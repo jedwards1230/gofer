@@ -12,3 +12,6 @@ dist/
 
 # local worktrees convention
 worktrees/
+
+# local Claude Code overrides
+.claude/settings.local.json
