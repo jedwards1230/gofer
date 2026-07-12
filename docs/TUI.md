@@ -94,6 +94,15 @@ tool-block rendering — a status-count header, grouped sections, a one-line
 session row, and a bottom dispatch bar with a hint line — reimplemented here
 for gofer's Event/Op model.
 
+**Tool blocks** in the attach/peek transcript render as a collapsed tree: a
+header line `‹glyph› tool(args)` (streaming glyph while the call runs, ok glyph
+once done), then the result tree-indented beneath — the first line on a `└`,
+up to two more indented, and any remainder collapsed to `… +N lines`. A failed
+call reuses the ok glyph until the SDK carries an error flag on
+`ToolCallFinished`. Because a tool item now spans several lines, the transcript
+renderers flatten every item to its lines before width-truncating and
+height-windowing.
+
 ## Two trees, one renderer
 
 The **fan-out tree** (subagents within a session — who is working) and the

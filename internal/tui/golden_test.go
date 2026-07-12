@@ -71,6 +71,25 @@ func TestGoldenToolCall(t *testing.T) {
 	)
 }
 
+// TestGoldenToolCallRunning covers a tool call that has started but not
+// finished, rendered as a header line only with the streaming glyph — no
+// result line, since none has settled yet.
+func TestGoldenToolCallRunning(t *testing.T) {
+	render(t, "tool_call_running",
+		event.NewToolCallStarted(sid, "call-1", "bash", json.RawMessage(`{"cmd":"echo hi"}`)),
+	)
+}
+
+// TestGoldenToolCallMultiline covers a finished tool call whose result spans
+// more lines than the collapsed tree block shows, exercising the "… +N
+// lines" collapse line.
+func TestGoldenToolCallMultiline(t *testing.T) {
+	render(t, "tool_call_multiline",
+		event.NewToolCallStarted(sid, "call-1", "bash", json.RawMessage(`{"cmd":"seq 1 6"}`)),
+		event.NewToolCallFinished(sid, "call-1", "1\n2\n3\n4\n5\n6", nil),
+	)
+}
+
 // TestGoldenMidStream captures a turn mid-flight: deltas have arrived but
 // MessageFinished and TurnFinished haven't, so the item is still open and
 // the status line still reads streaming.

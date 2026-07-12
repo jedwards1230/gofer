@@ -271,7 +271,9 @@ func (m Model) View(width, height int) string {
 
 	lines := make([]string, 0, len(m.items)+2)
 	for _, it := range m.items {
-		lines = append(lines, truncate(m.renderItem(it), width))
+		for _, line := range m.renderItemLines(it) {
+			lines = append(lines, truncate(line, width))
+		}
 	}
 
 	const reserved = 2 // status line + input line
@@ -283,32 +285,61 @@ func (m Model) View(width, height int) string {
 	return strings.Join(lines, "\n")
 }
 
-// renderItem renders a single transcript item to one line.
-func (m Model) renderItem(it item) string {
+// renderItemLines renders a single transcript item to its display lines. A
+// tool item is a collapsed tree block spanning header + up to three
+// result lines; every other kind renders to exactly one line.
+func (m Model) renderItemLines(it item) []string {
 	switch it.kind {
 	case itemAssistantReasoning:
-		return m.theme.MutedStyle().Render("» " + it.text)
+		return []string{m.theme.MutedStyle().Render("» " + it.text)}
 
 	case itemTool:
-		glyph := m.theme.GlyphStreaming
-		if it.done {
-			glyph = m.theme.GlyphOK
-		}
-		line := fmt.Sprintf("%s %s(%s)", glyph, it.toolName, it.toolInput)
-		if it.done {
-			line += " → " + it.toolResult
-		}
-		return line
+		return m.renderToolLines(it)
 
 	case itemError:
-		return m.theme.DangerStyle().Render(m.theme.GlyphErr + " " + it.text)
+		return []string{m.theme.DangerStyle().Render(m.theme.GlyphErr + " " + it.text)}
 
 	case itemApproval:
-		return m.theme.WarnStyle().Render(m.theme.GlyphApproval + " " + it.text)
+		return []string{m.theme.WarnStyle().Render(m.theme.GlyphApproval + " " + it.text)}
 
 	default: // itemAssistantText
-		return it.text
+		return []string{it.text}
 	}
+}
+
+// renderToolLines renders a tool call as a collapsed tree block: a header
+// line, then — once the call has finished with a non-empty result — up to
+// three tree-indented result lines, collapsing any remainder into a single
+// "… +N lines" line.
+func (m Model) renderToolLines(it item) []string {
+	// TODO(SDK): style the header glyph for a failed call once
+	// ToolCallFinished carries IsError through the Event contract; for now
+	// every finished call renders with GlyphOK regardless of outcome.
+	glyph := m.theme.GlyphStreaming
+	if it.done {
+		glyph = m.theme.GlyphOK
+	}
+	lines := []string{fmt.Sprintf("%s %s(%s)", glyph, it.toolName, it.toolInput)}
+
+	if !it.done || it.toolResult == "" {
+		return lines
+	}
+
+	resultLines := strings.Split(it.toolResult, "\n")
+	lines = append(lines, "   └ "+resultLines[0])
+	const maxExtra = 2
+	shown := 1
+	for _, l := range resultLines[1:] {
+		if shown >= 1+maxExtra {
+			break
+		}
+		lines = append(lines, "     "+l)
+		shown++
+	}
+	if extra := len(resultLines) - shown; extra > 0 {
+		lines = append(lines, fmt.Sprintf("     … +%d lines", extra))
+	}
+	return lines
 }
 
 // statusLine reports the turn's lifecycle state and, once TurnFinished has
@@ -347,7 +378,9 @@ func (m Model) TailView(width, height int) string {
 
 	lines := make([]string, 0, len(m.items))
 	for _, it := range m.items {
-		lines = append(lines, truncate(m.renderItem(it), width))
+		for _, line := range m.renderItemLines(it) {
+			lines = append(lines, truncate(line, width))
+		}
 	}
 
 	avail := height - 1 // status line
