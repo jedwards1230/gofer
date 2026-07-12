@@ -8,10 +8,13 @@ import (
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
 
-// InterruptMsg reports that the user pressed esc in the attach surface. A
-// caller wiring [Program] into a live session should send the
-// corresponding interrupt Op on receiving it; M1 has no daemon to send it
-// to, so the message only ever reaches [tea.Program.Run]'s caller.
+// InterruptMsg is reserved for the daemon-era interrupt Op: once gofer has a
+// daemon to send it to, esc will publish this instead of quitting outright,
+// and a caller wiring [Program] into a live session will send the
+// corresponding interrupt Op on receiving it. M1 has no daemon, so esc quits
+// the attach [tea.Program] directly (see handleKey) — driveTUI in
+// cmd/gofer treats that quit as a cancellation of the in-flight run, the
+// same as ctrl-c.
 type InterruptMsg struct{}
 
 // EventMsg wraps a session event.Event so it can ride the bubbletea message
@@ -40,8 +43,8 @@ func NewProgram(th theme.Theme) Program {
 func (p Program) Init() tea.Cmd { return nil }
 
 // Update satisfies tea.Model: it resizes on [tea.WindowSizeMsg], ingests
-// forwarded session events on [EventMsg], and edits the input buffer or
-// emits [InterruptMsg] on key presses.
+// forwarded session events on [EventMsg], and on key presses either edits
+// the input buffer or quits the program (ctrl-c, esc — see handleKey).
 func (p Program) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -68,7 +71,7 @@ func (p Program) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return p, tea.Quit
 
 	case key.Code == tea.KeyEscape:
-		return p, func() tea.Msg { return InterruptMsg{} }
+		return p, tea.Quit
 
 	case key.Code == tea.KeyEnter:
 		p.inner = p.inner.Submit()

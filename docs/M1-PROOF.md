@@ -51,6 +51,13 @@ hermetic CI test that proves the same mechanics with a scripted provider.
    read-only view. The journal itself is a plain, growing JSONL file at the
    path printed in step 2; `cat` it to see every settled entry.
 
+6. **Interactive TUI path.** Steps 2–4 above render through the plain line
+   stream when run from a script or a piped shell; run `gofer run "<task>"`
+   directly in a terminal (a prompt given as an argument, no `--json`) to
+   exercise the attach TUI frontend instead — esc or Ctrl-C interrupts the
+   run the same way. This path has no golden/CI coverage (bubbletea needs a
+   real PTY); it's exercised manually.
+
 ## Automated CI proof
 
 `internal/runner/runner_test.go`:

@@ -72,6 +72,13 @@ A real provider streams through the builtin tools (`bash`, `read`, `edit`,
 settled prefix survives; resume folds it back into context. See
 [`docs/M1-PROOF.md`](docs/M1-PROOF.md) for the full walkthrough.
 
+Run interactively (a prompt given as an argument, in a real terminal, no
+`--json`) and the stream renders through gofer's minimal attach TUI instead
+of the plain transcript — esc or Ctrl-C interrupts the run, same as Ctrl-C on
+the line renderer. Anything non-interactive — `--json`, a piped/redirected
+stdout, or a prompt piped in on stdin — always renders as the line-oriented
+stream, so scripts and CI never hit the TUI.
+
 ## Roadmap
 
 | Stage | Ships |
