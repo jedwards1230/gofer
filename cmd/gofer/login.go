@@ -10,19 +10,26 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/jedwards1230/agent-sdk-go/auth"
 
 	"github.com/jedwards1230/gofer/internal/runner"
 )
 
-// authProviders are the provider ids gofer knows how to authenticate — the
-// same set runner resolves a run model from.
-var authProviders = runner.SupportedProviders()
+// maxCodeAttempts is how many times `gofer login` re-prompts for the pasted
+// authorization code before giving up — one fat-fingered paste must not kill
+// the flow. The PKCE verifier stays valid and the authorization code is
+// unconsumed until a successful exchange, so re-prompting (and re-calling
+// Redeem) is safe.
+const maxCodeAttempts = 3
 
-// validProvider reports whether id is a known provider.
+// validProvider reports whether id is a provider gofer knows how to
+// authenticate — the same set runner resolves a run model from. It queries
+// runner.SupportedProviders() at call time rather than caching it at package
+// init, so there is no init-time dependency on the runner package.
 func validProvider(id string) bool {
-	for _, p := range authProviders {
+	for _, p := range runner.SupportedProviders() {
 		if p == id {
 			return true
 		}
@@ -163,7 +170,7 @@ func runLogin(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 	if *apiKey {
 		return loginWithAPIKey(store, provider, stdin, stdout)
 	}
-	return loginWithOAuth(ctx, store, provider, stdin, stdout)
+	return loginWithOAuth(ctx, store, provider, stdin, stdout, stderr)
 }
 
 // loginWithAPIKey reads a single line from stdin — never argv, which would
@@ -189,26 +196,18 @@ func loginWithAPIKey(store *auth.Store, provider string, stdin io.Reader, stdout
 // browser: it prints the authorize URL and waits for the user to complete the
 // flow, either by pasting back a code (manual mode) or by the SDK's local
 // callback listener catching the redirect (callback mode).
-func loginWithOAuth(ctx context.Context, store *auth.Store, provider string, stdin io.Reader, stdout io.Writer) error {
+func loginWithOAuth(ctx context.Context, store *auth.Store, provider string, stdin io.Reader, stdout, stderr io.Writer) error {
 	login, err := store.Login(ctx, provider)
 	if err != nil {
 		return fmt.Errorf("start login: %w", err)
 	}
+	defer login.Close()
 	_, _ = fmt.Fprintf(stdout, "Open this URL in a browser to authorize:\n\n  %s\n\n", login.AuthorizeURL)
 
 	switch login.Mode {
 	case auth.LoginModeManualCode:
-		_, _ = fmt.Fprint(stdout, "Paste the code shown after authorizing: ")
-		line, err := readLine(stdin)
-		if err != nil {
-			return fmt.Errorf("read pasted code: %w", err)
-		}
-		code := strings.TrimSpace(line)
-		if code == "" {
-			return errors.New("empty authorization code")
-		}
-		if err := login.Redeem(code); err != nil {
-			return fmt.Errorf("redeem code: %w", err)
+		if err := redeemWithRetry(login, stdin, stdout, stderr); err != nil {
+			return err
 		}
 	case auth.LoginModeCallback:
 		_, _ = fmt.Fprintln(stdout, "Waiting for the browser redirect to complete…")
@@ -221,6 +220,69 @@ func loginWithOAuth(ctx context.Context, store *auth.Store, provider string, std
 
 	_, _ = fmt.Fprintf(stdout, "Logged in to %s.\n", provider)
 	return nil
+}
+
+// redeemWithRetry prompts for the pasted authorization code and redeems it,
+// re-prompting up to maxCodeAttempts times so a single bad paste (an empty
+// line, the wrong text, or a code the endpoint rejects) doesn't kill the flow.
+// It reads from ONE bufio.Reader for the whole loop so buffered input is never
+// lost between attempts. An obviously-malformed paste (whitespace — e.g. a
+// pasted shell command) is rejected locally, before any token-endpoint call.
+func redeemWithRetry(login *auth.Login, stdin io.Reader, stdout, stderr io.Writer) error {
+	reader := bufio.NewReader(stdin)
+	var lastErr error
+
+	for attempt := 1; attempt <= maxCodeAttempts; attempt++ {
+		_, _ = fmt.Fprint(stdout, "Paste the code shown after authorizing: ")
+		line, rerr := reader.ReadString('\n')
+		eof := errors.Is(rerr, io.EOF)
+		if rerr != nil && !eof {
+			return fmt.Errorf("read pasted code: %w", rerr)
+		}
+		code := strings.TrimSpace(line)
+
+		switch {
+		case !looksLikeAuthCode(code):
+			// (a) empty / (b) not a code#state or callback URL — reject before
+			// contacting the endpoint (the PKCE verifier is untouched).
+			lastErr = fmt.Errorf("that doesn't look like an authorization code")
+			retryHint(stderr, attempt, eof, "that doesn't look like an authorization code")
+		default:
+			// (c) shape is plausible — try the endpoint. A rejection
+			// (invalid_grant) is retryable: the verifier is still valid and the
+			// real code is unconsumed.
+			if err := login.Redeem(code); err == nil {
+				return nil
+			} else {
+				lastErr = err
+				retryHint(stderr, attempt, eof, "code rejected — paste the code exactly as shown")
+			}
+		}
+		if eof {
+			break // no more input coming
+		}
+	}
+	return fmt.Errorf("login failed after %d attempt(s): %w", maxCodeAttempts, lastErr)
+}
+
+// retryHint prints the re-prompt line to stderr, unless this was the last
+// attempt or input has ended (in which case the caller returns the error).
+func retryHint(stderr io.Writer, attempt int, eof bool, reason string) {
+	if attempt < maxCodeAttempts && !eof {
+		_, _ = fmt.Fprintf(stderr, "%s (attempt %d/%d)\n", reason, attempt+1, maxCodeAttempts)
+	}
+}
+
+// looksLikeAuthCode reports whether s is plausibly a pasted authorization code
+// or callback URL: non-empty and free of internal whitespace. The common
+// fat-finger is pasting a shell command (which contains spaces), so this
+// catches it locally without a token-endpoint round trip; a real `code#state`
+// or callback URL contains no whitespace.
+func looksLikeAuthCode(s string) bool {
+	if s == "" {
+		return false
+	}
+	return strings.IndexFunc(s, unicode.IsSpace) < 0
 }
 
 // runLogout implements `gofer logout <provider> [--root dir]`.

@@ -199,3 +199,20 @@ func TestTranscript_UnknownSession(t *testing.T) {
 		t.Errorf("Transcript error = %v, want it to wrap session.ErrSessionNotFound", err)
 	}
 }
+
+// TestProviderTablesInSync enforces the invariant that every provider in
+// SupportedProviders has both a default model and an API-key env-var mapping.
+// Without it, adding a provider to supportedProviders but forgetting it in
+// defaultModels (models.go) or envVars (provider.go) would silently resolve to
+// an empty model ("runner: unknown model \"\"") or an unreachable env fallback.
+// This fails loudly at CI time instead.
+func TestProviderTablesInSync(t *testing.T) {
+	for _, p := range runner.SupportedProviders() {
+		if runner.DefaultModel(p) == "" {
+			t.Errorf("provider %q is in SupportedProviders but missing from defaultModels", p)
+		}
+		if runner.EnvVar(p) == "" {
+			t.Errorf("provider %q is in SupportedProviders but missing from envVars", p)
+		}
+	}
+}
