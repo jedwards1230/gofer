@@ -57,6 +57,16 @@ gofer logout anthropic
 Credentials persist in `~/.gofer/auth.json` (mode 0600). `gofer auth` never
 prints token material.
 
+> **Subscription-OAuth self-description caveat.** Logging in with subscription
+> OAuth (`gofer login <provider>`, no `--api-key`) authenticates over the
+> vendor's coding-assistant credential path (Anthropic's "Claude Code",
+> OpenAI's "Codex"), which carries a fixed assistant identity in the system
+> context. That identity can bleed into how the model describes *itself* in a
+> session — so an agent may call itself "Claude Code" regardless of gofer's own
+> system prompt. This is inherent to subscription auth, not a gofer bug. Use
+> `--api-key` (or the provider's API-key env var) if you need the model's
+> self-description to reflect only gofer's system prompt.
+
 ## Run a session (M1)
 
 ```bash
