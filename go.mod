@@ -6,7 +6,7 @@ require (
 	charm.land/bubbletea/v2 v2.0.8
 	charm.land/lipgloss/v2 v2.0.5
 	github.com/coder/websocket v1.8.15
-	github.com/jedwards1230/agent-sdk-go v0.1.1-0.20260712205214-c8dc74747d1b
+	github.com/jedwards1230/agent-sdk-go v0.1.1-0.20260712221524-2e57d68cc4a5
 	github.com/muesli/termenv v0.16.0
 )
 

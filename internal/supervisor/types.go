@@ -6,9 +6,8 @@ import (
 
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/provider"
+	"github.com/jedwards1230/agent-sdk-go/runner"
 	"github.com/jedwards1230/agent-sdk-go/session"
-
-	"github.com/jedwards1230/gofer/internal/runner"
 )
 
 // runState is a live session's internal pump run-state. It is deliberately

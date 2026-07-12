@@ -12,9 +12,8 @@ import (
 
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/provider"
+	"github.com/jedwards1230/agent-sdk-go/runner"
 	"github.com/jedwards1230/agent-sdk-go/session"
-
-	"github.com/jedwards1230/gofer/internal/runner"
 )
 
 // Config configures a [Supervisor].
@@ -31,7 +30,7 @@ type Config struct {
 	// seam.
 	Store *session.FileStore
 	// NewSession, when set, replaces the default construction of a fresh
-	// session (which calls [runner.NewSession] with the shared store
+	// session (which calls [runner.New] with the shared store
 	// injected). Test seam.
 	NewSession func(ctx context.Context, opts runner.Options) (Session, error)
 	// ResumeSession, when set, replaces the default reopening of an existing
@@ -105,7 +104,7 @@ func New(cfg Config) (*Supervisor, error) {
 	if newSession == nil {
 		newSession = func(ctx context.Context, opts runner.Options) (Session, error) {
 			opts.Store = store
-			return runner.NewSession(ctx, opts)
+			return runner.New(ctx, opts)
 		}
 	}
 	resumeSession := cfg.ResumeSession

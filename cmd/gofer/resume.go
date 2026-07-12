@@ -9,8 +9,7 @@ import (
 	"strings"
 
 	"github.com/jedwards1230/agent-sdk-go/provider"
-
-	"github.com/jedwards1230/gofer/internal/runner"
+	"github.com/jedwards1230/agent-sdk-go/runner"
 )
 
 // runResume implements `gofer resume`: it reopens an existing session by id
@@ -65,9 +64,11 @@ func runResume(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 		System: defaultSystemPrompt,
 	})
 	if err != nil {
-		// Resume's errors are already contextual (a clean credential error, or a
-		// "runner: …" message) — don't re-wrap.
-		return err
+		// runner.Resume's errors are already contextual (a "runner: …"
+		// message); the one case needing more is a missing credential, where
+		// the SDK error is deliberately app-neutral — wrapCredentialHint adds
+		// gofer's 'gofer login' remediation back.
+		return wrapCredentialHint(err)
 	}
 
 	_, _ = fmt.Fprintf(stderr, "gofer resume: session %s\n", r.ID())

@@ -8,9 +8,9 @@ import (
 
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/provider/faux"
+	"github.com/jedwards1230/agent-sdk-go/runner"
 	"github.com/jedwards1230/agent-sdk-go/session"
 
-	"github.com/jedwards1230/gofer/internal/runner"
 	"github.com/jedwards1230/gofer/internal/supervisor"
 )
 
@@ -18,7 +18,7 @@ import (
 // are real *runner.Runner instances (not the fakeSession used elsewhere in
 // this package) over a scripted faux provider — no network, fully
 // deterministic. It proves the supervisor's Create/Submit/Kill path works
-// against the real runner.NewSession/Options.Store wiring end to end, and
+// against the real runner.New/Options.Store wiring end to end, and
 // that Kill never deletes the on-disk journal.
 func TestSupervisor_Integration_RealRunner(t *testing.T) {
 	root := t.TempDir()
@@ -36,7 +36,7 @@ func TestSupervisor_Integration_RealRunner(t *testing.T) {
 		NewSession: func(ctx context.Context, opts runner.Options) (supervisor.Session, error) {
 			opts.Store = store
 			opts.Provider = faux.New(faux.Default())
-			return runner.NewSession(ctx, opts)
+			return runner.New(ctx, opts)
 		},
 	})
 	if err != nil {

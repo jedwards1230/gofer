@@ -13,10 +13,10 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/jedwards1230/agent-sdk-go/provider"
+	"github.com/jedwards1230/agent-sdk-go/runner"
 	"github.com/jedwards1230/agent-sdk-go/session"
 
 	"github.com/jedwards1230/gofer/internal/daemon"
-	"github.com/jedwards1230/gofer/internal/runner"
 	"github.com/jedwards1230/gofer/internal/supervisor"
 )
 
@@ -47,7 +47,7 @@ func newTestSupervisor(t *testing.T, newProvider func() provider.Provider) *supe
 			opts.Store = store
 			opts.Model = "faux"
 			opts.Provider = newProvider()
-			return runner.NewSession(ctx, opts)
+			return runner.New(ctx, opts)
 		},
 		ResumeSession: func(ctx context.Context, id string, opts runner.Options) (supervisor.Session, error) {
 			opts.Store = store

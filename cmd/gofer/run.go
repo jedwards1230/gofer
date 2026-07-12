@@ -9,7 +9,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/jedwards1230/gofer/internal/runner"
+	"github.com/jedwards1230/agent-sdk-go/runner"
 )
 
 // defaultSystemPrompt is the system prompt a run/resume session uses absent
@@ -35,6 +35,35 @@ func noProviderCredentialsMsg() string {
 	}
 	return fmt.Sprintf("no provider credentials — run %s (or set %s)",
 		strings.Join(logins, " or "), strings.Join(envVars, " / "))
+}
+
+// credentialHintError decorates the SDK runner's [runner.NoCredentialError]
+// with gofer's own remediation ('gofer login <provider>') — the message the
+// now-deleted internal/runner package used to produce directly. The SDK
+// package stays app-neutral (it can't know gofer's CLI verb), so gofer adds
+// the hint back at the one place its errors surface. It implements Unwrap so
+// errors.Is(err, runner.ErrNoCredential) still holds through the wrap.
+type credentialHintError struct {
+	msg   string
+	cause *runner.NoCredentialError
+}
+
+func (e *credentialHintError) Error() string { return e.msg }
+func (e *credentialHintError) Unwrap() error { return e.cause }
+
+// wrapCredentialHint adds gofer's login hint to a [runner.NoCredentialError],
+// leaving any other error (including nil) untouched. Call it around every
+// runner.New/runner.Resume error before returning it to reportCmdErr.
+func wrapCredentialHint(err error) error {
+	var nce *runner.NoCredentialError
+	if !errors.As(err, &nce) {
+		return err
+	}
+	msg := fmt.Sprintf("no credential for %s — run 'gofer login %s'", nce.Provider, nce.Provider)
+	if nce.EnvVar != "" {
+		msg = fmt.Sprintf("%s or set %s", msg, nce.EnvVar)
+	}
+	return &credentialHintError{msg: msg, cause: nce}
 }
 
 // ambiguousModelMsg is the usage-error message when -m is not given and more
@@ -128,16 +157,18 @@ func runRun(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 		return fmt.Errorf("getwd: %w", err)
 	}
 
-	r, err := runner.NewSession(ctx, runner.Options{
+	r, err := runner.New(ctx, runner.Options{
 		Root:   *root,
 		Cwd:    cwd,
 		Model:  modelID,
 		System: defaultSystemPrompt,
 	})
 	if err != nil {
-		// NewSession's errors are already contextual (a clean credential error,
-		// or a "runner: …" message) — don't re-wrap and double up the prefix.
-		return err
+		// runner.New's errors are already contextual (a "runner: …" message);
+		// the one case needing more is a missing credential, where the SDK
+		// error is deliberately app-neutral — wrapCredentialHint adds gofer's
+		// 'gofer login' remediation back. Any other error passes through as-is.
+		return wrapCredentialHint(err)
 	}
 
 	_, _ = fmt.Fprintf(stderr, "gofer run: session %s\n", r.ID())
