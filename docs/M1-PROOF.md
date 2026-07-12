@@ -1,0 +1,112 @@
+# M1 proof: kill and resume a real session
+
+M1's bar (`docs/PRD.md`): "a real coding task, streaming, resumable after
+kill." Two halves prove it — a manual run against a real provider (this repo
+never touches the network, so a human runs this half), and an automated,
+hermetic CI test that proves the same mechanics with a scripted provider.
+
+## Manual proof (you run this)
+
+1. **Authenticate.** Either:
+
+   ```bash
+   gofer login anthropic        # OAuth: paste the code it prints
+   # or
+   export ANTHROPIC_API_KEY=sk-...
+   ```
+
+2. **Start a real task**, in a scratch directory:
+
+   ```bash
+   cd /tmp/gofer-scratch
+   gofer run -m claude-sonnet-5 "create hello.txt containing hi using your tools, then summarize"
+   ```
+
+   Watch the streamed transcript: reasoning, the `write` tool call, its
+   result, then the summary. `gofer run` prints the journal path and session
+   id to stderr before streaming starts — note the id.
+
+3. **Kill it mid-run.** Ctrl-C (or `kill` the process) partway through. The
+   turn in flight is interrupted, but every turn that had already settled —
+   including a completed tool call and its result — is already fsynced to
+   the journal; nothing settled is lost.
+
+4. **Resume it:**
+
+   ```bash
+   gofer resume <id> "continue"
+   ```
+
+   The prior context (including the tool result) folds back into the
+   provider's messages, and the conversation continues from where it left
+   off.
+
+5. **Inspect without resuming:**
+
+   ```bash
+   gofer resume <id>
+   ```
+
+   With no prompt, this prints the current transcript and exits — a
+   read-only view. The journal itself is a plain, growing JSONL file at the
+   path printed in step 2; `cat` it to see every settled entry.
+
+6. **Interactive TUI path.** Steps 2–4 above render through the plain line
+   stream when run from a script or a piped shell; run `gofer run "<task>"`
+   directly in a terminal (a prompt given as an argument, no `--json`) to
+   exercise the attach TUI frontend instead — esc or Ctrl-C interrupts the
+   run the same way. This path has no golden/CI coverage (bubbletea needs a
+   real PTY); it's exercised manually.
+
+## Automated CI proof
+
+`internal/runner/runner_test.go`:
+
+- **`TestRunner_KillAndResume`** — the milestone proof. A gofer-local
+  scripted `provider.Provider` (`provider.SliceStream`, no network) drives a
+  turn that calls the real builtin `read` tool against a temp file. The tool
+  call's `Run` deterministically cancels the run's context right after the
+  real tool executes (synchronously, in the loop's own goroutine — no timing
+  race), simulating a kill the instant a tool round settles. The test then:
+  - `Close()`s the runner (waiting for the journaling goroutine to drain) and
+    reopens the journal from a **fresh** `session.FileStore` — bypassing any
+    in-process cache — to prove the settled prefix (the user message and the
+    tool round, with the tool's *real* file-content result) is durable on
+    disk, not just held in memory.
+  - `runner.Resume`s the same session id with a second scripted provider,
+    asserts the resumed runner's folded context already carries the prior
+    tool result (the fold → provider-message projection round-trips), drives
+    a new prompt, and asserts the journal grew with the continuation —
+    verified again from a fresh store after `Close`.
+- **`TestRunner_TextTurn`** — a plain (no tool call) turn: the user prompt
+  and settled assistant reply (text + reasoning) both land as journal
+  entries, and `Fold` projects them back losslessly.
+- **`TestRunner_KillDuringToolStreaming`** (`internal/runner/consume_test.go`)
+  — the harder kill: the run is cancelled *while a tool call is still
+  streaming its input* (announced, but no result), after the turn's assistant
+  text/reasoning has already settled. The settled text must still be journaled
+  (it is written at `turn.finished`, decoupled from tool execution) and the
+  orphaned, never-executed tool call is dropped — no stranded text, no dangling
+  `tool_use` to corrupt the fold on resume.
+
+Run it: `go test -race ./internal/runner/...`.
+
+## Known M1 limitations
+
+The runner journals from the **lossy event stream** (`message.finished` carries
+settled text as a string, not the provider's content blocks), so its stored
+blocks carry no per-block `Meta`. Two consequences, both accepted for M1:
+
+- **Reasoning signatures are not preserved across resume.** A *resumed*
+  Anthropic thinking+tools session degrades to reasoning-without-signature
+  (the provider adapter drops unsigned reasoning rather than replaying it) —
+  safe, but the prior turn's reasoning context is lost across the resume
+  boundary. Within a single run, the adapter's own signature replay (SDK #19)
+  is unaffected. This mirrors the OpenAI reasoning-item-id handling.
+- **Tool errors journal as non-error.** `tool.call.finished` carries no error
+  flag, so a tool `Result` is always recorded with `IsError=false`.
+
+**M2 path:** either the event contract gains per-block `Meta` (so gofer's
+event-sourced journaling stays lossless), or the runner journals the settled
+`loop.Run` result messages (verbatim provider blocks) instead of reconstructing
+from events.

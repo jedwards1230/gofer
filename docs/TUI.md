@@ -6,6 +6,12 @@ screen stack. Golden-file tests come first: the `testkit` harness pins fixed
 sizes, forces `termenv.Ascii`, and uses a test theme (see
 [`TESTING.md`](TESTING.md)).
 
+**Status**: `internal/tui` currently holds only the minimal attach surface —
+`Model` (transcript + input buffer + status line, driven by `Model.Ingest`)
+plus a thin bubbletea v2 adapter — as the seed of the design below and its
+`testkit`/`theme` packages. The screen stack, dialogs, keymap, roster/peek,
+and everything else in this doc are M2+.
+
 ## The three altitudes
 
 **Overview** — one row per session (a session = a task, titled by the work).
