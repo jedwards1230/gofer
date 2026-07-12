@@ -184,6 +184,24 @@ func appTranscriptEvents(sid string) []event.Event {
 	}
 }
 
+// TestAttachOpenPreselectsAndIngests verifies OverviewMeta.AttachSessionID
+// opens on the attach screen, pre-selects the session in the roster (so ← lands
+// on it), and that events for that session ingest into the transcript.
+func TestAttachOpenPreselectsAndIngests(t *testing.T) {
+	a := NewApp(theme.Test(), &internalFakeSup{}, OverviewMeta{AttachSessionID: "sess-x"})
+	if a.scr != screenAttach {
+		t.Fatalf("scr = %v; want screenAttach", a.scr)
+	}
+	if a.over.selectedID != "sess-x" {
+		t.Errorf("pre-selected id = %q; want sess-x", a.over.selectedID)
+	}
+
+	mdl, _ := a.Update(sessEventMsg{id: "sess-x", ev: event.NewSessionError("sess-x", "boom", true)})
+	if got := len(mdl.(App).sess.items); got != 1 {
+		t.Errorf("attached-session event not ingested: %d transcript items, want 1", got)
+	}
+}
+
 // TestAppStaleEventGuard verifies a sessEventMsg tagged for a session other
 // than the one currently attached/peeked is dropped rather than ingested —
 // the guard against a previous subscription's in-flight waitForEvent read

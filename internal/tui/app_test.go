@@ -255,6 +255,30 @@ func TestNavKillWorkingSession(t *testing.T) {
 	}
 }
 
+// TestAttachOpenStartsOnAttach verifies OverviewMeta.AttachSessionID opens the
+// app directly on the attach screen (the `gofer attach <id>` entry point), and
+// that ← still backs out to the overview from there.
+func TestAttachOpenStartsOnAttach(t *testing.T) {
+	sup := newFakeSup(appTestRoster())
+	meta := appTestMeta()
+	meta.AttachSessionID = "0192a1b2-appt-7000-8000-000000000002"
+
+	var m tea.Model = tui.NewApp(theme.Test(), sup, meta)
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+
+	if got := content(m); !strings.Contains(got, "> ▏") || strings.Contains(got, "enter peek") {
+		t.Fatalf("expected the attach screen on open, got:\n%s", got)
+	}
+	if cmd := tui.NewApp(theme.Test(), sup, meta).Init(); cmd == nil {
+		t.Error("Init with AttachSessionID returned nil cmd; expected the roster+subscribe batch")
+	}
+
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
+	if got := content(m); !strings.Contains(got, "enter peek") {
+		t.Fatalf("expected ← to back out to the overview, got:\n%s", got)
+	}
+}
+
 // TestNavAttachLeftBacksOutWhenEmpty verifies ← in the attach screen backs
 // out to the overview only when the input buffer is empty.
 func TestNavAttachLeftBacksOutWhenEmpty(t *testing.T) {
