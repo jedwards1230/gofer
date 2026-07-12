@@ -44,46 +44,50 @@ func TestSupervisor_Integration_RealRunner(t *testing.T) {
 	}
 	defer func() { _ = sup.Close() }()
 
-	entry, err := sup.Create(context.Background(), supervisor.CreateOptions{
+	ctx := context.Background()
+	entry, err := sup.Create(ctx, "", supervisor.CreateOptions{
 		Cwd: cwd, Model: "faux-1", System: "test system",
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if entry.State != supervisor.StateIdle {
-		t.Fatalf("initial state = %s, want idle", entry.State)
+	if entry.Status != supervisor.StatusNeedsInput {
+		t.Fatalf("initial status = %s, want needs-input", entry.Status)
 	}
 	if _, err := os.Stat(entry.JournalPath); err != nil {
 		t.Fatalf("journal not created on disk: %v", err)
 	}
 
-	sub, err := sup.Subscribe(entry.ID)
+	sub, err := sup.Subscribe(ctx, entry.ID)
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
 
-	if _, err := sup.Submit(entry.ID, "hello"); err != nil {
-		t.Fatalf("Submit: %v", err)
+	if err := sup.Send(ctx, entry.ID, "hello"); err != nil {
+		t.Fatalf("Send: %v", err)
 	}
 
 	// Drain events until the scripted turn settles (turn.finished), with a
 	// bound so a regression hangs the test instead of the suite.
 	waitForTurnFinished(t, sub)
-	waitForState(t, sup, entry.ID, supervisor.StateIdle)
+	waitForStatus(t, sup, entry.ID, supervisor.StatusNeedsInput)
 
-	roster := sup.Roster()
-	if len(roster) != 1 || roster[0].ID != entry.ID || roster[0].State != supervisor.StateIdle {
-		t.Fatalf("Roster after completed turn = %+v, want one idle entry for %s", roster, entry.ID)
+	r, err := sup.Roster(ctx)
+	if err != nil {
+		t.Fatalf("Roster: %v", err)
+	}
+	if len(r) != 1 || r[0].ID != entry.ID || r[0].Status != supervisor.StatusNeedsInput {
+		t.Fatalf("Roster after completed turn = %+v, want one needs-input entry for %s", r, entry.ID)
 	}
 
-	if err := sup.Kill(entry.ID); err != nil {
+	if err := sup.Kill(ctx, entry.ID); err != nil {
 		t.Fatalf("Kill: %v", err)
 	}
 	if _, err := os.Stat(entry.JournalPath); err != nil {
 		t.Fatalf("journal file missing after Kill: %v", err)
 	}
-	if roster := sup.Roster(); len(roster) != 0 {
-		t.Fatalf("Roster after Kill = %+v, want empty", roster)
+	if r, err := sup.Roster(ctx); err != nil || len(r) != 0 {
+		t.Fatalf("Roster after Kill = %+v, %v, want empty", r, err)
 	}
 }
 

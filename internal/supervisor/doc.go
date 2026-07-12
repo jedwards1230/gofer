@@ -31,12 +31,15 @@
 //
 // # Lifecycle: idle, running, kill, archive
 //
-// A session enters the roster live (state [StateIdle]) via [Supervisor.Create]
-// or [Supervisor.Resume]. [Supervisor.Resume] is idempotent: resuming an
-// already-live id returns its existing roster entry rather than building a
-// second runner over the same journal — the SDK's store caches one live
-// journal per id, and two runners driving it concurrently would race on
-// appends.
+// A session enters the roster live (idle, [StatusNeedsInput]) via
+// [Supervisor.Create] or [Supervisor.Resume]. Clients observe the derived
+// [SessionStatus] on a [SessionInfo] snapshot; the internal pump run-state
+// (idle⇄running) is not exported. [Supervisor.Create] with an empty prompt
+// registers an idle session with no first turn; a non-empty prompt is
+// enqueued as its first turn. [Supervisor.Resume] is idempotent: resuming an
+// already-live id returns its existing snapshot rather than building a second
+// runner over the same journal — the SDK's store caches one live journal per
+// id, and two runners driving it concurrently would race on appends.
 //
 // [Supervisor.Kill] interrupts any in-flight turn, drops the session from
 // the roster, emits session.killed on its event stream, and closes it.
@@ -48,7 +51,7 @@
 //
 // # Prompt queue and steering
 //
-// [Supervisor.Submit] never rejects a busy session. A prompt sent to an idle
+// [Supervisor.Send] never rejects a busy session. A prompt sent to an idle
 // session dispatches immediately; a prompt sent to a running session queues
 // FIFO and dispatches automatically once the in-flight turn (and every
 // prompt queued ahead of it) has settled. [Supervisor.Interrupt] cancels the
@@ -57,6 +60,17 @@
 // [Supervisor.QueueClear] make that queue inspectable and clearable by any
 // client, matching the PRD's "inspectable and clearable" queue requirement.
 //
+// # Observing the roster
+//
+// [Supervisor.Roster] returns a point-in-time snapshot of live sessions,
+// newest-first. [Supervisor.WatchRoster] returns a channel that delivers a
+// fresh snapshot on subscribe and again on every roster change (create,
+// kill, archive, idle⇄running transition, per-turn cost update). Delivery is
+// coalescing drop-old: a slow watcher never blocks the supervisor or any
+// pump — it may skip intermediate snapshots but always converges to the
+// latest. [Supervisor.List] additionally enumerates archived/offline
+// sessions still on disk, overlaying live state.
+//
 // # Concurrency
 //
 // Every session in the roster runs its own goroutine (its "pump") that
@@ -64,6 +78,7 @@
 // never held across a call into a session (Prompt, Close, or waiting for a
 // pump to exit) — only around roster bookkeeping — so one session blocked
 // mid-turn never stalls an operation on another. [Supervisor.Close] kills
-// every live session (emitting session.killed for each, per the
-// must-deliver contract) and closes the store it owns, then returns.
+// every live session (emitting session.killed for each, per the must-deliver
+// contract), joins every WatchRoster goroutine, and closes the store it
+// owns, then returns.
 package supervisor

@@ -61,6 +61,16 @@ type Supervisor struct {
 	mu     sync.Mutex
 	roster map[string]*managed
 	closed bool
+
+	// watchMu guards the WatchRoster subscriber registry and its shutdown
+	// flag, independent of mu so notify's fan-out never contends with roster
+	// bookkeeping. watchDone is closed once by Close to wake every watcher;
+	// watchWG joins their goroutines so Close returns leak-free.
+	watchMu     sync.Mutex
+	watchers    map[*watcher]struct{}
+	watchClosed bool
+	watchDone   chan struct{}
+	watchWG     sync.WaitGroup
 }
 
 // New builds a Supervisor. It opens (or accepts, via [Config.Store]) the
@@ -114,6 +124,8 @@ func New(cfg Config) (*Supervisor, error) {
 		newSession:    newSession,
 		resumeSession: resumeSession,
 		roster:        make(map[string]*managed),
+		watchers:      make(map[*watcher]struct{}),
+		watchDone:     make(chan struct{}),
 	}, nil
 }
 
@@ -131,26 +143,45 @@ func resolveRoot(root string) (string, error) {
 	return filepath.Join(home, ".gofer"), nil
 }
 
-// CreateOptions configures [Supervisor.Create].
+// CreateOptions configures [Supervisor.Create]. The zero value is valid: an
+// empty Model resolves to the credential-driven default, an empty Cwd to the
+// daemon's working directory (the caller's responsibility upstream), and a
+// zero MaxIters to the loop default.
 type CreateOptions struct {
-	Cwd, Model, System string
-	Params             provider.Params
-	MaxIters           int
+	Model    string
+	Cwd      string
+	System   string
+	Params   provider.Params
+	MaxIters int
 }
 
-// Create starts a fresh session and registers it live (state [StateIdle]).
-func (s *Supervisor) Create(ctx context.Context, opts CreateOptions) (RosterEntry, error) {
+// Create starts a fresh session and registers it live. An empty prompt
+// creates an idle session with no first turn (the ACP session/new path); a
+// non-empty prompt is enqueued as the session's first turn.
+func (s *Supervisor) Create(ctx context.Context, prompt string, opts CreateOptions) (SessionInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return SessionInfo{}, err
+	}
 	if s.isClosed() {
-		return RosterEntry{}, ErrClosed
+		return SessionInfo{}, ErrClosed
 	}
 	sess, err := s.newSession(ctx, runner.Options{
 		Root: s.root, Cwd: opts.Cwd, Model: opts.Model, System: opts.System,
 		Params: opts.Params, MaxIters: opts.MaxIters,
 	})
 	if err != nil {
-		return RosterEntry{}, fmt.Errorf("supervisor: create session: %w", err)
+		return SessionInfo{}, fmt.Errorf("supervisor: create session: %w", err)
 	}
-	return s.register(sess, opts.Model), nil
+
+	m := s.register(sess, opts.Model)
+	if prompt != "" {
+		if err := m.enqueue(prompt); err != nil {
+			return SessionInfo{}, fmt.Errorf("supervisor: create session: enqueue first prompt: %w", err)
+		}
+	}
+	info := m.info()
+	s.notify()
+	return info, nil
 }
 
 // ResumeOptions configures [Supervisor.Resume]. Model and Cwd are required —
@@ -162,17 +193,21 @@ type ResumeOptions struct {
 }
 
 // Resume reopens an on-disk session and registers it live. If id is already
-// live, Resume is a no-op that returns the existing roster entry — it never
+// live, Resume is a no-op that returns the existing snapshot — it never
 // builds a second runner over the same journal.
-func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) (RosterEntry, error) {
+func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) (SessionInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return SessionInfo{}, err
+	}
+
 	s.resumeMu.Lock()
 	defer s.resumeMu.Unlock()
 
-	if entry, ok := s.liveEntry(id); ok {
-		return entry, nil
+	if m, ok := s.get(id); ok {
+		return m.info(), nil
 	}
 	if s.isClosed() {
-		return RosterEntry{}, ErrClosed
+		return SessionInfo{}, ErrClosed
 	}
 
 	sess, err := s.resumeSession(ctx, id, runner.Options{
@@ -180,58 +215,50 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 		Params: opts.Params, MaxIters: opts.MaxIters,
 	})
 	if err != nil {
-		return RosterEntry{}, fmt.Errorf("supervisor: resume %s: %w", id, err)
+		return SessionInfo{}, fmt.Errorf("supervisor: resume %s: %w", id, err)
 	}
-	return s.register(sess, opts.Model), nil
+
+	m := s.register(sess, opts.Model)
+	info := m.info()
+	s.notify()
+	return info, nil
 }
 
 // register adds sess to the roster as a live, idle session and starts its
 // pump goroutine.
-func (s *Supervisor) register(sess Session, model string) RosterEntry {
-	m := newManaged(sess, model, s.clock())
+func (s *Supervisor) register(sess Session, model string) *managed {
+	m := newManaged(sess, model, s.clock(), s.clock, s.notify)
 
 	s.mu.Lock()
 	s.roster[m.id] = m
 	s.mu.Unlock()
 
 	go m.pump()
-	return m.entry()
+	return m
 }
 
-// Submit enqueues a prompt for id. It dispatches immediately when the
-// session is idle, else queues FIFO. The returned position is 0-based: 0
-// means the prompt will run next (idle) or is itself already running is
-// never returned here (Submit only ever enqueues) — 0 means it is about to
-// be the next dispatched, and a session with a turn already in flight
-// returns 1 for the first prompt queued behind it, 2 for the second, and so
-// on, treating the running turn as occupying position 0.
-func (s *Supervisor) Submit(id, text string) (int, error) {
-	m, err := s.lookup(id)
+// Send enqueues a prompt for id. It dispatches immediately when the session
+// is idle, else queues FIFO — real steering, never reject-if-busy.
+func (s *Supervisor) Send(ctx context.Context, sessionID, prompt string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m, err := s.lookup(sessionID)
 	if err != nil {
-		return 0, fmt.Errorf("supervisor: submit %s: %w", id, err)
+		return fmt.Errorf("supervisor: send %s: %w", sessionID, err)
 	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.closing {
-		return 0, fmt.Errorf("supervisor: submit %s: %w", id, ErrNotLive)
+	if err := m.enqueue(prompt); err != nil {
+		return fmt.Errorf("supervisor: send %s: %w", sessionID, err)
 	}
-	m.queue = append(m.queue, text)
-	pos := len(m.queue) - 1
-	if m.state == StateRunning {
-		pos++
-	}
-
-	select {
-	case m.submitCh <- struct{}{}:
-	default:
-	}
-	return pos, nil
+	return nil
 }
 
 // QueueList returns the pending (not yet dispatched) prompt texts for id, in
 // FIFO order.
-func (s *Supervisor) QueueList(id string) ([]string, error) {
+func (s *Supervisor) QueueList(ctx context.Context, id string) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	m, err := s.lookup(id)
 	if err != nil {
 		return nil, fmt.Errorf("supervisor: queue list %s: %w", id, err)
@@ -245,25 +272,34 @@ func (s *Supervisor) QueueList(id string) ([]string, error) {
 
 // QueueClear drops every pending prompt for id (it does not interrupt a
 // turn already in flight) and returns how many were cleared.
-func (s *Supervisor) QueueClear(id string) (int, error) {
+func (s *Supervisor) QueueClear(ctx context.Context, id string) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	m, err := s.lookup(id)
 	if err != nil {
 		return 0, fmt.Errorf("supervisor: queue clear %s: %w", id, err)
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	n := len(m.queue)
 	m.queue = nil
+	m.mu.Unlock()
+	if n > 0 {
+		s.notify()
+	}
 	return n, nil
 }
 
 // Interrupt cancels id's in-flight turn, if any. The session stays live and
-// returns to [StateIdle]; any queued prompts are untouched and dispatch
-// normally afterward. It is a no-op on an idle session.
-func (s *Supervisor) Interrupt(id string) error {
-	m, err := s.lookup(id)
+// returns to idle; any queued prompts are untouched and dispatch normally
+// afterward. It is a no-op on an idle session.
+func (s *Supervisor) Interrupt(ctx context.Context, sessionID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m, err := s.lookup(sessionID)
 	if err != nil {
-		return fmt.Errorf("supervisor: interrupt %s: %w", id, err)
+		return fmt.Errorf("supervisor: interrupt %s: %w", sessionID, err)
 	}
 	m.mu.Lock()
 	cancel := m.turnCancel
@@ -277,14 +313,19 @@ func (s *Supervisor) Interrupt(id string) error {
 // Kill interrupts any in-flight turn, drops id from the roster, emits
 // session.killed on its stream, and closes it. The on-disk journal is never
 // deleted.
-func (s *Supervisor) Kill(id string) error {
-	m, err := s.take(id)
+func (s *Supervisor) Kill(ctx context.Context, sessionID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m, err := s.take(sessionID)
 	if err != nil {
-		return fmt.Errorf("supervisor: kill %s: %w", id, err)
+		return fmt.Errorf("supervisor: kill %s: %w", sessionID, err)
 	}
 	m.stop()
-	m.sess.Emit(event.NewSessionKilled(id))
-	return m.sess.Close()
+	m.sess.Emit(event.NewSessionKilled(sessionID))
+	err = m.sess.Close()
+	s.notify()
+	return err
 }
 
 // Archive drops a finished session from the roster and emits
@@ -301,68 +342,84 @@ func (s *Supervisor) Kill(id string) error {
 // slip a new turn in between Archive's idle check and its removal of id from
 // the roster, and Archive can never observe idle for a session the pump has
 // already committed to running.
-func (s *Supervisor) Archive(id string) error {
+func (s *Supervisor) Archive(ctx context.Context, sessionID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		return fmt.Errorf("supervisor: archive %s: %w", id, ErrClosed)
+		return fmt.Errorf("supervisor: archive %s: %w", sessionID, ErrClosed)
 	}
-	m, ok := s.roster[id]
+	m, ok := s.roster[sessionID]
 	if !ok {
 		s.mu.Unlock()
-		return fmt.Errorf("supervisor: archive %s: %w", id, ErrNotLive)
+		return fmt.Errorf("supervisor: archive %s: %w", sessionID, ErrNotLive)
 	}
 
 	m.mu.Lock()
-	if m.state == StateRunning {
+	if m.state == stateRunning {
 		m.mu.Unlock()
 		s.mu.Unlock()
-		return fmt.Errorf("supervisor: archive %s: %w", id, ErrRunning)
+		return fmt.Errorf("supervisor: archive %s: %w", sessionID, ErrRunning)
 	}
 	m.closing = true
 	m.mu.Unlock()
-	delete(s.roster, id)
+	delete(s.roster, sessionID)
 	s.mu.Unlock()
 
 	m.stop()
-	m.sess.Emit(event.NewSessionArchived(id))
-	return m.sess.Close()
+	m.sess.Emit(event.NewSessionArchived(sessionID))
+	err := m.sess.Close()
+	s.notify()
+	return err
 }
 
-// stop marks m closing, cancels its base context (interrupting any in-flight
-// turn and waking an idle pump), and waits for its pump goroutine to exit.
-func (m *managed) stop() {
-	m.mu.Lock()
-	m.closing = true
-	m.mu.Unlock()
-	m.baseCancel()
-	<-m.done
+// Roster returns a snapshot of live sessions, newest-first (by Created, then
+// id, to keep ordering deterministic when timestamps tie).
+func (s *Supervisor) Roster(ctx context.Context) ([]SessionInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return s.snapshotLive(), nil
 }
 
-// Roster returns a snapshot of live sessions, newest-first (by CreatedAt,
-// then id, to keep ordering deterministic when timestamps tie).
-func (s *Supervisor) Roster() []RosterEntry {
+// snapshotLive builds the newest-first live-roster snapshot shared by Roster
+// and the WatchRoster fan-out. It takes s.mu only to copy the managed
+// pointers, then reads each session's info outside the roster lock.
+func (s *Supervisor) snapshotLive() []SessionInfo {
 	s.mu.Lock()
-	entries := make([]RosterEntry, 0, len(s.roster))
+	ms := make([]*managed, 0, len(s.roster))
 	for _, m := range s.roster {
-		entries = append(entries, m.entry())
+		ms = append(ms, m)
 	}
 	s.mu.Unlock()
 
-	sort.Slice(entries, func(i, j int) bool {
-		if !entries[i].CreatedAt.Equal(entries[j].CreatedAt) {
-			return entries[i].CreatedAt.After(entries[j].CreatedAt)
+	out := make([]SessionInfo, 0, len(ms))
+	for _, m := range ms {
+		out = append(out, m.info())
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Created.Equal(out[j].Created) {
+			return out[i].Created.After(out[j].Created)
 		}
-		return entries[i].ID > entries[j].ID
+		return out[i].ID > out[j].ID
 	})
-	return entries
+	return out
 }
 
 // List enumerates every session on disk under the store root — live and
 // archived/offline alike — overlaying live state from the roster. It walks
 // <root>/sessions/<slug> directories directly and lists each via the shared
-// store, since the SDK exposes no store-wide enumeration.
+// store, since the SDK exposes no store-wide enumeration. Live entries carry
+// full snapshot data (Status, Cost, ...); disk-only entries carry Live=false
+// and a zero-value Status.
 func (s *Supervisor) List(ctx context.Context) ([]SessionInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	sessionsDir := filepath.Join(s.root, "sessions")
 	des, err := os.ReadDir(sessionsDir)
 	if err != nil {
@@ -385,16 +442,16 @@ func (s *Supervisor) List(ctx context.Context) ([]SessionInfo, error) {
 			return nil, fmt.Errorf("supervisor: list project %s: %w", slug, err)
 		}
 		for _, id := range ids {
-			info := SessionInfo{
+			if info, ok := live[id]; ok {
+				out = append(out, info)
+				continue
+			}
+			out = append(out, SessionInfo{
 				ID:          id,
 				Project:     slug,
 				JournalPath: filepath.Join(sessionsDir, slug, id+".jsonl"),
-			}
-			if entry, ok := live[id]; ok {
-				info.Live = true
-				info.State = entry.State
-			}
-			out = append(out, info)
+				Live:        false,
+			})
 		}
 	}
 	return out, nil
@@ -402,10 +459,13 @@ func (s *Supervisor) List(ctx context.Context) ([]SessionInfo, error) {
 
 // Subscribe returns a live event subscription for id. Errors with
 // [ErrNotLive] if the session is not live.
-func (s *Supervisor) Subscribe(id string) (*event.Subscription, error) {
-	m, err := s.lookup(id)
+func (s *Supervisor) Subscribe(ctx context.Context, sessionID string) (*event.Subscription, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m, err := s.lookup(sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("supervisor: subscribe %s: %w", id, err)
+		return nil, fmt.Errorf("supervisor: subscribe %s: %w", sessionID, err)
 	}
 	return m.sess.Events(), nil
 }
@@ -426,8 +486,9 @@ func (s *Supervisor) LastError(id string) error {
 }
 
 // Close kills every live session (emitting session.killed for each, per the
-// must-deliver contract) and closes the store the supervisor built itself
-// (an injected [Config.Store] is left to its owner). Idempotent.
+// must-deliver contract), stops every WatchRoster subscriber, and closes the
+// store the supervisor built itself (an injected [Config.Store] is left to
+// its owner). Idempotent.
 func (s *Supervisor) Close() error {
 	s.mu.Lock()
 	if s.closed {
@@ -441,6 +502,15 @@ func (s *Supervisor) Close() error {
 	}
 	s.roster = make(map[string]*managed)
 	s.mu.Unlock()
+
+	// Wake and join every watcher goroutine so Close returns leak-free.
+	s.watchMu.Lock()
+	if !s.watchClosed {
+		s.watchClosed = true
+		close(s.watchDone)
+	}
+	s.watchMu.Unlock()
+	s.watchWG.Wait()
 
 	var errs []error
 	for _, m := range all {
@@ -460,7 +530,7 @@ func (s *Supervisor) Close() error {
 
 // take removes id from the roster and returns it, or an error if it is not
 // there (or the supervisor is closed). Removing under the roster lock, before
-// stopping the session, ensures no concurrent Submit/Interrupt/Archive call
+// stopping the session, ensures no concurrent Send/Interrupt/Archive call
 // can find it again once Kill has claimed it.
 func (s *Supervisor) take(id string) (*managed, error) {
 	s.mu.Lock()
@@ -490,24 +560,27 @@ func (s *Supervisor) lookup(id string) (*managed, error) {
 	return m, nil
 }
 
-// liveEntry returns id's roster entry and true if it is live.
-func (s *Supervisor) liveEntry(id string) (RosterEntry, bool) {
+// get returns id's managed session and whether it is live (no closed check —
+// Resume calls it to short-circuit an already-live id).
+func (s *Supervisor) get(id string) (*managed, bool) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	m, ok := s.roster[id]
-	s.mu.Unlock()
-	if !ok {
-		return RosterEntry{}, false
-	}
-	return m.entry(), true
+	return m, ok
 }
 
 // liveByID snapshots the roster into a map for List's overlay.
-func (s *Supervisor) liveByID() map[string]RosterEntry {
+func (s *Supervisor) liveByID() map[string]SessionInfo {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make(map[string]RosterEntry, len(s.roster))
-	for id, m := range s.roster {
-		out[id] = m.entry()
+	ms := make([]*managed, 0, len(s.roster))
+	for _, m := range s.roster {
+		ms = append(ms, m)
+	}
+	s.mu.Unlock()
+
+	out := make(map[string]SessionInfo, len(ms))
+	for _, m := range ms {
+		out[m.id] = m.info()
 	}
 	return out
 }

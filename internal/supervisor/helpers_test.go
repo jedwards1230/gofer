@@ -58,6 +58,15 @@ func (f *fakeSession) Fold() []provider.Message    { return nil }
 func (f *fakeSession) Events() *event.Subscription { return f.broker.Subscribe(event.FilterAll, 64) }
 func (f *fakeSession) Emit(e event.Event)          { f.broker.Publish(e) }
 
+// Cost returns a canned tally so SessionInfo.Cost/Usage are populated
+// deterministically without a real journal.
+func (f *fakeSession) Cost() session.CostReport {
+	return session.CostReport{
+		Usage: provider.Usage{InputTokens: 10, OutputTokens: 5},
+		Cost:  provider.Cost{USD: 0.01},
+	}
+}
+
 func (f *fakeSession) Close() error {
 	f.mu.Lock()
 	f.closed = true
@@ -173,20 +182,24 @@ func (h *harness) session(id string) *fakeSession {
 	return h.sessions[id]
 }
 
-// waitForState polls Roster until id reaches want or the deadline passes.
-// The supervisor's pump goroutine updates state asynchronously to Submit/
-// Interrupt/finish, so tests that need to observe the settled state use this
+// waitForStatus polls Roster until id reaches want or the deadline passes.
+// The supervisor's pump goroutine updates state asynchronously to Send/
+// Interrupt/finish, so tests that need to observe the settled status use this
 // instead of asserting immediately.
-func waitForState(t *testing.T, sup *supervisor.Supervisor, id string, want supervisor.State) {
+func waitForStatus(t *testing.T, sup *supervisor.Supervisor, id string, want supervisor.SessionStatus) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		for _, e := range sup.Roster() {
-			if e.ID == id && e.State == want {
+		roster, err := sup.Roster(context.Background())
+		if err != nil {
+			t.Fatalf("Roster: %v", err)
+		}
+		for _, e := range roster {
+			if e.ID == id && e.Status == want {
 				return
 			}
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatalf("waitForState: %s did not reach %s within the deadline", id, want)
+	t.Fatalf("waitForStatus: %s did not reach %s within the deadline", id, want)
 }
