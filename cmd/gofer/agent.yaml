@@ -1,0 +1,7 @@
+# Embedded demo manifest. At M0 the only provider is the deterministic faux
+# provider, so `gofer demo` runs entirely offline — no API key, no network.
+# Override it with `gofer demo --manifest <path>`.
+name: demo
+model: faux-1
+provider:
+  type: faux
