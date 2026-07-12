@@ -81,5 +81,12 @@ hermetic CI test that proves the same mechanics with a scripted provider.
 - **`TestRunner_TextTurn`** — a plain (no tool call) turn: the user prompt
   and settled assistant reply (text + reasoning) both land as journal
   entries, and `Fold` projects them back losslessly.
+- **`TestRunner_KillDuringToolStreaming`** (`internal/runner/consume_test.go`)
+  — the harder kill: the run is cancelled *while a tool call is still
+  streaming its input* (announced, but no result), after the turn's assistant
+  text/reasoning has already settled. The settled text must still be journaled
+  (it is written at `turn.finished`, decoupled from tool execution) and the
+  orphaned, never-executed tool call is dropped — no stranded text, no dangling
+  `tool_use` to corrupt the fold on resume.
 
 Run it: `go test -race ./internal/runner/...`.
