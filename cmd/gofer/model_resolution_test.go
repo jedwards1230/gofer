@@ -6,6 +6,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/jedwards1230/agent-sdk-go/runner"
 )
 
 // wantNoProviderCredentialsMsg is the exact neutral (no-flagship-vendor)
@@ -114,6 +116,70 @@ func TestRun_AmbiguousProviderCredentials(t *testing.T) {
 	}
 	if !strings.Contains(errBuf.String(), wantAmbiguousModelMsg) {
 		t.Errorf("stderr = %q, want it to contain %q", errBuf.String(), wantAmbiguousModelMsg)
+	}
+}
+
+// TestWrapCredentialHint locks the exact wording gofer adds back onto the
+// SDK's app-neutral [runner.NoCredentialError] — this is the message the
+// now-deleted internal/runner package used to produce directly — and that
+// errors.Is against runner.ErrNoCredential still holds through the wrap.
+// Any other error (including one that isn't a credential error at all) must
+// pass through unchanged.
+func TestWrapCredentialHint(t *testing.T) {
+	t.Run("with env var", func(t *testing.T) {
+		orig := &runner.NoCredentialError{Provider: "anthropic", EnvVar: "ANTHROPIC_API_KEY"}
+		got := wrapCredentialHint(orig)
+		const want = "no credential for anthropic — run 'gofer login anthropic' or set ANTHROPIC_API_KEY"
+		if got.Error() != want {
+			t.Errorf("wrapCredentialHint().Error() = %q, want %q", got.Error(), want)
+		}
+		if !errors.Is(got, runner.ErrNoCredential) {
+			t.Error("wrapCredentialHint result does not satisfy errors.Is(_, runner.ErrNoCredential)")
+		}
+	})
+
+	t.Run("no env var known", func(t *testing.T) {
+		orig := &runner.NoCredentialError{Provider: "widget"}
+		got := wrapCredentialHint(orig)
+		const want = "no credential for widget — run 'gofer login widget'"
+		if got.Error() != want {
+			t.Errorf("wrapCredentialHint().Error() = %q, want %q", got.Error(), want)
+		}
+	})
+
+	t.Run("non-credential error passes through unchanged", func(t *testing.T) {
+		orig := errors.New("boom")
+		if got := wrapCredentialHint(orig); got != orig {
+			t.Errorf("wrapCredentialHint(%v) = %v, want the same error unchanged", orig, got)
+		}
+	})
+
+	t.Run("nil passes through", func(t *testing.T) {
+		if got := wrapCredentialHint(nil); got != nil {
+			t.Errorf("wrapCredentialHint(nil) = %v, want nil", got)
+		}
+	})
+}
+
+// TestRun_NoCredentialForModel drives the full dispatch: `gofer run -m
+// <model>` for a provider with no stored login and no env var configured
+// fails with gofer's own 'gofer login' hint, not the SDK's bare app-neutral
+// message — the credential error now originates in agent-sdk-go/runner
+// (deliberately app-neutral there), and cmd/gofer is the one place that adds
+// the CLI-specific remediation back (see wrapCredentialHint).
+func TestRun_NoCredentialForModel(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
+
+	var out, errBuf bytes.Buffer
+	got := run([]string{"run", "-m", "claude-sonnet-5", "--root", root, "do a thing"}, strings.NewReader(""), &out, &errBuf)
+	if got != 1 {
+		t.Fatalf("run() = %d, want 1\nstderr: %s", got, errBuf.String())
+	}
+	const want = "no credential for anthropic — run 'gofer login anthropic' or set ANTHROPIC_API_KEY"
+	if !strings.Contains(errBuf.String(), want) {
+		t.Errorf("stderr = %q, want it to contain %q", errBuf.String(), want)
 	}
 }
 

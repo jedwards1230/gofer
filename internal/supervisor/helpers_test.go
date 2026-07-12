@@ -11,9 +11,9 @@ import (
 
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/provider"
+	"github.com/jedwards1230/agent-sdk-go/runner"
 	"github.com/jedwards1230/agent-sdk-go/session"
 
-	"github.com/jedwards1230/gofer/internal/runner"
 	"github.com/jedwards1230/gofer/internal/supervisor"
 )
 

@@ -13,8 +13,7 @@ import (
 	"unicode"
 
 	"github.com/jedwards1230/agent-sdk-go/auth"
-
-	"github.com/jedwards1230/gofer/internal/runner"
+	"github.com/jedwards1230/agent-sdk-go/runner"
 )
 
 // maxCodeAttempts is how many times `gofer login` re-prompts for the pasted

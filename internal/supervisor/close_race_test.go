@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/jedwards1230/gofer/internal/runner"
+	"github.com/jedwards1230/agent-sdk-go/runner"
 	"github.com/jedwards1230/gofer/internal/supervisor"
 )
 

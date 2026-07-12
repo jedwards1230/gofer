@@ -7,7 +7,7 @@
 //
 // The SDK ([github.com/jedwards1230/agent-sdk-go]) owns one session's loop,
 // provider, tool registry, and durable JSONL journal — see
-// [github.com/jedwards1230/gofer/internal/runner], which wraps exactly one
+// [github.com/jedwards1230/agent-sdk-go/runner], which wraps exactly one
 // SDK session. The supervisor owns everything a second application would NOT
 // need unchanged (the SDK-promotion test from the repo's docs/PRD.md):
 // registering many sessions under one shared [session.FileStore], a
@@ -15,7 +15,7 @@
 // real steering, and the kill/archive lifecycle operations with their
 // must-deliver lifecycle events. The supervisor never reaches into runner or
 // SDK internals — it drives each session through the [Session] interface,
-// the same shape [github.com/jedwards1230/gofer/internal/runner.Runner]
+// the same shape [github.com/jedwards1230/agent-sdk-go/runner.Runner]
 // implements.
 //
 // # One journal per session, one shared store
