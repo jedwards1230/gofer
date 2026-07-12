@@ -75,7 +75,9 @@ func runRun(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 		System: defaultSystemPrompt,
 	})
 	if err != nil {
-		return fmt.Errorf("start session: %w", err)
+		// NewSession's errors are already contextual (a clean credential error,
+		// or a "runner: …" message) — don't re-wrap and double up the prefix.
+		return err
 	}
 
 	_, _ = fmt.Fprintf(stderr, "gofer run: session %s\n", r.ID())

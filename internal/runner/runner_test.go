@@ -376,3 +376,31 @@ func TestRunner_KillAndResume(t *testing.T) {
 		t.Fatalf("final Entries: got %d, want 5 (the journal grew with the continuation)", got)
 	}
 }
+
+// TestNewSession_MissingCredentialLeavesNoJournal is the pre-flight regression:
+// a run whose provider has no configured credential must fail BEFORE any session
+// journal is created, so a misconfiguration leaves no orphan .jsonl on disk. A
+// credential that resolves but is rejected live is a different case (a real
+// errored session that does journal) and is not exercised here.
+func TestNewSession_MissingCredentialLeavesNoJournal(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
+	root := t.TempDir()
+	cwd := t.TempDir()
+
+	// No Provider injected → the real credential pre-flight runs.
+	_, err := runner.NewSession(context.Background(), runner.Options{
+		Root: root, Cwd: cwd, Model: "claude-sonnet-5", System: "test system",
+	})
+	if err == nil {
+		t.Fatal("NewSession: got nil error, want a missing-credential error")
+	}
+	if !errors.Is(err, runner.ErrNoCredential) {
+		t.Fatalf("NewSession err = %v, want runner.ErrNoCredential", err)
+	}
+
+	matches, _ := filepath.Glob(filepath.Join(root, "sessions", "*", "*.jsonl"))
+	if len(matches) != 0 {
+		t.Errorf("found %d journal file(s) after a failed pre-flight, want 0 (no orphan): %v", len(matches), matches)
+	}
+}

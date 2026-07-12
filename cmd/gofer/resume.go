@@ -46,7 +46,9 @@ func runResume(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 		System: defaultSystemPrompt,
 	})
 	if err != nil {
-		return fmt.Errorf("resume session: %w", err)
+		// Resume's errors are already contextual (a clean credential error, or a
+		// "runner: …" message) — don't re-wrap.
+		return err
 	}
 
 	if len(promptArgs) == 0 {
