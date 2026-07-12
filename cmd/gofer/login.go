@@ -12,10 +12,13 @@ import (
 	"time"
 
 	"github.com/jedwards1230/agent-sdk-go/auth"
+
+	"github.com/jedwards1230/gofer/internal/runner"
 )
 
-// authProviders are the provider ids gofer knows how to authenticate.
-var authProviders = []string{"anthropic", "openai"}
+// authProviders are the provider ids gofer knows how to authenticate — the
+// same set runner resolves a run model from.
+var authProviders = runner.SupportedProviders()
 
 // validProvider reports whether id is a known provider.
 func validProvider(id string) bool {
@@ -25,6 +28,27 @@ func validProvider(id string) bool {
 		}
 	}
 	return false
+}
+
+// providerBlurbs is a short, human description of each provider's login
+// flow, printed by `gofer login` with no provider argument.
+var providerBlurbs = map[string]string{
+	"anthropic": "subscription OAuth (Claude Pro/Max) — paste the code shown after authorizing; or --api-key to store ANTHROPIC_API_KEY",
+	"openai":    "subscription OAuth (ChatGPT) — completes via a local browser redirect; or --api-key to store OPENAI_API_KEY",
+}
+
+// printLoginProviders writes a short usage + provider listing to w — the
+// "point the user at a login screen" response to `gofer login` with no
+// provider argument.
+func printLoginProviders(w io.Writer) {
+	_, _ = fmt.Fprint(w, "Usage: gofer login <provider> [--api-key]\n\nProviders:\n")
+	for _, p := range runner.SupportedProviders() {
+		blurb := providerBlurbs[p]
+		if blurb == "" {
+			blurb = fmt.Sprintf("set %s, or run with --api-key", runner.EnvVar(p))
+		}
+		_, _ = fmt.Fprintf(w, "  %-11s %s\n", p, blurb)
+	}
 }
 
 // usageError marks an error as a usage problem (bad or missing arguments),
@@ -118,6 +142,12 @@ func runLogin(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 		return nil
 	}
 
+	if len(positionals) == 0 {
+		// No provider named: point the user at a login screen rather than
+		// erroring — this is the natural first stop for "how do I log in".
+		printLoginProviders(stdout)
+		return nil
+	}
 	if len(positionals) != 1 {
 		return &usageError{msg: "usage: gofer login <anthropic|openai> [--api-key]"}
 	}

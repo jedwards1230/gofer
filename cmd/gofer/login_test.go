@@ -196,12 +196,19 @@ func TestLoginUnknownProvider(t *testing.T) {
 	}
 }
 
-func TestLoginMissingProvider(t *testing.T) {
+// TestLoginNoProvider asserts `gofer login` with no provider argument is not
+// a usage error: it prints a short provider listing (a login screen) and
+// exits cleanly, since "how do I log in" is the natural first stop.
+func TestLoginNoProvider(t *testing.T) {
 	root := t.TempDir()
 	var stdout, stderr bytes.Buffer
 	err := runLogin(context.Background(), []string{"--root", root}, strings.NewReader(""), &stdout, &stderr)
-	if err == nil {
-		t.Fatalf("expected usage error for missing provider")
+	if err != nil {
+		t.Fatalf("runLogin with no provider: %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "anthropic") || !strings.Contains(out, "openai") {
+		t.Fatalf("provider listing missing a provider: %q", out)
 	}
 }
 
@@ -272,8 +279,11 @@ func TestRunDispatchLoginLogoutAuth(t *testing.T) {
 	root := t.TempDir()
 
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"login", "--root", root}, strings.NewReader(""), &stdout, &stderr); code != 2 {
-		t.Fatalf("login with no provider: exit = %d, want 2", code)
+	if code := run([]string{"login", "--root", root}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("login with no provider: exit = %d, want 0, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "anthropic") {
+		t.Fatalf("login with no provider: stdout missing provider listing: %q", stdout.String())
 	}
 
 	stdout.Reset()

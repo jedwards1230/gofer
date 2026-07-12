@@ -19,7 +19,7 @@ import (
 func runResume(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("resume", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	model := fs.String("m", defaultRunModel, "model to run")
+	model := fs.String("m", "", "model to run (default: the sole logged-in provider's model)")
 	root := fs.String("root", "", "session store root (default ~/.gofer)")
 	asJSON := fs.Bool("json", false, "emit each event as JSONL instead of a human-readable transcript")
 	if help, err := parseFlags(fs, args); err != nil {
@@ -34,26 +34,40 @@ func runResume(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 	}
 	id, promptArgs := rest[0], rest[1:]
 
+	if len(promptArgs) == 0 {
+		// A read-only transcript view needs no provider and no credential — it
+		// reads the journal directly, so `gofer resume <id>` works even with
+		// nothing configured.
+		msgs, err := runner.Transcript(ctx, id, *root)
+		if err != nil {
+			return err
+		}
+		return printTranscript(msgs, stdout)
+	}
+
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("getwd: %w", err)
 	}
 
+	modelID := *model
+	if modelID == "" {
+		modelID, err = resolveRunModel(ctx, *root)
+		if err != nil {
+			return err
+		}
+	}
+
 	r, err := runner.Resume(ctx, id, runner.Options{
 		Root:   *root,
 		Cwd:    cwd,
-		Model:  *model,
+		Model:  modelID,
 		System: defaultSystemPrompt,
 	})
 	if err != nil {
 		// Resume's errors are already contextual (a clean credential error, or a
 		// "runner: …" message) — don't re-wrap.
 		return err
-	}
-
-	if len(promptArgs) == 0 {
-		defer func() { _ = r.Close() }()
-		return printTranscript(r, stdout)
 	}
 
 	_, _ = fmt.Fprintf(stderr, "gofer resume: session %s\n", r.ID())
@@ -72,10 +86,10 @@ func runResume(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 	return driveSession(ctx, r, prompt, *asJSON, stdout, stderr)
 }
 
-// printTranscript writes r's current folded context as a plain-text
-// transcript, one line per content block across the folded messages.
-func printTranscript(r *runner.Runner, w io.Writer) error {
-	for _, msg := range r.Fold() {
+// printTranscript writes msgs as a plain-text transcript, one line per
+// content block across the folded messages.
+func printTranscript(msgs []provider.Message, w io.Writer) error {
+	for _, msg := range msgs {
 		for _, b := range msg.Content {
 			line, ok := transcriptLine(msg.Role, b)
 			if !ok {
