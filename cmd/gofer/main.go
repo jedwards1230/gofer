@@ -22,8 +22,12 @@ func main() {
 // on a command error, 2 on a usage error. It takes its streams as arguments so
 // the dispatch is exercisable without touching the real stdio.
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
+	// No SIGINT-capturing context is installed here: commands that acquire a
+	// prompt from an interactive stdin read (run, bare gofer) must install it
+	// only AFTER the read (see interruptCtx), so Ctrl-C during a blocking,
+	// non-ctx-aware read terminates the process via Go's default handling
+	// instead of being swallowed. Commands that stream install it themselves.
+	ctx := context.Background()
 
 	// Bare `gofer`, with no subcommand at all, runs one prompt in the current
 	// directory — the shortest path from install to a working session.
@@ -78,6 +82,16 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		usage(stderr)
 		return 2
 	}
+}
+
+// interruptCtx returns a child of ctx cancelled on the first SIGINT (Ctrl-C),
+// plus a stop func to release the handler. Streaming commands install it around
+// the session run so Ctrl-C interrupts the turn gracefully — but only AFTER any
+// interactive prompt read, since a blocking non-ctx-aware read would otherwise
+// swallow the signal (the flag package's handler disables Go's default
+// terminate-on-SIGINT) and wedge the process.
+func interruptCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(ctx, os.Interrupt)
 }
 
 // reportCmdErr prints a command error to stderr and returns the process exit

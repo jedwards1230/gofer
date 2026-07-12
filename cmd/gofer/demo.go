@@ -30,6 +30,11 @@ const demoPrompt = "demo"
 // scripted turn, and renders the resulting event stream. With --json it emits
 // the stream as JSONL; otherwise it prints a legible transcript.
 func runDemo(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	// demo streams a scripted session and reads no prompt, so it installs the
+	// interrupt handler up front — Ctrl-C cancels the stream.
+	ctx, stop := interruptCtx(ctx)
+	defer stop()
+
 	fs := flag.NewFlagSet("demo", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	manifestPath := fs.String("manifest", "", "path to an agent manifest (default: embedded faux manifest)")
