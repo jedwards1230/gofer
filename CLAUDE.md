@@ -40,10 +40,14 @@ go run ./cmd/gofer demo                            # offline faux-provider strea
 
 ## Layout
 
-- `cmd/gofer/` — CLI entrypoint: `run`/`resume` (routing through a reachable
-  daemon as an ACP client, else the in-process path), `ps`/`kill`/`archive`
-  (always daemon-only), `demo`, `login`/`logout`/`auth`, `daemon`/`serve`
-  today; `attach` lands with the TUI-over-daemon leg of M2.
+- `cmd/gofer/` — CLI entrypoint: bare `gofer` on an interactive terminal
+  opens the local roster overview TUI (an in-process supervisor this same
+  process owns — no daemon probe/attach yet); piped/non-interactive stdin
+  keeps the M1 one-prompt behavior. `run`/`resume` (routing through a
+  reachable daemon as an ACP client, else the in-process path),
+  `ps`/`kill`/`archive` (always daemon-only), `demo`, `login`/`logout`/`auth`,
+  `daemon`/`serve` today; `attach` and the daemon-attached unified roster TUI
+  land with a later M2 leg.
 - `internal/supervisor/` — session registry over the shared store + runner
   seams; see its package doc for the full contract.
 - `internal/daemon/` — ACP-over-WebSocket listener hosting the supervisor
