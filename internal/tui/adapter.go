@@ -91,7 +91,26 @@ func (p Program) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 // View satisfies tea.Model, rendering the wrapped Model at the last known
-// terminal size.
+// terminal size. It requests the alternate screen so the live, height-clipped
+// frames never touch the normal buffer; bubbletea exits the alt screen on
+// quit, and driveTUI then flushes the full transcript to the scrollback (see
+// [Program.FinalTranscript]).
 func (p Program) View() tea.View {
-	return tea.NewView(p.inner.View(p.width, p.height))
+	v := tea.NewView(p.inner.View(p.width, p.height))
+	v.AltScreen = true
+	return v
+}
+
+// FinalTranscript renders the wrapped Model's full transcript at the last known
+// terminal width, for flushing to the scrollback on exit. A caller running the
+// program in the alternate screen (so the live, height-clipped frames leave no
+// residue) prints this to stdout after [tea.Program.Run] returns, giving the
+// user the whole conversation instead of the clipped final frame. Width
+// defaults to 80 when no [tea.WindowSizeMsg] has been seen.
+func (p Program) FinalTranscript() string {
+	width := p.width
+	if width < 1 {
+		width = 80
+	}
+	return p.inner.FullTranscript(width)
 }

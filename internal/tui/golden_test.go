@@ -116,6 +116,31 @@ func TestGoldenApproval(t *testing.T) {
 	)
 }
 
+// TestGoldenFullTranscript covers the exit-flush render: every transcript item
+// plus the final status line, unclipped by height and with no input line —
+// what the attach TUI writes to the scrollback when it exits.
+func TestGoldenFullTranscript(t *testing.T) {
+	m := ingest(
+		event.NewTurnStarted(sid),
+		event.NewMessageStarted(sid, event.MessageReasoning),
+		event.NewMessageFinished(sid, event.MessageReasoning, "Plan: greet, then run a check."),
+		event.NewMessageStarted(sid, event.MessageText),
+		event.NewMessageFinished(sid, event.MessageText, "Hello! Running a quick check."),
+		event.NewToolCallStarted(sid, "call-1", "bash", json.RawMessage(`{"cmd":"echo hi"}`)),
+		event.NewToolCallFinished(sid, "call-1", "hi", nil),
+		event.NewTurnFinished(sid, "end_turn", provider.Usage{InputTokens: 12, OutputTokens: 9}),
+	)
+	testkit.AssertGolden(t, "full_transcript", m.FullTranscript(testkit.Width))
+}
+
+// TestFullTranscriptEmpty verifies an untouched transcript flushes nothing, so
+// an immediately-interrupted run doesn't print a bare status line.
+func TestFullTranscriptEmpty(t *testing.T) {
+	if got := tui.New(theme.Test()).FullTranscript(testkit.Width); got != "" {
+		t.Errorf("empty FullTranscript = %q; want empty string", got)
+	}
+}
+
 // TestGoldenInputBuffer covers the input line with a typed buffer, driven
 // through Model's pure edit methods rather than a bubbletea Program.
 func TestGoldenInputBuffer(t *testing.T) {

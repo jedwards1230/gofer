@@ -398,6 +398,30 @@ func (m Model) TailView(width, height int) string {
 	return strings.Join(lines, "\n")
 }
 
+// FullTranscript renders every transcript item unclipped by height, followed
+// by the final status line. It is what the attach TUI flushes to the terminal
+// on exit, so the scrollback holds the whole conversation — not the
+// viewport-clipped final frame the live view leaves behind (the M1
+// exit-truncation bug). The input line is omitted: there is no more input once
+// the program has exited.
+func (m Model) FullTranscript(width int) string {
+	if width < 1 {
+		width = 1
+	}
+	if len(m.items) == 0 {
+		return "" // nothing streamed; nothing to flush
+	}
+
+	lines := make([]string, 0, len(m.items)+1)
+	for _, it := range m.items {
+		for _, line := range m.renderItemLines(it) {
+			lines = append(lines, truncate(line, width))
+		}
+	}
+	lines = append(lines, truncate(m.statusLine(), width))
+	return strings.Join(lines, "\n")
+}
+
 // truncate clips s to at most w runes, marking a clipped line with a
 // trailing ellipsis.
 func truncate(s string, w int) string {
