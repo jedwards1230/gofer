@@ -105,7 +105,10 @@ across the rest of the M2 stack:
 - **The `gofer` TUI overview** attaches to the daemon and renders the live
   roster + transcript, so the phone-created session appears and can be
   peeked/attached exactly like a local one — this leg (`attach`) is still
-  pending.
+  pending. Bare `gofer` on an interactive terminal today opens the roster
+  overview over an in-process supervisor this process itself owns (its own
+  session store, not the running daemon's); the daemon-attached unified
+  roster is the pending leg above.
 
 You can also confirm the roster directly over the control channel: any
 ACP/WebSocket client pointed at the same URL+token can call the `gofer/roster`

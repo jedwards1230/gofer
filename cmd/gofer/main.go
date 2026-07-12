@@ -1,8 +1,9 @@
-// Command gofer is the CLI entrypoint for the gofer agent platform. `run` and
-// `resume` drive a real session — a real provider, the builtin tool set, and
-// a durable JSONL journal — through the SDK's typed event contract; `demo`
-// still streams a deterministic faux-provider session with no network. The
-// daemon, supervisor, and TUI land in later milestones.
+// Command gofer is the CLI entrypoint for the gofer agent platform. Bare
+// `gofer` on an interactive terminal launches the local roster overview TUI;
+// `run` and `resume` drive a real session — a real provider, the builtin
+// tool set, and a durable JSONL journal — through the SDK's typed event
+// contract, optionally routed through a reachable `gofer daemon`; `demo`
+// still streams a deterministic faux-provider session with no network.
 package main
 
 import (
@@ -29,9 +30,19 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// instead of being swallowed. Commands that stream install it themselves.
 	ctx := context.Background()
 
-	// Bare `gofer`, with no subcommand at all, runs one prompt in the current
-	// directory — the shortest path from install to a working session.
+	// Bare `gofer`, with no subcommand at all, is interactive-terminal aware:
+	// on a real TTY it opens the local roster overview TUI (runTUI) — the
+	// shortest path from install to supervising sessions; piped/redirected
+	// stdin (e.g. `echo prompt | gofer`, or any non-interactive caller) keeps
+	// the original M1 behavior unchanged, running one prompt in the current
+	// directory (runRun), for scripting and backward compatibility.
 	if len(args) == 0 {
+		if stdinIsTTY() && interactiveTTY(stdout) {
+			if err := runTUI(ctx, stdin, stdout, stderr); err != nil {
+				return reportCmdErr("", err, stderr)
+			}
+			return 0
+		}
 		if err := runRun(ctx, nil, stdin, stdout, stderr); err != nil {
 			return reportCmdErr("", err, stderr)
 		}
@@ -135,7 +146,8 @@ func usage(w io.Writer) {
 	_, _ = fmt.Fprint(w, `gofer — supervise coding agents (M1)
 
 Usage:
-  gofer                           Run one prompt (read from stdin) in the current directory
+  gofer                           Launch the session overview TUI (interactive terminal) —
+                                   pipe a prompt or use "gofer run" for one-shot
   gofer <command> [flags]
 
 Commands:
