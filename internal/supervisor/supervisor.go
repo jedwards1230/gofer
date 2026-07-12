@@ -173,15 +173,24 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts CreateOptio
 		return SessionInfo{}, fmt.Errorf("supervisor: create session: %w", err)
 	}
 
-	m := s.register(sess, opts.Model)
+	m, err := s.register(sess, opts.Model)
+	if err != nil {
+		// Lost a race with Close between the isClosed check above and here:
+		// tear down the just-built session so it does not leak. Its store is
+		// the shared one and stays open; only its broker and journal close.
+		_ = sess.Close()
+		return SessionInfo{}, fmt.Errorf("supervisor: create session: %w", err)
+	}
 	if prompt != "" {
 		if err := m.enqueue(prompt); err != nil {
 			return SessionInfo{}, fmt.Errorf("supervisor: create session: enqueue first prompt: %w", err)
 		}
+	} else {
+		// enqueue announces the session on the prompt path; announce the new
+		// idle session here on the no-prompt (ACP session/new) path.
+		s.notify()
 	}
-	info := m.info()
-	s.notify()
-	return info, nil
+	return m.info(), nil
 }
 
 // ResumeOptions configures [Supervisor.Resume]. Model and Cwd are required —
@@ -218,23 +227,34 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 		return SessionInfo{}, fmt.Errorf("supervisor: resume %s: %w", id, err)
 	}
 
-	m := s.register(sess, opts.Model)
+	m, err := s.register(sess, opts.Model)
+	if err != nil {
+		_ = sess.Close()
+		return SessionInfo{}, fmt.Errorf("supervisor: resume %s: %w", id, err)
+	}
 	info := m.info()
 	s.notify()
 	return info, nil
 }
 
 // register adds sess to the roster as a live, idle session and starts its
-// pump goroutine.
-func (s *Supervisor) register(sess Session, model string) *managed {
-	m := newManaged(sess, model, s.clock(), s.clock, s.notify)
-
+// pump goroutine. It returns ErrClosed — checked under s.mu, atomically with
+// the roster insert — if the supervisor has been closed, so a Create/Resume
+// racing Close can never insert a session (and leak its pump) into a roster
+// Close has already drained. The managed value (and its context) is built
+// only once the insert is committed, so a rejected registration leaks nothing.
+func (s *Supervisor) register(sess Session, model string) (*managed, error) {
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil, ErrClosed
+	}
+	m := newManaged(sess, model, s.clock(), s.clock, s.notify)
 	s.roster[m.id] = m
 	s.mu.Unlock()
 
 	go m.pump()
-	return m
+	return m, nil
 }
 
 // Send enqueues a prompt for id. It dispatches immediately when the session
@@ -329,13 +349,16 @@ func (s *Supervisor) Kill(ctx context.Context, sessionID string) error {
 }
 
 // Archive drops a finished session from the roster and emits
-// session.archived, keeping its journal. It rejects (returns [ErrRunning])
-// a session with a turn in flight — kill it first.
+// session.archived, keeping its journal. It rejects (returns [ErrRunning]) a
+// session with a turn in flight OR queued-but-not-yet-dispatched prompts —
+// both surface as StatusWorking in the roster, and archiving a queued session
+// would silently discard that pending work. Interrupt or kill it first.
 //
-// The check-then-act race between "is id idle" and "remove id from the
-// roster" is closed by holding both the roster lock and m's own lock across
-// the whole decision: the state check and setting m.closing happen under
-// m.mu without releasing it, and m's pump goroutine only ever starts a new
+// The check-then-act race between "is id idle and unqueued" and "remove id
+// from the roster" is closed by holding both the roster lock and m's own lock
+// across the whole decision: the state/queue check and setting m.closing
+// happen under m.mu without releasing it, and m's pump goroutine only ever
+// starts a new
 // turn (transitioning idle -> running) while holding that same lock (see
 // managed.pump). So whichever of {Archive's decision, the pump's next
 // dispatch} acquires m.mu first is the one that happens — the pump can never
@@ -359,7 +382,7 @@ func (s *Supervisor) Archive(ctx context.Context, sessionID string) error {
 	}
 
 	m.mu.Lock()
-	if m.state == stateRunning {
+	if m.state == stateRunning || len(m.queue) > 0 {
 		m.mu.Unlock()
 		s.mu.Unlock()
 		return fmt.Errorf("supervisor: archive %s: %w", sessionID, ErrRunning)

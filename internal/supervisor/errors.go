@@ -8,9 +8,10 @@ import "errors"
 // on-disk journal, if any, is unaffected; see [Supervisor.List] to find it.
 var ErrNotLive = errors.New("session not live")
 
-// ErrRunning indicates [Supervisor.Archive] was called on a session with a
-// turn in flight. Interrupt or kill it first.
-var ErrRunning = errors.New("session is running")
+// ErrRunning indicates [Supervisor.Archive] was called on a session that is
+// still active — a turn in flight, or queued-but-not-yet-dispatched prompts
+// (both surface as StatusWorking). Interrupt or kill it first.
+var ErrRunning = errors.New("session is running or has queued work")
 
 // ErrClosed indicates the supervisor itself has been closed; no further
 // session operations are accepted.
