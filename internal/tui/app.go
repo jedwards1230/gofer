@@ -133,10 +133,13 @@ func waitForEvent(id string, sub *event.Subscription) tea.Cmd {
 	}
 }
 
-// doCreate starts a new session via the Supervisor.
+// doCreate starts a new session via the Supervisor. The dispatch bar creates
+// with default options (credential-driven model, daemon cwd) — a zero-value
+// CreateOptions; per-session model/cwd overrides arrive with the config/`-m`
+// wiring in a later milestone.
 func (a App) doCreate(prompt string) tea.Cmd {
 	return func() tea.Msg {
-		info, err := a.sup.Create(context.Background(), prompt)
+		info, err := a.sup.Create(context.Background(), prompt, CreateOptions{})
 		return createdMsg{info: info, err: err}
 	}
 }

@@ -72,6 +72,16 @@ type SessionInfo struct {
 	Updated time.Time // last activity — the recency sort key
 }
 
+// CreateOptions configures [Supervisor.Create]. The zero value is the
+// daemon's default: a credential-driven model in the daemon's working
+// directory. The daemon supervisor's CreateOptions carries more fields
+// (System, Params, MaxIters); the TUI only sets these two, so this local copy
+// mirrors just them until the reconciliation PR imports the daemon type.
+type CreateOptions struct {
+	Model string
+	Cwd   string
+}
+
 // Supervisor is the client-side view of the daemon the TUI drives. Every
 // method is an Op or a read a remote ACP client could equally issue: the TUI
 // holds no back channel the protocol doesn't expose.
@@ -87,8 +97,12 @@ type Supervisor interface {
 	Subscribe(ctx context.Context, sessionID string) (*event.Subscription, error)
 
 	// Create starts a new session seeded with prompt and returns its roster
-	// row. The dispatch bar calls this, then attaches into the returned id.
-	Create(ctx context.Context, prompt string) (SessionInfo, error)
+	// row. The dispatch bar calls this, then attaches into the returned id. A
+	// zero-value opts gives the daemon's default behavior (credential-driven
+	// model, daemon working directory); an ACP client or a `-m` invocation
+	// sets Model/Cwd at create time. An empty prompt creates an idle session
+	// with no first turn (the ACP path).
+	Create(ctx context.Context, prompt string, opts CreateOptions) (SessionInfo, error)
 
 	// Send submits prompt as the next turn on an existing session — the
 	// multi-turn attach loop's send-when-idle path.

@@ -60,7 +60,7 @@ func (f *fakeSup) Subscribe(_ context.Context, id string) (*event.Subscription, 
 	return f.broker(id).Subscribe(event.FilterAll, 16), nil
 }
 
-func (f *fakeSup) Create(_ context.Context, prompt string) (tui.SessionInfo, error) {
+func (f *fakeSup) Create(_ context.Context, prompt string, _ tui.CreateOptions) (tui.SessionInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.created = append(f.created, prompt)
