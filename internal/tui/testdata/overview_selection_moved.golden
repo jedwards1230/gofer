@@ -21,4 +21,4 @@ fable-5 · ~/orchestration
 
 ────────────────────────────────────────────────────────────────────────────────
 ❯ describe a task for a new session
-enter peek · → attach · v toggle view · ctrl-x kill · ? shortcuts
+enter peek · → attach · tab toggle view · ctrl-x kill · ? shortcuts

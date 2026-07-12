@@ -230,7 +230,7 @@ func (o Overview) dispatch(width int) []string {
 		line = "❯ " + o.input + "▏"
 	}
 
-	hint := o.theme.MutedStyle().Render("enter peek · → attach · v toggle view · ctrl-x kill · ? shortcuts")
+	hint := o.theme.MutedStyle().Render("enter peek · → attach · tab toggle view · ctrl-x kill · ? shortcuts")
 
 	return []string{rule, truncate(line, width), truncate(hint, width)}
 }

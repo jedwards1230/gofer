@@ -77,13 +77,9 @@ type SessionInfo struct {
 // holds no back channel the protocol doesn't expose.
 type Supervisor interface {
 	// Roster returns a snapshot of every live (and, per the daemon's policy,
-	// recently finished) session.
+	// recently finished) session. The supervisor's roster is pull-based, so
+	// the app root polls this on a timer and re-renders on each snapshot.
 	Roster(ctx context.Context) ([]SessionInfo, error)
-
-	// WatchRoster returns a channel that receives a fresh whole-roster
-	// snapshot whenever any session changes. The channel closes when ctx is
-	// cancelled.
-	WatchRoster(ctx context.Context) (<-chan []SessionInfo, error)
 
 	// Subscribe returns the event stream for one session — the same
 	// *event.Subscription an attach or peek renders, and the same bytes an
