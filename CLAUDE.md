@@ -13,7 +13,9 @@ navigation and protocol-message approvals. The framework half is
 gofer consumes it exclusively through the typed Event/Op contract.
 
 Full product requirements + design: [`docs/PRD.md`](docs/PRD.md). Read it
-before structural changes.
+before structural changes. [`docs/TUI.md`](docs/TUI.md) holds the TUI design
+system (component contracts, slash commands, plugin UI);
+[`docs/TESTING.md`](docs/TESTING.md) the test strategy.
 
 ## Architecture invariants (violations are bugs)
 
