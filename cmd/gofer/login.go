@@ -1,0 +1,268 @@
+package main
+
+import (
+	"bufio"
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/jedwards1230/agent-sdk-go/auth"
+)
+
+// authProviders are the provider ids gofer knows how to authenticate.
+var authProviders = []string{"anthropic", "openai"}
+
+// validProvider reports whether id is a known provider.
+func validProvider(id string) bool {
+	for _, p := range authProviders {
+		if p == id {
+			return true
+		}
+	}
+	return false
+}
+
+// usageError marks an error as a usage problem (bad or missing arguments),
+// which main maps to exit code 2 instead of the generic command-error code 1.
+type usageError struct{ msg string }
+
+func (e *usageError) Error() string { return e.msg }
+
+// parseArgs parses fs while allowing flags and positionals to interleave in
+// any order. Go's flag package stops at the first non-flag token, so a bare
+// fs.Parse(args) would reject the documented `gofer login anthropic --api-key`
+// form. This loops: parse, peel the leading positional, parse the remainder,
+// repeat — collecting every positional regardless of position.
+func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
+	var positionals []string
+	rest := args
+	for {
+		if err := fs.Parse(rest); err != nil {
+			return nil, err
+		}
+		rest = fs.Args()
+		if len(rest) == 0 {
+			return positionals, nil
+		}
+		positionals = append(positionals, rest[0])
+		rest = rest[1:]
+	}
+}
+
+// newAuthStore builds the auth.Store the login/logout/auth commands share.
+// An empty root uses the store's default (~/.gofer).
+func newAuthStore(root string) (*auth.Store, error) {
+	var opts []auth.Option
+	if root != "" {
+		opts = append(opts, auth.WithRoot(root))
+	}
+	store, err := auth.New(opts...)
+	if err != nil {
+		return nil, fmt.Errorf("open auth store: %w", err)
+	}
+	return store, nil
+}
+
+// runLogin implements `gofer login <provider> [--api-key] [--root dir]`.
+func runLogin(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("login", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	apiKey := fs.Bool("api-key", false, "read an API key from stdin instead of running the OAuth login flow")
+	root := fs.String("root", "", "override the auth store directory (default: ~/.gofer)")
+	positionals, err := parseArgs(fs, args)
+	if err != nil {
+		return err
+	}
+
+	if len(positionals) != 1 {
+		return &usageError{msg: "usage: gofer login <anthropic|openai> [--api-key]"}
+	}
+	provider := positionals[0]
+	if !validProvider(provider) {
+		return &usageError{msg: fmt.Sprintf("unknown provider %q (want anthropic or openai)", provider)}
+	}
+
+	store, err := newAuthStore(*root)
+	if err != nil {
+		return err
+	}
+	if *apiKey {
+		return loginWithAPIKey(store, provider, stdin, stdout)
+	}
+	return loginWithOAuth(ctx, store, provider, stdin, stdout)
+}
+
+// loginWithAPIKey reads a single line from stdin — never argv, which would
+// leak the key to shell history and the process list — and stores it as a
+// static API key.
+func loginWithAPIKey(store *auth.Store, provider string, stdin io.Reader, stdout io.Writer) error {
+	line, err := readLine(stdin)
+	if err != nil {
+		return fmt.Errorf("read api key: %w", err)
+	}
+	key := strings.TrimSpace(line)
+	if key == "" {
+		return errors.New("empty api key")
+	}
+	if err := store.SetAPIKey(provider, key); err != nil {
+		return fmt.Errorf("store api key: %w", err)
+	}
+	_, _ = fmt.Fprintf(stdout, "Stored API key for %s.\n", provider)
+	return nil
+}
+
+// loginWithOAuth drives the subscription OAuth login. It never opens a
+// browser: it prints the authorize URL and waits for the user to complete the
+// flow, either by pasting back a code (manual mode) or by the SDK's local
+// callback listener catching the redirect (callback mode).
+func loginWithOAuth(ctx context.Context, store *auth.Store, provider string, stdin io.Reader, stdout io.Writer) error {
+	login, err := store.Login(ctx, provider)
+	if err != nil {
+		return fmt.Errorf("start login: %w", err)
+	}
+	_, _ = fmt.Fprintf(stdout, "Open this URL in a browser to authorize:\n\n  %s\n\n", login.AuthorizeURL)
+
+	switch login.Mode {
+	case auth.LoginModeManualCode:
+		_, _ = fmt.Fprint(stdout, "Paste the code shown after authorizing: ")
+		line, err := readLine(stdin)
+		if err != nil {
+			return fmt.Errorf("read pasted code: %w", err)
+		}
+		code := strings.TrimSpace(line)
+		if code == "" {
+			return errors.New("empty authorization code")
+		}
+		if err := login.Redeem(code); err != nil {
+			return fmt.Errorf("redeem code: %w", err)
+		}
+	case auth.LoginModeCallback:
+		_, _ = fmt.Fprintln(stdout, "Waiting for the browser redirect to complete…")
+		if err := login.Wait(); err != nil {
+			return fmt.Errorf("wait for callback: %w", err)
+		}
+	default:
+		return fmt.Errorf("unsupported login mode %v", login.Mode)
+	}
+
+	_, _ = fmt.Fprintf(stdout, "Logged in to %s.\n", provider)
+	return nil
+}
+
+// runLogout implements `gofer logout <provider> [--root dir]`.
+func runLogout(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("logout", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	root := fs.String("root", "", "override the auth store directory (default: ~/.gofer)")
+	positionals, err := parseArgs(fs, args)
+	if err != nil {
+		return err
+	}
+
+	if len(positionals) != 1 {
+		return &usageError{msg: "usage: gofer logout <anthropic|openai>"}
+	}
+	provider := positionals[0]
+	if !validProvider(provider) {
+		return &usageError{msg: fmt.Sprintf("unknown provider %q (want anthropic or openai)", provider)}
+	}
+
+	store, err := newAuthStore(*root)
+	if err != nil {
+		return err
+	}
+	if err := store.Logout(provider); err != nil {
+		return fmt.Errorf("logout: %w", err)
+	}
+	_, _ = fmt.Fprintf(stdout, "Logged out of %s.\n", provider)
+	return nil
+}
+
+// runAuth implements `gofer auth [status] [--root dir]`. Bare `gofer auth`
+// defaults to `status`.
+func runAuth(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("auth", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	root := fs.String("root", "", "override the auth store directory (default: ~/.gofer)")
+	positionals, err := parseArgs(fs, args)
+	if err != nil {
+		return err
+	}
+
+	// Bare `auth` defaults to `status`; the only accepted positional is `status`.
+	if len(positionals) > 1 || (len(positionals) == 1 && positionals[0] != "status") {
+		return &usageError{msg: "usage: gofer auth [status]"}
+	}
+
+	store, err := newAuthStore(*root)
+	if err != nil {
+		return err
+	}
+	entries, err := store.Status()
+	if err != nil {
+		return fmt.Errorf("read auth status: %w", err)
+	}
+	writeStatusTable(stdout, entries)
+	return nil
+}
+
+// writeStatusTable renders an aligned "PROVIDER  KIND  STATUS" table sorted by
+// provider name. It never prints token material — entries carry none.
+func writeStatusTable(w io.Writer, entries []auth.StatusEntry) {
+	if len(entries) == 0 {
+		_, _ = fmt.Fprintln(w, "No credentials configured.")
+		return
+	}
+
+	sorted := make([]auth.StatusEntry, len(entries))
+	copy(sorted, entries)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Provider < sorted[j].Provider })
+
+	type row struct{ provider, kind, status string }
+	rows := make([]row, 0, len(sorted)+1)
+	rows = append(rows, row{"PROVIDER", "KIND", "STATUS"})
+	for _, e := range sorted {
+		rows = append(rows, row{e.Provider, string(e.Kind), statusText(e)})
+	}
+
+	var providerW, kindW int
+	for _, r := range rows {
+		if len(r.provider) > providerW {
+			providerW = len(r.provider)
+		}
+		if len(r.kind) > kindW {
+			kindW = len(r.kind)
+		}
+	}
+	for _, r := range rows {
+		_, _ = fmt.Fprintf(w, "%-*s  %-*s  %s\n", providerW, r.provider, kindW, r.kind, r.status)
+	}
+}
+
+// statusText renders a StatusEntry's STATUS column: "-" for API keys, and
+// "valid until <RFC3339>" or "expired" for OAuth entries.
+func statusText(e auth.StatusEntry) string {
+	if e.Kind != auth.KindOAuth {
+		return "-"
+	}
+	if e.Expired {
+		return "expired"
+	}
+	return "valid until " + e.Expires.Format(time.RFC3339)
+}
+
+// readLine reads one line from r, stripping the trailing newline handling to
+// the caller (via strings.TrimSpace). EOF without a trailing newline still
+// returns whatever was read.
+func readLine(r io.Reader) (string, error) {
+	line, err := bufio.NewReader(r).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	return line, nil
+}
