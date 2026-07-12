@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/jedwards1230/agent-sdk-go/auth"
-	"github.com/jedwards1230/agent-sdk-go/provider"
 )
 
 // TestNewProvider_UnknownModel asserts a legible, hermetic (no network)
@@ -33,7 +32,7 @@ func TestCompositeCredSource_EnvFallback(t *testing.T) {
 
 	t.Run("falls back to env", func(t *testing.T) {
 		t.Setenv("ANTHROPIC_API_KEY", "sk-test-key")
-		src := compositeCredSource{store: store, env: provider.StaticEnv()}
+		src := compositeCredSource{store: store, envVars: envVars}
 
 		cred, err := src.Credential(context.Background(), "anthropic")
 		if err != nil {
@@ -46,7 +45,7 @@ func TestCompositeCredSource_EnvFallback(t *testing.T) {
 
 	t.Run("legible error when neither source has a credential", func(t *testing.T) {
 		t.Setenv("ANTHROPIC_API_KEY", "")
-		src := compositeCredSource{store: store, env: provider.StaticEnv()}
+		src := compositeCredSource{store: store, envVars: envVars}
 
 		_, err := src.Credential(context.Background(), "anthropic")
 		if err == nil {

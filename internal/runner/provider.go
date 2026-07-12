@@ -40,6 +40,15 @@ func (e *credentialError) Unwrap() error { return e.cause }
 // still satisfies errors.Is for the SDK-level errors (e.g. auth.ErrNoCredential).
 func (e *credentialError) Is(target error) bool { return target == ErrNoCredential }
 
+// envVars maps a provider id to the API-key environment variable gofer's
+// composite credential source falls back to. gofer owns this mapping so the
+// same source drives both the env-var fallback lookup and the "or set X" hint
+// in the missing-credential error — the two can never drift.
+var envVars = map[string]string{
+	"anthropic": "ANTHROPIC_API_KEY",
+	"openai":    "OPENAI_API_KEY",
+}
+
 // newProvider resolves model's backend from the SDK's model registry, builds a
 // compositeCredSource (gofer login OAuth/API-key first, an environment variable
 // second), PRE-FLIGHTS the credential (a store/env lookup — not a live model API
@@ -59,7 +68,7 @@ func newProvider(ctx context.Context, model, root string) (provider.Provider, er
 	if err != nil {
 		return nil, fmt.Errorf("runner: open credential store: %w", err)
 	}
-	creds := compositeCredSource{store: store, env: provider.StaticEnv()}
+	creds := compositeCredSource{store: store, envVars: envVars}
 
 	// Pre-flight the credential so a misconfiguration fails fast with no orphan
 	// journal. A credential that resolves here but is rejected by the live API
@@ -81,11 +90,12 @@ func newProvider(ctx context.Context, model, root string) (provider.Provider, er
 // compositeCredSource resolves a provider credential from the persisted
 // auth.Store first — the material a `gofer login` OAuth flow or `gofer login
 // <provider> --api-key` would have written — and falls back to the provider's
-// conventional environment variable when the store has no entry for it. This
-// lets `gofer run`/`gofer resume` work with either path with no extra flags.
+// conventional API-key environment variable (from the gofer-owned envVars map)
+// when the store has no entry for it. This lets `gofer run`/`gofer resume` work
+// with either path with no extra flags.
 type compositeCredSource struct {
-	store *auth.Store
-	env   provider.EnvCredentialSource
+	store   *auth.Store
+	envVars map[string]string
 }
 
 var _ provider.CredentialSource = compositeCredSource{}
@@ -103,13 +113,17 @@ func (c compositeCredSource) Credential(ctx context.Context, providerID string) 
 		return provider.Credential{}, fmt.Errorf("runner: resolve %s credential: %w", providerID, err)
 	}
 
-	cred, envErr := c.env.Credential(ctx, providerID)
+	// Fall back to the API-key environment variable via an EnvCredentialSource
+	// built from our own mapping — the same map that names the var in the hint
+	// below, so the checked variable and the message never diverge.
+	env := provider.EnvCredentialSource{Vars: c.envVars}
+	cred, envErr := env.Credential(ctx, providerID)
 	if envErr == nil {
 		return cred, nil
 	}
 	return provider.Credential{}, &credentialError{
 		provider: providerID,
-		envVar:   c.env.Vars[providerID],
+		envVar:   c.envVars[providerID],
 		cause:    errors.Join(err, envErr),
 	}
 }
