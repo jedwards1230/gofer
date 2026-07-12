@@ -90,8 +90,15 @@ func driveTUI(ctx context.Context, r sessionDriver, prompt string, stdout, stder
 // arguments rather than stdin (driveTUI reads raw key presses from stdin
 // itself, so a prompt sourced from a stdin pipe would collide with it), and
 // both stdout and the process's real stdin are connected to a terminal.
-func useTUI(asJSON, promptFromArgs bool, stdout io.Writer) bool {
-	return !asJSON && promptFromArgs && interactiveTTY(stdout) && stdinIsTTY()
+// useTUI reports whether an interactive attach TUI should render this
+// run/resume rather than the line renderer: --json was not requested and BOTH
+// stdin and stdout are terminals. The prompt's SOURCE (CLI args vs the
+// interactive `prompt>` read) is deliberately not a factor. On a terminal the
+// prompt read is line-buffered — one line, no over-read — so stdin is left
+// clean for bubbletea to take over; the piped-stdin case (where a bufio
+// over-read could steal the TUI's keystrokes) is already excluded by stdinTTY.
+func useTUI(asJSON, stdinTTY, stdoutTTY bool) bool {
+	return !asJSON && stdinTTY && stdoutTTY
 }
 
 // isTerminal reports whether f is connected to a terminal.
