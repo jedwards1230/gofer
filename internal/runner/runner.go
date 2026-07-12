@@ -185,10 +185,10 @@ func (r *Runner) ID() string { return r.journal.ID() }
 // JournalPath returns the session journal's JSONL file path.
 func (r *Runner) JournalPath() string { return r.journal.Path() }
 
-// Fold returns the session's current folded context — the same projection
-// Prompt feeds the provider, exposed for read-only transcript views (e.g.
-// `gofer resume <id>` with no prompt).
-func (r *Runner) Fold() []session.ContextMessage { return r.journal.Fold() }
+// Fold returns the session's current folded context as provider messages —
+// the same context Prompt feeds the provider, exposed for read-only transcript
+// views (e.g. `gofer resume <id>` with no prompt).
+func (r *Runner) Fold() []provider.Message { return r.journal.Fold() }
 
 // Events returns a subscription to every event the session emits, of both
 // delivery tiers.
@@ -205,7 +205,7 @@ func (r *Runner) Prompt(ctx context.Context, text string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if _, err := r.journal.Append(session.NewMessageEntry("user", text)); err != nil {
+	if _, err := r.journal.Append(session.NewMessageEntry(provider.UserText(text))); err != nil {
 		return fmt.Errorf("runner: append user message: %w", err)
 	}
 
@@ -219,7 +219,9 @@ func (r *Runner) Prompt(ctx context.Context, text string) error {
 		SessionID: r.journal.ID(),
 		MaxIters:  r.maxIters,
 	}
-	_, err := loop.Run(ctx, cfg, r.projectMessages())
+	// The journal folds back to provider messages directly (verbatim content
+	// blocks), so the loop's input is the folded context as-is.
+	_, err := loop.Run(ctx, cfg, r.journal.Fold())
 	return err
 }
 

@@ -3,7 +3,6 @@ package runner_test
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"testing"
 	"time"
 
@@ -151,7 +150,7 @@ func TestRunner_KillDuringToolStreaming(t *testing.T) {
 	if entries[0].Type != session.EntryMessage {
 		t.Fatalf("entries[0].Type = %s, want %s", entries[0].Type, session.EntryMessage)
 	}
-	if userMsg, err := entries[0].Message(); err != nil || userMsg.Content != "read the notes" {
+	if userMsg, err := entries[0].Message(); err != nil || msgText(userMsg) != "read the notes" {
 		t.Fatalf("entries[0].Message() = %+v, %v", userMsg, err)
 	}
 	if entries[1].Type != session.EntryMessage {
@@ -161,24 +160,27 @@ func TestRunner_KillDuringToolStreaming(t *testing.T) {
 	if err != nil {
 		t.Fatalf("entries[1].Message(): %v", err)
 	}
-	if asst.Role != "assistant" || asst.Content != "I will read the notes." {
-		t.Errorf("assistant entry = %+v, want role assistant content %q", asst, "I will read the notes.")
+	if asst.Role != provider.RoleAssistant || msgText(asst) != "I will read the notes." {
+		t.Errorf("assistant entry = %+v, want role assistant text %q", asst, "I will read the notes.")
 	}
-	if asst.Reasoning != "planning the read" {
-		t.Errorf("assistant reasoning = %q, want %q", asst.Reasoning, "planning the read")
+	if msgReasoning(asst) != "planning the read" {
+		t.Errorf("assistant reasoning = %q, want %q", msgReasoning(asst), "planning the read")
+	}
+	if uses := blocksOfType(asst, provider.BlockToolUse); len(uses) != 0 {
+		t.Errorf("assistant tool_use blocks = %+v, want none (orphaned call dropped, no dangling tool_use)", uses)
 	}
 
 	// The fold must round-trip cleanly: two messages, the assistant one carrying
-	// the settled text/reasoning and NO orphaned tool call (no dangling tool_use
+	// the settled text/reasoning and NO orphaned tool_use (a dangling tool_use
 	// would corrupt the provider projection on resume).
 	fold := j.Fold()
 	if len(fold) != 2 {
 		t.Fatalf("Fold: got %d, want 2: %+v", len(fold), fold)
 	}
-	if len(fold[1].ToolCalls) != 0 {
-		t.Errorf("fold[1].ToolCalls = %+v, want none (orphaned call dropped)", fold[1].ToolCalls)
+	if uses := blocksOfType(fold[1], provider.BlockToolUse); len(uses) != 0 {
+		t.Errorf("fold[1] tool_use blocks = %+v, want none (orphaned call dropped)", uses)
 	}
-	if !strings.Contains(fold[1].Content, "read the notes") {
-		t.Errorf("fold[1].Content = %q, want the settled assistant text", fold[1].Content)
+	if msgText(fold[1]) != "I will read the notes." {
+		t.Errorf("fold[1] text = %q, want the settled assistant text", msgText(fold[1]))
 	}
 }

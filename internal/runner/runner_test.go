@@ -146,14 +146,14 @@ func TestRunner_TextTurn(t *testing.T) {
 	if len(fold) != 2 {
 		t.Fatalf("Fold: got %d messages, want 2: %+v", len(fold), fold)
 	}
-	if fold[0].Role != "user" || fold[0].Content != "hello" {
+	if fold[0].Role != provider.RoleUser || msgText(fold[0]) != "hello" {
 		t.Errorf("fold[0] = %+v, want user %q", fold[0], "hello")
 	}
-	if fold[1].Role != "assistant" || fold[1].Content != "hi there" {
+	if fold[1].Role != provider.RoleAssistant || msgText(fold[1]) != "hi there" {
 		t.Errorf("fold[1] = %+v, want assistant %q", fold[1], "hi there")
 	}
-	if fold[1].Reasoning != "thinking" {
-		t.Errorf("fold[1].Reasoning = %q, want %q", fold[1].Reasoning, "thinking")
+	if msgReasoning(fold[1]) != "thinking" {
+		t.Errorf("fold[1] reasoning = %q, want %q", msgReasoning(fold[1]), "thinking")
 	}
 
 	// Reopen from a fresh store (no in-process cache) to prove the turn is
@@ -248,34 +248,45 @@ func TestRunner_KillAndResume(t *testing.T) {
 		t.Fatalf("Open(%s): %v", id, err)
 	}
 	entries := verifyJournal.Entries()
-	if len(entries) != 2 {
-		t.Fatalf("Entries after kill: got %d, want 2 (user message + settled tool round): %+v", len(entries), entries)
+	// New verbatim-block model: the assistant message (carrying the tool_use
+	// block) and the tool_result round are distinct entries, so a settled
+	// tool turn is user message + assistant(tool_use) + tool_round(tool_result).
+	if len(entries) != 3 {
+		t.Fatalf("Entries after kill: got %d, want 3 (user + assistant tool_use + tool_result round): %+v", len(entries), entries)
 	}
 	if entries[0].Type != session.EntryMessage {
 		t.Fatalf("entries[0].Type = %s, want %s", entries[0].Type, session.EntryMessage)
 	}
-	if msg, err := entries[0].Message(); err != nil || msg.Content != "read notes.txt" {
+	if msg, err := entries[0].Message(); err != nil || msgText(msg) != "read notes.txt" {
 		t.Fatalf("entries[0].Message() = %+v, %v", msg, err)
 	}
-	if entries[1].Type != session.EntryToolRound {
-		t.Fatalf("entries[1].Type = %s, want %s", entries[1].Type, session.EntryToolRound)
+	if entries[1].Type != session.EntryMessage {
+		t.Fatalf("entries[1].Type = %s, want %s (assistant tool_use)", entries[1].Type, session.EntryMessage)
 	}
-	round, err := entries[1].ToolRound()
+	asst, err := entries[1].Message()
 	if err != nil {
-		t.Fatalf("entries[1].ToolRound(): %v", err)
+		t.Fatalf("entries[1].Message(): %v", err)
 	}
-	if len(round.Calls) != 1 {
-		t.Fatalf("ToolRound.Calls: got %d, want 1: %+v", len(round.Calls), round.Calls)
+	uses := blocksOfType(asst, provider.BlockToolUse)
+	if len(uses) != 1 || uses[0].ToolUseID != "t1" || uses[0].ToolName != "read" {
+		t.Fatalf("assistant tool_use blocks = %+v, want one (t1, read)", uses)
 	}
-	call := round.Calls[0]
-	if call.ID != "t1" || call.Name != "read" {
-		t.Errorf("call = %+v, want id t1, name read", call)
+	if entries[2].Type != session.EntryToolRound {
+		t.Fatalf("entries[2].Type = %s, want %s", entries[2].Type, session.EntryToolRound)
 	}
-	if !strings.Contains(call.Result, "hello world") {
-		t.Errorf("call.Result = %q, want it to contain the real file contents %q", call.Result, "hello world")
+	round, err := entries[2].ToolRound()
+	if err != nil {
+		t.Fatalf("entries[2].ToolRound(): %v", err)
 	}
-	if call.IsError {
-		t.Errorf("call.IsError = true, want false")
+	if len(round.Blocks) != 1 || round.Blocks[0].Type != provider.BlockToolResult {
+		t.Fatalf("ToolRound.Blocks = %+v, want one tool_result block", round.Blocks)
+	}
+	res := round.Blocks[0]
+	if res.ToolUseID != "t1" {
+		t.Errorf("tool_result ToolUseID = %q, want t1", res.ToolUseID)
+	}
+	if !strings.Contains(res.ToolResult, "hello world") {
+		t.Errorf("tool_result = %q, want it to contain the real file contents %q", res.ToolResult, "hello world")
 	}
 	if err := verifyStore.Close(); err != nil {
 		t.Fatalf("verifyStore.Close: %v", err)
@@ -302,11 +313,17 @@ func TestRunner_KillAndResume(t *testing.T) {
 	// proof the fold/project round-trip preserves it across a process
 	// boundary (a fresh store reopened it from disk in Resume itself).
 	preFold := r2.Fold()
-	if len(preFold) != 2 {
-		t.Fatalf("preFold: got %d messages, want 2: %+v", len(preFold), preFold)
+	// [user, assistant(tool_use), user(tool_result)] — the tool exchange folds
+	// back as three provider messages across a fresh process.
+	if len(preFold) != 3 {
+		t.Fatalf("preFold: got %d messages, want 3: %+v", len(preFold), preFold)
 	}
-	if len(preFold[1].ToolCalls) != 1 || !strings.Contains(preFold[1].ToolCalls[0].Result, "hello world") {
-		t.Fatalf("preFold[1].ToolCalls = %+v, want the prior read result", preFold[1].ToolCalls)
+	results := blocksOfType(preFold[2], provider.BlockToolResult)
+	if len(results) != 1 || !strings.Contains(results[0].ToolResult, "hello world") {
+		t.Fatalf("preFold tool_result blocks = %+v, want the prior read result", results)
+	}
+	if uses := blocksOfType(preFold[1], provider.BlockToolUse); len(uses) != 1 {
+		t.Fatalf("preFold[1] tool_use blocks = %+v, want one (matches the tool_result)", uses)
 	}
 
 	// session.resumed is must-deliver, so the broker's replay buffer hands it
@@ -337,11 +354,12 @@ func TestRunner_KillAndResume(t *testing.T) {
 	}
 
 	postFold := r2.Fold()
-	if len(postFold) != 4 {
-		t.Fatalf("postFold: got %d messages, want 4: %+v", len(postFold), postFold)
+	// Prior 3 + the "continue" user message + the "done" assistant reply.
+	if len(postFold) != 5 {
+		t.Fatalf("postFold: got %d messages, want 5: %+v", len(postFold), postFold)
 	}
 	last := postFold[len(postFold)-1]
-	if last.Role != "assistant" || last.Content != "done" {
+	if last.Role != provider.RoleAssistant || msgText(last) != "done" {
 		t.Fatalf("postFold last = %+v, want assistant %q", last, "done")
 	}
 
@@ -354,7 +372,7 @@ func TestRunner_KillAndResume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open(%s): %v", id, err)
 	}
-	if got := len(finalJournal.Entries()); got != 4 {
-		t.Fatalf("final Entries: got %d, want 4 (the journal grew with the continuation)", got)
+	if got := len(finalJournal.Entries()); got != 5 {
+		t.Fatalf("final Entries: got %d, want 5 (the journal grew with the continuation)", got)
 	}
 }
