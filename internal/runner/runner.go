@@ -66,6 +66,13 @@ type Options struct {
 	// Tools, when set, is used instead of the builtin tool set rooted at Cwd.
 	// Test seam.
 	Tools loop.ToolRegistry
+
+	// Store, when set, is used instead of building a store from Root. This is
+	// the seam a multi-session owner (the supervisor) uses to share one
+	// *session.FileStore across every Runner it drives: the Runner does NOT
+	// close an injected Store in Close — the caller owns its lifecycle. Tests
+	// use it too, to share a store across a Runner and out-of-band assertions.
+	Store *session.FileStore
 }
 
 // Runner drives one session: it owns the provider, tool registry, event
@@ -83,6 +90,10 @@ type Runner struct {
 	broker  *event.Broker
 	journal *session.Journal
 	store   *session.FileStore
+	// ownsStore is true when this Runner built its own store (Options.Store
+	// was nil) and so must close it in Close; false when the store was
+	// injected and its lifecycle belongs to the caller.
+	ownsStore bool
 
 	journalDone chan struct{}
 
@@ -105,7 +116,9 @@ func NewSession(ctx context.Context, opts Options) (*Runner, error) {
 	}
 	journal, err := store.Create(ctx, session.Slugify(opts.Cwd))
 	if err != nil {
-		_ = store.Close()
+		if opts.Store == nil {
+			_ = store.Close()
+		}
 		return nil, fmt.Errorf("runner: create session: %w", err)
 	}
 	return build(opts, store, journal, prov, false), nil
@@ -125,7 +138,9 @@ func Resume(ctx context.Context, id string, opts Options) (*Runner, error) {
 	}
 	journal, err := store.Open(ctx, id)
 	if err != nil {
-		_ = store.Close()
+		if opts.Store == nil {
+			_ = store.Close()
+		}
 		return nil, fmt.Errorf("runner: open session %s: %w", id, err)
 	}
 	return build(opts, store, journal, prov, true), nil
@@ -141,9 +156,13 @@ func resolveProvider(ctx context.Context, opts Options) (provider.Provider, erro
 	return newProvider(ctx, opts.Model, opts.Root)
 }
 
-// newStore builds the journal store from opts, wiring the deterministic id
-// generator / clock test seams when set.
+// newStore returns the injected store when opts.Store is set (the caller
+// owns its lifecycle — see Options.Store), else builds one from opts, wiring
+// the deterministic id generator / clock test seams when set.
 func newStore(opts Options) (*session.FileStore, error) {
+	if opts.Store != nil {
+		return opts.Store, nil
+	}
 	var storeOpts []session.StoreOption
 	if opts.Root != "" {
 		storeOpts = append(storeOpts, session.WithRoot(opts.Root))
@@ -183,6 +202,7 @@ func build(opts Options, store *session.FileStore, journal *session.Journal, pro
 		broker:      broker,
 		journal:     journal,
 		store:       store,
+		ownsStore:   opts.Store == nil,
 		journalDone: make(chan struct{}),
 	}
 	go r.consume(journalSub)
@@ -241,9 +261,12 @@ func (r *Runner) Prompt(ctx context.Context, text string) error {
 
 // Close shuts down the runner's broker (closing every subscription,
 // including the journaling consumer's), waits for the journaling consumer to
-// drain so no settled turn is lost, then closes the journal and the store.
-// It returns the first error encountered, if any, joined with any journal
-// write error the consumer observed.
+// drain so no settled turn is lost, then closes the journal and — only when
+// this Runner built its own store (Options.Store was nil) — the store. An
+// injected store is never closed here; its lifecycle belongs to the caller
+// (e.g. the supervisor, which shares one store across many Runners). Close
+// returns the first error encountered, if any, joined with any journal write
+// error the consumer observed.
 func (r *Runner) Close() error {
 	r.broker.Close()
 	<-r.journalDone
@@ -255,11 +278,25 @@ func (r *Runner) Close() error {
 	if err := r.journal.Close(); err != nil {
 		errs = append(errs, err)
 	}
-	if err := r.store.Close(); err != nil {
-		errs = append(errs, err)
+	if r.ownsStore {
+		if err := r.store.Close(); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	return errors.Join(errs...)
 }
+
+// Emit publishes a lifecycle event (e.g. session.killed / session.archived)
+// onto this session's stream so subscribers observe it. The supervisor calls
+// this when it kills or archives a session; it must be called before Close,
+// which closes the broker and so ends delivery to every subscriber.
+func (r *Runner) Emit(e event.Event) { r.broker.Publish(e) }
+
+// Cost returns the session's token/cost tally across every journaled turn,
+// priced against the embedded provider model registry. It is the read model
+// the supervisor surfaces per roster row; an unknown (or faux) model still
+// has its tokens summed, with a zero priced cost.
+func (r *Runner) Cost() session.CostReport { return r.journal.Cost(session.RegistryPricing{}) }
 
 // setJournalWriteErr records the first journal write failure the consumer
 // goroutine observes; later failures are dropped (the first is the one that
