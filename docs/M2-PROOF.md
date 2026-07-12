@@ -102,13 +102,37 @@ across the rest of the M2 stack:
   rather than the SDK's `event.Event` JSONL, and the interactive attach TUI is
   replaced by plain streaming. Pass `--local` (alias `--no-daemon`) to force
   the in-process path even when a daemon is up.
-- **The `gofer` TUI overview** attaches to the daemon and renders the live
-  roster + transcript, so the phone-created session appears and can be
-  peeked/attached exactly like a local one — this leg (`attach`) is still
-  pending. Bare `gofer` on an interactive terminal today opens the roster
-  overview over an in-process supervisor this process itself owns (its own
-  session store, not the running daemon's); the daemon-attached unified
-  roster is the pending leg above.
+- **The `gofer` TUI overview and `gofer attach`** (`internal/daemonbridge`,
+  a `tui.Supervisor` backed by `internal/daemon.Client`) attach to the daemon
+  and render its live roster + transcript, so the phone-created session
+  appears and can be peeked/attached exactly like a local one. Bare `gofer`
+  on an interactive terminal prefers a reachable daemon at the default
+  address (honoring `$GOFER_TOKEN`) and falls back to the local in-process
+  supervisor only when none is reachable, printing which backend it picked on
+  stderr; `gofer attach [<session>]` is the explicit daemon-only form
+  (`--daemon`/`--token` like `ps`/`kill`/`archive`) — no daemon reachable is a
+  hard error there, never a silent local fallback. Point either at the
+  phone's daemon (`--daemon <tailnet-ip>:7333 --token <the-token>` for
+  `attach`) and the phone-created session shows up in the roster, right
+  alongside anything started locally.
+
+  **Fidelity**: the roster itself is exact (it's the daemon's own
+  `gofer/roster` response, unmarshaled directly). The attached transcript is
+  reconstructed client-side from the ACP `session/update` stream a
+  `session/prompt` call yields — there is no direct channel to the daemon's
+  in-process `event.Broker`, only the wire — so it is a best-effort
+  projection, not a byte-identical replay: assistant text/reasoning stream
+  incrementally and settle exactly as local; a tool call shows its start and
+  final result (no incremental tool-output streaming, since ACP's
+  `tool_call_update` has no delta variant distinct from a full update); turn
+  cost/usage show on the roster row (refreshed every second) rather than in
+  the transcript itself, since ACP's `session/prompt` response carries no
+  usage/cost. Permission approvals are not relayed by the daemon at all in
+  M2 (that lands with M3's approvals UX) — nothing in the reconstructed
+  transcript represents them yet. `gofer attach <session>` resolves and
+  confirms the id up front but, absent a TUI deep-link affordance, still
+  opens on the overview screen rather than straight into that session's
+  attach view — select it from there.
 
 You can also confirm the roster directly over the control channel: any
 ACP/WebSocket client pointed at the same URL+token can call the `gofer/roster`

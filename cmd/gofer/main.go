@@ -1,9 +1,12 @@
 // Command gofer is the CLI entrypoint for the gofer agent platform. Bare
-// `gofer` on an interactive terminal launches the local roster overview TUI;
-// `run` and `resume` drive a real session — a real provider, the builtin
-// tool set, and a durable JSONL journal — through the SDK's typed event
-// contract, optionally routed through a reachable `gofer daemon`; `demo`
-// still streams a deterministic faux-provider session with no network.
+// `gofer` on an interactive terminal launches the roster overview TUI,
+// preferring a reachable `gofer daemon`'s live roster and falling back to a
+// local in-process supervisor only when none is reachable; `gofer attach`
+// launches the same TUI but requires a daemon. `run` and `resume` drive a
+// real session — a real provider, the builtin tool set, and a durable JSONL
+// journal — through the SDK's typed event contract, optionally routed
+// through a reachable `gofer daemon`; `demo` still streams a deterministic
+// faux-provider session with no network.
 package main
 
 import (
@@ -31,7 +34,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	ctx := context.Background()
 
 	// Bare `gofer`, with no subcommand at all, is interactive-terminal aware:
-	// on a real TTY it opens the local roster overview TUI (runTUI) — the
+	// on a real TTY it opens the roster overview TUI (runTUI), which prefers a
+	// reachable daemon's live roster over the local in-process one — the
 	// shortest path from install to supervising sessions; piped/redirected
 	// stdin (e.g. `echo prompt | gofer`, or any non-interactive caller) keeps
 	// the original M1 behavior unchanged, running one prompt in the current
@@ -59,6 +63,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "resume":
 		if err := runResume(ctx, rest, stdin, stdout, stderr); err != nil {
 			return reportCmdErr("resume", err, stderr)
+		}
+		return 0
+	case "attach":
+		if err := runAttach(ctx, rest, stdin, stdout, stderr); err != nil {
+			return reportCmdErr("attach", err, stderr)
 		}
 		return 0
 	case "daemon", "serve":
@@ -146,13 +155,15 @@ func usage(w io.Writer) {
 	_, _ = fmt.Fprint(w, `gofer — supervise coding agents (M1)
 
 Usage:
-  gofer                           Launch the session overview TUI (interactive terminal) —
-                                   pipe a prompt or use "gofer run" for one-shot
+  gofer                           Launch the roster TUI (interactive terminal): prefers a
+                                   reachable daemon's live roster, falls back to a local
+                                   in-process one — pipe a prompt or use "gofer run" for one-shot
   gofer <command> [flags]
 
 Commands:
   run       Start a session and drive one prompt through a real provider
   resume    Reopen a session by id: continue it, or print its transcript
+  attach    Open the roster TUI against a running daemon (requires one)
   daemon    Run the supervisor behind an ACP-over-WebSocket listener (alias: serve)
   ps        List sessions on a running daemon's roster (--all: include archived)
   kill      Interrupt and drop a live session from the roster (journal kept)
@@ -174,10 +185,14 @@ Model (-m): gofer ships with no default vendor. With -m omitted, "run" and
 more than one and -m is required; log in to none and login is required
 first ("gofer login").
 
-Daemon (ps/kill/archive, and run/resume when one is reachable): --daemon
-<addr> (default 127.0.0.1:7333) and --token <token> (default $GOFER_TOKEN)
-point at a running "gofer daemon". "run"/"resume" auto-detect a daemon and
-route through it (pass --local / --no-daemon to force the in-process path
-even when one is up); "ps"/"kill"/"archive" always require one.
+Daemon (ps/kill/archive/attach, and run/resume/bare-gofer when one is
+reachable): --daemon <addr> (default 127.0.0.1:7333) and --token <token>
+(default $GOFER_TOKEN) point at a running "gofer daemon". "run"/"resume"
+auto-detect a daemon and route through it (pass --local / --no-daemon to
+force the in-process path even when one is up); bare "gofer" auto-detects
+one too, falling back to the local roster TUI when none is reachable;
+"ps"/"kill"/"archive"/"attach" always require one (bare "gofer" honors
+$GOFER_TOKEN but has no --daemon/--token flags of its own — use "gofer
+attach" to point at a non-default address).
 `)
 }
