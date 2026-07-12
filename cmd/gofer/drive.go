@@ -6,9 +6,25 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/jedwards1230/agent-sdk-go/event"
+
 	"github.com/jedwards1230/gofer/internal/render"
-	"github.com/jedwards1230/gofer/internal/runner"
 )
+
+// sessionDriver is the slice of *runner.Runner that driveSession consumes. It
+// is declared here (consumer-side) so the drive loop — including its handling
+// of a Close/journal-write error — is testable with a fake, without a live
+// provider or on-disk journal.
+type sessionDriver interface {
+	// Events returns a subscription to the session's event stream.
+	Events() *event.Subscription
+	// Prompt runs one turn for text, streaming events to subscribers.
+	Prompt(ctx context.Context, text string) error
+	// Close drains journaling and returns any accumulated write error.
+	Close() error
+	// ID returns the session id (for the resume hint on interrupt).
+	ID() string
+}
 
 // driveSession subscribes to r's event stream, drives prompt on its own
 // goroutine (closing r once the turn settles, whatever the outcome), and
@@ -16,7 +32,7 @@ import (
 // render structure. A ctx cancellation (Ctrl-C) is reported as an interrupt,
 // not an error: the settled prefix is already durable in the journal by the
 // time driveSession returns, since r.Close() waits for it to drain.
-func driveSession(ctx context.Context, r *runner.Runner, prompt string, asJSON bool, stdout, stderr io.Writer) error {
+func driveSession(ctx context.Context, r sessionDriver, prompt string, asJSON bool, stdout, stderr io.Writer) error {
 	var rnd render.Renderer
 	if asJSON {
 		rnd = render.NewJSONL(stdout)
