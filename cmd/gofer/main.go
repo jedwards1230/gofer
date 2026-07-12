@@ -132,5 +132,10 @@ Run "gofer run --help" / "gofer resume --help" / "gofer demo --help" for
 per-command flags. Run "gofer login <anthropic|openai>" to start a
 subscription OAuth login, or "gofer login <provider> --api-key" to store a
 static key read from stdin.
+
+Model (-m): gofer ships with no default vendor. With -m omitted, "run" and
+"resume <id> <prompt>" use the sole logged-in provider's model; log in to
+more than one and -m is required; log in to none and login is required
+first ("gofer login").
 `)
 }

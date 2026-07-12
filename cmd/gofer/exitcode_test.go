@@ -26,7 +26,7 @@ func TestAuthCommandExitCodes(t *testing.T) {
 		{"login undefined flag", []string{"login", "--bogus", "--root", root}, 2},
 		{"login flag missing value", []string{"login", "--root"}, 2},
 		{"login unknown provider", []string{"login", "bogusprovider", "--root", root}, 2},
-		{"login missing provider", []string{"login", "--root", root}, 2},
+		{"login no provider (lists providers)", []string{"login", "--root", root}, 0},
 		{"logout undefined flag", []string{"logout", "--nope"}, 2},
 		{"auth undefined flag", []string{"auth", "--nope"}, 2},
 		{"auth extra subcommand", []string{"auth", "bogus", "--root", root}, 2},
@@ -78,10 +78,16 @@ func TestRunResumeExitCodes(t *testing.T) {
 // TestRunPromptAcquisition covers bare `gofer` / `gofer run` prompt handling:
 // no prompt is a usage error (exit 2, never a silent hang), while a prompt from
 // args OR from a piped stdin is acquired and the run proceeds (here it fails
-// fast at an unknown model — exit 1 — so the path stays hermetic: no creds, no
-// network, so no ANTHROPIC_API_KEY dependence).
+// fast at an unknown model — exit 1 — so the path stays hermetic: no network).
+// Model resolution now runs before prompt acquisition, so this test isolates
+// it (HOME + exactly one credentialed provider) rather than exercising it —
+// see resolveRunModel's own tests for the none/one/many resolution behavior.
 func TestRunPromptAcquisition(t *testing.T) {
 	root := t.TempDir()
+	t.Setenv("HOME", t.TempDir()) // bare `gofer` takes no --root; isolate its default (~/.gofer) credential lookup from the real machine
+	t.Setenv("ANTHROPIC_API_KEY", "sk-test-key")
+	t.Setenv("OPENAI_API_KEY", "")
+
 	cases := []struct {
 		name  string
 		args  []string

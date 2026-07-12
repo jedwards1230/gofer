@@ -7,17 +7,65 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/jedwards1230/gofer/internal/runner"
 )
 
-// defaultRunModel is the model `gofer run`/`gofer resume` uses when -m is
-// not given.
-const defaultRunModel = "claude-sonnet-5"
-
 // defaultSystemPrompt is the system prompt a run/resume session uses absent
 // a richer agent manifest (a later milestone).
 const defaultSystemPrompt = "You are gofer, a careful coding agent. Use your tools to accomplish the user's task."
+
+// errNoProviderCredentials is returned when -m is not given and no provider
+// has a credential configured at all. gofer deliberately ships with no
+// flagship-vendor default: the run model is resolved from whichever
+// provider(s) are actually logged in, never hardcoded to one vendor.
+var errNoProviderCredentials = errors.New(noProviderCredentialsMsg())
+
+// noProviderCredentialsMsg builds errNoProviderCredentials' message from
+// runner's provider/env-var tables, so the hint can never drift from the
+// providers gofer actually supports.
+func noProviderCredentialsMsg() string {
+	providers := runner.SupportedProviders()
+	logins := make([]string, len(providers))
+	envVars := make([]string, len(providers))
+	for i, p := range providers {
+		logins[i] = fmt.Sprintf("'gofer login %s'", p)
+		envVars[i] = runner.EnvVar(p)
+	}
+	return fmt.Sprintf("no provider credentials — run %s (or set %s)",
+		strings.Join(logins, " or "), strings.Join(envVars, " / "))
+}
+
+// ambiguousModelMsg is the usage-error message when -m is not given and more
+// than one provider has a credential configured: gofer picks no favorite
+// among logged-in providers, so the caller must say which model to run.
+func ambiguousModelMsg(creds []string) string {
+	models := make([]string, len(creds))
+	for i, p := range creds {
+		models[i] = runner.DefaultModel(p)
+	}
+	return fmt.Sprintf("multiple providers have credentials — pass -m (e.g. -m %s)", strings.Join(models, " or -m "))
+}
+
+// resolveRunModel picks the model `gofer run`/`gofer resume` uses when -m is
+// not given: the sole logged-in provider's default model. No credentials is
+// a command error (exit 1); more than one is a usage error (exit 2) — gofer
+// never guesses a vendor to favor.
+func resolveRunModel(ctx context.Context, root string) (string, error) {
+	creds, err := runner.CredentialedProviders(ctx, root)
+	if err != nil {
+		return "", err
+	}
+	switch len(creds) {
+	case 1:
+		return runner.DefaultModel(creds[0]), nil
+	case 0:
+		return "", errNoProviderCredentials
+	default:
+		return "", &usageError{msg: ambiguousModelMsg(creds)}
+	}
+}
 
 // runRun implements `gofer run` (and bare `gofer`): it starts a fresh
 // session rooted at the current directory, drives one prompt — from args, or
@@ -26,7 +74,7 @@ const defaultSystemPrompt = "You are gofer, a careful coding agent. Use your too
 func runRun(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	model := fs.String("m", defaultRunModel, "model to run")
+	model := fs.String("m", "", "model to run (default: the sole logged-in provider's model)")
 	root := fs.String("root", "", "session store root (default ~/.gofer)")
 	asJSON := fs.Bool("json", false, "emit each event as JSONL instead of a human-readable transcript")
 	if help, err := parseFlags(fs, args); err != nil {
@@ -36,6 +84,18 @@ func runRun(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 	}
 
 	promptFromArgs := len(fs.Args()) > 0
+
+	// Resolve the model before acquiring the prompt (which may block on an
+	// interactive stdin read): a caller with no usable credential should fail
+	// fast, not sit at a prompt> indicator first.
+	modelID := *model
+	if modelID == "" {
+		var rerr error
+		modelID, rerr = resolveRunModel(ctx, *root)
+		if rerr != nil {
+			return rerr
+		}
+	}
 
 	// Install the interrupt handler up front and make the prompt read itself
 	// cancellable, so Ctrl-C ALWAYS exits promptly — both at the prompt and
@@ -71,7 +131,7 @@ func runRun(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 	r, err := runner.NewSession(ctx, runner.Options{
 		Root:   *root,
 		Cwd:    cwd,
-		Model:  *model,
+		Model:  modelID,
 		System: defaultSystemPrompt,
 	})
 	if err != nil {
