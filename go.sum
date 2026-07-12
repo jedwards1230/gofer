@@ -26,8 +26,8 @@ github.com/clipperhouse/uax29/v2 v2.7.0 h1:+gs4oBZ2gPfVrKPthwbMzWZDaAFPGYK72F0NJ
 github.com/clipperhouse/uax29/v2 v2.7.0/go.mod h1:EFJ2TJMRUaplDxHKj1qAEhCtQPW2tJSwu5BF98AuoVM=
 github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
 github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
-github.com/jedwards1230/agent-sdk-go v0.1.1-0.20260712151645-5d8150ad5c0e h1:XeRUv05KKdF0TvmIwLM70fXKqgnyVshYUaWlj4E0+w4=
-github.com/jedwards1230/agent-sdk-go v0.1.1-0.20260712151645-5d8150ad5c0e/go.mod h1:U1o/wb6aSQzyMz99N/dOpQz2958LcDFeByyDQp33p5Y=
+github.com/jedwards1230/agent-sdk-go v0.1.1-0.20260712153425-8540ace032bd h1:YEPpf5PNKkQlwmixWTJpm8ZlKKfOlsKgbAAe+bXAfSc=
+github.com/jedwards1230/agent-sdk-go v0.1.1-0.20260712153425-8540ace032bd/go.mod h1:U1o/wb6aSQzyMz99N/dOpQz2958LcDFeByyDQp33p5Y=
 github.com/lucasb-eyer/go-colorful v1.4.0 h1:UtrWVfLdarDgc44HcS7pYloGHJUjHV/4FwW4TvVgFr4=
 github.com/lucasb-eyer/go-colorful v1.4.0/go.mod h1:R4dSotOR9KMtayYi1e77YzuveK+i7ruzyGqttikkLy0=
 github.com/mattn/go-isatty v0.0.20 h1:xfD0iDuEKnDkl03q4limB+vH+GxLEtL/jb4xVJSWWEY=
