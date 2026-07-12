@@ -1,0 +1,31 @@
+# .github/dependabot.yml — Dependabot version updates
+#
+# Convention: group all bumps per ecosystem into ONE PR, cap open PRs, and
+# label + prefix commits so they classify cleanly.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: ["dependency", "chore"]
+    commit-message:
+      prefix: "deps(actions)"
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: ["dependency", "chore"]
+    commit-message:
+      prefix: "deps(gomod)"
+    groups:
+      go:
+        patterns: ["*"]
