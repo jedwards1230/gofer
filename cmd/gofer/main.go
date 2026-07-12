@@ -1,7 +1,8 @@
-// Command gofer is the CLI entrypoint for the gofer agent platform. At M0 it
-// offers a single working command, `demo`, which streams a deterministic
-// faux-provider session through the SDK's typed event contract — the daemon,
-// supervisor, and TUI land in later milestones.
+// Command gofer is the CLI entrypoint for the gofer agent platform. `run` and
+// `resume` drive a real session — a real provider, the builtin tool set, and
+// a durable JSONL journal — through the SDK's typed event contract; `demo`
+// still streams a deterministic faux-provider session with no network. The
+// daemon, supervisor, and TUI land in later milestones.
 package main
 
 import (
@@ -24,13 +25,30 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
+	// Bare `gofer`, with no subcommand at all, runs one prompt in the current
+	// directory — the shortest path from install to a working session.
 	if len(args) == 0 {
-		usage(stderr)
-		return 2
+		if err := runRun(ctx, nil, stdin, stdout, stderr); err != nil {
+			_, _ = fmt.Fprintf(stderr, "gofer: %v\n", err)
+			return 1
+		}
+		return 0
 	}
 
 	cmd, rest := args[0], args[1:]
 	switch cmd {
+	case "run":
+		if err := runRun(ctx, rest, stdin, stdout, stderr); err != nil {
+			_, _ = fmt.Fprintf(stderr, "gofer run: %v\n", err)
+			return 1
+		}
+		return 0
+	case "resume":
+		if err := runResume(ctx, rest, stdin, stdout, stderr); err != nil {
+			_, _ = fmt.Fprintf(stderr, "gofer resume: %v\n", err)
+			return 1
+		}
+		return 0
 	case "demo":
 		if err := runDemo(ctx, rest, stdout, stderr); err != nil {
 			_, _ = fmt.Fprintf(stderr, "gofer demo: %v\n", err)
@@ -78,12 +96,15 @@ func reportCmdErr(cmd string, err error, stderr io.Writer) int {
 
 // usage writes the command listing to w.
 func usage(w io.Writer) {
-	_, _ = fmt.Fprint(w, `gofer — supervise coding agents (M0 scaffold)
+	_, _ = fmt.Fprint(w, `gofer — supervise coding agents (M1)
 
 Usage:
+  gofer                           Run one prompt (read from stdin) in the current directory
   gofer <command> [flags]
 
 Commands:
+  run       Start a session and drive one prompt through a real provider
+  resume    Reopen a session by id: continue it, or print its transcript
   demo      Stream a faux-provider session through the SDK event contract
   login     Authenticate a provider (OAuth by default, --api-key for a static key)
   logout    Remove a provider's stored credential
@@ -91,7 +112,9 @@ Commands:
   version   Print the gofer version
   help      Show this help
 
-Run "gofer login <anthropic|openai>" to start a subscription OAuth login, or
-"gofer login <provider> --api-key" to store a static key read from stdin.
+Run "gofer run --help" / "gofer resume --help" / "gofer demo --help" for
+per-command flags. Run "gofer login <anthropic|openai>" to start a
+subscription OAuth login, or "gofer login <provider> --api-key" to store a
+static key read from stdin.
 `)
 }
