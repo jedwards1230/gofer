@@ -140,8 +140,8 @@ would double-encode).
 - **License: Apache-2.0** both repos (NOTICE-based attribution).
 - **Supervisor stays in the app** — promoted to the SDK only if a second app
   needs it unchanged.
-- **Claude-subscription OAuth ships at M3** with API-key fallback from day
-  one.
+- **Claude-subscription OAuth shipped at M1** (`gofer login`, earlier than the
+  original M3 target), with API-key fallback from day one.
 - **TUI is bubbletea v2**; plugin-contributed UI is a declarative widget
   vocabulary rendered by the host (plugins ship data + structure, never
   in-process code). Full design: [`TUI.md`](TUI.md).
