@@ -1,0 +1,29 @@
+name: Claude PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: write
+  id-token: write
+
+jobs:
+  review:
+    uses: jedwards1230/release-workflows/.github/workflows/claude-pr-review.yml@v1
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} # preferred (subscription)
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }} # fallback (metered API)
+    with:
+      focus: |
+        gofer is a daemon + TUI for running and supervising many coding agents,
+        built on the agent-sdk-go framework and consuming it exclusively through
+        its typed Event/Op contract. Highest-value lenses: contract-only
+        consumption (flag any reach into SDK internals — if the app needs data
+        the contract doesn't carry, the contract is what should change),
+        CLI/TUI error paths and exit codes, stream-rendering correctness
+        (lossy deltas vs settled *.finished payloads), and session-lifecycle
+        semantics (kill vs archive; journals are never deleted).
+        Do NOT re-flag gofmt/go vet/golangci-lint findings — CI owns those.
