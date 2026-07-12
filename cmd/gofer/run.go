@@ -28,8 +28,10 @@ func runRun(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 	model := fs.String("m", defaultRunModel, "model to run")
 	root := fs.String("root", "", "session store root (default ~/.gofer)")
 	asJSON := fs.Bool("json", false, "emit each event as JSONL instead of a human-readable transcript")
-	if err := fs.Parse(args); err != nil {
+	if help, err := parseFlags(fs, args); err != nil {
 		return err
+	} else if help {
+		return nil
 	}
 
 	promptFromArgs := len(fs.Args()) > 0

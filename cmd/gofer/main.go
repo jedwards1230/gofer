@@ -29,8 +29,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// directory — the shortest path from install to a working session.
 	if len(args) == 0 {
 		if err := runRun(ctx, nil, stdin, stdout, stderr); err != nil {
-			_, _ = fmt.Fprintf(stderr, "gofer: %v\n", err)
-			return 1
+			return reportCmdErr("", err, stderr)
 		}
 		return 0
 	}
@@ -39,14 +38,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	switch cmd {
 	case "run":
 		if err := runRun(ctx, rest, stdin, stdout, stderr); err != nil {
-			_, _ = fmt.Fprintf(stderr, "gofer run: %v\n", err)
-			return 1
+			return reportCmdErr("run", err, stderr)
 		}
 		return 0
 	case "resume":
 		if err := runResume(ctx, rest, stdin, stdout, stderr); err != nil {
-			_, _ = fmt.Fprintf(stderr, "gofer resume: %v\n", err)
-			return 1
+			return reportCmdErr("resume", err, stderr)
 		}
 		return 0
 	case "demo":
@@ -84,9 +81,14 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 }
 
 // reportCmdErr prints a command error to stderr and returns the process exit
-// code: 2 for a *usageError, 1 for anything else.
+// code: 2 for a *usageError, 1 for anything else. An empty cmd (bare `gofer`)
+// prints under the plain "gofer:" prefix.
 func reportCmdErr(cmd string, err error, stderr io.Writer) int {
-	_, _ = fmt.Fprintf(stderr, "gofer %s: %v\n", cmd, err)
+	prefix := "gofer"
+	if cmd != "" {
+		prefix += " " + cmd
+	}
+	_, _ = fmt.Fprintf(stderr, "%s: %v\n", prefix, err)
 	var uerr *usageError
 	if errors.As(err, &uerr) {
 		return 2
