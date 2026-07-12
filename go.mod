@@ -5,7 +5,8 @@ go 1.25.0
 require (
 	charm.land/bubbletea/v2 v2.0.8
 	charm.land/lipgloss/v2 v2.0.5
-	github.com/jedwards1230/agent-sdk-go v0.1.1-0.20260712172127-62ef9ffc3683
+	github.com/coder/websocket v1.8.15
+	github.com/jedwards1230/agent-sdk-go v0.1.1-0.20260712205214-c8dc74747d1b
 	github.com/muesli/termenv v0.16.0
 )
 

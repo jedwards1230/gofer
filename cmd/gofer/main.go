@@ -50,6 +50,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return reportCmdErr("resume", err, stderr)
 		}
 		return 0
+	case "daemon", "serve":
+		if err := runDaemon(ctx, rest, stdout, stderr); err != nil {
+			return reportCmdErr(cmd, err, stderr)
+		}
+		return 0
 	case "demo":
 		if err := runDemo(ctx, rest, stdout, stderr); err != nil {
 			_, _ = fmt.Fprintf(stderr, "gofer demo: %v\n", err)
@@ -121,6 +126,7 @@ Usage:
 Commands:
   run       Start a session and drive one prompt through a real provider
   resume    Reopen a session by id: continue it, or print its transcript
+  daemon    Run the supervisor behind an ACP-over-WebSocket listener (alias: serve)
   demo      Stream a faux-provider session through the SDK event contract
   login     Authenticate a provider (OAuth by default, --api-key for a static key)
   logout    Remove a provider's stored credential

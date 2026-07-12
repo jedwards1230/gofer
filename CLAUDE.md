@@ -40,7 +40,12 @@ go run ./cmd/gofer demo                            # offline faux-provider strea
 
 ## Layout
 
-- `cmd/gofer/` — CLI entrypoint (`demo` today; `ps`, `kill`, `archive`,
-  `attach`, daemon mode land M2+).
-- Planned: `internal/supervisor/`, `internal/tui/` (bubbletea),
-  `internal/config/`.
+- `cmd/gofer/` — CLI entrypoint (`run`, `resume`, `demo`, `login`/`logout`/
+  `auth`, `daemon`/`serve` today; `ps`, `kill`, `archive`, `attach` land
+  M2+).
+- `internal/supervisor/` — session registry over the shared store + runner
+  seams; see its package doc for the full contract.
+- `internal/daemon/` — ACP-over-WebSocket listener hosting the supervisor
+  (`gofer daemon`); see its package doc and `docs/M2-PROOF.md`.
+- `internal/tui/` (bubbletea) — the attach/peek/overview frontend.
+- Planned: `internal/config/`.
