@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"github.com/jedwards1230/agent-sdk-go/runner"
+
+	"github.com/jedwards1230/gofer/internal/daemon"
 )
 
 // defaultSystemPrompt is the system prompt a run/resume session uses absent
@@ -98,14 +100,34 @@ func resolveRunModel(ctx context.Context, root string) (string, error) {
 
 // runRun implements `gofer run` (and bare `gofer`): it starts a fresh
 // session rooted at the current directory, drives one prompt — from args, or
-// one line read from stdin when none are given — through a real provider and
-// the builtin tool set, and streams the resulting events to stdout.
+// one line read from stdin when none are given — and streams the resulting
+// output to stdout. When a `gofer daemon` is reachable at --daemon (default
+// 127.0.0.1:7333), the session is driven THROUGH it as an ACP client
+// (driveDaemonSession) — no privileged path, the same surface a phone or
+// editor client uses (docs/M2-PROOF.md). With no daemon reachable, it falls
+// back unchanged to the in-process path: a real provider and the builtin tool
+// set via runner.New.
+//
+// Known daemon-path differences from the in-process path — inherent to M2's
+// ACP surface, not oversights (each prints a one-line stderr notice when the
+// relevant flag was set, and --local opts out of the daemon entirely):
+//
+//   - -m is ignored (ACP's session/new carries no model field — the daemon
+//     resolved its own default model at startup, see `gofer daemon --model`).
+//   - --root is ignored (the daemon uses its own session store, chosen at its
+//     startup; --root cannot retarget it).
+//   - --json emits ACP's session/update JSON rather than the SDK's event.Event
+//     JSON the in-process --json emits.
+//   - the interactive attach TUI is never used; the daemon path always plain-
+//     streams the turn to stdout.
 func runRun(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	model := fs.String("m", "", "model to run (default: the sole logged-in provider's model)")
 	root := fs.String("root", "", "session store root (default ~/.gofer)")
 	asJSON := fs.Bool("json", false, "emit each event as JSONL instead of a human-readable transcript")
+	df := addDaemonFlags(fs)
+	local := addLocalFlag(fs)
 	if help, err := parseFlags(fs, args); err != nil {
 		return err
 	} else if help {
@@ -114,15 +136,48 @@ func runRun(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 
 	promptFromArgs := len(fs.Args()) > 0
 
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("getwd: %w", err)
+	}
+
+	// Dial before any local model/credential resolution: a running daemon
+	// needs neither (it already resolved its own default model at startup),
+	// so the common "there's a daemon, just use it" case pays no
+	// credential-lookup cost at all. A dial failure that ISN'T "nothing is
+	// listening" (e.g. a wrong token) is a real problem to surface, not a
+	// silent fallback — see [daemonUnreachable]. --local skips the probe
+	// outright, forcing the in-process path.
+	var daemonClient *daemon.Client
+	daemonRunning := false
+	if !*local {
+		c, dialErr := dialDaemon(ctx, df)
+		switch {
+		case dialErr == nil:
+			daemonClient = c
+			daemonRunning = true
+			defer func() { _ = daemonClient.Close() }()
+		case !daemonUnreachable(dialErr):
+			return daemonDialErr(df.addr, dialErr)
+		}
+	}
+	if daemonRunning {
+		noteDaemonDeviations(stderr, "run", *model, *root, *asJSON)
+	}
+
 	// Resolve the model before acquiring the prompt (which may block on an
 	// interactive stdin read): a caller with no usable credential should fail
-	// fast, not sit at a prompt> indicator first.
-	modelID := *model
-	if modelID == "" {
-		var rerr error
-		modelID, rerr = resolveRunModel(ctx, *root)
-		if rerr != nil {
-			return rerr
+	// fast, not sit at a prompt> indicator first. Skipped entirely on the
+	// daemon path — see above.
+	var modelID string
+	if !daemonRunning {
+		modelID = *model
+		if modelID == "" {
+			var rerr error
+			modelID, rerr = resolveRunModel(ctx, *root)
+			if rerr != nil {
+				return rerr
+			}
 		}
 	}
 
@@ -152,9 +207,8 @@ func runRun(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 		return &usageError{msg: "no prompt given (pass it as an argument or pipe one line on stdin)"}
 	}
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("getwd: %w", err)
+	if daemonRunning {
+		return driveDaemonSession(ctx, daemonClient, "run", "", cwd, prompt, *asJSON, stdout, stderr)
 	}
 
 	r, err := runner.New(ctx, runner.Options{
