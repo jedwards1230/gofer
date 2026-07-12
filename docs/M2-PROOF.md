@@ -135,10 +135,9 @@ across the rest of the M2 stack:
   same permissive behavior as local `gofer run`). A phone-driven, tool-using
   turn therefore **auto-proceeds to completion** and never hangs waiting for
   an approval that could not be delivered over the daemon. `gofer attach
-  <session>` resolves and
-  confirms the id up front but, absent a TUI deep-link affordance, still
-  opens on the overview screen rather than straight into that session's
-  attach view — select it from there.
+  <session>` resolves the id against the live roster and opens the TUI
+  directly on that session's attach screen (← backs out to the overview);
+  with no argument it opens overview-first.
 
 You can also confirm the roster directly over the control channel: any
 ACP/WebSocket client pointed at the same URL+token can call the `gofer/roster`
