@@ -43,7 +43,14 @@ func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
 	rest := args
 	for {
 		if err := fs.Parse(rest); err != nil {
-			return nil, err
+			// flag.ErrHelp (-h/--help) is passed through unwrapped so callers
+			// can treat it as a successful help print (exit 0); every other
+			// parse failure is a usage error (exit 2, per main's contract),
+			// not a generic command error (exit 1).
+			if errors.Is(err, flag.ErrHelp) {
+				return nil, err
+			}
+			return nil, &usageError{msg: err.Error()}
 		}
 		rest = fs.Args()
 		if len(rest) == 0 {
@@ -52,6 +59,18 @@ func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
 		positionals = append(positionals, rest[0])
 		rest = rest[1:]
 	}
+}
+
+// parsePositionals runs parseArgs and folds flag.ErrHelp into a nil error: the
+// flag package already printed usage to the command's stderr, so -h/--help is a
+// successful exit. Every command's flag parsing routes through here so exit
+// codes stay consistent (0 help / 2 usage / 1 command error).
+func parsePositionals(fs *flag.FlagSet, args []string) (positionals []string, help bool, err error) {
+	positionals, err = parseArgs(fs, args)
+	if errors.Is(err, flag.ErrHelp) {
+		return nil, true, nil
+	}
+	return positionals, false, err
 }
 
 // newAuthStore builds the auth.Store the login/logout/auth commands share.
@@ -74,9 +93,12 @@ func runLogin(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 	fs.SetOutput(stderr)
 	apiKey := fs.Bool("api-key", false, "read an API key from stdin instead of running the OAuth login flow")
 	root := fs.String("root", "", "override the auth store directory (default: ~/.gofer)")
-	positionals, err := parseArgs(fs, args)
+	positionals, help, err := parsePositionals(fs, args)
 	if err != nil {
 		return err
+	}
+	if help {
+		return nil
 	}
 
 	if len(positionals) != 1 {
@@ -159,9 +181,12 @@ func runLogout(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("logout", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	root := fs.String("root", "", "override the auth store directory (default: ~/.gofer)")
-	positionals, err := parseArgs(fs, args)
+	positionals, help, err := parsePositionals(fs, args)
 	if err != nil {
 		return err
+	}
+	if help {
+		return nil
 	}
 
 	if len(positionals) != 1 {
@@ -189,9 +214,12 @@ func runAuth(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("auth", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	root := fs.String("root", "", "override the auth store directory (default: ~/.gofer)")
-	positionals, err := parseArgs(fs, args)
+	positionals, help, err := parsePositionals(fs, args)
 	if err != nil {
 		return err
+	}
+	if help {
+		return nil
 	}
 
 	// Bare `auth` defaults to `status`; the only accepted positional is `status`.
