@@ -29,8 +29,12 @@ func driveSession(ctx context.Context, r *runner.Runner, prompt string, asJSON b
 
 	promptErr := make(chan error, 1)
 	go func() {
-		promptErr <- r.Prompt(ctx, prompt)
-		_ = r.Close()
+		// Close after the turn settles, whatever the outcome: it waits for the
+		// journaling consumer to drain and returns any journal-write error it
+		// observed. Fold that in so a failed persist is never silently dropped —
+		// the caller must know if the session did not fully save.
+		perr := r.Prompt(ctx, prompt)
+		promptErr <- errors.Join(perr, r.Close())
 	}()
 
 	var renderErr error
@@ -46,7 +50,10 @@ func driveSession(ctx context.Context, r *runner.Runner, prompt string, asJSON b
 		return fmt.Errorf("render stream: %w", renderErr)
 	}
 	if err != nil {
-		if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+		// A Ctrl-C cancellation is an expected interrupt, not a failure — but a
+		// journal-write error joined alongside it still means the saved prefix
+		// may be incomplete, so only a *pure* cancellation is a clean interrupt.
+		if ctx.Err() != nil && errors.Is(err, context.Canceled) && !hasNonCancel(err) {
 			_, _ = fmt.Fprintf(stderr, "gofer: interrupted — progress saved, resume with `gofer resume %s`\n", r.ID())
 			return nil
 		}
@@ -56,4 +63,20 @@ func driveSession(ctx context.Context, r *runner.Runner, prompt string, asJSON b
 		_, _ = fmt.Fprintf(stderr, "gofer: dropped %d lossy event(s)\n", dropped)
 	}
 	return nil
+}
+
+// hasNonCancel reports whether err carries any error other than a context
+// cancellation, unwrapping an errors.Join tree. It distinguishes a clean Ctrl-C
+// interrupt (only context.Canceled) from a real failure — e.g. a journal-write
+// error — hiding behind one.
+func hasNonCancel(err error) bool {
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, e := range joined.Unwrap() {
+			if hasNonCancel(e) {
+				return true
+			}
+		}
+		return false
+	}
+	return err != nil && !errors.Is(err, context.Canceled)
 }
