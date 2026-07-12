@@ -42,6 +42,19 @@ go run ./cmd/gofer demo
 Streams a scripted faux-provider session through the real event pipeline — no
 API key, no network.
 
+## Auth (M1)
+
+```bash
+gofer login anthropic          # subscription OAuth (paste the code back)
+gofer login openai             # subscription OAuth (local browser redirect)
+gofer login anthropic --api-key   # reads a key from stdin, never argv
+gofer auth                     # show configured providers and credential status
+gofer logout anthropic
+```
+
+Credentials persist in `~/.gofer/auth.json` (mode 0600). `gofer auth` never
+prints token material.
+
 ## Roadmap
 
 | Stage | Ships |
