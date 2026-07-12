@@ -52,13 +52,22 @@ type App struct {
 // NewApp returns an App rendering through th, driving sup, with its roster
 // screen seeded from meta.
 func NewApp(th theme.Theme, sup Supervisor, meta OverviewMeta) App {
-	return App{
+	a := App{
 		theme: th,
 		sup:   sup,
 		over:  NewOverview(th, meta),
 		sess:  New(th),
 		scr:   screenOverview,
 	}
+	// `gofer attach <id>`: open straight into the session's attach screen and
+	// pre-select it in the roster, so backing out with ← lands on it. The
+	// subscription is kicked off in Init.
+	if meta.AttachSessionID != "" {
+		a.scr = screenAttach
+		a.sessID = meta.AttachSessionID
+		a.over.selectedID = meta.AttachSessionID
+	}
+	return a
 }
 
 // rosterTickMsg fires [App.fetchRoster] again on the polling interval.
@@ -102,8 +111,13 @@ type createdMsg struct {
 // (Send/Interrupt/Kill/Archive).
 type opDoneMsg struct{ err error }
 
-// Init satisfies tea.Model: it kicks off the first roster fetch.
+// Init satisfies tea.Model: it kicks off the first roster fetch, plus — when
+// the app opened straight into an attach (via OverviewMeta.AttachSessionID) —
+// the subscription to that session so its transcript streams in immediately.
 func (a App) Init() tea.Cmd {
+	if a.sessID != "" {
+		return tea.Batch(a.fetchRoster, a.subscribe(a.sessID))
+	}
 	return a.fetchRoster
 }
 

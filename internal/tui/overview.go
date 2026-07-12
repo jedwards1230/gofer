@@ -39,6 +39,11 @@ type OverviewMeta struct {
 	Model   string
 	Cwd     string
 	Now     time.Time
+
+	// AttachSessionID, when set, opens the app directly on that session's
+	// attach screen instead of the overview — the `gofer attach <id>` entry
+	// point. Empty (the default) starts on the overview.
+	AttachSessionID string
 }
 
 // rosterView selects the roster ordering.
