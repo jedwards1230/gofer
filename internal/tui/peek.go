@@ -65,7 +65,7 @@ func (p Peek) View(width, height int) string {
 	}
 
 	hint := truncate(p.theme.MutedStyle().Render(
-		"j/k switch · →/enter attach · esc back · ctrl-c quit"), width)
+		"j/k switch · →/enter attach · ← back · ctrl-c quit"), width)
 	bodyH := height - 1
 	if bodyH < 1 {
 		bodyH = 1

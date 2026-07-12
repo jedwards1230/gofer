@@ -227,6 +227,11 @@ func (m Model) Backspace() Model {
 	return m
 }
 
+// InputEmpty reports whether the input buffer has no pending text. The app
+// root consults this to resolve the navigation contract's left-arrow (← in
+// an empty attach input backs out to the overview; with text it edits).
+func (m Model) InputEmpty() bool { return m.input == "" }
+
 // Submit records the current input buffer as submitted (retrievable via
 // [Model.TakeSubmitted]) and clears it. Submitting an empty buffer is a
 // no-op: there is nothing to send.

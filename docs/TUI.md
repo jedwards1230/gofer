@@ -6,12 +6,12 @@ screen stack. Golden-file tests come first: the `testkit` harness pins fixed
 sizes, forces `termenv.Ascii`, and uses a test theme (see
 [`TESTING.md`](TESTING.md)).
 
-**Status**: `internal/tui` holds the attach surface — `Model` (transcript +
-input buffer + status line, driven by `Model.Ingest`) plus a thin bubbletea v2
-adapter — and, from M2, the `Overview` roster screen (see [Roster &
-navigation](#roster--navigation-m2) below). The screen-stack root, peek screen,
-dialogs, and keymap registry are landing over the M2 stack; slash commands and
-plugin UI remain M4+.
+**Status**: `internal/tui` holds the M2 TUI — the attach `Model` (transcript +
+input, driven by `Model.Ingest`), the `Overview` roster screen, the `Peek`
+split, collapsed tool-block rendering, and the `App` screen-stack root that
+composes them under the navigation contract (see [Roster &
+navigation](#roster--navigation-m2) below). Still ahead: the dialog stack and
+central keymap registry, then slash commands and plugin UI (M4+).
 
 ## The three altitudes
 
@@ -67,10 +67,11 @@ Layout, top to bottom:
   bar; `enter` on a non-empty bar creates a new session from that text and
   attaches into it (`Supervisor.Create`).
 
-**Two roster views**, toggled by `v`: flat (every session, most-recently-active
+**Two roster views**, toggled by `tab`: flat (every session, most-recently-active
 first) and grouped (Working / Needs input / Finished sections, each
 recency-sorted). Selection is tracked by session id, not row index, so it
-survives the reorder a toggle causes.
+survives the reorder a toggle causes. (`tab` rather than a letter key so the
+dispatch bar stays freely typeable — a plain `v` is text, not a shortcut.)
 
 **Peek** is the read-only split: the roster rail (the overview's header + body,
 no dispatch bar) alongside a live tail of the selected session's transcript. It
@@ -82,12 +83,23 @@ leaves each pane too narrow for a roster row. The `layout` package owns the
 geometry (orientation, pane-size division, column zipping) as pure int/string
 math so both arrangements stay golden-testable.
 
-**Navigation contract** (the app root, landing with the peek screen, enforces
-it): `enter` peeks the selected session; `→` attaches it; `esc`
+**Navigation contract** — enforced by the app root (`App` in `app.go`, the
+bubbletea root that composes overview/peek/attach): `enter` peeks the selected
+session (with dispatch-bar text, it instead creates a session from that text
+and attaches into it); `→` attaches the selected session; `esc`
 interrupts/acts on the *active* session (never "go back"); `←` in an **empty**
 input backs out to the overview (with text, it edits); `ctrl-x` kills a running
-session or archives a finished one; `ctrl-c` quits. Dispatch precedence is
-dialog stack > active screen > global keys.
+session or archives a finished one; `ctrl-c` quits. In peek, `j`/`k` switch the
+peeked session and `←` returns to the overview.
+
+The app root is a **client** like any other (repo invariant): it reads the
+roster by polling `Supervisor.Roster` on a timer (the supervisor's roster is
+pull-based) and drives one live `event.Subscription` at a time for the
+peeked/attached session, issuing the same create/send/interrupt/kill/archive
+Ops an ACP client would. Switching sessions closes the old subscription and
+stale events (tagged with a since-left session id) are dropped. It has no cmd
+wiring yet — a thin adapter bridges the concrete daemon supervisor to this
+`Supervisor` interface once both land on the integration branch.
 
 These patterns are adapted from Claude Code's agent-roster and collapsed
 tool-block rendering — a status-count header, grouped sections, a one-line
