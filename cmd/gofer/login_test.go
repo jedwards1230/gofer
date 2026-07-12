@@ -227,8 +227,8 @@ func TestLoginOAuthManualRedeem(t *testing.T) {
 	// own generated PKCE state, so the test doesn't need to scrape the
 	// authorize URL for the real (randomly generated) state value.
 	stdin := strings.NewReader("fakecode-from-browser\n")
-	var stdout bytes.Buffer
-	if err := loginWithOAuth(context.Background(), store, "anthropic", stdin, &stdout); err != nil {
+	var stdout, stderr bytes.Buffer
+	if err := loginWithOAuth(context.Background(), store, "anthropic", stdin, &stdout, &stderr); err != nil {
 		t.Fatalf("loginWithOAuth: %v", err)
 	}
 
@@ -380,5 +380,115 @@ func TestFlagsAfterPositional(t *testing.T) {
 	}
 	if got, want := stdout.String(), "Logged out of anthropic.\n"; got != want {
 		t.Fatalf("stdout = %q, want %q", got, want)
+	}
+}
+
+// scriptedTokenDoer returns a pre-scripted HTTP status for each call and counts
+// how many times the token endpoint is actually contacted — so a test can
+// assert both retry behavior and that a locally-rejected paste never hits the
+// network. A status past the end of the script defaults to 200.
+type scriptedTokenDoer struct {
+	statuses []int
+	calls    int
+}
+
+func (d *scriptedTokenDoer) Do(*http.Request) (*http.Response, error) {
+	status := http.StatusOK
+	if d.calls < len(d.statuses) {
+		status = d.statuses[d.calls]
+	}
+	d.calls++
+	body := `{"access_token":"sk-ant-oat-fake","refresh_token":"ref","expires_in":3600}`
+	if status != http.StatusOK {
+		body = `{"error":"invalid_grant","error_description":"authorization code is invalid"}`
+	}
+	return &http.Response{
+		StatusCode: status,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}, nil
+}
+
+// TestLoginRetry_ShapeRejectionNoEndpointContact asserts a paste that can't be
+// an authorization code (whitespace — e.g. a fat-fingered shell command) is
+// rejected LOCALLY: the token endpoint is never contacted, and the flow
+// re-prompts rather than dying.
+func TestLoginRetry_ShapeRejectionNoEndpointContact(t *testing.T) {
+	root := t.TempDir()
+	doer := &scriptedTokenDoer{} // would 200 if ever called
+	store, err := auth.New(auth.WithRoot(root), auth.WithHTTPClient(doer))
+	if err != nil {
+		t.Fatalf("auth.New: %v", err)
+	}
+
+	// Three whitespace pastes → exhausted, never a token-endpoint round trip.
+	stdin := strings.NewReader("gofer login anthropic\nnot a code\nstill wrong\n")
+	var stdout, stderr bytes.Buffer
+	if err := loginWithOAuth(context.Background(), store, "anthropic", stdin, &stdout, &stderr); err == nil {
+		t.Fatal("loginWithOAuth: got nil error, want exhausted after bad-shape pastes")
+	}
+	if doer.calls != 0 {
+		t.Errorf("token endpoint contacted %d time(s), want 0 (shape rejected before the endpoint)", doer.calls)
+	}
+	if !strings.Contains(stderr.String(), "doesn't look like an authorization code") {
+		t.Errorf("stderr = %q, want the shape-rejection hint", stderr.String())
+	}
+}
+
+// TestLoginRetry_RetryThenSuccess asserts a first paste the endpoint rejects
+// (400 invalid_grant) followed by a good code succeeds — one bad paste doesn't
+// kill the flow, and the PKCE verifier is reused across the retry.
+func TestLoginRetry_RetryThenSuccess(t *testing.T) {
+	root := t.TempDir()
+	doer := &scriptedTokenDoer{statuses: []int{http.StatusBadRequest, http.StatusOK}}
+	store, err := auth.New(auth.WithRoot(root), auth.WithHTTPClient(doer))
+	if err != nil {
+		t.Fatalf("auth.New: %v", err)
+	}
+
+	stdin := strings.NewReader("firstcode\nsecondcode\n")
+	var stdout, stderr bytes.Buffer
+	if err := loginWithOAuth(context.Background(), store, "anthropic", stdin, &stdout, &stderr); err != nil {
+		t.Fatalf("loginWithOAuth: %v", err)
+	}
+	if doer.calls != 2 {
+		t.Errorf("token endpoint contacted %d time(s), want 2 (reject then success)", doer.calls)
+	}
+	if !strings.Contains(stderr.String(), "code rejected") {
+		t.Errorf("stderr = %q, want the rejection retry hint", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Logged in to anthropic.") {
+		t.Errorf("stdout = %q, want the success message", stdout.String())
+	}
+	if _, ok, _ := store.Get("anthropic"); !ok {
+		t.Error("credential not persisted after retry-then-success")
+	}
+}
+
+// TestLoginRetry_Exhausted asserts that after maxCodeAttempts rejected codes
+// the login fails cleanly (no infinite loop), having contacted the endpoint
+// exactly that many times.
+func TestLoginRetry_Exhausted(t *testing.T) {
+	root := t.TempDir()
+	doer := &scriptedTokenDoer{statuses: []int{http.StatusBadRequest, http.StatusBadRequest, http.StatusBadRequest}}
+	store, err := auth.New(auth.WithRoot(root), auth.WithHTTPClient(doer))
+	if err != nil {
+		t.Fatalf("auth.New: %v", err)
+	}
+
+	stdin := strings.NewReader("codeone\ncodetwo\ncodethree\n")
+	var stdout, stderr bytes.Buffer
+	err = loginWithOAuth(context.Background(), store, "anthropic", stdin, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("loginWithOAuth: got nil error, want failure after exhausted attempts")
+	}
+	if doer.calls != maxCodeAttempts {
+		t.Errorf("token endpoint contacted %d time(s), want %d", doer.calls, maxCodeAttempts)
+	}
+	if !strings.Contains(err.Error(), "after 3 attempt") {
+		t.Errorf("error = %v, want it to note attempts exhausted", err)
+	}
+	if _, ok, _ := store.Get("anthropic"); ok {
+		t.Error("credential unexpectedly persisted after all attempts failed")
 	}
 }
