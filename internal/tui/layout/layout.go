@@ -15,8 +15,13 @@ import "strings"
 const PeekHorizontalMinWidth = 120
 
 // columnDivider separates side-by-side panes: a space, a vertical rule, a
-// space.
-const columnDivider = " │ "
+// space. columnDividerWidth is its DISPLAY width in columns — three cells —
+// which differs from len(columnDivider) in bytes (the rule is a multi-byte
+// rune), so pane-width math must use the width constant, never len().
+const (
+	columnDivider      = " │ "
+	columnDividerWidth = 3
+)
 
 // Orientation is how the peek screen arranges its two panes.
 type Orientation int
@@ -37,13 +42,16 @@ func PeekOrientation(width int) Orientation {
 }
 
 // SplitWidth divides total columns into a left and right pane separated by the
-// column divider. The left pane takes the floor of half the remaining width so
-// the split is stable and the two panes sum (with the divider) to exactly
-// total.
+// column divider. The left pane takes the floor of the inner width so the split
+// is stable, and `left + right + len(columnDivider) == total` holds for every
+// total ≥ len(columnDivider)+2 — i.e. wide enough for two ≥1-column panes plus
+// the divider. The peek screen only ever splits at [PeekHorizontalMinWidth]
+// (120), far inside that range. Below the minimum a two-pane-plus-divider split
+// cannot sum to total, so both panes clamp to 1 (a defensive path the peek gate
+// makes unreachable).
 func SplitWidth(total int) (left, right int) {
-	inner := total - len(columnDivider)
+	inner := total - columnDividerWidth
 	if inner < 2 {
-		// Too narrow to split meaningfully; give each pane at least 1 col.
 		return 1, 1
 	}
 	left = inner / 2
@@ -52,8 +60,11 @@ func SplitWidth(total int) (left, right int) {
 }
 
 // SplitHeight divides total rows into a top and bottom pane separated by a
-// one-row divider. The top pane (the roster) takes the ceiling of half so the
-// roster gets the extra row when the height is odd.
+// one-row divider. The top pane (the roster) takes the ceiling of the inner
+// height so it gets the extra row when the height is odd, and
+// `top + bottom + 1 == total` holds for every total ≥ 3 — wide enough for two
+// ≥1-row panes plus the divider row. Below that a split cannot sum to total, so
+// both panes clamp to 1 (a defensive path the peek layout makes unreachable).
 func SplitHeight(total int) (top, bottom int) {
 	inner := total - 1 // divider row
 	if inner < 2 {
