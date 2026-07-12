@@ -91,24 +91,34 @@ type Runner struct {
 }
 
 // NewSession builds a Runner around a freshly created journal for the
-// project at opts.Cwd.
+// project at opts.Cwd. The provider (and its credential) is resolved BEFORE the
+// journal is created, so a missing-credential misconfiguration fails fast with
+// no orphan journal on disk.
 func NewSession(ctx context.Context, opts Options) (*Runner, error) {
+	prov, err := resolveProvider(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
 	store, err := newStore(opts)
 	if err != nil {
 		return nil, err
 	}
-	slug := session.Slugify(opts.Cwd)
-	journal, err := store.Create(ctx, slug)
+	journal, err := store.Create(ctx, session.Slugify(opts.Cwd))
 	if err != nil {
 		_ = store.Close()
 		return nil, fmt.Errorf("runner: create session: %w", err)
 	}
-	return build(opts, store, journal, false)
+	return build(opts, store, journal, prov, false), nil
 }
 
 // Resume builds a Runner around the existing journal for id, publishing
-// session.resumed once the runner is live.
+// session.resumed once the runner is live. The provider is resolved before the
+// journal is opened so a credential misconfiguration fails before session.resumed.
 func Resume(ctx context.Context, id string, opts Options) (*Runner, error) {
+	prov, err := resolveProvider(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
 	store, err := newStore(opts)
 	if err != nil {
 		return nil, err
@@ -118,7 +128,17 @@ func Resume(ctx context.Context, id string, opts Options) (*Runner, error) {
 		_ = store.Close()
 		return nil, fmt.Errorf("runner: open session %s: %w", id, err)
 	}
-	return build(opts, store, journal, true)
+	return build(opts, store, journal, prov, true), nil
+}
+
+// resolveProvider returns the test-injected provider when set, else builds the
+// real one — which pre-flights its credential. It runs before any journal is
+// created so a failure leaves no on-disk residue.
+func resolveProvider(ctx context.Context, opts Options) (provider.Provider, error) {
+	if opts.Provider != nil {
+		return opts.Provider, nil
+	}
+	return newProvider(ctx, opts.Model, opts.Root)
 }
 
 // newStore builds the journal store from opts, wiring the deterministic id
@@ -141,21 +161,10 @@ func newStore(opts Options) (*session.FileStore, error) {
 	return store, nil
 }
 
-// build assembles a Runner around an already-opened journal: it resolves the
-// provider and tool registry, starts the broker and its journaling consumer,
-// and (when resumed) publishes session.resumed.
-func build(opts Options, store *session.FileStore, journal *session.Journal, resumed bool) (*Runner, error) {
-	prov := opts.Provider
-	if prov == nil {
-		var err error
-		prov, err = newProvider(opts.Model, opts.Root)
-		if err != nil {
-			_ = journal.Close()
-			_ = store.Close()
-			return nil, err
-		}
-	}
-
+// build assembles a Runner around an already-opened journal and a resolved
+// provider: it wires the tool registry, starts the broker and its journaling
+// consumer, and (when resumed) publishes session.resumed.
+func build(opts Options, store *session.FileStore, journal *session.Journal, prov provider.Provider, resumed bool) *Runner {
 	tools := opts.Tools
 	if tools == nil {
 		tools = loop.FromRegistry(tool.NewRegistry(tool.Builtins(opts.Cwd)...))
@@ -181,7 +190,7 @@ func build(opts Options, store *session.FileStore, journal *session.Journal, res
 	if resumed {
 		broker.Publish(event.NewSessionResumed(journal.ID()))
 	}
-	return r, nil
+	return r
 }
 
 // ID returns the session's journal id.

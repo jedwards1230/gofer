@@ -2,17 +2,17 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/jedwards1230/agent-sdk-go/auth"
-	"github.com/jedwards1230/agent-sdk-go/provider"
 )
 
 // TestNewProvider_UnknownModel asserts a legible, hermetic (no network)
 // error for a model the SDK registry does not recognize.
 func TestNewProvider_UnknownModel(t *testing.T) {
-	_, err := newProvider("not-a-real-model", t.TempDir())
+	_, err := newProvider(context.Background(), "not-a-real-model", t.TempDir())
 	if err == nil {
 		t.Fatal("newProvider: got nil error, want an unknown-model error")
 	}
@@ -32,7 +32,7 @@ func TestCompositeCredSource_EnvFallback(t *testing.T) {
 
 	t.Run("falls back to env", func(t *testing.T) {
 		t.Setenv("ANTHROPIC_API_KEY", "sk-test-key")
-		src := compositeCredSource{store: store, env: provider.StaticEnv()}
+		src := compositeCredSource{store: store, envVars: envVars}
 
 		cred, err := src.Credential(context.Background(), "anthropic")
 		if err != nil {
@@ -45,14 +45,24 @@ func TestCompositeCredSource_EnvFallback(t *testing.T) {
 
 	t.Run("legible error when neither source has a credential", func(t *testing.T) {
 		t.Setenv("ANTHROPIC_API_KEY", "")
-		src := compositeCredSource{store: store, env: provider.StaticEnv()}
+		src := compositeCredSource{store: store, envVars: envVars}
 
 		_, err := src.Credential(context.Background(), "anthropic")
 		if err == nil {
 			t.Fatal("Credential: got nil error, want one")
 		}
-		if !strings.Contains(err.Error(), "gofer login anthropic") {
-			t.Errorf("Credential error = %q, want it to name 'gofer login anthropic'", err.Error())
+		// One short, actionable sentence — not the redundant wrapped chain.
+		want := "no credential for anthropic — run 'gofer login anthropic' or set ANTHROPIC_API_KEY"
+		if err.Error() != want {
+			t.Errorf("Credential error = %q, want %q", err.Error(), want)
+		}
+		// errors.Is matches the sentinel, and the underlying causes are retained
+		// via Unwrap for --json / structured consumers.
+		if !errors.Is(err, ErrNoCredential) {
+			t.Errorf("error is not ErrNoCredential: %v", err)
+		}
+		if !errors.Is(err, auth.ErrNoCredential) {
+			t.Errorf("error lost the underlying auth.ErrNoCredential cause: %v", err)
 		}
 	})
 }
