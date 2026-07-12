@@ -45,6 +45,34 @@ func (o Overview) View(width, height int) string {
 	return strings.Join(out, "\n")
 }
 
+// Rail renders the roster as a peek/split rail — the header and body only, no
+// dispatch bar — filled to exactly height rows. Selection and view state
+// render identically to the full screen, so the roster reads the same whether
+// it owns the terminal or shares it with a tail pane.
+func (o Overview) Rail(width, height int) string {
+	if width < 1 {
+		width = 1
+	}
+	if height < 1 {
+		height = 1
+	}
+
+	out := o.header(width)
+	bodyAvail := height - headerLines
+	if bodyAvail < 0 {
+		bodyAvail = 0
+	}
+	out = append(out, o.body(width, bodyAvail)...)
+
+	if len(out) > height {
+		out = out[:height]
+	}
+	for len(out) < height {
+		out = append(out, "")
+	}
+	return strings.Join(out, "\n")
+}
+
 // header renders the app identity, model·cwd context, and status counts.
 func (o Overview) header(width int) []string {
 	working, needsInput, finished := o.counts()

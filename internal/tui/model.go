@@ -333,6 +333,38 @@ func (m Model) inputLine() string {
 	return "> " + m.input + "▏"
 }
 
+// TailView renders a read-only tail of the transcript for the peek pane: the
+// most recent transcript items above the status line, bottom-aligned like a
+// live terminal, with no input line — peek steals no input. Output is exactly
+// height rows.
+func (m Model) TailView(width, height int) string {
+	if width < 1 {
+		width = 1
+	}
+	if height < 1 {
+		height = 1
+	}
+
+	lines := make([]string, 0, len(m.items))
+	for _, it := range m.items {
+		lines = append(lines, truncate(m.renderItem(it), width))
+	}
+
+	avail := height - 1 // status line
+	if avail < 0 {
+		avail = 0
+	}
+	if len(lines) > avail {
+		lines = lines[len(lines)-avail:]
+	}
+	// Top-pad so the transcript sits just above the status line.
+	if n := avail - len(lines); n > 0 {
+		lines = append(make([]string, n), lines...)
+	}
+	lines = append(lines, truncate(m.statusLine(), width))
+	return strings.Join(lines, "\n")
+}
+
 // truncate clips s to at most w runes, marking a clipped line with a
 // trailing ellipsis.
 func truncate(s string, w int) string {

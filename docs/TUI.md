@@ -72,6 +72,16 @@ first) and grouped (Working / Needs input / Finished sections, each
 recency-sorted). Selection is tracked by session id, not row index, so it
 survives the reorder a toggle causes.
 
+**Peek** is the read-only split: the roster rail (the overview's header + body,
+no dispatch bar) alongside a live tail of the selected session's transcript. It
+steals no input — `j`/`k` move the rail selection and the app root swaps the
+tail to the newly selected session. The panes stack vertically (roster above
+tail) by default and split side-by-side once the terminal reaches
+`layout.PeekHorizontalMinWidth` (120 cols) — below that a horizontal split
+leaves each pane too narrow for a roster row. The `layout` package owns the
+geometry (orientation, pane-size division, column zipping) as pure int/string
+math so both arrangements stay golden-testable.
+
 **Navigation contract** (the app root, landing with the peek screen, enforces
 it): `enter` peeks the selected session; `→` attaches it; `esc`
 interrupts/acts on the *active* session (never "go back"); `←` in an **empty**
