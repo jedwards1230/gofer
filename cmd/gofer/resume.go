@@ -59,7 +59,11 @@ func runResume(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 
 	prompt := strings.Join(promptArgs, " ")
 	// promptArgs is non-empty here (see the len(promptArgs) == 0 branch
-	// above), so a resume prompt always comes from CLI arguments.
+	// above), so a resume prompt always comes from CLI arguments — there is no
+	// interactive read, but the interrupt handler is still scoped to the run so
+	// Ctrl-C interrupts the continued turn.
+	ctx, stop := interruptCtx(ctx)
+	defer stop()
 	if useTUI(*asJSON, true, stdout) {
 		return driveTUI(ctx, r, prompt, stdout, stderr)
 	}

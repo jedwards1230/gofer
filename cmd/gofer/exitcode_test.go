@@ -74,3 +74,33 @@ func TestRunResumeExitCodes(t *testing.T) {
 		})
 	}
 }
+
+// TestRunPromptAcquisition covers bare `gofer` / `gofer run` prompt handling:
+// no prompt is a usage error (exit 2, never a silent hang), while a prompt from
+// args OR from a piped stdin is acquired and the run proceeds (here it fails
+// fast at an unknown model — exit 1 — so the path stays hermetic: no creds, no
+// network, so no ANTHROPIC_API_KEY dependence).
+func TestRunPromptAcquisition(t *testing.T) {
+	root := t.TempDir()
+	cases := []struct {
+		name  string
+		args  []string
+		stdin string
+		want  int
+	}{
+		{"bare gofer, no prompt", nil, "", 2},
+		{"run, no prompt (empty stdin)", []string{"run", "--root", root}, "", 2},
+		{"run, prompt from piped stdin", []string{"run", "-m", "no-such-model", "--root", root}, "do a thing\n", 1},
+		{"run, prompt from args", []string{"run", "-m", "no-such-model", "--root", root, "do a thing"}, "", 1},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, errBuf bytes.Buffer
+			got := run(tc.args, strings.NewReader(tc.stdin), &out, &errBuf)
+			if got != tc.want {
+				t.Errorf("run(%q, stdin=%q) = %d, want %d\nstderr: %s", tc.args, tc.stdin, got, tc.want, errBuf.String())
+			}
+		})
+	}
+}

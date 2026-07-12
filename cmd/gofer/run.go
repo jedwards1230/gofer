@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -35,12 +36,31 @@ func runRun(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 	}
 
 	promptFromArgs := len(fs.Args()) > 0
-	prompt, ok, err := resolvePrompt(fs.Args(), stdin)
+
+	// Install the interrupt handler up front and make the prompt read itself
+	// cancellable, so Ctrl-C ALWAYS exits promptly — both at the prompt and
+	// during the run. The read runs on a goroutine the select abandons on
+	// cancellation (signal.Notify overrides any inherited SIG_IGN), so a
+	// blocking stdin read can never swallow the signal and wedge the process.
+	ctx, stop := interruptCtx(ctx)
+	defer stop()
+
+	// On an interactive terminal with no prompt argument, show an explicit
+	// indicator rather than silently blocking on the read; a piped stdin reads
+	// one line with no indicator.
+	if !promptFromArgs && stdinIsTTY() {
+		_, _ = fmt.Fprint(stderr, "prompt> ")
+	}
+	prompt, ok, err := resolvePromptCtx(ctx, fs.Args(), stdin)
+	if errors.Is(err, context.Canceled) {
+		_, _ = fmt.Fprintln(stderr) // finish the ^C line cleanly
+		return nil
+	}
 	if err != nil {
 		return err
 	}
 	if !ok {
-		return fmt.Errorf("no prompt given (pass it as an argument or pipe one line on stdin)")
+		return &usageError{msg: "no prompt given (pass it as an argument or pipe one line on stdin)"}
 	}
 
 	cwd, err := os.Getwd()
