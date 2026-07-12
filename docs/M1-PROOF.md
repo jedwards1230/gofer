@@ -90,3 +90,23 @@ hermetic CI test that proves the same mechanics with a scripted provider.
   `tool_use` to corrupt the fold on resume.
 
 Run it: `go test -race ./internal/runner/...`.
+
+## Known M1 limitations
+
+The runner journals from the **lossy event stream** (`message.finished` carries
+settled text as a string, not the provider's content blocks), so its stored
+blocks carry no per-block `Meta`. Two consequences, both accepted for M1:
+
+- **Reasoning signatures are not preserved across resume.** A *resumed*
+  Anthropic thinking+tools session degrades to reasoning-without-signature
+  (the provider adapter drops unsigned reasoning rather than replaying it) —
+  safe, but the prior turn's reasoning context is lost across the resume
+  boundary. Within a single run, the adapter's own signature replay (SDK #19)
+  is unaffected. This mirrors the OpenAI reasoning-item-id handling.
+- **Tool errors journal as non-error.** `tool.call.finished` carries no error
+  flag, so a tool `Result` is always recorded with `IsError=false`.
+
+**M2 path:** either the event contract gains per-block `Meta` (so gofer's
+event-sourced journaling stays lossless), or the runner journals the settled
+`loop.Run` result messages (verbatim provider blocks) instead of reconstructing
+from events.

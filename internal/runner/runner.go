@@ -5,6 +5,11 @@
 // persistence — and folding a journal back into provider messages on resume —
 // is gofer-owned, consuming the SDK only through its exported
 // provider/auth/tool/loop/event/session APIs (never SDK internals).
+//
+// Because journaling is event-sourced, stored content blocks carry no per-block
+// Meta (e.g. Anthropic reasoning signatures), so reasoning signatures are not
+// preserved across a resume boundary — a documented M1 limitation with an M2
+// path in docs/M1-PROOF.md.
 package runner
 
 import (
