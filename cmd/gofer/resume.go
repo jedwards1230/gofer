@@ -22,13 +22,15 @@ func runResume(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 	model := fs.String("m", defaultRunModel, "model to run")
 	root := fs.String("root", "", "session store root (default ~/.gofer)")
 	asJSON := fs.Bool("json", false, "emit each event as JSONL instead of a human-readable transcript")
-	if err := fs.Parse(args); err != nil {
+	if help, err := parseFlags(fs, args); err != nil {
 		return err
+	} else if help {
+		return nil
 	}
 
 	rest := fs.Args()
 	if len(rest) == 0 {
-		return fmt.Errorf("missing session id (usage: gofer resume <id> [prompt...])")
+		return &usageError{msg: "missing session id (usage: gofer resume <id> [prompt...])"}
 	}
 	id, promptArgs := rest[0], rest[1:]
 

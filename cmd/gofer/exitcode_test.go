@@ -44,3 +44,33 @@ func TestAuthCommandExitCodes(t *testing.T) {
 		})
 	}
 }
+
+// TestRunResumeExitCodes locks the same 0-help / 2-usage contract for run and
+// resume, whose flag parsing previously leaked the generic exit 1 on -h and on
+// a bad flag. These cases return before any provider/store work, so they need
+// no credentials or --root.
+func TestRunResumeExitCodes(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want int
+	}{
+		{"run help long", []string{"run", "--help"}, 0},
+		{"run help short", []string{"run", "-h"}, 0},
+		{"run undefined flag", []string{"run", "--bogus"}, 2},
+		{"run flag missing value", []string{"run", "-m"}, 2},
+		{"resume help", []string{"resume", "--help"}, 0},
+		{"resume undefined flag", []string{"resume", "--bogus"}, 2},
+		{"resume missing id", []string{"resume"}, 2},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, errBuf bytes.Buffer
+			got := run(tc.args, strings.NewReader(""), &out, &errBuf)
+			if got != tc.want {
+				t.Errorf("run(%q) = %d, want %d\nstderr: %s", tc.args, got, tc.want, errBuf.String())
+			}
+		})
+	}
+}

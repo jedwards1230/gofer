@@ -73,6 +73,23 @@ func parsePositionals(fs *flag.FlagSet, args []string) (positionals []string, he
 	return positionals, false, err
 }
 
+// parseFlags parses fs and classifies the outcome for the exit-code contract:
+// help is true when -h/--help was requested (the flag package already printed
+// usage, so the command exits 0), and a parse failure is returned as a
+// *usageError (exit 2) rather than a generic command error (exit 1). Commands
+// with no interleaved positionals (run/resume/demo) use this; the auth commands
+// use parsePositionals, which layers positional interleaving on the same rules.
+func parseFlags(fs *flag.FlagSet, args []string) (help bool, err error) {
+	switch e := fs.Parse(args); {
+	case e == nil:
+		return false, nil
+	case errors.Is(e, flag.ErrHelp):
+		return true, nil
+	default:
+		return false, &usageError{msg: e.Error()}
+	}
+}
+
 // newAuthStore builds the auth.Store the login/logout/auth commands share.
 // An empty root uses the store's default (~/.gofer).
 func newAuthStore(root string) (*auth.Store, error) {
