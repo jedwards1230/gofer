@@ -57,7 +57,7 @@ func (f *internalFakeSup) Subscribe(_ context.Context, id string) (*event.Subscr
 	return f.broker(id).Subscribe(event.FilterAll, 16), nil
 }
 
-func (f *internalFakeSup) Create(_ context.Context, prompt string) (SessionInfo, error) {
+func (f *internalFakeSup) Create(_ context.Context, prompt string, _ CreateOptions) (SessionInfo, error) {
 	return SessionInfo{ID: "created-1", Title: prompt, Status: StatusWorking}, nil
 }
 
