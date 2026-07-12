@@ -3,6 +3,7 @@ module github.com/jedwards1230/gofer
 go 1.25.0
 
 require (
+	charm.land/bubbletea/v2 v2.0.8
 	charm.land/lipgloss/v2 v2.0.5
 	github.com/jedwards1230/agent-sdk-go v0.1.1-0.20260712151645-5d8150ad5c0e
 	github.com/muesli/termenv v0.16.0
