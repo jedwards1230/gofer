@@ -30,21 +30,14 @@ import (
 // so this command is testable end to end (dial, resolve, construct the App)
 // without a real TTY; only the final tea.NewProgram.Run() needs one.
 //
-// # The <session> argument's current fidelity
+// # The <session> argument
 //
 // A <session> argument, when given, is resolved against the daemon's live
-// roster up front (a clear "no such session" error beats a silent no-op) —
-// but [tui.NewApp]/[tui.OverviewMeta] have no "open directly into this
-// session" affordance as of this M2 leg: the TUI always opens on the
-// overview screen (see internal/tui/app.go's NewApp/OverviewMeta and
-// docs/M2-PROOF.md §4). `gofer attach <id>` is therefore functionally
-// identical to bare `gofer attach` today — a resolved id gets a one-line
-// stderr confirmation, then the operator selects it from the overview
-// (→/enter on the highlighted row) same as any other session. Landing a real
-// deep-link (open straight into the attach screen) needs a small TUI
-// affordance — an optional initial-session field on OverviewMeta, or a
-// constructor variant — which is out of scope for this leg; flagged for a
-// follow-up.
+// roster up front (a clear "no such session" error beats a silent no-op) and
+// passed as [tui.OverviewMeta.AttachSessionID], so the TUI opens directly on
+// that session's attach screen (← backs out to the overview). With no
+// argument, `gofer attach` opens overview-first, like bare `gofer` against a
+// reachable daemon.
 func runAttach(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("attach", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -70,12 +63,14 @@ func runAttach(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 	b := daemonbridge.New(c)
 	defer func() { _ = b.Close() }()
 
+	var attachID string
 	if len(positionals) == 1 {
 		id, rerr := resolveSessionID(ctx, c, positionals[0])
 		if rerr != nil {
 			return rerr
 		}
-		_, _ = fmt.Fprintf(stderr, "gofer attach: %s is live — select it from the overview (direct-session-open lands in a later M2 leg)\n", shortID(id))
+		attachID = id
+		_, _ = fmt.Fprintf(stderr, "gofer attach: opening %s\n", shortID(id))
 	}
 
 	if !stdinIsTTY() || !interactiveTTY(stdout) {
@@ -89,10 +84,11 @@ func runAttach(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 
 	_, _ = fmt.Fprintf(stderr, "gofer attach: connected to daemon at %s\n", df.addr)
 	app := tui.NewApp(theme.Default(), b, tui.OverviewMeta{
-		App:     "gofer",
-		Version: version,
-		Cwd:     cwd,
-		Now:     time.Now(),
+		App:             "gofer",
+		Version:         version,
+		Cwd:             cwd,
+		Now:             time.Now(),
+		AttachSessionID: attachID,
 	})
 
 	ctx, stop := interruptCtx(ctx)
