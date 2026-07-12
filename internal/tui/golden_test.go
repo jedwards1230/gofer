@@ -67,7 +67,7 @@ func TestGoldenReasoningAndText(t *testing.T) {
 func TestGoldenToolCall(t *testing.T) {
 	render(t, "tool_call",
 		event.NewToolCallStarted(sid, "call-1", "bash", json.RawMessage(`{"cmd":"echo hi"}`)),
-		event.NewToolCallFinished(sid, "call-1", "hi", nil),
+		event.NewToolCallFinished(sid, "call-1", "hi", false, nil),
 	)
 }
 
@@ -86,7 +86,7 @@ func TestGoldenToolCallRunning(t *testing.T) {
 func TestGoldenToolCallMultiline(t *testing.T) {
 	render(t, "tool_call_multiline",
 		event.NewToolCallStarted(sid, "call-1", "bash", json.RawMessage(`{"cmd":"seq 1 6"}`)),
-		event.NewToolCallFinished(sid, "call-1", "1\n2\n3\n4\n5\n6", nil),
+		event.NewToolCallFinished(sid, "call-1", "1\n2\n3\n4\n5\n6", false, nil),
 	)
 }
 
@@ -127,7 +127,7 @@ func TestGoldenFullTranscript(t *testing.T) {
 		event.NewMessageStarted(sid, event.MessageText),
 		event.NewMessageFinished(sid, event.MessageText, "Hello! Running a quick check."),
 		event.NewToolCallStarted(sid, "call-1", "bash", json.RawMessage(`{"cmd":"echo hi"}`)),
-		event.NewToolCallFinished(sid, "call-1", "hi", nil),
+		event.NewToolCallFinished(sid, "call-1", "hi", false, nil),
 		event.NewTurnFinished(sid, "end_turn", provider.Usage{InputTokens: 12, OutputTokens: 9}),
 	)
 	testkit.AssertGolden(t, "full_transcript", m.FullTranscript(testkit.Width))
