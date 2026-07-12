@@ -88,13 +88,25 @@ daemon's own roster already includes it, with the same status
 The laptop-side clients that read that roster from the running daemon land
 across the rest of the M2 stack:
 
-- **`gofer ps` / `gofer kill` / `gofer archive`** (the CLI-over-daemon client)
-  query and drive the daemon via its `gofer/roster`, `gofer/ps`, `gofer/kill`,
-  and `gofer/archive` control methods on the same WebSocket listener.
+- **`gofer ps` / `gofer kill` / `gofer archive`** (the CLI-over-daemon client,
+  `internal/daemon.Client` + `cmd/gofer`) query and drive the daemon via its
+  `gofer/roster`, `gofer/ps`, `gofer/kill`, and `gofer/archive` control methods
+  on the same WebSocket listener — point them at the phone's daemon with
+  `--daemon <tailnet-ip>:7333 --token <the-token>` and the phone-created
+  session shows up in `gofer ps`, right alongside anything started locally.
+  `gofer run`/`gofer resume <id> <prompt>` do the same auto-detection: with a
+  daemon reachable at `--daemon` they drive the turn through it as their own
+  ACP client instead of starting an in-process session. On that path a few
+  in-process flags don't apply and say so on stderr — `-m` and `--root` are the
+  daemon's (chosen at its startup), `--json` emits ACP `session/update` JSON
+  rather than the SDK's `event.Event` JSONL, and the interactive attach TUI is
+  replaced by plain streaming. Pass `--local` (alias `--no-daemon`) to force
+  the in-process path even when a daemon is up.
 - **The `gofer` TUI overview** attaches to the daemon and renders the live
   roster + transcript, so the phone-created session appears and can be
-  peeked/attached exactly like a local one.
+  peeked/attached exactly like a local one — this leg (`attach`) is still
+  pending.
 
-Until those clients are wired to the daemon, you can confirm the roster
-directly over the control channel: any ACP/WebSocket client pointed at the same
-URL+token can call the `gofer/roster` method and see the phone's session listed.
+You can also confirm the roster directly over the control channel: any
+ACP/WebSocket client pointed at the same URL+token can call the `gofer/roster`
+method and see the phone's session listed.

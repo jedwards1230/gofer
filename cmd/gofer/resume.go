@@ -10,17 +10,24 @@ import (
 
 	"github.com/jedwards1230/agent-sdk-go/provider"
 	"github.com/jedwards1230/agent-sdk-go/runner"
+
+	"github.com/jedwards1230/gofer/internal/daemon"
 )
 
 // runResume implements `gofer resume`: it reopens an existing session by id
 // and either continues it with a prompt or, given none, prints its current
-// transcript and exits — a read-only view of the journal.
+// transcript and exits — a read-only view of the journal. Continuing with a
+// prompt routes through a reachable daemon exactly like `gofer run` does (see
+// its doc comment for the daemon-path differences); the read-only transcript
+// view never touches a daemon at all.
 func runResume(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("resume", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	model := fs.String("m", "", "model to run (default: the sole logged-in provider's model)")
 	root := fs.String("root", "", "session store root (default ~/.gofer)")
 	asJSON := fs.Bool("json", false, "emit each event as JSONL instead of a human-readable transcript")
+	df := addDaemonFlags(fs)
+	local := addLocalFlag(fs)
 	if help, err := parseFlags(fs, args); err != nil {
 		return err
 	} else if help {
@@ -36,7 +43,7 @@ func runResume(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 	if len(promptArgs) == 0 {
 		// A read-only transcript view needs no provider and no credential — it
 		// reads the journal directly, so `gofer resume <id>` works even with
-		// nothing configured.
+		// nothing configured, and never touches a daemon.
 		msgs, err := runner.Transcript(ctx, id, *root)
 		if err != nil {
 			return err
@@ -49,12 +56,44 @@ func runResume(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 		return fmt.Errorf("getwd: %w", err)
 	}
 
-	modelID := *model
-	if modelID == "" {
-		modelID, err = resolveRunModel(ctx, *root)
-		if err != nil {
-			return err
+	var daemonClient *daemon.Client
+	daemonRunning := false
+	if !*local {
+		c, dialErr := dialDaemon(ctx, df)
+		switch {
+		case dialErr == nil:
+			daemonClient = c
+			daemonRunning = true
+			defer func() { _ = daemonClient.Close() }()
+		case !daemonUnreachable(dialErr):
+			return daemonDialErr(df.addr, dialErr)
 		}
+	}
+	if daemonRunning {
+		noteDaemonDeviations(stderr, "resume", *model, *root, *asJSON)
+	}
+
+	var modelID string
+	if !daemonRunning {
+		modelID = *model
+		if modelID == "" {
+			modelID, err = resolveRunModel(ctx, *root)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	prompt := strings.Join(promptArgs, " ")
+	// promptArgs is non-empty here (see the len(promptArgs) == 0 branch
+	// above), so a resume prompt always comes from CLI arguments — there is no
+	// interactive read, but the interrupt handler is still scoped to the run so
+	// Ctrl-C interrupts the continued turn.
+	ctx, stop := interruptCtx(ctx)
+	defer stop()
+
+	if daemonRunning {
+		return driveDaemonSession(ctx, daemonClient, "resume", id, cwd, prompt, *asJSON, stdout, stderr)
 	}
 
 	r, err := runner.Resume(ctx, id, runner.Options{
@@ -74,13 +113,6 @@ func runResume(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 	_, _ = fmt.Fprintf(stderr, "gofer resume: session %s\n", r.ID())
 	_, _ = fmt.Fprintf(stderr, "gofer resume: journal %s\n", r.JournalPath())
 
-	prompt := strings.Join(promptArgs, " ")
-	// promptArgs is non-empty here (see the len(promptArgs) == 0 branch
-	// above), so a resume prompt always comes from CLI arguments — there is no
-	// interactive read, but the interrupt handler is still scoped to the run so
-	// Ctrl-C interrupts the continued turn.
-	ctx, stop := interruptCtx(ctx)
-	defer stop()
 	if useTUI(*asJSON, stdinIsTTY(), interactiveTTY(stdout)) {
 		return driveTUI(ctx, r, prompt, stdout, stderr)
 	}

@@ -55,6 +55,21 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return reportCmdErr(cmd, err, stderr)
 		}
 		return 0
+	case "ps":
+		if err := runPS(ctx, rest, stdout, stderr); err != nil {
+			return reportCmdErr("ps", err, stderr)
+		}
+		return 0
+	case "kill":
+		if err := runKill(ctx, rest, stdout, stderr); err != nil {
+			return reportCmdErr("kill", err, stderr)
+		}
+		return 0
+	case "archive":
+		if err := runArchive(ctx, rest, stdout, stderr); err != nil {
+			return reportCmdErr("archive", err, stderr)
+		}
+		return 0
 	case "demo":
 		if err := runDemo(ctx, rest, stdout, stderr); err != nil {
 			_, _ = fmt.Fprintf(stderr, "gofer demo: %v\n", err)
@@ -127,6 +142,9 @@ Commands:
   run       Start a session and drive one prompt through a real provider
   resume    Reopen a session by id: continue it, or print its transcript
   daemon    Run the supervisor behind an ACP-over-WebSocket listener (alias: serve)
+  ps        List sessions on a running daemon's roster (--all: include archived)
+  kill      Interrupt and drop a live session from the roster (journal kept)
+  archive   Drop a finished session from the roster (journal kept)
   demo      Stream a faux-provider session through the SDK event contract
   login     Authenticate a provider (OAuth by default, --api-key for a static key)
   logout    Remove a provider's stored credential
@@ -143,5 +161,11 @@ Model (-m): gofer ships with no default vendor. With -m omitted, "run" and
 "resume <id> <prompt>" use the sole logged-in provider's model; log in to
 more than one and -m is required; log in to none and login is required
 first ("gofer login").
+
+Daemon (ps/kill/archive, and run/resume when one is reachable): --daemon
+<addr> (default 127.0.0.1:7333) and --token <token> (default $GOFER_TOKEN)
+point at a running "gofer daemon". "run"/"resume" auto-detect a daemon and
+route through it (pass --local / --no-daemon to force the in-process path
+even when one is up); "ps"/"kill"/"archive" always require one.
 `)
 }
