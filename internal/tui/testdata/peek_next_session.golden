@@ -21,4 +21,4 @@ fable-5 · ~/orchestration
    └ ok  acp  0.4s
 Tests pass. The listener is wired.
 ○ idle  stop=end_turn  usage=40in/18out
-j/k switch · →/enter attach · esc back · ctrl-c quit
+j/k switch · →/enter attach · ← back · ctrl-c quit

@@ -112,6 +112,18 @@ func (o Overview) move(delta int) Overview {
 // roster is empty.
 func (o Overview) SelectedID() string { return o.selectedID }
 
+// Selected returns the currently selected session's full info and true, or a
+// zero value and false when the roster is empty. The app root reads it to
+// route ctrl-x to kill (running) or archive (finished).
+func (o Overview) Selected() (SessionInfo, bool) {
+	for _, s := range o.sessions {
+		if s.ID == o.selectedID {
+			return s, true
+		}
+	}
+	return SessionInfo{}, false
+}
+
 // TypeRune appends r to the dispatch-bar buffer.
 func (o Overview) TypeRune(r rune) Overview {
 	o.input += string(r)

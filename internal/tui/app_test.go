@@ -1,0 +1,273 @@
+package tui_test
+
+// app_test.go drives App entirely through its exported tea.Model surface
+// (Init/Update/View) — the fake Supervisor plus the navigation-contract
+// behavioral tests live here. Anything that needs App's unexported
+// messages or fields (golden renders of peek/attach, the stale-event
+// guard) lives in app_internal_test.go (package tui) instead.
+
+import (
+	"context"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	tea "charm.land/bubbletea/v2"
+
+	"github.com/jedwards1230/agent-sdk-go/event"
+
+	"github.com/jedwards1230/gofer/internal/tui"
+	"github.com/jedwards1230/gofer/internal/tui/theme"
+)
+
+// fakeSup is a Supervisor backed by real event.Brokers, so App's
+// subscribe/waitForEvent plumbing exercises a genuine channel instead of a
+// canned response. Create/Send/Interrupt/Kill/Archive record what they were
+// called with, for the behavioral tests to assert against.
+type fakeSup struct {
+	mu      sync.Mutex
+	roster  []tui.SessionInfo
+	brokers map[string]*event.Broker
+
+	created []string
+	sent    []string
+	ops     []string
+}
+
+func newFakeSup(roster []tui.SessionInfo) *fakeSup {
+	return &fakeSup{roster: roster, brokers: map[string]*event.Broker{}}
+}
+
+func (f *fakeSup) broker(id string) *event.Broker {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	b, ok := f.brokers[id]
+	if !ok {
+		b = event.NewBroker()
+		f.brokers[id] = b
+	}
+	return b
+}
+
+func (f *fakeSup) Roster(context.Context) ([]tui.SessionInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]tui.SessionInfo(nil), f.roster...), nil
+}
+
+func (f *fakeSup) Subscribe(_ context.Context, id string) (*event.Subscription, error) {
+	return f.broker(id).Subscribe(event.FilterAll, 16), nil
+}
+
+func (f *fakeSup) Create(_ context.Context, prompt string, _ tui.CreateOptions) (tui.SessionInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.created = append(f.created, prompt)
+	info := tui.SessionInfo{ID: "created-1", Title: prompt, Status: tui.StatusWorking}
+	f.roster = append(f.roster, info)
+	return info, nil
+}
+
+func (f *fakeSup) Send(_ context.Context, id, prompt string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sent = append(f.sent, id+":"+prompt)
+	return nil
+}
+
+func (f *fakeSup) Interrupt(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ops = append(f.ops, "interrupt:"+id)
+	return nil
+}
+
+func (f *fakeSup) Kill(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ops = append(f.ops, "kill:"+id)
+	return nil
+}
+
+func (f *fakeSup) Archive(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ops = append(f.ops, "archive:"+id)
+	return nil
+}
+
+var appTestNow = time.Date(2026, 7, 12, 18, 0, 0, 0, time.UTC)
+
+func appTestMeta() tui.OverviewMeta {
+	return tui.OverviewMeta{App: "gofer", Version: "0.2.0", Model: "fable-5", Cwd: "~/orchestration", Now: appTestNow}
+}
+
+// appTestRoster is the shared fixture the behavioral tests navigate: a
+// working session (selected first — most recently active) and an idle one
+// awaiting input.
+func appTestRoster() []tui.SessionInfo {
+	return []tui.SessionInfo{
+		{
+			ID:      "0192a1b2-appt-7000-8000-000000000001",
+			Title:   "wire the app root",
+			Summary: "overview <-> peek <-> attach nav",
+			Status:  tui.StatusWorking,
+			Updated: appTestNow.Add(-2 * time.Minute),
+		},
+		{
+			ID:      "0192a1b2-appt-7000-8000-000000000002",
+			Title:   "review the supervisor contract",
+			Summary: "turn finished — awaiting the next prompt",
+			Status:  tui.StatusNeedsInput,
+			Updated: appTestNow.Add(-5 * time.Minute),
+		},
+	}
+}
+
+// content renders m the way a real frame would, returning just the string
+// content for substring assertions.
+func content(m tea.Model) string {
+	return m.View().Content
+}
+
+// newTestApp builds an App over sup, sizes it, and drives Init's roster
+// fetch to completion through the exported Update surface only — the
+// fetchRoster Cmd's resulting Msg is opaque to this package (its
+// concrete type is unexported), but Update accepts it all the same.
+func newTestApp(t *testing.T, sup tui.Supervisor) tea.Model {
+	t.Helper()
+	var m tea.Model = tui.NewApp(theme.Test(), sup, appTestMeta())
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+
+	cmd := m.Init()
+	if cmd == nil {
+		t.Fatal("Init() returned a nil Cmd; expected the roster fetch")
+	}
+	m, _ = m.Update(cmd())
+	return m
+}
+
+// press drives one key through Update and, if it returns a Cmd, executes it
+// immediately and feeds the resulting Msg back in — the synchronous stand-in
+// for bubbletea's own runtime loop, safe here because every Cmd App issues
+// off a key press (subscribe, create, send, interrupt, kill, archive) either
+// resolves immediately against the fake Supervisor or is a follow-on
+// waitForEvent read this helper deliberately does not chase (it would block
+// forever with no event pending).
+func press(t *testing.T, m tea.Model, key tea.KeyPressMsg) tea.Model {
+	t.Helper()
+	m, cmd := m.Update(key)
+	if cmd == nil {
+		return m
+	}
+	m, _ = m.Update(cmd())
+	return m
+}
+
+// type_ types s into whichever screen's input is focused, one rune per key
+// press.
+func type_(t *testing.T, m tea.Model, s string) tea.Model {
+	t.Helper()
+	for _, r := range s {
+		m = press(t, m, tea.KeyPressMsg{Text: string(r)})
+	}
+	return m
+}
+
+const ctrl = tea.ModCtrl
+
+// TestNavEnterPeeksSelected verifies enter, with an empty dispatch input,
+// peeks the selected session rather than dispatching a new one.
+func TestNavEnterPeeksSelected(t *testing.T) {
+	m := newTestApp(t, newFakeSup(appTestRoster()))
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	if got := content(m); !strings.Contains(got, "j/k switch") {
+		t.Fatalf("expected the peek screen after enter, got:\n%s", got)
+	}
+}
+
+// TestNavRightAttachesSelected verifies → attaches the selected session
+// directly, skipping peek.
+func TestNavRightAttachesSelected(t *testing.T) {
+	m := newTestApp(t, newFakeSup(appTestRoster()))
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
+
+	if got := content(m); !strings.Contains(got, "> ▏") {
+		t.Fatalf("expected the attach screen (empty input line) after →, got:\n%s", got)
+	}
+}
+
+// TestNavTabTogglesView verifies tab flips the roster from the flat to the
+// grouped ordering, surfacing its section headers.
+func TestNavTabTogglesView(t *testing.T) {
+	m := newTestApp(t, newFakeSup(appTestRoster()))
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyTab})
+
+	if got := content(m); !strings.Contains(got, "Working") || !strings.Contains(got, "Needs input") {
+		t.Fatalf("expected grouped-view section headers after tab, got:\n%s", got)
+	}
+}
+
+// TestNavDispatchCreatesSession verifies typing into the dispatch bar and
+// pressing enter dispatches the prompt to Supervisor.Create.
+func TestNavDispatchCreatesSession(t *testing.T) {
+	sup := newFakeSup(appTestRoster())
+	m := newTestApp(t, sup)
+
+	m = type_(t, m, "fix the flaky peek test")
+	press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	if len(sup.created) != 1 || sup.created[0] != "fix the flaky peek test" {
+		t.Fatalf("sup.created = %v; want one entry %q", sup.created, "fix the flaky peek test")
+	}
+}
+
+// TestNavAttachSendsPrompt verifies typing into the attach input and
+// pressing enter sends the prompt to Supervisor.Send for the attached
+// session.
+func TestNavAttachSendsPrompt(t *testing.T) {
+	sup := newFakeSup(appTestRoster())
+	m := newTestApp(t, sup)
+
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected (working) session
+	m = type_(t, m, "status?")
+	press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	want := "0192a1b2-appt-7000-8000-000000000001:status?"
+	if len(sup.sent) != 1 || sup.sent[0] != want {
+		t.Fatalf("sup.sent = %v; want one entry %q", sup.sent, want)
+	}
+}
+
+// TestNavKillWorkingSession verifies ctrl-x on a working (non-finished)
+// session kills it rather than archiving it.
+func TestNavKillWorkingSession(t *testing.T) {
+	sup := newFakeSup(appTestRoster())
+	m := newTestApp(t, sup)
+
+	press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl})
+
+	want := "kill:0192a1b2-appt-7000-8000-000000000001"
+	if len(sup.ops) != 1 || sup.ops[0] != want {
+		t.Fatalf("sup.ops = %v; want one entry %q", sup.ops, want)
+	}
+}
+
+// TestNavAttachLeftBacksOutWhenEmpty verifies ← in the attach screen backs
+// out to the overview only when the input buffer is empty.
+func TestNavAttachLeftBacksOutWhenEmpty(t *testing.T) {
+	m := newTestApp(t, newFakeSup(appTestRoster()))
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach
+
+	if got := content(m); !strings.Contains(got, "> ▏") {
+		t.Fatalf("expected the attach screen before ←, got:\n%s", got)
+	}
+
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyLeft})
+
+	if got := content(m); !strings.Contains(got, "enter peek") {
+		t.Fatalf("expected ← with an empty input to back out to the overview, got:\n%s", got)
+	}
+}
