@@ -80,7 +80,7 @@ func runResume(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 	// Ctrl-C interrupts the continued turn.
 	ctx, stop := interruptCtx(ctx)
 	defer stop()
-	if useTUI(*asJSON, true, stdout) {
+	if useTUI(*asJSON, stdinIsTTY(), interactiveTTY(stdout)) {
 		return driveTUI(ctx, r, prompt, stdout, stderr)
 	}
 	return driveSession(ctx, r, prompt, *asJSON, stdout, stderr)

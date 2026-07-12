@@ -52,36 +52,28 @@ func TestStdinIsTTY(t *testing.T) {
 }
 
 func TestUseTUI(t *testing.T) {
-	// A *bytes.Buffer stdout is never a terminal, so useTUI must be false
-	// regardless of the other inputs — this is the path every existing
-	// test/CI invocation takes today, and it must keep resolving to
-	// driveSession.
 	tests := []struct {
-		name           string
-		asJSON         bool
-		promptFromArgs bool
+		name      string
+		asJSON    bool
+		stdinTTY  bool
+		stdoutTTY bool
+		want      bool
 	}{
-		{name: "json flag, prompt from args", asJSON: true, promptFromArgs: true},
-		{name: "no json, prompt from args", asJSON: false, promptFromArgs: true},
-		{name: "no json, prompt from stdin", asJSON: false, promptFromArgs: false},
-		{name: "json flag, prompt from stdin", asJSON: true, promptFromArgs: false},
+		// The key case: both stdio are terminals and --json is off → TUI,
+		// regardless of whether the prompt came from args or the interactive
+		// `prompt>` read (prompt source is no longer a factor).
+		{name: "both TTY, no json", asJSON: false, stdinTTY: true, stdoutTTY: true, want: true},
+		{name: "json forces the renderer", asJSON: true, stdinTTY: true, stdoutTTY: true, want: false},
+		{name: "piped stdin stays line-rendered", asJSON: false, stdinTTY: false, stdoutTTY: true, want: false},
+		{name: "redirected stdout stays line-rendered", asJSON: false, stdinTTY: true, stdoutTTY: false, want: false},
+		{name: "neither TTY", asJSON: false, stdinTTY: false, stdoutTTY: false, want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if useTUI(tt.asJSON, tt.promptFromArgs, &bytes.Buffer{}) {
-				t.Fatal("useTUI with a non-terminal stdout must be false")
+			if got := useTUI(tt.asJSON, tt.stdinTTY, tt.stdoutTTY); got != tt.want {
+				t.Errorf("useTUI(asJSON=%v, stdinTTY=%v, stdoutTTY=%v) = %v, want %v",
+					tt.asJSON, tt.stdinTTY, tt.stdoutTTY, got, tt.want)
 			}
 		})
-	}
-
-	// asJSON=true and promptFromArgs=false are each independently
-	// sufficient to force the renderer, ahead of the TTY checks in the &&
-	// chain — lock that in explicitly rather than relying only on the
-	// non-terminal stdout above to mask it.
-	if useTUI(true, true, &bytes.Buffer{}) {
-		t.Fatal("--json must force driveSession even with a prompt from args")
-	}
-	if useTUI(false, false, &bytes.Buffer{}) {
-		t.Fatal("a stdin-sourced prompt must force driveSession")
 	}
 }

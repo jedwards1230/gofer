@@ -143,7 +143,7 @@ func runRun(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 	_, _ = fmt.Fprintf(stderr, "gofer run: session %s\n", r.ID())
 	_, _ = fmt.Fprintf(stderr, "gofer run: journal %s\n", r.JournalPath())
 
-	if useTUI(*asJSON, promptFromArgs, stdout) {
+	if useTUI(*asJSON, stdinIsTTY(), interactiveTTY(stdout)) {
 		return driveTUI(ctx, r, prompt, stdout, stderr)
 	}
 	return driveSession(ctx, r, prompt, *asJSON, stdout, stderr)
