@@ -129,7 +129,13 @@ across the rest of the M2 stack:
   the transcript itself, since ACP's `session/prompt` response carries no
   usage/cost. Permission approvals are not relayed by the daemon at all in
   M2 (that lands with M3's approvals UX) — nothing in the reconstructed
-  transcript represents them yet. `gofer attach <session>` resolves and
+  transcript represents them yet. Crucially, this is not a stall risk for the
+  phone test: M2 runs tools with **no approval gate** (the loop's permission
+  hook seam is unwired until M3, so tool calls execute unconditionally — the
+  same permissive behavior as local `gofer run`). A phone-driven, tool-using
+  turn therefore **auto-proceeds to completion** and never hangs waiting for
+  an approval that could not be delivered over the daemon. `gofer attach
+  <session>` resolves and
   confirms the id up front but, absent a TUI deep-link affordance, still
   opens on the overview screen rather than straight into that session's
   attach view — select it from there.
