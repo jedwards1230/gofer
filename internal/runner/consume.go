@@ -16,50 +16,55 @@ type toolSeed struct {
 	Input json.RawMessage
 }
 
-// turnAcc accumulates one model-call iteration's settled output across
-// events. It cannot flush strictly on turn.finished: for a tool-use
-// iteration the loop publishes turn.finished *before* it executes the
-// requested tools (execution, and each tool.call.finished, happens
-// afterward, in the same iteration, before the next turn.started). A turn is
-// only fully settled — safe to journal — once turn.finished has been seen
-// *and* every tool call it announced has a matching result.
+// turnAcc accumulates one model-call iteration's settled output across events,
+// then journals it in two independently-flushed parts:
+//
+//   - The assistant MESSAGE (text/reasoning + usage) flushes at turn.finished,
+//     which is when usage arrives. This is deliberately decoupled from tool
+//     execution: the loop emits turn.finished for a tool-use iteration *before*
+//     it runs the tools, so gating the message flush on tool results would lose
+//     already-settled text if the run is killed while a tool call is still
+//     streaming (started, no result) — the tool.call.finished that would drain
+//     `pending` never arrives.
+//   - The tool ROUND flushes once every announced call has a result (pending
+//     drained), which for a tool-use turn happens after turn.finished.
+//
+// Tools only run on a StopToolUse turn; on any other stop reason (end_turn,
+// cancelled, error, …) the loop returns without executing pending calls, so
+// those orphaned started-but-unexecuted calls are dropped — never left to wedge
+// the accumulator or to emit a dangling tool_use with no matching result.
 type turnAcc struct {
-	text      strings.Builder
-	reasoning strings.Builder
-	pending   map[string]toolSeed
-	done      []session.ToolCallRecord
-	usage     provider.Usage
-	settled   bool // turn.finished observed for the iteration in progress
+	text       strings.Builder
+	reasoning  strings.Builder
+	usage      provider.Usage
+	msgFlushed bool // assistant message entry already written for this turn
+	pending    map[string]toolSeed
+	done       []session.ToolCallRecord
+	finished   bool // turn.finished observed for the iteration in progress
 }
 
 func newTurnAcc() *turnAcc {
 	return &turnAcc{pending: make(map[string]toolSeed)}
 }
 
-// ready reports whether the accumulated iteration is fully settled: its
-// turn.finished has arrived and no tool call it started is still pending a
-// result.
-func (a *turnAcc) ready() bool {
-	return a.settled && len(a.pending) == 0
-}
-
 // reset clears the accumulator for the next iteration.
 func (a *turnAcc) reset() {
 	a.text.Reset()
 	a.reasoning.Reset()
+	a.usage = provider.Usage{}
+	a.msgFlushed = false
 	for id := range a.pending {
 		delete(a.pending, id)
 	}
 	a.done = nil
-	a.usage = provider.Usage{}
-	a.settled = false
+	a.finished = false
 }
 
 // consume drains sub until the broker closes it, journaling each iteration's
-// settled output as soon as it is ready (see turnAcc). It runs on its own
-// goroutine for the lifetime of the Runner; Close waits for it to finish
-// draining before closing the journal, so a killed run's already-settled
-// prefix is guaranteed durable once Close returns.
+// settled output as it settles (see turnAcc). It runs on its own goroutine for
+// the lifetime of the Runner; Close waits for it to finish draining before
+// closing the journal, so a killed run's already-settled prefix is guaranteed
+// durable once Close returns.
 func (r *Runner) consume(sub *event.Subscription) {
 	defer close(r.journalDone)
 
@@ -88,46 +93,74 @@ func (r *Runner) consume(sub *event.Subscription) {
 				// IsError: tool.call.finished carries no error flag (an SDK
 				// contract gap at M1 — see docs/M1-PROOF.md) — default false.
 			})
-			if acc.ready() {
-				r.flushTurn(acc)
-				acc.reset()
-			}
+			r.maybeFlushRound(acc)
 
 		case event.TurnFinished:
 			acc.usage = ev.Usage
-			acc.settled = true
-			if acc.ready() {
-				r.flushTurn(acc)
-				acc.reset()
+			acc.finished = true
+			// The assistant message has settled (usage is available); flush it
+			// now, independent of any tool round, so a kill during tool-call
+			// streaming cannot strand already-settled text/reasoning.
+			r.flushMessage(acc)
+			if ev.StopReason != string(provider.StopToolUse) {
+				// Tools run only on a tool_use stop; on any other stop reason the
+				// loop returns without executing them, so no tool.call.finished
+				// will arrive. Drop the orphaned started-but-unexecuted calls
+				// rather than wedge the accumulator forever.
+				for id := range acc.pending {
+					delete(acc.pending, id)
+				}
 			}
+			r.maybeFlushRound(acc)
 		}
 	}
+
+	// Belt-and-suspenders: if the stream tore down with settled text that never
+	// saw a turn.finished (an out-of-band teardown), persist it rather than
+	// silently dropping it. No-op after a normal reset or an already-flushed
+	// message.
+	r.flushMessage(acc)
 }
 
-// flushTurn appends the accumulator's settled output to the journal: an
-// assistant message entry when the iteration produced text or reasoning, and
-// a tool-round entry when it produced tool calls. Either, both, or neither
-// may apply to a given iteration.
-func (r *Runner) flushTurn(acc *turnAcc) {
+// flushMessage appends the assistant message entry (settled text/reasoning +
+// usage) at most once per turn. It no-ops when nothing textual settled or the
+// entry was already written.
+func (r *Runner) flushMessage(acc *turnAcc) {
+	if acc.msgFlushed {
+		return
+	}
 	text := acc.text.String()
 	reasoning := acc.reasoning.String()
-	if text != "" || reasoning != "" {
-		opts := []session.EntryOpt{
-			session.WithEntryModel(r.model),
-			session.WithEntryUsage(acc.usage),
-		}
-		if reasoning != "" {
-			opts = append(opts, session.WithReasoning(reasoning))
-		}
-		if _, err := r.journal.Append(session.NewMessageEntry("assistant", text, opts...)); err != nil {
-			r.setJournalWriteErr(err)
-		}
+	if text == "" && reasoning == "" {
+		return
 	}
+	opts := []session.EntryOpt{
+		session.WithEntryModel(r.model),
+		session.WithEntryUsage(acc.usage),
+	}
+	if reasoning != "" {
+		opts = append(opts, session.WithReasoning(reasoning))
+	}
+	if _, err := r.journal.Append(session.NewMessageEntry("assistant", text, opts...)); err != nil {
+		r.setJournalWriteErr(err)
+	}
+	acc.msgFlushed = true
+}
 
+// maybeFlushRound appends the tool-round entry once the turn has finished and
+// every announced call has a result (pending drained), then resets the
+// accumulator for the next iteration. It no-ops while calls are still pending —
+// a tool-use turn between its turn.finished and its tool results — and while the
+// turn has not finished.
+func (r *Runner) maybeFlushRound(acc *turnAcc) {
+	if !acc.finished || len(acc.pending) > 0 {
+		return
+	}
 	if len(acc.done) > 0 {
 		entry := session.NewToolRoundEntry(acc.done, session.WithEntryModel(r.model))
 		if _, err := r.journal.Append(entry); err != nil {
 			r.setJournalWriteErr(err)
 		}
 	}
+	acc.reset()
 }
