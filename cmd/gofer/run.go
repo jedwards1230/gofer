@@ -32,6 +32,7 @@ func runRun(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 		return err
 	}
 
+	promptFromArgs := len(fs.Args()) > 0
 	prompt, ok, err := resolvePrompt(fs.Args(), stdin)
 	if err != nil {
 		return err
@@ -58,5 +59,8 @@ func runRun(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 	_, _ = fmt.Fprintf(stderr, "gofer run: session %s\n", r.ID())
 	_, _ = fmt.Fprintf(stderr, "gofer run: journal %s\n", r.JournalPath())
 
+	if useTUI(*asJSON, promptFromArgs, stdout) {
+		return driveTUI(ctx, r, prompt, stdout, stderr)
+	}
 	return driveSession(ctx, r, prompt, *asJSON, stdout, stderr)
 }

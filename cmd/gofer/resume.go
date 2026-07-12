@@ -53,7 +53,13 @@ func runResume(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 	_, _ = fmt.Fprintf(stderr, "gofer resume: session %s\n", r.ID())
 	_, _ = fmt.Fprintf(stderr, "gofer resume: journal %s\n", r.JournalPath())
 
-	return driveSession(ctx, r, strings.Join(promptArgs, " "), *asJSON, stdout, stderr)
+	prompt := strings.Join(promptArgs, " ")
+	// promptArgs is non-empty here (see the len(promptArgs) == 0 branch
+	// above), so a resume prompt always comes from CLI arguments.
+	if useTUI(*asJSON, true, stdout) {
+		return driveTUI(ctx, r, prompt, stdout, stderr)
+	}
+	return driveSession(ctx, r, prompt, *asJSON, stdout, stderr)
 }
 
 // printTranscript writes r's current folded context as a plain-text
