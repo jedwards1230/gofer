@@ -159,8 +159,8 @@ phone-home.
 | Stage | Ships | Proof |
 |---|---|---|
 | **M0 · scaffold** ✅ shipped 2026-07-12 | repo + `gofer demo` streaming the SDK faux provider | typed events flow end-to-end offline |
-| M1 · one good session | real provider + tools via SDK, minimal attach TUI | a real coding task, streaming, resumable after kill |
-| M2 · the daemon | supervisor + roster + overview⇄peek⇄attach + native ACP | an ACP client on a phone drives a session on a laptop |
+| **M1 · one good session** ✅ shipped 2026-07-12 | real provider + tools via SDK, minimal attach TUI | a real coding task, streaming, resumable after kill |
+| **M2 · the daemon** ✅ shipped 2026-07-13 | supervisor + roster + overview⇄peek⇄attach + native ACP | an ACP client on a phone drives a session on a laptop |
 | M3 · guardrails | approvals UX + grants + sandbox + headless exec | Claude Code `settings.json` honored; approval from the phone |
 | M4 · ecosystem | MCP + skills + plugins surfaced in the TUI | a third-party plugin adds a tool with one config line |
 | M5 · auto + polish | auto mode (reviewer pipeline), CC-asset import, mDNS pairing | auto mode survives a week of real ops without a bad allow |

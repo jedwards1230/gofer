@@ -97,9 +97,8 @@ roster by polling `Supervisor.Roster` on a timer (the supervisor's roster is
 pull-based) and drives one live `event.Subscription` at a time for the
 peeked/attached session, issuing the same create/send/interrupt/kill/archive
 Ops an ACP client would. Switching sessions closes the old subscription and
-stale events (tagged with a since-left session id) are dropped. It has no cmd
-wiring yet — a thin adapter bridges the concrete daemon supervisor to this
-`Supervisor` interface once both land on the integration branch.
+stale events (tagged with a since-left session id) are dropped. A thin adapter
+now bridges the concrete daemon supervisor to this `Supervisor` interface.
 
 These patterns are adapted from Claude Code's agent-roster and collapsed
 tool-block rendering — a status-count header, grouped sections, a one-line
@@ -110,10 +109,10 @@ for gofer's Event/Op model.
 header line `‹glyph› tool(args)` (streaming glyph while the call runs, ok glyph
 once done), then the result tree-indented beneath — the first line on a `└`,
 up to two more indented, and any remainder collapsed to `… +N lines`. A failed
-call reuses the ok glyph until the SDK carries an error flag on
-`ToolCallFinished`. Because a tool item now spans several lines, the transcript
-renderers flatten every item to its lines before width-truncating and
-height-windowing.
+call reuses the ok glyph: the SDK now carries `IsError` on `ToolCallFinished`,
+but the transcript renderer doesn't yet style the failure glyph. Because a
+tool item now spans several lines, the transcript renderers flatten every
+item to its lines before width-truncating and height-windowing.
 
 ## Two trees, one renderer
 

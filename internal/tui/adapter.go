@@ -11,11 +11,11 @@ import (
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
 
-// InterruptMsg is reserved for the daemon-era interrupt Op: once gofer has a
-// daemon to send it to, esc will publish this instead of quitting outright,
-// and a caller wiring [Program] into a live session will send the
-// corresponding interrupt Op on receiving it. M1 has no daemon, so esc quits
-// the attach [tea.Program] directly (see handleKey) — driveTUI in
+// InterruptMsg is reserved for an interrupt Op: once this [Program] is wired
+// to a live daemon session, esc will publish this instead of quitting
+// outright, and a caller will send the corresponding interrupt Op on
+// receiving it. This minimal in-process attach path has no such wiring, so
+// esc quits the attach [tea.Program] directly (see handleKey) — driveTUI in
 // cmd/gofer treats that quit as a cancellation of the in-flight run, the
 // same as ctrl-c.
 type InterruptMsg struct{}
