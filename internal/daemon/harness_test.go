@@ -33,7 +33,15 @@ const defaultWait = 5 * time.Second
 // per-turn).
 func newTestSupervisor(t *testing.T, newProvider func() provider.Provider) *supervisor.Supervisor {
 	t.Helper()
-	root := t.TempDir()
+	return newTestSupervisorAtRoot(t, t.TempDir(), newProvider)
+}
+
+// newTestSupervisorAtRoot is [newTestSupervisor] with an explicit store root
+// instead of a fresh t.TempDir() — the seam a daemon-restart test uses to
+// build a second Supervisor over the exact same on-disk root once the first
+// is closed.
+func newTestSupervisorAtRoot(t *testing.T, root string, newProvider func() provider.Provider) *supervisor.Supervisor {
+	t.Helper()
 	store, err := session.NewFileStore(session.WithRoot(root))
 	if err != nil {
 		t.Fatalf("session.NewFileStore: %v", err)

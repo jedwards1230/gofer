@@ -201,6 +201,18 @@ func handleSessionNew(d *Daemon, ctx context.Context, _ *peer, params json.RawMe
 // needed to keep replay and live streaming from corrupting each other's
 // frames — only their relative ordering (which is unspecified once a prompt
 // races a load) is left unguaranteed, and ACP does not require otherwise.
+//
+// Cwd precedence: ACP v1's LoadSessionRequest.cwd is REQUIRED and is the
+// working directory to reload the session into (src/v1/agent.rs), so the
+// client-supplied cwd is authoritative here — via resolveSessionCwd, same as
+// session/new — even though [supervisor.Supervisor.List] can now also read a
+// session's persisted cwd back from its journal (see [handleSessionList]).
+// The persisted cwd is for LISTING (so a client can discover/filter sessions
+// before it has picked one to load), not for overriding what the client
+// explicitly asks to load into; a client is expected to always send a cwd on
+// load per spec. When it sends none, resolveSessionCwd's existing empty-cwd
+// fallback (the daemon's own working directory) applies unchanged — that
+// fallback predates this change and is not replaced by the persisted cwd.
 func handleSessionLoad(d *Daemon, ctx context.Context, p *peer, params json.RawMessage) (any, *rpcError) {
 	op, rerr := decodeOp[event.SessionResume](acp.MethodSessionLoad, params)
 	if rerr != nil {
@@ -264,11 +276,14 @@ const sessionListPageSize = 50
 // archived — see [supervisor.Supervisor.List]), optionally filtered by cwd,
 // newest-first, opaquely paginated at [sessionListPageSize] entries per page.
 //
-// A disk-only (archived) [supervisor.SessionInfo] carries no cwd — the
-// journal does not persist it — so Cwd falls back to the daemon's own
-// working directory for those entries; a cwd filter therefore only ever
-// matches live sessions in M2, which is an accepted limitation (see the
-// task brief).
+// A disk-only (archived, or simply not yet resumed since the daemon last
+// started) [supervisor.SessionInfo] now carries its Cwd, Title, and Updated
+// read back from the journal — see [supervisor.Supervisor.List]'s doc — so a
+// cwd filter matches those sessions too, and they survive a daemon restart
+// with a real title instead of a bare id. The only entries still missing Cwd
+// are legacy journals written before the SDK started persisting it (no
+// session_meta entry); those fall back to the daemon's own working directory
+// below, and a cwd filter simply never matches them.
 func handleSessionList(d *Daemon, ctx context.Context, _ *peer, params json.RawMessage) (any, *rpcError) {
 	var req acp.ListSessionsRequest
 	if len(params) > 0 {
@@ -313,9 +328,10 @@ func handleSessionList(d *Daemon, ctx context.Context, _ *peer, params json.RawM
 	}
 	page := infos[offset:end]
 
-	// daemonCwd is the fallback for a disk-only entry's empty Cwd (see the
-	// doc above); resolved once, best-effort — an error here just leaves the
-	// fallback "" rather than failing the whole request.
+	// daemonCwd is the fallback for a legacy disk-only entry whose journal
+	// predates the SDK's session_meta cwd persistence (see the doc above);
+	// resolved once, best-effort — an error here just leaves the fallback ""
+	// rather than failing the whole request.
 	daemonCwd, _ := os.Getwd()
 
 	sessions := make([]acp.SessionInfo, 0, len(page))

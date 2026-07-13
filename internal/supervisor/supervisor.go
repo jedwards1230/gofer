@@ -435,8 +435,9 @@ func (s *Supervisor) snapshotLive() []SessionInfo {
 // archived/offline alike — overlaying live state from the roster. It walks
 // <root>/sessions/<slug> directories directly and lists each via the shared
 // store, since the SDK exposes no store-wide enumeration. Live entries carry
-// full snapshot data (Status, Cost, ...); disk-only entries carry Live=false
-// and a zero-value Status.
+// full snapshot data (Status, Cost, ...); disk-only entries carry Live=false,
+// a zero-value Status, and are enriched from their journal (see
+// [diskSessionInfo]) — Cwd, Title, and Updated all survive a process restart.
 func (s *Supervisor) List(ctx context.Context) ([]SessionInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -468,15 +469,66 @@ func (s *Supervisor) List(ctx context.Context) ([]SessionInfo, error) {
 				out = append(out, info)
 				continue
 			}
-			out = append(out, SessionInfo{
-				ID:          id,
-				Project:     slug,
-				JournalPath: filepath.Join(sessionsDir, slug, id+".jsonl"),
-				Live:        false,
-			})
+			path := filepath.Join(sessionsDir, slug, id+".jsonl")
+			out = append(out, diskSessionInfo(id, slug, path))
 		}
 	}
 	return out, nil
+}
+
+// diskSessionInfo builds a disk-only [SessionInfo] for id under slug at path,
+// enriched from the journal read-only via [session.ReadEntries] (no append
+// handle is opened — List never resumes a session just to enumerate it):
+//
+//   - Cwd comes from the journal's [session.EntryMeta] root entry (see
+//     [session.NewMetaEntry]), always its first entry when present. A legacy
+//     journal written before the SDK started persisting cwd has no meta
+//     entry, so Cwd is left "" — the caller falls back to some other default
+//     (see [handleSessionList]'s daemonCwd fallback in package daemon).
+//   - Title mirrors how a live session derives it (see managed.go's
+//     enqueue/snippet): an excerpt of the first user-role message's text.
+//   - Created and Updated come from the first and last entry's Time.
+//
+// A read error, or a journal with no entries at all, degrades to the bare
+// {ID, Project, JournalPath, Live:false} snapshot rather than failing the
+// whole List — one unreadable journal must never hide every other session.
+func diskSessionInfo(id, slug, path string) SessionInfo {
+	info := SessionInfo{
+		ID:          id,
+		Project:     slug,
+		JournalPath: path,
+		Live:        false,
+	}
+
+	entries, err := session.ReadEntries(path)
+	if err != nil || len(entries) == 0 {
+		return info
+	}
+
+	info.Created = entries[0].Time
+	info.Updated = entries[len(entries)-1].Time
+
+	if entries[0].Type == session.EntryMeta {
+		if meta, metaErr := entries[0].Meta(); metaErr == nil {
+			info.Cwd = meta.Cwd
+		}
+	}
+
+	for _, e := range entries {
+		if e.Type != session.EntryMessage {
+			continue
+		}
+		msg, msgErr := e.Message()
+		if msgErr != nil || msg.Role != provider.RoleUser {
+			continue
+		}
+		if text := msg.Text(); text != "" {
+			info.Title = snippet(text)
+			break
+		}
+	}
+
+	return info
 }
 
 // Subscribe returns a live event subscription for id. Errors with

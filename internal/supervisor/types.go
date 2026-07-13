@@ -109,9 +109,10 @@ type SessionInfo struct {
 	Queued      int
 	Live        bool // false for disk-only archived entries from List
 
-	// Cwd is the working directory a live session was created/resumed
-	// into. Populated for live sessions only — the on-disk journal does not
-	// persist it, so a disk-only entry from [Supervisor.List] leaves this
-	// "".
+	// Cwd is the working directory the session was created/resumed into.
+	// Live sessions carry it from their [managed] bookkeeping; a disk-only
+	// entry from [Supervisor.List] reads it back from the journal's
+	// [session.EntryMeta] root entry (see [diskSessionInfo]) and leaves it ""
+	// only for a legacy journal written before the SDK persisted it.
 	Cwd string
 }
