@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/coder/websocket"
 
@@ -96,9 +97,22 @@ func TestSessionLoadReplaysHistoryBeforeResponse(t *testing.T) {
 	// would build from this session's current folded history, independent of
 	// the daemon's handler, so the wire assertions below aren't just checking
 	// the handler against itself.
+	//
+	// session/prompt returns on the turn.finished EVENT, but the runner
+	// journals the turn asynchronously — so the oracle (this History read) and
+	// the session/load replay below must both observe a SETTLED journal to
+	// agree. Reading mid-journal (e.g. only the user message present) is what
+	// made this flake in CI. Poll until the folded history stops growing.
 	msgs, err := sup.History(context.Background(), sid)
 	if err != nil {
 		t.Fatalf("History: %v", err)
+	}
+	for prev := -1; len(msgs) != prev; {
+		prev = len(msgs)
+		time.Sleep(20 * time.Millisecond)
+		if msgs, err = sup.History(context.Background(), sid); err != nil {
+			t.Fatalf("History: %v", err)
+		}
 	}
 	wantNotifs := acp.ReplayNotifications(sid, msgs)
 	if len(wantNotifs) == 0 {
