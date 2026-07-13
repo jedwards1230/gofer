@@ -19,15 +19,23 @@ import (
 // acp package (it is written for gofer to play the agent/server role, not
 // the client role); this is gofer's own client-side projection.
 //
-// # Single demuxer, one goroutine, two inputs
+// It also, via [Supervisor.loadHistory]/[Supervisor.finishLoad], replays a
+// session's settled history through this SAME reconstruction path the first
+// time this bridge ever references it — see loadHistory's doc below for the
+// full design (why it must run off the demuxer goroutine, and how it
+// guarantees history is applied before any live event for the same session).
+//
+// # Single demuxer, one goroutine, three inputs
 //
 // [New] starts exactly one demux goroutine. It is the sole reader of
 // [daemon.Client.Notifications] (required: Client's doc states any caller
-// issuing a call that streams notifications — session/prompt — needs a peer
-// goroutine draining Notifications concurrently, or the read loop stalls
-// behind a full buffer) and the sole reader of turnEndCh, the internal
-// channel [Supervisor.Send] posts its turn's outcome to once the daemon's
-// session/prompt Call resolves. Because it is the only goroutine that ever
+// issuing a call that streams notifications — session/prompt, session/load —
+// needs a peer goroutine draining Notifications concurrently, or the read
+// loop stalls behind a full buffer); the sole reader of turnEndCh, the
+// internal channel [Supervisor.Send] posts its turn's outcome to once the
+// daemon's session/prompt Call resolves; and the sole reader of loadCh, the
+// analogous channel [Supervisor.loadHistory] posts to once the daemon's
+// session/load Call resolves. Because it is the only goroutine that ever
 // mutates a sessionState's open-message fields or publishes to a session's
 // broker for the reconstruction path, event ordering within one session's
 // stream is entirely determined by this goroutine's own sequential
@@ -81,6 +89,12 @@ import (
 // semantics (a sent value persists until some receive takes it; a single
 // consumer cannot miss what it hasn't yet received) plus the wire-order
 // invariant above — not on scheduling luck.
+//
+// The identical argument, substituting handleSessionLoad for
+// handleSessionPrompt and loadCh/finishLoad for turnEndCh/handleTurnEnd,
+// establishes that every notification a session/load replayed is drained
+// (and applied) before [Supervisor.finishLoad] flushes the replay's last
+// open message and closes rec.loadDone — see [Supervisor.loadHistory]'s doc.
 func (s *Supervisor) demux() {
 	defer s.wg.Done()
 	defer s.closeAllBrokers()
@@ -94,6 +108,9 @@ func (s *Supervisor) demux() {
 		case te := <-s.turnEndCh:
 			s.drainNotifications()
 			s.handleTurnEnd(te)
+		case rec := <-s.loadCh:
+			s.drainNotifications()
+			s.finishLoad(rec)
 		}
 	}
 }
@@ -148,6 +165,16 @@ type turnEnd struct {
 // flushes any open message and publishes the terminal
 // SessionError/TurnFinished pair (see handleTurnEnd).
 //
+// Before publishing anything, Send waits on rec.loadDone: for a session
+// this bridge is referencing for the first time (rec.loadDone was just
+// opened by session's call to loadHistory), this blocks until that
+// session's history replay has been fully applied — see loadHistory's doc
+// for why this is the piece that makes "history before any live event"
+// actually hold, not just "history requested before any live event". For
+// every other session (already loaded, or registerFresh'd as history-free at
+// Create time), rec.loadDone is already closed and this is a non-blocking
+// no-op.
+//
 // The prompt Call runs against context.Background(), not ctx: like
 // cmd/gofer's driveDaemonSession, a turn started this way outlives the
 // call that started it (the App always calls Send with context.Background()
@@ -163,6 +190,11 @@ func (s *Supervisor) Send(_ context.Context, sessionID, prompt string) error {
 	rec := s.session(sessionID)
 	if rec == nil {
 		return nil // supervisor closed: a Send is a no-op
+	}
+	select {
+	case <-rec.loadDone:
+	case <-s.closed:
+		return nil
 	}
 	rec.broker.Publish(event.NewTurnStarted(sessionID))
 
@@ -212,12 +244,102 @@ func (s *Supervisor) handleTurnEnd(te turnEnd) {
 	rec.broker.Publish(event.NewTurnFinished(te.sessionID, te.stopReason, provider.Usage{}))
 }
 
+// loadHistory issues session/load for rec.id — the reconstruction's answer
+// to the M1 bug this exists to fix: attaching over the daemon rendered a
+// blank transcript even for a session with prior turns, because reconstruct.go
+// only ever built a session's [event.Event] stream from LIVE notifications.
+// [Supervisor.session] starts loadHistory on its own goroutine at most once
+// per session id — see its doc — the moment this bridge references a session
+// it did not itself just Create (which pre-registers via registerFresh
+// instead, skipping the load entirely: a brand-new session has no history).
+//
+// # Why this must run off the demuxer goroutine
+//
+// [daemon.Client]'s single read loop demuxes both call responses and
+// notifications onto, respectively, a per-call channel and the shared
+// Notifications channel (64-slot buffer) — see its doc. handleSessionLoad
+// (internal/daemon/handlers.go) writes every replay notification to the wire
+// strictly before the session/load response, so that response can only be
+// read once every replay notification has already been enqueued onto
+// Notifications. If the demuxer goroutine — Notifications' ONLY consumer —
+// were the one blocked awaiting that response (i.e. if it issued this Call
+// inline instead of handing it to a dedicated goroutine), a session whose
+// history exceeds the buffer's 64 slots would deadlock: the read loop's
+// blocking send of the 65th replay notification would never complete, since
+// nothing would be left to drain the channel, so the response — and every
+// notification behind it — could never arrive either. Running the Call on
+// its own goroutine, exactly the pattern [Supervisor.Send] already uses for
+// session/prompt, keeps the demuxer free to keep draining Notifications (and
+// therefore keep accepting replay notifications) throughout the load.
+//
+// # Ordering: history before any live event for the same session
+//
+// loadHistory itself never touches rec's broker or open-message state — that
+// stays demuxer-only (see sessionState's doc) — it only issues the RPCs and
+// hands rec off to the demuxer via loadCh once the Call resolves, success or
+// failure alike (a failed load — e.g. an id the daemon doesn't recognize —
+// just leaves the session starting from whatever live events arrive next,
+// the pre-existing M1 behavior, rather than failing attach outright). The
+// demuxer's loadCh case (see demux) drains every notification still
+// buffered before calling [Supervisor.finishLoad] — by the identical
+// wire-order argument demux's doc makes for turnEndCh/handleTurnEnd, that
+// drain is guaranteed to forward every notification this load replayed —
+// and finishLoad flushes any message the replay left open before closing
+// rec.loadDone. [Supervisor.Send] waits on rec.loadDone before publishing or
+// dispatching anything for a session (see its doc), so a live turn this
+// bridge itself starts can never race a still-settling history replay onto
+// the broker ahead of it. A session/prompt from a DIFFERENT peer's
+// connection cannot race it at all: the daemon only ever pushes
+// session/update notifications to the peer whose own call produced them
+// (see handleSessionPrompt's and handleSessionLoad's *peer-scoped p.notify
+// calls) — this bridge's connection only ever sees replay/live notifications
+// it itself asked for.
+func (s *Supervisor) loadHistory(rec *sessionState) {
+	ctx := context.Background()
+	cwd := s.sessionCwd(ctx, rec.id)
+	_, _ = s.client.Call(ctx, acp.MethodSessionLoad, acp.LoadSessionRequest{SessionID: rec.id, Cwd: cwd})
+	select {
+	case s.loadCh <- rec:
+	case <-s.closed:
+	}
+}
+
+// finishLoad settles rec's history load. Called from the demuxer only after
+// drainNotifications has exhaustively forwarded every notification currently
+// buffered (see demux's loadCh case and loadHistory's doc), so every
+// session/update this load replayed has already been applied via
+// handleNotification by the time this runs. It flushes any message left open
+// by that replay — [acp.ReplayNotifications] has no turn.finished-equivalent
+// boundary of its own; an ordinary delta only closes on a kind change, a
+// tool_call, or a live turn ending (see flushOpenMessage/handleTurnEnd), none
+// of which a history replay ever produces — before closing rec.loadDone,
+// unblocking any [Supervisor.Send] waiting on it. Without this flush, a live
+// turn starting with the same message kind the replay ended on would
+// silently keep appending onto that stale historical item instead of
+// starting a fresh one.
+func (s *Supervisor) finishLoad(rec *sessionState) {
+	s.flushOpenMessage(rec)
+	close(rec.loadDone)
+}
+
 // handleNotification decodes one inbound notification and applies it to its
 // session's reconstruction state. Only session/update notifications carry
 // reconstructable state (the M2 daemon never sends any other notification
 // method — see internal/daemon's package doc); anything else, or anything
 // that fails to decode (a protocol drift, not a reason to crash the
 // reconstruction), is dropped.
+//
+// Its s.session(w.SessionID) call below will, in practice, always find an
+// already-mapped entry rather than create one: this connection only ever
+// receives a notification for a session because THIS bridge's own Send or
+// loadHistory issued the Call that produced it (see loadHistory's doc on
+// per-peer notification scoping), and both of those already reference the
+// session — creating its entry and, for loadHistory, starting the load — via
+// session() before dispatching their Call. The lookup-or-create fallback
+// here exists only so a genuinely unexpected notification (a protocol drift)
+// degrades to "reconstruct into a fresh, unloaded broker" rather than a nil
+// dereference, not because this path is expected to fire in normal
+// operation.
 func (s *Supervisor) handleNotification(n daemon.Notification) {
 	if n.Method != acp.MethodSessionUpdate {
 		return
@@ -245,11 +367,16 @@ func (s *Supervisor) handleNotification(n daemon.Notification) {
 	case "tool_call_update":
 		s.handleToolCallUpdate(rec, w.Update)
 	default:
-		// Unrecognized/future session/update variant (e.g. user_message_chunk,
-		// which this daemon never emits per acp.ToSessionUpdate's doc): no
-		// event.Event projection exists for it in the minimal attach surface,
-		// so it is accepted and ignored, mirroring tui.Model.Ingest's own
-		// tolerance of event kinds it doesn't render.
+		// Unrecognized/future session/update variant: no event.Event
+		// projection exists for it in the minimal attach surface, so it is
+		// accepted and ignored, mirroring tui.Model.Ingest's own tolerance of
+		// event kinds it doesn't render. user_message_chunk is the one
+		// variant actually seen here in practice — [acp.ToSessionUpdate]
+		// (the LIVE projection, driving handleSessionPrompt) never emits it
+		// per its own doc, but [acp.ReplayNotifications] (the HISTORY
+		// projection loadHistory triggers) does, once per persisted user
+		// turn; tui.Model never renders past user turns either way (see its
+		// Ingest), so dropping it here is consistent, not a regression.
 	}
 }
 

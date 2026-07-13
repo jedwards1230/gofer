@@ -90,6 +90,16 @@ func newBridge(t *testing.T, url string) *daemonbridge.Supervisor {
 // faux.Default(): one turn, 2 reasoning deltas + 3 text deltas, end_turn.
 func fauxProvider() provider.Provider { return faux.New(faux.Default()) }
 
+// twoTurnFauxProvider returns a provider.Provider constructor replaying
+// faux.Default()'s single turn TWICE — one Stream call per turn, per
+// [faux.Script]'s doc — so a session driven by it can take a first turn (used
+// to seed history), then, once resumed on a fresh connection, a second,
+// live-reconstructed turn with byte-identical content to the first.
+func twoTurnFauxProvider() provider.Provider {
+	turn := faux.Default().Turns[0]
+	return faux.New(faux.Script{Turns: []faux.Turn{turn, turn}})
+}
+
 // drainEvents reads exactly n events from sub, failing the test if it times
 // out or the subscription closes early.
 func drainEvents(t *testing.T, sub *event.Subscription, n int) []event.Event {
@@ -210,6 +220,175 @@ func TestSendReconstructsTranscript(t *testing.T) {
 	case e, ok := <-sub.C:
 		if ok {
 			t.Errorf("unexpected extra event after TurnFinished: %+v", e)
+		}
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// wantMessage asserts events[start:] begins with a MessageStarted(kind), one
+// or more MessageDelta events, then a MessageFinished(kind, content) —
+// failing with ctx as a label prefix on any mismatch — and returns the index
+// of the first event after that run. The delta count is intentionally
+// unchecked (and so unbounded) here: a history replay always folds a
+// message into exactly one delta (see [acp.ReplayNotifications]), while a
+// live turn deltas exactly as the provider script does (see
+// TestSendReconstructsTranscript), so a caller comparing the two shapes for
+// the SAME scripted content chains wantMessage calls rather than hardcoding
+// either count.
+func wantMessage(t *testing.T, ctx string, events []event.Event, start int, kind event.MessageKind, content string) int {
+	t.Helper()
+	i := start
+	started, ok := events[i].(event.MessageStarted)
+	if !ok || started.MessageKind != kind {
+		t.Fatalf("%s: event %d = %+v, want MessageStarted(kind=%v)", ctx, i, events[i], kind)
+	}
+	i++
+	for i < len(events) {
+		if _, ok := events[i].(event.MessageDelta); !ok {
+			break
+		}
+		i++
+	}
+	if i >= len(events) {
+		t.Fatalf("%s: ran out of events after %d deltas, want a trailing MessageFinished", ctx, i-start-1)
+	}
+	fin, ok := events[i].(event.MessageFinished)
+	if !ok {
+		t.Fatalf("%s: event %d = %+v, want MessageFinished", ctx, i, events[i])
+	}
+	if fin.MessageKind != kind || fin.Content != content {
+		t.Errorf("%s: event %d = %+v, want MessageFinished(kind=%v, content=%q)", ctx, i, fin, kind, content)
+	}
+	return i + 1
+}
+
+// TestAttachReplaysHistory covers the bug this change fixes: attaching to a
+// session over the daemon rendered a blank transcript even when the session
+// had prior turns, because daemonbridge only ever reconstructed a session's
+// event stream from LIVE notifications. It drives one full turn through a
+// first bridge connection (seeding history the daemon's supervisor keeps
+// live across connections — see [supervisor.Supervisor.Resume]'s
+// already-live no-op), closes that connection, then opens a SECOND bridge —
+// the same shape a fresh `gofer attach <id>` takes — and asserts its
+// Subscribe replays that history (via the triggered session/load) BEFORE a
+// subsequently-sent live turn's events, with nothing duplicated.
+func TestAttachReplaysHistory(t *testing.T) {
+	sup := newTestSupervisor(t, twoTurnFauxProvider)
+	url := newTestDaemon(t, sup)
+
+	b1 := newBridge(t, url)
+	info, err := b1.Create(context.Background(), "", tui.CreateOptions{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sub1, err := b1.Subscribe(context.Background(), info.ID)
+	if err != nil {
+		t.Fatalf("Subscribe (b1): %v", err)
+	}
+	if err := b1.Send(context.Background(), info.ID, "hi"); err != nil {
+		t.Fatalf("Send (b1): %v", err)
+	}
+	drainEvents(t, sub1, 11) // the first turn settles fully — see TestSendReconstructsTranscript
+	sub1.Close()
+	if err := b1.Close(); err != nil {
+		t.Fatalf("b1.Close: %v", err)
+	}
+
+	// A brand-new bridge connection sees none of the above as live events
+	// (each daemonbridge.Supervisor reconstructs only from its OWN
+	// connection's notifications) — its Subscribe must trigger a
+	// session/load to backfill them, since the session itself stayed live
+	// server-side (b1.Close only tore down the client connection).
+	b2 := newBridge(t, url)
+	sub2, err := b2.Subscribe(context.Background(), info.ID)
+	if err != nil {
+		t.Fatalf("Subscribe (b2): %v", err)
+	}
+	defer sub2.Close()
+
+	// History replay: the prior turn's reasoning message, then its text
+	// message, each started/deltad/finished — 6 events. No TurnStarted/
+	// TurnFinished (a history replay carries no turn-lifecycle boundary of
+	// its own — see loadHistory's doc) and no user message (acp.
+	// ReplayNotifications does emit one for "hi", but daemonbridge drops the
+	// unrecognized user_message_chunk variant, matching tui.Model, which
+	// never renders past user turns either way — see handleNotification's
+	// doc).
+	history := drainEvents(t, sub2, 6)
+	next := wantMessage(t, "history", history, 0, event.MessageReasoning, "The user said hello. I'll greet them back.")
+	next = wantMessage(t, "history", history, next, event.MessageText, "Hello! How can I help you today?")
+	if next != len(history) {
+		t.Errorf("history: %d trailing event(s) after both messages, want none", len(history)-next)
+	}
+
+	// A live turn sent on the reattached bridge lands strictly after the
+	// history above: drainEvents already consumed exactly those 6 events, in
+	// that order, before Send is even issued below.
+	if err := b2.Send(context.Background(), info.ID, "again"); err != nil {
+		t.Fatalf("Send (b2): %v", err)
+	}
+	live := drainEvents(t, sub2, 11)
+	if _, ok := live[0].(event.TurnStarted); !ok {
+		t.Errorf("live event 0 = %+v, want TurnStarted", live[0])
+	}
+	next = wantMessage(t, "live", live, 1, event.MessageReasoning, "The user said hello. I'll greet them back.")
+	next = wantMessage(t, "live", live, next, event.MessageText, "Hello! How can I help you today?")
+	if next != len(live)-1 {
+		t.Errorf("live: %d trailing event(s) before the terminal TurnFinished, want none", len(live)-1-next)
+	}
+	tf, ok := live[len(live)-1].(event.TurnFinished)
+	if !ok {
+		t.Fatalf("live event %d = %+v, want TurnFinished", len(live)-1, live[len(live)-1])
+	}
+	if tf.StopReason != "end_turn" {
+		t.Errorf("live TurnFinished.StopReason = %q, want end_turn", tf.StopReason)
+	}
+
+	// No stray or duplicate event beyond the 6 history + 11 live: history
+	// isn't replayed twice, and the live turn's own events don't repeat.
+	select {
+	case e, ok := <-sub2.C:
+		if ok {
+			t.Errorf("unexpected extra event after the live turn: %+v", e)
+		}
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// TestCreateSkipsHistoryLoad asserts that a session THIS bridge just created
+// never triggers a session/load: [Supervisor.Create] pre-registers it as
+// history-free via registerFresh, so its subsequent Subscribe/Send see only
+// the live turn's own events — no extra replay-shaped events in front of
+// them (which would silently double a Create-then-Send session's transcript
+// on every attach, not just a resumed one).
+func TestCreateSkipsHistoryLoad(t *testing.T) {
+	sup := newTestSupervisor(t, fauxProvider)
+	url := newTestDaemon(t, sup)
+	b := newBridge(t, url)
+
+	info, err := b.Create(context.Background(), "", tui.CreateOptions{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sub, err := b.Subscribe(context.Background(), info.ID)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer sub.Close()
+
+	if err := b.Send(context.Background(), info.ID, "hi"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	events := drainEvents(t, sub, 11)
+	if _, ok := events[0].(event.TurnStarted); !ok {
+		t.Fatalf("event 0 = %+v, want TurnStarted (a session/load replay would have inserted events ahead of it)", events[0])
+	}
+
+	select {
+	case e, ok := <-sub.C:
+		if ok {
+			t.Errorf("unexpected extra event: %+v", e)
 		}
 	case <-time.After(50 * time.Millisecond):
 	}
