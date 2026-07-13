@@ -26,7 +26,7 @@ func runKill(ctx context.Context, args []string, stdout, stderr io.Writer) error
 		return &usageError{msg: "usage: gofer kill <id>"}
 	}
 
-	c, err := dialDaemon(ctx, df)
+	c, err := dialDaemon(ctx, df, "")
 	if err != nil {
 		return daemonDialErr(df.addr, err)
 	}

@@ -12,7 +12,9 @@ import (
 // ($GOFER_DAEMON/$GOFER_TOKEN) > the on-disk endpoint file > the loopback
 // default — for both addr and token, including the rule that the file's
 // token is used ONLY when its address is what resolve actually settled on
-// for addr (no flag/env addr override).
+// for addr (no flag/env addr override). It exercises resolve("") — the
+// default-root lookup every daemon-aware command with no --root of its own
+// uses; [TestResolveHonorsRoot] covers the non-default-root case.
 //
 // Every case sets $HOME to a fresh t.TempDir() (isolating [daemon.ReadEndpoint]
 // from a real ~/.gofer on the machine running the test) and explicitly sets
@@ -109,7 +111,7 @@ func TestDaemonFlagsResolvePrecedence(t *testing.T) {
 			}
 
 			f := &daemonFlags{addr: c.flagAddr, token: c.flagToken}
-			gotAddr, gotToken := f.resolve()
+			gotAddr, gotToken := f.resolve("")
 			if gotAddr != c.wantAddr {
 				t.Errorf("resolve() addr = %q, want %q", gotAddr, c.wantAddr)
 			}
@@ -145,7 +147,7 @@ func TestDialDaemonDiscoversEndpointFile(t *testing.T) {
 
 	t.Run("no flag uses the discovered endpoint", func(t *testing.T) {
 		f := &daemonFlags{}
-		c, err := dialDaemon(t.Context(), f)
+		c, err := dialDaemon(t.Context(), f, "")
 		if err != nil {
 			t.Fatalf("dialDaemon: %v", err)
 		}
@@ -157,10 +159,46 @@ func TestDialDaemonDiscoversEndpointFile(t *testing.T) {
 			t.Fatalf("WriteEndpoint: %v", err)
 		}
 		f := &daemonFlags{addr: addr, token: "the-token"}
-		c, err := dialDaemon(t.Context(), f)
+		c, err := dialDaemon(t.Context(), f, "")
 		if err != nil {
 			t.Fatalf("dialDaemon with explicit flag: %v", err)
 		}
 		defer func() { _ = c.Close() }()
+	})
+}
+
+// TestResolveHonorsRoot is the prod fix this change makes: a daemon and a
+// client given the SAME non-default --root must discover each other, because
+// resolve now reads the endpoint file from the caller's root rather than
+// always the default ~/.gofer. It checks both directions — resolve(root)
+// DOES see an endpoint file written under that root, and resolve("") does
+// NOT see it (it looks at the default root instead, which — with $HOME
+// pointed at an unrelated, empty tempdir — has no endpoint file at all).
+func TestResolveHonorsRoot(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // default root: empty, no endpoint file here
+	t.Setenv("GOFER_DAEMON", "")
+	t.Setenv("GOFER_TOKEN", "")
+
+	root := t.TempDir()
+	if err := daemon.WriteEndpoint(root, daemon.Endpoint{
+		Addr: "10.0.0.7:9007", Token: "root-token", PID: os.Getpid(),
+	}); err != nil {
+		t.Fatalf("WriteEndpoint: %v", err)
+	}
+
+	t.Run("resolve(root) reads the endpoint file under root", func(t *testing.T) {
+		f := &daemonFlags{}
+		gotAddr, gotToken := f.resolve(root)
+		if gotAddr != "10.0.0.7:9007" || gotToken != "root-token" {
+			t.Errorf("resolve(%q) = (%q, %q), want (%q, %q)", root, gotAddr, gotToken, "10.0.0.7:9007", "root-token")
+		}
+	})
+
+	t.Run(`resolve("") does not see a non-default root's endpoint file`, func(t *testing.T) {
+		f := &daemonFlags{}
+		gotAddr, gotToken := f.resolve("")
+		if gotAddr != daemon.DefaultListenAddr || gotToken != "" {
+			t.Errorf(`resolve("") = (%q, %q), want the loopback default (%q, "")`, gotAddr, gotToken, daemon.DefaultListenAddr)
+		}
 	})
 }

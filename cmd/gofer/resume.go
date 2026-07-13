@@ -59,7 +59,7 @@ func runResume(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 	var daemonClient *daemon.Client
 	daemonRunning := false
 	if !*local {
-		c, dialErr := dialDaemon(ctx, df)
+		c, dialErr := dialDaemon(ctx, df, *root)
 		switch {
 		case dialErr == nil:
 			daemonClient = c

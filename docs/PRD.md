@@ -68,14 +68,17 @@ gofer config get|set …      # global or project config
 `run`/`resume`/bare `gofer` when one is reachable): the daemon address and
 bearer token are resolved in precedence order — an explicit `--daemon`/
 `--token` flag, then `$GOFER_DAEMON`/`$GOFER_TOKEN`, then the endpoint a
-running `gofer daemon` advertised at `~/.gofer/daemon.json` (mode 0600,
+running `gofer daemon` advertised at `<root>/daemon.json` (mode 0600,
 written on startup and removed on clean shutdown), then the loopback
 default `127.0.0.1:7333`. So on the same host, once a daemon is up, clients
 need no flags at all — this closes the M2 gap where a daemon bound to a
 non-loopback address (e.g. a tailnet IP) required every client invocation to
-pass `--daemon`/`--token` by hand. A daemon started with a non-default
-`--root` advertises no endpoint file at the default location; point its
-clients at it explicitly.
+pass `--daemon`/`--token` by hand. `run`/`resume` read the endpoint file at
+their own `--root` (defaulting to `~/.gofer`), so a daemon and a client given
+the SAME `--root` discover each other automatically; `ps`/`kill`/`archive`/
+`attach`/`agents`/bare `gofer` take no `--root` of their own and always use
+the default `~/.gofer` — a daemon started with a different `--root` needs an
+explicit `--daemon`/`$GOFER_DAEMON` on those clients.
 
 Daemon lifecycle: the client auto-spawns the daemon on launch (health probe →
 detached spawn); a version/build mismatch triggers graceful shutdown →

@@ -29,7 +29,7 @@ func runArchive(ctx context.Context, args []string, stdout, stderr io.Writer) er
 		return &usageError{msg: "usage: gofer archive <id>"}
 	}
 
-	c, err := dialDaemon(ctx, df)
+	c, err := dialDaemon(ctx, df, "")
 	if err != nil {
 		return daemonDialErr(df.addr, err)
 	}

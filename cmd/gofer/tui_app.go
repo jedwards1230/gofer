@@ -96,7 +96,7 @@ type tuiBackend struct {
 // exactly one backend renders per invocation, and its label is always
 // printed so the operator knows which one they're looking at.
 func selectTUIBackend(ctx context.Context, df *daemonFlags, cwd, root string) (tuiBackend, error) {
-	c, dialErr := dialDaemon(ctx, df)
+	c, dialErr := dialDaemon(ctx, df, "")
 	switch {
 	case dialErr == nil:
 		b := daemonbridge.New(c)

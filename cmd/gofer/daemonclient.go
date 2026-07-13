@@ -39,7 +39,7 @@ type daemonFlags struct {
 // otherwise leak a token set in the environment into --help/usage output.
 func addDaemonFlags(fs *flag.FlagSet) *daemonFlags {
 	f := &daemonFlags{}
-	fs.StringVar(&f.addr, "daemon", "", "daemon address to connect to (default: $GOFER_DAEMON, the endpoint gofer daemon advertised at ~/.gofer/daemon.json, or 127.0.0.1:7333)")
+	fs.StringVar(&f.addr, "daemon", "", "daemon address to connect to (default: $GOFER_DAEMON, the endpoint gofer daemon advertised at <root>/daemon.json, or 127.0.0.1:7333)")
 	fs.StringVar(&f.token, "token", "", "bearer token for the daemon (default: $GOFER_TOKEN, or the token from the endpoint file when its address was used)")
 	return f
 }
@@ -49,11 +49,14 @@ func addDaemonFlags(fs *flag.FlagSet) *daemonFlags {
 //
 //  1. An explicit --daemon/--token flag.
 //  2. $GOFER_DAEMON / $GOFER_TOKEN.
-//  3. The endpoint file a running `gofer daemon` advertises at
-//     ~/.gofer/daemon.json (see internal/daemon.WriteEndpoint) — read from
-//     the DEFAULT store root only ([daemon.ReadEndpoint] with an empty root),
-//     since daemon-aware commands take no --root of their own; a daemon
-//     started with a non-default --root needs an explicit --daemon (or
+//  3. The endpoint file a running `gofer daemon` advertised at
+//     <root>/daemon.json (see internal/daemon.WriteEndpoint), read via
+//     [daemon.ReadEndpoint] with the given root — the command's own --root
+//     when it has one, so a daemon and a client given the SAME --root
+//     discover each other automatically. Commands with no --root of their
+//     own (ps/kill/archive/attach/bare gofer) pass "", which resolves to
+//     the default ~/.gofer; a daemon started with a --root other than the
+//     one the client resolves against still needs an explicit --daemon (or
 //     $GOFER_DAEMON) on its clients, since its endpoint file lives
 //     somewhere resolve never looks.
 //  4. [daemon.DefaultListenAddr] (the loopback default).
@@ -70,7 +73,7 @@ func addDaemonFlags(fs *flag.FlagSet) *daemonFlags {
 // again after calling it (e.g. daemonDialErr, or a stderr "connected to
 // daemon at %s" notice) sees the resolved values, not the flags' original
 // zero values.
-func (f *daemonFlags) resolve() (addr, token string) {
+func (f *daemonFlags) resolve(root string) (addr, token string) {
 	addr = f.addr
 	token = f.token
 	if addr == "" {
@@ -81,7 +84,7 @@ func (f *daemonFlags) resolve() (addr, token string) {
 	}
 
 	if addr == "" {
-		if ep, err := daemon.ReadEndpoint(""); err == nil && ep.Addr != "" {
+		if ep, err := daemon.ReadEndpoint(root); err == nil && ep.Addr != "" {
 			addr = ep.Addr
 			if token == "" {
 				token = ep.Token
@@ -132,15 +135,16 @@ func noteDaemonDeviations(stderr io.Writer, cmd, model, root string, asJSON bool
 }
 
 // dialDaemon connects to the daemon at f's resolved address (see
-// [daemonFlags.resolve] for the flag/env/endpoint-file/default precedence),
-// bounded by [daemonDialTimeout] so a dead/filtered address cannot hang the
-// caller. It returns [daemon.Dial]'s error unwrapped (still satisfying
-// errors.Is(err, daemon.ErrNoDaemon) / [daemon.ErrUnauthorized]) so a caller
-// can tell "nothing is listening — fall back" (run/resume) apart from
-// "something is listening but rejected us — that's a real problem" (every
-// daemon-aware command); see [daemonUnreachable] and [daemonDialErr].
-func dialDaemon(ctx context.Context, f *daemonFlags) (*daemon.Client, error) {
-	addr, token := f.resolve()
+// [daemonFlags.resolve] for the flag/env/endpoint-file/default precedence;
+// root is the endpoint-file lookup root — the caller's --root when it has
+// one, else ""), bounded by [daemonDialTimeout] so a dead/filtered address
+// cannot hang the caller. It returns [daemon.Dial]'s error unwrapped (still
+// satisfying errors.Is(err, daemon.ErrNoDaemon) / [daemon.ErrUnauthorized])
+// so a caller can tell "nothing is listening — fall back" (run/resume) apart
+// from "something is listening but rejected us — that's a real problem"
+// (every daemon-aware command); see [daemonUnreachable] and [daemonDialErr].
+func dialDaemon(ctx context.Context, f *daemonFlags, root string) (*daemon.Client, error) {
+	addr, token := f.resolve(root)
 	dctx, cancel := context.WithTimeout(ctx, daemonDialTimeout)
 	defer cancel()
 	return daemon.Dial(dctx, addr, token)
