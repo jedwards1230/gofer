@@ -18,6 +18,33 @@ import (
 	"github.com/jedwards1230/gofer/internal/supervisor"
 )
 
+// hermeticDaemonEnv isolates a test from any real `gofer daemon` running on
+// the host. daemonFlags.resolve (see cmd/gofer/daemonclient.go) falls back to
+// daemon.ReadEndpoint("") — the DEFAULT store root's endpoint file
+// (~/.gofer/daemon.json) — whenever a test drives run/resume/attach/ps/kill/
+// archive/bare-gofer without an explicit --daemon flag; daemon-aware commands
+// take no --root of their own, so that discovery is keyed off
+// os.UserHomeDir(), which reads $HOME directly on this platform (see
+// internal/daemon.EndpointPath -> supervisor.ResolveRoot). A host with a real
+// daemon up (and its endpoint file written under the real $HOME) would
+// silently redirect such a test's run to that live daemon instead of the
+// in-process path the test actually means to exercise, breaking its
+// assertions (or worse, driving a real prompt through the real daemon).
+//
+// Setting HOME to a fresh, empty tempdir makes that discovery find nothing;
+// clearing $GOFER_DAEMON/$GOFER_TOKEN too closes the higher-precedence env
+// fallback resolve() also checks, so nothing in the ambient test environment
+// can leak a real daemon in either way. Call this from every daemon-aware
+// test in this package that does not pass its own --daemon flag (tests that
+// deliberately exercise discovery construct their own controlled endpoint
+// file/env instead — see daemonclient_test.go).
+func hermeticDaemonEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GOFER_DAEMON", "")
+	t.Setenv("GOFER_TOKEN", "")
+}
+
 // testDaemon builds a real [daemon.Daemon] hosting a real [supervisor.Supervisor]
 // (real journals, real event broker; newProvider stands in for a live model —
 // no network) behind an in-process httptest server, returning a

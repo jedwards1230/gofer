@@ -86,7 +86,14 @@ func TestResolveRunModel(t *testing.T) {
 // TestRun_NoProviderCredentials drives the full dispatch: `gofer run` with no
 // -m and no credentials anywhere fails fast (before any prompt read) with
 // exit 1 and the exact neutral message on stderr.
+//
+// hermeticDaemonEnv is required here: run() dials for a daemon before this
+// failure is even reached (see runRun's doc), and this test passes no
+// --daemon flag — without it, a real `gofer daemon` running on the host
+// would get discovered and this assertion would break (see
+// hermeticDaemonEnv's doc).
 func TestRun_NoProviderCredentials(t *testing.T) {
+	hermeticDaemonEnv(t)
 	root := t.TempDir()
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("OPENAI_API_KEY", "")
@@ -104,7 +111,11 @@ func TestRun_NoProviderCredentials(t *testing.T) {
 // TestRun_AmbiguousProviderCredentials drives the full dispatch: `gofer run`
 // with no -m and BOTH providers credentialed is a usage error (exit 2) —
 // gofer picks no favorite among logged-in providers.
+//
+// hermeticDaemonEnv is required for the same reason as
+// TestRun_NoProviderCredentials — see its doc.
 func TestRun_AmbiguousProviderCredentials(t *testing.T) {
+	hermeticDaemonEnv(t)
 	root := t.TempDir()
 	t.Setenv("ANTHROPIC_API_KEY", "sk-test-key")
 	t.Setenv("OPENAI_API_KEY", "sk-test-key")
@@ -167,7 +178,11 @@ func TestWrapCredentialHint(t *testing.T) {
 // message — the credential error now originates in agent-sdk-go/runner
 // (deliberately app-neutral there), and cmd/gofer is the one place that adds
 // the CLI-specific remediation back (see wrapCredentialHint).
+//
+// hermeticDaemonEnv is required for the same reason as
+// TestRun_NoProviderCredentials — see its doc.
 func TestRun_NoCredentialForModel(t *testing.T) {
+	hermeticDaemonEnv(t)
 	root := t.TempDir()
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("OPENAI_API_KEY", "")
