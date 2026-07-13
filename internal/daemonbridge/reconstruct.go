@@ -153,6 +153,12 @@ type turnEnd struct {
 // call that started it (the App always calls Send with context.Background()
 // itself — see doSend — since Send is meant to keep running after the TUI
 // event loop has moved on to render other state).
+//
+// One-outstanding-turn-per-session is CALLER-enforced: Send publishes
+// TurnStarted and fires the Call unconditionally — the bridge keeps no prompt
+// queue of its own. The invariant holds because the TUI App only sends to a
+// session it sees as idle (see internal/tui's doSend); a caller that pipelined
+// two Sends on one session would interleave two turns' reconstruction.
 func (s *Supervisor) Send(_ context.Context, sessionID, prompt string) error {
 	rec := s.session(sessionID)
 	if rec == nil {

@@ -2,8 +2,9 @@
 
 Your errand-runner for agents. **gofer** is a daemon + TUI for running and
 supervising many coding agents at once — a roster of live sessions, peek/attach
-navigation, approvals that reach your phone — built in Go on
-[`agent-sdk-go`](https://github.com/jedwards1230/agent-sdk-go).
+navigation, and phone-driven sessions over ACP — built in Go on
+[`agent-sdk-go`](https://github.com/jedwards1230/agent-sdk-go). (Approvals that
+reach your phone land in M3 — see the [roadmap](#roadmap).)
 
 > **Status: M2 — the daemon.** `gofer daemon` hosts a session supervisor
 > behind an ACP-over-WebSocket listener (optional bearer token), so an ACP
