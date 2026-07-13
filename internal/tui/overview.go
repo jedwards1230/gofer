@@ -9,9 +9,12 @@ import (
 
 // Overview is the roster screen: a header with status counts, a scrollable
 // list of sessions in one of two orderings, and a persistent dispatch bar for
-// starting a new session by typing. It is a pure value like [Model] — every
-// method returns an updated copy, so a fixed sequence of inputs replays to the
-// same rendered output in every golden test.
+// starting a new session by typing. It is a pure value like [Model]: most
+// methods return an updated copy, so a fixed sequence of inputs replays to the
+// same rendered output in every golden test. The exception is
+// [Overview.TakeSubmitted], which has a pointer receiver and mutates in place
+// to ensure its take-once semantics (each dispatched prompt is observed
+// exactly once).
 type Overview struct {
 	theme theme.Theme
 	meta  OverviewMeta

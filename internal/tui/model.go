@@ -60,7 +60,10 @@ type item struct {
 // Model is gofer's minimal attach surface. It is immutable from the
 // caller's perspective: [Model.Ingest] and the input-editing methods return
 // an updated copy rather than mutating in place, so a fixed event sequence
-// replays to the same rendered output in every test.
+// replays to the same rendered output in every test. The one exception is
+// [Model.TakeSubmitted], which has a pointer receiver and mutates in place to
+// ensure its take-once semantics (each submitted prompt is observed exactly
+// once).
 type Model struct {
 	theme theme.Theme
 
