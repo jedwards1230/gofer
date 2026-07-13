@@ -108,19 +108,52 @@ func cwdErrRef(raw, resolved string) string {
 	return fmt.Sprintf("%q (resolved to %q)", raw, resolved)
 }
 
+// normalizeCwd is the ONE normalization rule every client-supplied cwd is put
+// through before it is either stored (session creation/load, via
+// [resolveSessionCwd]) or compared against a stored one (the session/list cwd
+// filter, see [handleSessionList]): a leading "~" or "~/" is expanded against
+// the daemon's own home, then the result is filepath.Clean'd. Unlike
+// resolveSessionCwd, it does NOT require the result to be absolute, does NOT
+// check that it exists, and does NOT apply the empty-cwd default — those are
+// resolveSessionCwd's job, layered on top for the create/load paths. That
+// asymmetry is deliberate: a session/list filter for a relative or
+// nonexistent path should simply match nothing, not fail the request, so
+// filtering can never require the extra validation session creation does.
+//
+// If the daemon's home directory can't be resolved (os.UserHomeDir failing —
+// vanishingly rare in practice, since it just reads $HOME/USERPROFILE), a
+// "~"-prefixed raw is left unexpanded rather than erroring: normalizeCwd has
+// no error return, so downstream callers just see it fail their own
+// validation (resolveSessionCwd's IsAbs check rejects it as a real problem)
+// or, for a filter, simply fail to match — both acceptable outcomes for a
+// condition this unlikely.
+func normalizeCwd(raw string) string {
+	cwd := raw
+	if raw == "~" || strings.HasPrefix(raw, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			if raw == "~" {
+				cwd = home
+			} else {
+				cwd = filepath.Join(home, raw[2:])
+			}
+		}
+	}
+	return filepath.Clean(cwd)
+}
+
 // resolveSessionCwd validates and normalizes an ACP session cwd. ACP v1
 // requires cwd to be an absolute path (both NewSessionRequest.cwd and
 // LoadSessionRequest.cwd — src/v1/agent.rs); as a DX nicety for phone clients
 // that let a user type a path, a leading "~" or "~/" is expanded against the
-// daemon's own home. An empty cwd defaults to the daemon's own working
-// directory (os.Getwd) — the same effective root a zero-value
-// [supervisor.CreateOptions]/[supervisor.ResumeOptions] has always resolved
-// to (see their doc comments), now explicit and validated here rather than
-// left to flow down unchecked. The result must be an existing directory;
-// otherwise a clear invalid-params error naming the path (raw, plus the
-// resolved form when they differ — see [cwdErrRef]) is returned instead of
-// creating a session whose every tool call silently fails (the live bug this
-// guards: an ACP client sending the literal, unexpanded string
+// daemon's own home (see [normalizeCwd]). An empty cwd defaults to the
+// daemon's own working directory (os.Getwd) — the same effective root a
+// zero-value [supervisor.CreateOptions]/[supervisor.ResumeOptions] has always
+// resolved to (see their doc comments), now explicit and validated here
+// rather than left to flow down unchecked. The result must be an existing
+// directory; otherwise a clear invalid-params error naming the path (raw,
+// plus the resolved form when they differ — see [cwdErrRef]) is returned
+// instead of creating a session whose every tool call silently fails (the
+// live bug this guards: an ACP client sending the literal, unexpanded string
 // "~/orchestration" as cwd).
 func resolveSessionCwd(raw string) (string, *rpcError) {
 	if strings.TrimSpace(raw) == "" {
@@ -131,19 +164,7 @@ func resolveSessionCwd(raw string) (string, *rpcError) {
 		return cwd, nil
 	}
 
-	cwd := raw
-	if raw == "~" || strings.HasPrefix(raw, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", internalErr(fmt.Errorf("session cwd: resolve daemon home directory: %w", err))
-		}
-		if raw == "~" {
-			cwd = home
-		} else {
-			cwd = filepath.Join(home, raw[2:])
-		}
-	}
-	cwd = filepath.Clean(cwd)
+	cwd := normalizeCwd(raw)
 
 	if !filepath.IsAbs(cwd) {
 		return "", invalidParamsMsg(fmt.Sprintf("session cwd %s must be an absolute path (a leading ~ is expanded to the daemon's home)", cwdErrRef(raw, cwd)))
@@ -284,6 +305,16 @@ const sessionListPageSize = 50
 // are legacy journals written before the SDK started persisting it (no
 // session_meta entry); those fall back to the daemon's own working directory
 // below, and a cwd filter simply never matches them.
+//
+// The cwd filter is run through [normalizeCwd] before comparison, the same
+// normalization every stored session cwd went through at creation/load time
+// (via [resolveSessionCwd]) — a stored cwd is always absolute+cleaned, so a
+// raw string comparison against a client-supplied filter like "~/project"
+// would never match the resolved "/home/user/project" it was actually stored
+// as, making the list appear empty even for a live session (the bug this
+// guards). Unlike resolveSessionCwd, the filter is not required to be
+// absolute or to exist: a relative or nonexistent filter simply matches
+// nothing rather than erroring the whole request.
 func handleSessionList(d *Daemon, ctx context.Context, _ *peer, params json.RawMessage) (any, *rpcError) {
 	var req acp.ListSessionsRequest
 	if len(params) > 0 {
@@ -303,9 +334,10 @@ func handleSessionList(d *Daemon, ctx context.Context, _ *peer, params json.RawM
 	}
 
 	if req.Cwd != "" {
+		filterCwd := normalizeCwd(req.Cwd)
 		filtered := infos[:0:0]
 		for _, info := range infos {
-			if info.Cwd == req.Cwd {
+			if info.Cwd == filterCwd {
 				filtered = append(filtered, info)
 			}
 		}

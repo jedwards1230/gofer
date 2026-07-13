@@ -3,10 +3,13 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/jedwards1230/agent-sdk-go/acp"
 )
 
 // maxInFlightPerPeer bounds the number of request-handler goroutines one
@@ -147,11 +150,36 @@ func (p *peer) handleFrame(ctx context.Context, data []byte) {
 	}
 
 	if rerr != nil {
+		// A failing read is always worth seeing, even for a high-frequency
+		// polled method — stays at INFO regardless of isHighFrequencyRead.
 		log.Info("request handled", "method", env.Method, "id", string(env.ID), "outcome", "error", "code", rerr.Code, "message", rerr.Message, "dur_ms", durMS)
 	} else {
-		log.Info("request handled", "method", env.Method, "id", string(env.ID), "outcome", "ok", "dur_ms", durMS)
+		// A --log-level info log needs to stay readable with a TUI attached:
+		// the TUI polls gofer/roster (and a CLI client may poll gofer/ps or
+		// session/list) at ~1Hz, and logging every one of those at INFO would
+		// drown out everything else on an otherwise quiet daemon. Demote only
+		// the ok outcome of these specific high-frequency, read-only methods
+		// to DEBUG; every other method's ok log — and any of these methods'
+		// error outcome, above — stays at INFO.
+		level := slog.LevelInfo
+		if isHighFrequencyRead(env.Method) {
+			level = slog.LevelDebug
+		}
+		log.Log(ctx, level, "request handled", "method", env.Method, "id", string(env.ID), "outcome", "ok", "dur_ms", durMS)
 	}
 	p.reply(ctx, env.ID, result, rerr)
+}
+
+// isHighFrequencyRead reports whether method is a read-only, high-frequency
+// (polled roughly at UI refresh rate) request whose successful outcome should
+// log at DEBUG rather than INFO — see handleFrame.
+func isHighFrequencyRead(method string) bool {
+	switch method {
+	case methodGoferRoster, methodGoferPS, acp.MethodSessionList:
+		return true
+	default:
+		return false
+	}
 }
 
 // reply sends a JSON-RPC response for a request. A nil id (parse failure, id

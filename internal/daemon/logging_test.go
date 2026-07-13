@@ -154,6 +154,95 @@ func TestLogging_NotificationLogsAtDebug(t *testing.T) {
 	}
 }
 
+// newLevelTestDaemon is like newLoggingTestDaemon but lets the test choose the
+// logger's level — used here to build an INFO-level daemon so
+// TestLogging_HighFrequencyReadOkDemotedToDebug can assert a DEBUG-demoted
+// line is genuinely ABSENT from an INFO-level log, not just present at DEBUG.
+func newLevelTestDaemon(t *testing.T, sup *supervisor.Supervisor, level slog.Level) (string, *syncBuffer) {
+	t.Helper()
+	buf := &syncBuffer{}
+	logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: level}))
+	d := daemon.New(sup, daemon.Config{DefaultModel: "faux", Logger: logger})
+	srv := httptest.NewServer(d.Handler())
+	t.Cleanup(srv.Close)
+	return "ws" + srv.URL[len("http"):], buf
+}
+
+// TestLogging_HighFrequencyReadOkDemotedToDebug covers isHighFrequencyRead
+// (see peer.go's handleFrame): an ok gofer/roster request — the TUI's ~1Hz
+// poll — logs at DEBUG, so it is invisible in an INFO-level buffer and
+// present in a DEBUG-level one; an ERRORING gofer/roster request still logs
+// at INFO regardless; and an ok session/prompt (not high-frequency) stays at
+// INFO.
+func TestLogging_HighFrequencyReadOkDemotedToDebug(t *testing.T) {
+	t.Run("ok roster is absent at INFO, present at DEBUG", func(t *testing.T) {
+		sup := newTestSupervisor(t, fauxProvider)
+		infoURL, infoBuf := newLevelTestDaemon(t, sup, slog.LevelInfo)
+		debugURL, debugBuf := newLevelTestDaemon(t, sup, slog.LevelDebug)
+
+		infoC := dial(t, context.Background(), infoURL, nil)
+		resp := infoC.request("gofer/roster", nil)
+		if resp.Error != nil {
+			t.Fatalf("gofer/roster error: %+v", resp.Error)
+		}
+		if strings.Contains(infoBuf.String(), "method=gofer/roster") {
+			t.Errorf("INFO-level logs unexpectedly contain the ok gofer/roster request-handled line:\n%s", infoBuf.String())
+		}
+
+		debugC := dial(t, context.Background(), debugURL, nil)
+		resp = debugC.request("gofer/roster", nil)
+		if resp.Error != nil {
+			t.Fatalf("gofer/roster error: %+v", resp.Error)
+		}
+		logs := debugBuf.String()
+		if !strings.Contains(logs, `msg="request handled"`) || !strings.Contains(logs, "method=gofer/roster") || !strings.Contains(logs, "outcome=ok") {
+			t.Errorf("DEBUG-level logs missing the ok gofer/roster request-handled line:\n%s", logs)
+		}
+		if !strings.Contains(logs, "level=DEBUG") {
+			t.Errorf("DEBUG-level logs missing a DEBUG line for gofer/roster:\n%s", logs)
+		}
+	})
+
+	t.Run("erroring roster still logs at INFO", func(t *testing.T) {
+		sup := newTestSupervisor(t, fauxProvider)
+		infoURL, infoBuf := newLevelTestDaemon(t, sup, slog.LevelInfo)
+		c := dial(t, context.Background(), infoURL, nil)
+
+		resp := c.request("gofer/kill", map[string]string{"sessionId": "does-not-exist"})
+		if resp.Error == nil {
+			t.Fatal("gofer/kill unknown session: want an error, got none")
+		}
+
+		logs := infoBuf.String()
+		if !strings.Contains(logs, `msg="request handled"`) || !strings.Contains(logs, "method=gofer/kill") || !strings.Contains(logs, "outcome=error") {
+			t.Errorf("INFO-level logs missing the error gofer/kill request-handled line:\n%s", logs)
+		}
+		if !strings.Contains(logs, "level=INFO") {
+			t.Errorf("INFO-level logs missing a INFO line for the erroring gofer/kill:\n%s", logs)
+		}
+	})
+
+	t.Run("ok session/prompt stays at INFO", func(t *testing.T) {
+		sup := newTestSupervisor(t, fauxProvider)
+		infoURL, infoBuf := newLevelTestDaemon(t, sup, slog.LevelInfo)
+		c := dial(t, context.Background(), infoURL, nil)
+
+		sid := newSession(t, c, t.TempDir())
+		resp := c.request(acp.MethodSessionPrompt, acp.PromptRequest{
+			SessionID: sid,
+			Prompt:    []acp.ContentBlock{acp.TextBlock("hi")},
+		})
+		if resp.Error != nil {
+			t.Fatalf("session/prompt error: %+v", resp.Error)
+		}
+
+		logs := infoBuf.String()
+		if !strings.Contains(logs, `msg="request handled"`) || !strings.Contains(logs, "method="+acp.MethodSessionPrompt) || !strings.Contains(logs, "outcome=ok") {
+			t.Errorf("INFO-level logs missing the ok session/prompt request-handled line:\n%s", logs)
+		}
+	})
+}
+
 // waitForLog polls buf until its contents contain substr or defaultWait
 // elapses, returning the final contents either way (so a timeout's failure
 // message still shows whatever was captured).
