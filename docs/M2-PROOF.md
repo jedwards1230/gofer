@@ -116,12 +116,36 @@ daemon's own roster already includes it, with the same status
 The laptop-side clients that read that roster from the running daemon land
 across the rest of the M2 stack:
 
+- **Same-host clients auto-discover the daemon — no flags needed.** On
+  startup (after every other check passes, right before it starts serving)
+  `gofer daemon` writes its listen address and bearer token to
+  `~/.gofer/daemon.json` (mode 0600 — it holds the token in cleartext, the
+  same sensitivity as `auth.json`; `gofer daemon` never logs it) and removes
+  that file on a clean shutdown (SIGINT). Every daemon-aware client
+  (`ps`/`kill`/`archive`/`attach`/`agents`, and `run`/`resume`/bare `gofer`
+  when probing for a daemon) resolves its target address/token in order: an
+  explicit `--daemon`/`--token` flag, then `$GOFER_DAEMON`/`$GOFER_TOKEN`,
+  then that endpoint file, then the loopback default. So once a daemon is up
+  on a box, `gofer attach` / `gofer agents` / `gofer ps` "just work" there
+  with no flags at all — this is what closes the original motivating gap
+  (a client that couldn't find a daemon already listening on a non-loopback
+  address). A daemon started with a non-default `--root` writes its endpoint
+  file under that root instead of `~/.gofer`, so its clients still need an
+  explicit `--daemon`/`$GOFER_DAEMON` — discovery only looks at the default
+  root. If the daemon process dies without a clean shutdown, the file is
+  left behind (stale); clients don't validate staleness themselves — a stale
+  discovered address just dials like any other unreachable one and fails
+  with the usual "no gofer daemon running at …" message. (`gofer daemon`
+  itself does detect and self-heal past its own stale file on the *next*
+  startup — see `internal/daemon/endpoint.go` and `cmd/gofer/daemon.go`'s
+  `guardLiveEndpoint`.)
 - **`gofer ps` / `gofer kill` / `gofer archive`** (the CLI-over-daemon client,
   `internal/daemon.Client` + `cmd/gofer`) query and drive the daemon via its
   `gofer/roster`, `gofer/ps`, `gofer/kill`, and `gofer/archive` control methods
   on the same WebSocket listener — point them at the phone's daemon with
-  `--daemon <tailnet-ip>:7333 --token <the-token>` and the phone-created
-  session shows up in `gofer ps`, right alongside anything started locally.
+  `--daemon <tailnet-ip>:7333 --token <the-token>` (or rely on discovery when
+  running on the same host as the daemon) and the phone-created session shows
+  up in `gofer ps`, right alongside anything started locally.
   `gofer run`/`gofer resume <id> <prompt>` do the same auto-detection: with a
   daemon reachable at `--daemon` they drive the turn through it as their own
   ACP client instead of starting an in-process session. On that path a few
@@ -130,7 +154,8 @@ across the rest of the M2 stack:
   rather than the SDK's `event.Event` JSONL, and the interactive attach TUI is
   replaced by plain streaming. Pass `--local` (alias `--no-daemon`) to force
   the in-process path even when a daemon is up.
-- **The `gofer` TUI overview and `gofer attach`** (`internal/daemonbridge`,
+- **The `gofer` TUI overview and `gofer attach` (alias `gofer agents`)**
+  (`internal/daemonbridge`,
   a `tui.Supervisor` backed by `internal/daemon.Client`) attach to the daemon
   and render its live roster + transcript, so the phone-created session
   appears and can be peeked/attached exactly like a local one. Bare `gofer`

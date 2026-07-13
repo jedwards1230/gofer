@@ -12,7 +12,6 @@ import (
 
 	"github.com/jedwards1230/agent-sdk-go/runner"
 
-	"github.com/jedwards1230/gofer/internal/daemon"
 	"github.com/jedwards1230/gofer/internal/daemonbridge"
 	"github.com/jedwards1230/gofer/internal/supervisor"
 	"github.com/jedwards1230/gofer/internal/tui"
@@ -36,11 +35,14 @@ func runTUI(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer) erro
 	}
 
 	// Bare `gofer` parses no flags (it is the zero-argument dispatch path in
-	// main.go), so it probes the default daemon address, honoring
-	// $GOFER_TOKEN the same way ps/kill/archive's --token flag falls back to
-	// it (see daemonFlags.resolveToken) — an operator wanting a non-default
-	// address uses `gofer attach` instead, which does parse --daemon/--token.
-	df := &daemonFlags{addr: daemon.DefaultListenAddr}
+	// main.go), so it probes whatever [daemonFlags.resolve] discovers with
+	// both fields unset: $GOFER_DAEMON/$GOFER_TOKEN, else the endpoint file a
+	// running `gofer daemon` advertised, else the loopback default — the same
+	// precedence ps/kill/archive/attach/agents use with an explicit
+	// --daemon/--token they didn't pass. An operator wanting a specific
+	// non-discoverable address still uses `gofer attach` instead, which does
+	// parse --daemon/--token.
+	df := &daemonFlags{}
 	backend, err := selectTUIBackend(ctx, df, cwd, "")
 	if err != nil {
 		return err

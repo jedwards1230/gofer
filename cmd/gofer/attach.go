@@ -16,8 +16,10 @@ import (
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
 
-// runAttach implements `gofer attach [<session>]`: the daemon-backed roster
-// TUI (see docs/PRD.md's CLI surface). Unlike bare `gofer` (runTUI), which
+// runAttach implements `gofer attach [<session>]` (also dispatched as
+// `gofer agents [<session>]` — see main.go's dispatch, an alias for exactly
+// this function): the daemon-backed roster TUI (see docs/PRD.md's CLI
+// surface). Unlike bare `gofer` (runTUI), which
 // falls back to the local in-process supervisor when no daemon is reachable,
 // attach is explicitly the daemon path — no daemon reachable is a hard
 // error, never a silent local fallback (there would be nothing meaningful to
