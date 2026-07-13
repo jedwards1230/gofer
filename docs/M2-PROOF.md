@@ -8,6 +8,16 @@ personally — there is no hermetic CI equivalent for the phone-to-daemon leg
 
 ## 1. Start the daemon on the laptop
 
+**A bearer token is REQUIRED for any non-loopback bind.** The M2 daemon runs
+every tool call — including `bash` — completely **unattended**: the loop's
+permission-hook seam isn't wired until M3, so a `session/prompt` proceeds
+through every tool call with no approval gate at all (see §4 below).
+Reaching the daemon is therefore the ability to run your agent's tools —
+**RCE-by-design** for whoever can connect. `gofer daemon` enforces this: it
+refuses to start on a non-loopback (tailnet, LAN, or bind-all `0.0.0.0`/`::`)
+address unless `--token`/`$GOFER_TOKEN` is set, with a `--listen 127.0.0.1:…`
+(or `localhost`) bind as the only token-free option.
+
 Bind it to the laptop's Tailscale address (not loopback — the whole point is
 a phone reaching it over the tailnet), and set a bearer token so an
 unauthenticated device on the tailnet can't drive your sessions:
@@ -28,9 +38,6 @@ Notes:
 - `--token` also reads from `$GOFER_TOKEN`, so `GOFER_TOKEN=... gofer daemon
   --listen <tailnet-ip>:7333` works without the flag — handy for a launchd/
   systemd unit that keeps the token out of `ps` output.
-- The token is **optional**: omitting it accepts any connection that can
-  reach the listen address. On a tailnet with sane ACLs this is a reasonable
-  default; a token adds a second factor beyond "on the tailnet."
 - `gofer daemon` prints the listen address on startup — never the token.
 - `--model` picks the model new ACP sessions use; omitted, it resolves the
   same way `gofer run` does (the sole logged-in provider's model — log in
@@ -48,11 +55,13 @@ In the client's connection settings:
 
 - **URL**: `ws://<tailnet-ip>:7333` (or `wss://<host>` if you fronted it with
   a TLS terminator per the note above).
-- **Bearer token**: the token from step 1, if you set one. The daemon accepts
-  it either as a standard `Authorization: Bearer <token>` header (preferred —
-  use this if the client exposes a headers field) or, for a client that can
-  only put a WebSocket URL together, a `?token=<token>` query parameter on
-  the same URL.
+- **Bearer token**: the token from step 1 — **required**, since the address
+  above is non-loopback (see §1). Prefer the standard `Authorization: Bearer
+  <token>` header whenever the client exposes a headers field: unlike a URL,
+  headers don't get written to reverse-proxy or tailnet access logs. Fall
+  back to a `?token=<token>` query parameter only for a client that can't set
+  headers and must put the whole thing in a WebSocket URL — that token can
+  leak into any logging layer sitting between the client and the daemon.
 
 ## 3. Drive a session
 

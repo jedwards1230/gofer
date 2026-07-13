@@ -8,6 +8,18 @@ import (
 	"github.com/coder/websocket"
 )
 
+// maxInFlightPerPeer bounds the number of request-handler goroutines one
+// connection may have running at once. Unlike serveWS's connection-level
+// maxConns (which rejects a new connection outright with 503, since refusing
+// a handshake is cheap and immediately visible to the caller), acquiring this
+// semaphore BLOCKS: a client that floods a single connection with more than
+// maxInFlightPerPeer concurrent requests stalls its own read loop (see run)
+// until a handler frees a slot, applying backpressure instead of spawning an
+// unbounded number of goroutines and per-request buffers for that one peer. A
+// well-behaved client — at most a session/prompt or two in flight — never
+// notices the cap.
+const maxInFlightPerPeer = 64
+
 // peer is one WebSocket connection's JSON-RPC session: it reads frames in a
 // loop, dispatches each request onto its own goroutine (so a long-running
 // session/prompt can never block the read loop — a client must be able to
@@ -25,10 +37,13 @@ type peer struct {
 	// context, cancelled on read-loop exit or daemon shutdown) and unwinds
 	// rather than leaking.
 	wg sync.WaitGroup
+
+	// inFlight is the maxInFlightPerPeer semaphore (see its doc).
+	inFlight chan struct{}
 }
 
 func newPeer(conn *websocket.Conn, d *Daemon) *peer {
-	return &peer{conn: conn, daemon: d}
+	return &peer{conn: conn, daemon: d, inFlight: make(chan struct{}, maxInFlightPerPeer)}
 }
 
 // run reads frames until the connection closes or ctx is cancelled, dispatching
@@ -60,9 +75,24 @@ func (p *peer) run(ctx context.Context) {
 		}
 
 		frame := data
+
+		// Acquire an in-flight slot BEFORE spawning the handler goroutine —
+		// see maxInFlightPerPeer's doc. The select on ctx.Done alongside the
+		// blocking acquire ensures a peer wedged at the cap during shutdown
+		// unblocks via cancellation rather than the read loop (and therefore
+		// this whole exit path) hanging forever waiting for a slot that will
+		// never free because nothing is reading frames to eventually finish
+		// the in-flight handlers.
+		select {
+		case p.inFlight <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
+
 		p.wg.Add(1)
 		go func() {
 			defer p.wg.Done()
+			defer func() { <-p.inFlight }()
 			p.handleFrame(ctx, frame)
 		}()
 	}
