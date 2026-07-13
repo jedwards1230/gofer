@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/jedwards1230/gofer/internal/daemon"
 	"github.com/jedwards1230/gofer/internal/supervisor"
@@ -69,6 +72,14 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		return err
 	}
 
+	// Guard against a second `gofer daemon` clobbering a still-live one's
+	// endpoint advertisement (see internal/daemon/endpoint.go and
+	// guardLiveEndpoint's doc) — fail fast here, before any supervisor or
+	// model resolution work, for the same reason ValidateListen runs first.
+	if err := guardLiveEndpoint(ctx, *root, *listen); err != nil {
+		return err
+	}
+
 	// Resolve the model before starting anything: a daemon with no usable
 	// credential should fail fast at startup, not on the first session/new.
 	modelID := *model
@@ -103,11 +114,120 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	// never printed — see docs/M2-PROOF.md for how to mint and pass one.
 	logger.Info("daemon listening", "addr", *listen)
 
+	// Advertise our endpoint so a same-host client (ps/kill/archive/attach/
+	// agents, bare gofer) can discover us without --daemon/--token — see
+	// cmd/gofer/daemonclient.go's daemonFlags.resolve and
+	// internal/daemon/endpoint.go. Written only after guardLiveEndpoint above
+	// has confirmed no live daemon already owns this root's endpoint file, and
+	// only after every other startup check has passed, so a failed startup
+	// never advertises a daemon that isn't actually going to serve.
+	ourPID := os.Getpid()
+	if err := daemon.WriteEndpoint(*root, daemon.Endpoint{
+		Addr:      *listen,
+		Token:     bearerToken,
+		PID:       ourPID,
+		StartedAt: time.Now(),
+	}); err != nil {
+		return fmt.Errorf("write daemon endpoint: %w", err)
+	}
+	// Guarded: only remove the file if it still names OUR pid when we get
+	// here. A clean shutdown (the common case) always finds its own pid and
+	// removes it. A crash leaves the file in place — clients self-heal past
+	// a stale one (see the pidAlive/Probe check in guardLiveEndpoint, and
+	// dialDaemon's own dead-address handling); a LATER daemon that started
+	// after we crashed and overwrote the file with its own pid must NOT have
+	// its endpoint clobbered by this deferred cleanup running (it never does,
+	// since this process is already gone by then — this guard matters for
+	// the case where guardLiveEndpoint judged an existing file stale and we
+	// overwrote it, then something else races us).
+	defer func() {
+		if err := removeOwnEndpoint(*root, ourPID); err != nil {
+			// Path/permission errors only — never the endpoint's contents
+			// (address, token) — see [daemon.Endpoint]'s security note.
+			logger.Warn("remove daemon endpoint file", "err", err)
+		}
+	}()
+
 	serveErr := d.Serve(ctx)
 	if cerr := sup.Close(); cerr != nil && serveErr == nil {
 		serveErr = fmt.Errorf("close supervisor: %w", cerr)
 	}
 	return serveErr
+}
+
+// guardLiveEndpoint reports whether a still-running `gofer daemon` already
+// owns the endpoint file at root and is bound to the SAME address this
+// process is about to bind — in which case starting would be a silent
+// double-listen a client could not tell apart from the original, so it is a
+// clear error instead ("stop it first"), and the existing file is left
+// untouched.
+//
+// An endpoint file that names a dead pid, or whose recorded address no
+// longer answers a dial (see [daemon.Probe]), is stale — the residue of a
+// crash rather than a clean shutdown (see runDaemon's own guarded-remove
+// defer) — and is silently treated as absent; the caller
+// ([daemon.WriteEndpoint]) then overwrites it. A live daemon recorded at a
+// DIFFERENT address than the one we're about to bind is also let through
+// unblocked (a deliberate second instance over the same root, e.g. during a
+// migration) — this process's own WriteEndpoint call then becomes the
+// root's advertised endpoint going forward.
+func guardLiveEndpoint(ctx context.Context, root, listenAddr string) error {
+	existing, err := daemon.ReadEndpoint(root)
+	if err != nil {
+		// Missing (nothing to guard against) or unreadable/corrupt (as good
+		// as missing — WriteEndpoint replaces it below): either way, proceed.
+		return nil
+	}
+	if !pidAlive(existing.PID) {
+		return nil
+	}
+	dctx, cancel := context.WithTimeout(ctx, daemonDialTimeout)
+	defer cancel()
+	if !daemon.Probe(dctx, existing.Addr, existing.Token) {
+		return nil
+	}
+	if existing.Addr != listenAddr {
+		return nil
+	}
+	return fmt.Errorf("a gofer daemon is already running at %s (pid %d) — stop it first", existing.Addr, existing.PID)
+}
+
+// removeOwnEndpoint removes the endpoint file at root only if it still
+// records pid as its owner, so a shutdown that runs after some other process
+// has already taken over the file (see guardLiveEndpoint) never clobbers
+// that other daemon's advertisement.
+func removeOwnEndpoint(root string, pid int) error {
+	cur, err := daemon.ReadEndpoint(root)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if cur.PID != pid {
+		return nil
+	}
+	return daemon.RemoveEndpoint(root)
+}
+
+// pidAlive reports whether a process with the given pid is currently
+// running — the liveness half of guardLiveEndpoint's stale-file detection.
+// Unix-only (this repo ships no Windows build): os.FindProcess always
+// succeeds on Unix regardless of whether pid is alive, so signal 0 is the
+// portable "is it there" probe — it performs error checking without
+// actually delivering a signal. A nil error, or EPERM (exists, just not
+// ours to signal), both mean alive; anything else (typically ESRCH /
+// [os.ErrProcessDone]) means gone.
+func pidAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	err = proc.Signal(syscall.Signal(0))
+	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 // parseLogLevel maps a --log-level flag value to a [slog.Level]. Only the

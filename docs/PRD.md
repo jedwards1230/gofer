@@ -48,7 +48,8 @@ would need it unchanged.
 
 ```
 gofer                       # TUI: health-probe daemon → auto-spawn if absent → overview
-gofer attach <session>      # attach straight into one session
+gofer attach [<session>]    # daemon roster TUI; with <session>, attach straight into it
+gofer agents [<session>]    # alias for `gofer attach` (M2)
 gofer demo                  # M0: offline faux-provider stream
 gofer exec [-p prompt] [--agent name] [--json] [--output-schema file]
                             # headless one-shot: JSONL events on stdout (M3)
@@ -56,12 +57,25 @@ gofer serve [--host unix://…|tcp://…]   # run the daemon in the foreground
 gofer acp serve             # ACP over stdio (editors, stdio→ws bridges)
 gofer ps [--all]            # roster (--all includes archived; later: fleet)
 gofer kill|archive <id>     # stop running / clear finished (journal kept)
-gofer agents|skills|plugins # list what's composed; `plugins install <module>`
+gofer skills|plugins        # list what's composed; `plugins install <module>` (M5)
 gofer import claude         # idempotent import of CC skills/commands (M5)
                             #   (settings.json permissions honored natively from M3)
 gofer doctor                # providers, LSP servers on PATH, daemon, sandbox
 gofer config get|set …      # global or project config
 ```
+
+**Daemon discovery** (`ps`/`kill`/`archive`/`attach`/`agents`, and
+`run`/`resume`/bare `gofer` when one is reachable): the daemon address and
+bearer token are resolved in precedence order — an explicit `--daemon`/
+`--token` flag, then `$GOFER_DAEMON`/`$GOFER_TOKEN`, then the endpoint a
+running `gofer daemon` advertised at `~/.gofer/daemon.json` (mode 0600,
+written on startup and removed on clean shutdown), then the loopback
+default `127.0.0.1:7333`. So on the same host, once a daemon is up, clients
+need no flags at all — this closes the M2 gap where a daemon bound to a
+non-loopback address (e.g. a tailnet IP) required every client invocation to
+pass `--daemon`/`--token` by hand. A daemon started with a non-default
+`--root` advertises no endpoint file at the default location; point its
+clients at it explicitly.
 
 Daemon lifecycle: the client auto-spawns the daemon on launch (health probe →
 detached spawn); a version/build mismatch triggers graceful shutdown →

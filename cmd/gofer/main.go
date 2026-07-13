@@ -65,9 +65,13 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return reportCmdErr("resume", err, stderr)
 		}
 		return 0
-	case "attach":
+	case "attach", "agents":
+		// "agents" is an alias for "attach": same runAttach, same daemon
+		// discovery, same code path — see runAttach's doc for why calling it
+		// with no <session> positional (the common case for both names) opens
+		// the roster overview rather than a specific session's attach screen.
 		if err := runAttach(ctx, rest, stdin, stdout, stderr); err != nil {
-			return reportCmdErr("attach", err, stderr)
+			return reportCmdErr(cmd, err, stderr)
 		}
 		return 0
 	case "daemon", "serve":
@@ -164,6 +168,7 @@ Commands:
   run       Start a session and drive one prompt through a real provider
   resume    Reopen a session by id: continue it, or print its transcript
   attach    Open the roster TUI against a running daemon (requires one)
+  agents    Alias for "attach" with no <session>: open the roster overview
   daemon    Run the supervisor behind an ACP-over-WebSocket listener (alias: serve)
   ps        List sessions on a running daemon's roster (--all: include archived)
   kill      Interrupt and drop a live session from the roster (journal kept)
@@ -185,14 +190,20 @@ Model (-m): gofer ships with no default vendor. With -m omitted, "run" and
 more than one and -m is required; log in to none and login is required
 first ("gofer login").
 
-Daemon (ps/kill/archive/attach, and run/resume/bare-gofer when one is
-reachable): --daemon <addr> (default 127.0.0.1:7333) and --token <token>
-(default $GOFER_TOKEN) point at a running "gofer daemon". "run"/"resume"
-auto-detect a daemon and route through it (pass --local / --no-daemon to
-force the in-process path even when one is up); bare "gofer" auto-detects
-one too, falling back to the local roster TUI when none is reachable;
-"ps"/"kill"/"archive"/"attach" always require one (bare "gofer" honors
-$GOFER_TOKEN but has no --daemon/--token flags of its own — use "gofer
-attach" to point at a non-default address).
+Daemon discovery (ps/kill/archive/attach/agents, and run/resume/bare-gofer
+when one is reachable): the address and token are resolved in order —
+(1) an explicit --daemon/--token flag, (2) $GOFER_DAEMON/$GOFER_TOKEN,
+(3) the endpoint a running "gofer daemon" advertised at
+~/.gofer/daemon.json, (4) the loopback default 127.0.0.1:7333. So on the
+same host, no flags are usually needed at all once a daemon is up.
+"run"/"resume" auto-detect a daemon and route through it (pass --local /
+--no-daemon to force the in-process path even when one is up); bare "gofer"
+auto-detects one too, falling back to the local roster TUI when none is
+reachable; "ps"/"kill"/"archive"/"attach"/"agents" always require one (bare
+"gofer" uses the same discovery but has no --daemon/--token flags of its
+own — use "gofer attach"/"gofer agents" to point at a non-default address).
+A daemon started with a non-default --root advertises no discoverable
+endpoint at the default location — point clients at it explicitly with
+--daemon/$GOFER_DAEMON.
 `)
 }

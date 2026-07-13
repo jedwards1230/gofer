@@ -21,31 +21,80 @@ import (
 const daemonDialTimeout = 2 * time.Second
 
 // daemonFlags are the --daemon/--token flags every daemon-aware command
-// (ps, kill, archive, and the daemon leg of run/resume) shares.
+// (ps, kill, archive, attach, agents, and the daemon leg of run/resume)
+// shares.
 type daemonFlags struct {
 	addr  string
 	token string
 }
 
 // addDaemonFlags registers --daemon and --token on fs and returns the flags
-// struct dialDaemon reads back after Parse. The token flag's default is
-// deliberately "" rather than os.Getenv("GOFER_TOKEN") for the same reason
-// `gofer daemon`'s does (see cmd/gofer/daemon.go): flag.PrintDefaults would
+// struct [daemonFlags.resolve] (dialDaemon's only caller) reads back after
+// Parse. Both flags default to "" — an unset sentinel distinguishing "the
+// operator explicitly named an address/token" from "let resolve fall through
+// to $GOFER_DAEMON/$GOFER_TOKEN, the endpoint file, or the loopback
+// default" (see resolve's doc for the full precedence). The token flag's
+// empty default is additionally deliberate for the same reason
+// `gofer daemon`'s is (see cmd/gofer/daemon.go): flag.PrintDefaults would
 // otherwise leak a token set in the environment into --help/usage output.
 func addDaemonFlags(fs *flag.FlagSet) *daemonFlags {
 	f := &daemonFlags{}
-	fs.StringVar(&f.addr, "daemon", daemon.DefaultListenAddr, "daemon address to connect to")
-	fs.StringVar(&f.token, "token", "", "bearer token for the daemon (default: $GOFER_TOKEN)")
+	fs.StringVar(&f.addr, "daemon", "", "daemon address to connect to (default: $GOFER_DAEMON, the endpoint gofer daemon advertised at ~/.gofer/daemon.json, or 127.0.0.1:7333)")
+	fs.StringVar(&f.token, "token", "", "bearer token for the daemon (default: $GOFER_TOKEN, or the token from the endpoint file when its address was used)")
 	return f
 }
 
-// resolveToken resolves the effective bearer token: the flag if set, else
-// $GOFER_TOKEN. Never logged — see [dialDaemon], its only caller.
-func (f *daemonFlags) resolveToken() string {
-	if f.token != "" {
-		return f.token
+// resolve resolves the effective daemon address and bearer token dialDaemon
+// uses, in precedence order:
+//
+//  1. An explicit --daemon/--token flag.
+//  2. $GOFER_DAEMON / $GOFER_TOKEN.
+//  3. The endpoint file a running `gofer daemon` advertises at
+//     ~/.gofer/daemon.json (see internal/daemon.WriteEndpoint) — read from
+//     the DEFAULT store root only ([daemon.ReadEndpoint] with an empty root),
+//     since daemon-aware commands take no --root of their own; a daemon
+//     started with a non-default --root needs an explicit --daemon (or
+//     $GOFER_DAEMON) on its clients, since its endpoint file lives
+//     somewhere resolve never looks.
+//  4. [daemon.DefaultListenAddr] (the loopback default).
+//
+// The endpoint file's token is used ONLY when its address is what resolve
+// actually settled on for addr (i.e. no flag/env override chose a
+// different address) — otherwise a token minted for one daemon could leak
+// into a connection aimed at another one entirely.
+//
+// A missing or corrupt endpoint file is silently skipped — discovery is a
+// convenience, never a hard requirement, and resolve never logs the file's
+// contents (path-only errors, if any, are simply treated as "no file").
+// resolve caches its result onto f.addr/f.token so a caller that reads them
+// again after calling it (e.g. daemonDialErr, or a stderr "connected to
+// daemon at %s" notice) sees the resolved values, not the flags' original
+// zero values.
+func (f *daemonFlags) resolve() (addr, token string) {
+	addr = f.addr
+	token = f.token
+	if addr == "" {
+		addr = os.Getenv("GOFER_DAEMON")
 	}
-	return os.Getenv("GOFER_TOKEN")
+	if token == "" {
+		token = os.Getenv("GOFER_TOKEN")
+	}
+
+	if addr == "" {
+		if ep, err := daemon.ReadEndpoint(""); err == nil && ep.Addr != "" {
+			addr = ep.Addr
+			if token == "" {
+				token = ep.Token
+			}
+		}
+	}
+
+	if addr == "" {
+		addr = daemon.DefaultListenAddr
+	}
+
+	f.addr, f.token = addr, token
+	return addr, token
 }
 
 // addLocalFlag registers the --local / --no-daemon opt-out on fs (both names
@@ -82,17 +131,19 @@ func noteDaemonDeviations(stderr io.Writer, cmd, model, root string, asJSON bool
 	}
 }
 
-// dialDaemon connects to the daemon at f's address, bounded by
-// [daemonDialTimeout] so a dead/filtered address cannot hang the caller. It
-// returns [daemon.Dial]'s error unwrapped (still satisfying
+// dialDaemon connects to the daemon at f's resolved address (see
+// [daemonFlags.resolve] for the flag/env/endpoint-file/default precedence),
+// bounded by [daemonDialTimeout] so a dead/filtered address cannot hang the
+// caller. It returns [daemon.Dial]'s error unwrapped (still satisfying
 // errors.Is(err, daemon.ErrNoDaemon) / [daemon.ErrUnauthorized]) so a caller
 // can tell "nothing is listening — fall back" (run/resume) apart from
 // "something is listening but rejected us — that's a real problem" (every
 // daemon-aware command); see [daemonUnreachable] and [daemonDialErr].
 func dialDaemon(ctx context.Context, f *daemonFlags) (*daemon.Client, error) {
+	addr, token := f.resolve()
 	dctx, cancel := context.WithTimeout(ctx, daemonDialTimeout)
 	defer cancel()
-	return daemon.Dial(dctx, f.addr, f.resolveToken())
+	return daemon.Dial(dctx, addr, token)
 }
 
 // daemonUnreachable reports whether err is [dialDaemon] reporting no daemon at

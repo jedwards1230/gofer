@@ -76,7 +76,7 @@ type Supervisor struct {
 // shared session store eagerly, so a bad root fails at construction rather
 // than on the first Create.
 func New(cfg Config) (*Supervisor, error) {
-	root, err := resolveRoot(cfg.Root)
+	root, err := ResolveRoot(cfg.Root)
 	if err != nil {
 		return nil, err
 	}
@@ -128,10 +128,14 @@ func New(cfg Config) (*Supervisor, error) {
 	}, nil
 }
 
-// resolveRoot mirrors the SDK FileStore's default-root resolution (~/.gofer)
+// ResolveRoot mirrors the SDK FileStore's default-root resolution (~/.gofer)
 // so the supervisor can enumerate <root>/sessions itself in List — the SDK
-// exposes no store-wide "list every session" call.
-func resolveRoot(root string) (string, error) {
+// exposes no store-wide "list every session" call. Exported so
+// internal/daemon can resolve the same default when locating the endpoint
+// file it advertises alongside the session store (see
+// internal/daemon.EndpointPath) — an empty root always means the same
+// directory to every part of gofer, never re-derived independently.
+func ResolveRoot(root string) (string, error) {
 	if root != "" {
 		return root, nil
 	}
