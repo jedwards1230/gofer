@@ -38,6 +38,17 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		bearerToken = os.Getenv("GOFER_TOKEN")
 	}
 
+	// Fail fast, before building a supervisor or resolving a model: a
+	// non-loopback bind with no bearer token is a misconfiguration that
+	// leaves the daemon open to unauthenticated, unattended tool execution
+	// (see docs/M2-PROOF.md). daemon.Serve enforces this too (it's the
+	// authoritative check — see its doc); this call exists purely so the CLI
+	// error is clean and immediate rather than surfacing after a supervisor
+	// and model resolution have already run.
+	if err := daemon.ValidateListen(*listen, bearerToken); err != nil {
+		return err
+	}
+
 	// Resolve the model before starting anything: a daemon with no usable
 	// credential should fail fast at startup, not on the first session/new.
 	modelID := *model
