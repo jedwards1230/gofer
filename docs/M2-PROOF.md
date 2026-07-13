@@ -129,10 +129,14 @@ across the rest of the M2 stack:
   on a box, `gofer attach` / `gofer agents` / `gofer ps` "just work" there
   with no flags at all — this is what closes the original motivating gap
   (a client that couldn't find a daemon already listening on a non-loopback
-  address). A daemon started with a non-default `--root` writes its endpoint
-  file under that root instead of `~/.gofer`, so its clients still need an
-  explicit `--daemon`/`$GOFER_DAEMON` — discovery only looks at the default
-  root. If the daemon process dies without a clean shutdown, the file is
+  address). `gofer run`/`gofer resume` look for that file at their own
+  `--root` (default `~/.gofer`), so a daemon and a client started with the
+  SAME `--root` discover each other automatically too.
+  `ps`/`kill`/`archive`/`attach`/`agents`/bare `gofer` take no `--root` of
+  their own, so they always look at the default `~/.gofer`; a daemon started
+  with a different `--root` writes its endpoint file elsewhere, and those
+  clients still need an explicit `--daemon`/`$GOFER_DAEMON`. If the daemon
+  process dies without a clean shutdown, the file is
   left behind (stale); clients don't validate staleness themselves — a stale
   discovered address just dials like any other unreachable one and fails
   with the usual "no gofer daemon running at …" message. (`gofer daemon`

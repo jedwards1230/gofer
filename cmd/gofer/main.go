@@ -193,17 +193,18 @@ first ("gofer login").
 Daemon discovery (ps/kill/archive/attach/agents, and run/resume/bare-gofer
 when one is reachable): the address and token are resolved in order —
 (1) an explicit --daemon/--token flag, (2) $GOFER_DAEMON/$GOFER_TOKEN,
-(3) the endpoint a running "gofer daemon" advertised at
-~/.gofer/daemon.json, (4) the loopback default 127.0.0.1:7333. So on the
-same host, no flags are usually needed at all once a daemon is up.
-"run"/"resume" auto-detect a daemon and route through it (pass --local /
---no-daemon to force the in-process path even when one is up); bare "gofer"
-auto-detects one too, falling back to the local roster TUI when none is
-reachable; "ps"/"kill"/"archive"/"attach"/"agents" always require one (bare
-"gofer" uses the same discovery but has no --daemon/--token flags of its
-own — use "gofer attach"/"gofer agents" to point at a non-default address).
-A daemon started with a non-default --root advertises no discoverable
-endpoint at the default location — point clients at it explicitly with
---daemon/$GOFER_DAEMON.
+(3) the endpoint a running "gofer daemon" advertised at <root>/daemon.json,
+(4) the loopback default 127.0.0.1:7333. So on the same host, no flags are
+usually needed at all once a daemon is up. "run"/"resume" auto-detect a
+daemon and route through it (pass --local / --no-daemon to force the
+in-process path even when one is up); bare "gofer" auto-detects one too,
+falling back to the local roster TUI when none is reachable;
+"ps"/"kill"/"archive"/"attach"/"agents" always require one. A daemon and a
+client given the SAME --root discover each other automatically — "run" and
+"resume" read the endpoint file at their own --root (default ~/.gofer);
+"ps"/"kill"/"archive"/"attach"/"agents" and bare "gofer" have no --root of
+their own, so they always look at the default ~/.gofer (use "gofer
+attach"/"gofer agents" --daemon/--token to point at a daemon on a
+non-default --root instead).
 `)
 }
