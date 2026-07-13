@@ -44,10 +44,24 @@ type peer struct {
 
 	// inFlight is the maxInFlightPerPeer semaphore (see its doc).
 	inFlight chan struct{}
+
+	// attachedMu guards attached. It is a small per-peer lock, distinct from
+	// the daemon's registry lock — see [Daemon.attachPeer]'s lock-ordering note.
+	attachedMu sync.Mutex
+	// attached is the set of session ids this peer is registered for in the
+	// daemon's fan-out registry (see [Daemon.sessionPeers]). Tracking it on the
+	// peer makes deregister-on-close O(attached) rather than O(all sessions):
+	// [Daemon.detachPeer] walks exactly this set.
+	attached map[string]struct{}
 }
 
 func newPeer(conn *websocket.Conn, d *Daemon) *peer {
-	return &peer{conn: conn, daemon: d, inFlight: make(chan struct{}, maxInFlightPerPeer)}
+	return &peer{
+		conn:     conn,
+		daemon:   d,
+		inFlight: make(chan struct{}, maxInFlightPerPeer),
+		attached: make(map[string]struct{}),
+	}
 }
 
 // run reads frames until the connection closes or ctx is cancelled, dispatching
@@ -61,6 +75,14 @@ func (p *peer) run(ctx context.Context) {
 	// or ctx.Done) would never observe the disconnect, and wg.Wait would hang
 	// until the next event flowed or a write failed.
 	ctx, cancel := context.WithCancel(ctx)
+	// Registered FIRST so it runs LAST (defers are LIFO): the peer is removed
+	// from the daemon's fan-out registry only after cancel has unblocked every
+	// in-flight handler and wg.Wait has joined them, so no handler of THIS peer
+	// is still broadcasting when it leaves the registry. A concurrent broadcast
+	// from ANOTHER peer's handler that snapshotted this peer before it detached
+	// is harmless — its notify just errors on the closing connection and is
+	// logged and skipped (see handleSessionPrompt).
+	defer p.daemon.detachPeer(p)
 	defer p.wg.Wait()
 	defer cancel()
 

@@ -99,6 +99,19 @@ type Daemon struct {
 	// connSem is a counting semaphore bounding concurrent connections to
 	// maxConns (see serveWS).
 	connSem chan struct{}
+
+	// sessionPeersMu guards sessionPeers. It is a dedicated lock, held ONLY
+	// for the O(1) map mutations below and the snapshot in peersForSession —
+	// never across a peer.notify (a socket write), so a slow or wedged client
+	// can never stall the registry for every other session's fan-out.
+	sessionPeersMu sync.RWMutex
+	// sessionPeers is the session->peers fan-out registry: for each session id,
+	// the set of connected peers that have "attached" to it (via session/load
+	// or by driving a session/prompt). handleSessionPrompt broadcasts each
+	// projected session/update to this set so a turn one client drives is seen
+	// by every other client attached to the same session. Empty session sets
+	// are deleted, so a live entry always has at least one peer.
+	sessionPeers map[string]map[*peer]struct{}
 }
 
 // New builds a Daemon around sup. It does not start listening — call Serve
@@ -113,7 +126,87 @@ func New(sup *supervisor.Supervisor, cfg Config) *Daemon {
 		logger = slog.New(slog.DiscardHandler)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Daemon{sup: sup, cfg: cfg, log: logger, ctx: ctx, cancel: cancel, connSem: make(chan struct{}, maxConns)}
+	return &Daemon{
+		sup:          sup,
+		cfg:          cfg,
+		log:          logger,
+		ctx:          ctx,
+		cancel:       cancel,
+		connSem:      make(chan struct{}, maxConns),
+		sessionPeers: make(map[string]map[*peer]struct{}),
+	}
+}
+
+// attachPeer records that p is interested in sessionID's session/update
+// stream, so handleSessionPrompt's broadcast (see peersForSession) reaches it.
+// Called when a peer attaches to a session — on session/load and at the top of
+// session/prompt (a prompting client is attached for subsequent turns other
+// peers drive too). Idempotent: attaching an already-attached peer is a no-op.
+//
+// Lock discipline: sessionPeersMu and the peer's own attachedMu are taken in
+// sequence, never nested — sessionPeersMu is released before attachedMu is
+// acquired. detachPeer takes them in the opposite order (attachedMu first),
+// which is safe precisely because neither is ever held while acquiring the
+// other, so no lock-ordering cycle exists.
+func (d *Daemon) attachPeer(sessionID string, p *peer) {
+	d.sessionPeersMu.Lock()
+	peers := d.sessionPeers[sessionID]
+	if peers == nil {
+		peers = make(map[*peer]struct{})
+		d.sessionPeers[sessionID] = peers
+	}
+	peers[p] = struct{}{}
+	d.sessionPeersMu.Unlock()
+
+	p.attachedMu.Lock()
+	p.attached[sessionID] = struct{}{}
+	p.attachedMu.Unlock()
+}
+
+// detachPeer removes p from every session it is attached to. Called once from
+// a deferred cleanup in peer.run, after all of p's in-flight handlers have been
+// joined, so the peer leaves the registry cleanly on disconnect with no
+// dangling reference and no goroutine/subscription leak. O(sessions p attached
+// to), not O(all sessions), because p tracks its own attached set.
+func (d *Daemon) detachPeer(p *peer) {
+	p.attachedMu.Lock()
+	ids := make([]string, 0, len(p.attached))
+	for id := range p.attached {
+		ids = append(ids, id)
+	}
+	p.attached = make(map[string]struct{})
+	p.attachedMu.Unlock()
+
+	d.sessionPeersMu.Lock()
+	for _, id := range ids {
+		peers := d.sessionPeers[id]
+		if peers == nil {
+			continue
+		}
+		delete(peers, p)
+		if len(peers) == 0 {
+			delete(d.sessionPeers, id)
+		}
+	}
+	d.sessionPeersMu.Unlock()
+}
+
+// peersForSession returns a snapshot of the peers attached to sessionID. The
+// registry lock is held ONLY to copy the set into a fresh slice and released
+// before the caller iterates — a peer.notify (a socket write, potentially slow
+// on a wedged client) must never run under sessionPeersMu, or one stuck client
+// would stall fan-out for every session. A peer that disconnects after the
+// snapshot is taken is harmless: its notify simply errors, which the broadcast
+// caller logs and skips (see handleSessionPrompt).
+func (d *Daemon) peersForSession(sessionID string) []*peer {
+	d.sessionPeersMu.RLock()
+	defer d.sessionPeersMu.RUnlock()
+	peers := d.sessionPeers[sessionID]
+	out := make([]*peer, 0, len(peers))
+	for p := range peers {
+		out = append(out, p)
+	}
+	return out
 }
 
 // Handler returns the daemon's WebSocket upgrade handler, exported so tests

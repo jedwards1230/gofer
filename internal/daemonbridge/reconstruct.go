@@ -157,10 +157,12 @@ type turnEnd struct {
 // Send submits prompt as sessionID's next turn. It is fire-and-forget by
 // contract (the TUI's App calls it as a non-blocking Op — see
 // internal/tui/app.go's doSend): it publishes a synthesized TurnStarted
-// immediately, launches the actual session/prompt Call on its own goroutine,
-// and returns. The Call blocks server-side for the whole turn — the daemon
-// streams every event as a session/update notification the demuxer
-// reconstructs — and resolves once the turn reaches a terminal stop reason.
+// followed by the user's own prompt as a settled MessageUser pair (the daemon
+// suppresses the user-message echo back to the driving peer — see below),
+// launches the actual session/prompt Call on its own goroutine, and returns.
+// The Call blocks server-side for the whole turn — the daemon streams every
+// event as a session/update notification the demuxer reconstructs — and
+// resolves once the turn reaches a terminal stop reason.
 // When it does, the goroutine posts the outcome to turnEndCh; the demuxer
 // flushes any open message and publishes the terminal
 // SessionError/TurnFinished pair (see handleTurnEnd).
@@ -197,6 +199,20 @@ func (s *Supervisor) Send(_ context.Context, sessionID, prompt string) error {
 		return nil
 	}
 	rec.broker.Publish(event.NewTurnStarted(sessionID))
+	// Inject the user's own prompt into this bridge's reconstruction locally.
+	// The daemon SUPPRESSES the user-message echo (user_message_chunk) back to
+	// the peer that drove the prompt (see internal/daemon's broadcastUpdate) —
+	// only OTHER attached peers receive it live — so without this the driving
+	// bridge's transcript would lose its own user turn until a reload replayed
+	// it from history. This synthesizes the same settled MessageStarted/
+	// MessageFinished{MessageUser} pair handleUserMessage builds from that
+	// echo, in the same TurnStarted->user->agent order the pre-suppression live
+	// stream produced. Published straight to the broker (not via
+	// handleUserMessage) because this runs on the caller's goroutine, not the
+	// demuxer's, so it must not touch rec's demuxer-only open-message fields; an
+	// idle session has no message open here, so no flush is needed.
+	rec.broker.Publish(event.NewMessageStarted(sessionID, event.MessageUser))
+	rec.broker.Publish(event.NewMessageFinished(sessionID, event.MessageUser, prompt))
 
 	go func() {
 		raw, err := s.client.Call(context.Background(), acp.MethodSessionPrompt, acp.PromptRequest{
@@ -288,12 +304,25 @@ func (s *Supervisor) handleTurnEnd(te turnEnd) {
 // rec.loadDone. [Supervisor.Send] waits on rec.loadDone before publishing or
 // dispatching anything for a session (see its doc), so a live turn this
 // bridge itself starts can never race a still-settling history replay onto
-// the broker ahead of it. A session/prompt from a DIFFERENT peer's
-// connection cannot race it at all: the daemon only ever pushes
-// session/update notifications to the peer whose own call produced them
-// (see handleSessionPrompt's and handleSessionLoad's *peer-scoped p.notify
-// calls) — this bridge's connection only ever sees replay/live notifications
-// it itself asked for.
+// the broker ahead of it.
+//
+// A live turn a DIFFERENT peer drives now CAN interleave with this bridge's
+// history load: the daemon fans each turn's session/update out to every peer
+// attached to the session — including one that just issued session/load — not
+// only to the peer whose own call produced them (see internal/daemon's
+// broadcastUpdate; this bridge attaches by issuing the session/load Call
+// loadHistory makes). Reconstruction stays correct because the SAME demuxer
+// goroutine applies both streams: the session/load response can only be read
+// once every replay notification has been enqueued onto Notifications ahead of
+// it (handleSessionLoad writes them to the wire first), and the demuxer's
+// loadCh case drains all of those before finishLoad closes rec.loadDone — so a
+// concurrent peer's live session/update, arriving as an ordinary notification,
+// is applied either fully before the load settles or after it, never torn
+// across it. What is NOT guaranteed once a second peer drives a turn during
+// this load is the relative ORDER of that live turn's events against the tail
+// of the replayed history — but ACP does not order events across independent
+// turns from different clients, and Model.Ingest reconstructs each item by its
+// own started/finished boundary, so the transcript stays coherent regardless.
 func (s *Supervisor) loadHistory(rec *sessionState) {
 	ctx := context.Background()
 	cwd := s.sessionCwd(ctx, rec.id)
@@ -330,16 +359,20 @@ func (s *Supervisor) finishLoad(rec *sessionState) {
 // reconstruction), is dropped.
 //
 // Its s.session(w.SessionID) call below will, in practice, always find an
-// already-mapped entry rather than create one: this connection only ever
-// receives a notification for a session because THIS bridge's own Send or
-// loadHistory issued the Call that produced it (see loadHistory's doc on
-// per-peer notification scoping), and both of those already reference the
-// session — creating its entry and, for loadHistory, starting the load — via
-// session() before dispatching their Call. The lookup-or-create fallback
-// here exists only so a genuinely unexpected notification (a protocol drift)
-// degrades to "reconstruct into a fresh, unloaded broker" rather than a nil
-// dereference, not because this path is expected to fire in normal
-// operation.
+// already-mapped entry rather than create one: this connection only receives a
+// notification for a session it has ATTACHED to, and it attaches only by
+// issuing session/load (loadHistory) or session/prompt (Send) for that session
+// — both of which reference the session via session() (creating its entry, and
+// for loadHistory starting the load) before dispatching their Call. Crucially,
+// the notification may now be for a turn a DIFFERENT peer drove — the daemon
+// fans each turn out to every attached peer, not just the caller whose Call
+// produced it (see internal/daemon's broadcastUpdate) — but this bridge still
+// only ever attaches through its own session()-backed Call, so the entry
+// exists regardless of which peer's turn the notification carries. The
+// lookup-or-create fallback here exists only so a genuinely unexpected
+// notification (a protocol drift) degrades to "reconstruct into a fresh,
+// unloaded broker" rather than a nil dereference, not because this path is
+// expected to fire in normal operation.
 func (s *Supervisor) handleNotification(n daemon.Notification) {
 	if n.Method != acp.MethodSessionUpdate {
 		return
@@ -383,10 +416,13 @@ func (s *Supervisor) handleNotification(n daemon.Notification) {
 // carries the WHOLE prompt text in one shot rather than incremental deltas
 // (event.MessageUser is never streamed — see its doc), so this synthesizes
 // the settled pair directly instead of going through appendDelta's
-// open-message bookkeeping. Both [acp.ToSessionUpdate] (the LIVE projection,
-// once per session/prompt call) and [acp.ReplayNotifications] (the HISTORY
-// projection, once per persisted user turn) emit this variant, so it is
-// reconstructed the same way regardless of which path triggered it. Any
+// open-message bookkeeping. It reconstructs a user_message_chunk arriving from
+// two remaining sources the same way: [acp.ReplayNotifications] (the HISTORY
+// projection, once per persisted user turn on session/load) and
+// [acp.ToSessionUpdate]'s LIVE projection for a turn ANOTHER peer drove — the
+// daemon fans that peer's echo out to this attached bridge. The bridge's OWN
+// prompt does NOT arrive here: the daemon suppresses the echo to the driving
+// peer, which instead injects the user pair locally in Send. Any
 // still-open assistant message is flushed first for defense in depth, though
 // in practice none should be open here: a user_message_chunk always precedes
 // that turn's own assistant content on both the live and replay paths.
