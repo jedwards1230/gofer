@@ -155,6 +155,9 @@ type turnEnd struct {
 // event loop has moved on to render other state).
 func (s *Supervisor) Send(_ context.Context, sessionID, prompt string) error {
 	rec := s.session(sessionID)
+	if rec == nil {
+		return nil // supervisor closed: a Send is a no-op
+	}
 	rec.broker.Publish(event.NewTurnStarted(sessionID))
 
 	go func() {
@@ -190,6 +193,9 @@ func (s *Supervisor) Send(_ context.Context, sessionID, prompt string) error {
 // cost/usage (see Roster), refreshed by the App's 1s poll.
 func (s *Supervisor) handleTurnEnd(te turnEnd) {
 	rec := s.session(te.sessionID)
+	if rec == nil {
+		return // supervisor closing: drop the terminal event
+	}
 	s.flushOpenMessage(rec)
 
 	if te.err != "" {
@@ -220,6 +226,9 @@ func (s *Supervisor) handleNotification(n daemon.Notification) {
 	}
 
 	rec := s.session(w.SessionID)
+	if rec == nil {
+		return // supervisor closing: drop the update
+	}
 	switch disc.SessionUpdate {
 	case "agent_message_chunk":
 		s.appendDelta(rec, event.MessageText, w.Update)

@@ -3,6 +3,7 @@ package daemonbridge
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -36,6 +37,11 @@ const (
 	subBuffer   = 256
 	replayDepth = 256
 )
+
+// errClosed is returned by [Supervisor.Subscribe] once the supervisor has been
+// closed — its brokers are reaped and the demuxer is gone, so no new
+// subscription could ever receive events.
+var errClosed = errors.New("daemonbridge: supervisor is closed")
 
 // turnEndChanBuffer bounds how many in-flight [Supervisor.Send] calls can
 // have their turn-end result queued for the demuxer at once before a sender
@@ -123,6 +129,16 @@ func (s *Supervisor) session(id string) *sessionState {
 	defer s.mu.Unlock()
 	if rec, ok := s.sessions[id]; ok {
 		return rec
+	}
+	// After Close (s.closed is closed and closeAllBrokers has reaped the map),
+	// never create a fresh broker: nothing would ever close it or publish to
+	// it, so a subscription on it would hang forever and the broker would leak.
+	// A nil return signals "closed" to callers. mu serializes this with
+	// closeAllBrokers, so a broker created just before Close is still reaped.
+	select {
+	case <-s.closed:
+		return nil
+	default:
 	}
 	rec := &sessionState{
 		id:     id,
@@ -212,6 +228,9 @@ func (s *Supervisor) Roster(ctx context.Context) ([]tui.SessionInfo, error) {
 // first Subscribe/Send/notification the bridge has seen for it.
 func (s *Supervisor) Subscribe(_ context.Context, sessionID string) (*event.Subscription, error) {
 	rec := s.session(sessionID)
+	if rec == nil {
+		return nil, errClosed
+	}
 	return rec.broker.Subscribe(event.FilterAll, subBuffer), nil
 }
 

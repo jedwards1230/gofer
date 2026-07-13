@@ -5,11 +5,15 @@ supervising many coding agents at once — a roster of live sessions, peek/attac
 navigation, approvals that reach your phone — built in Go on
 [`agent-sdk-go`](https://github.com/jedwards1230/agent-sdk-go).
 
-> **Status: M1 in progress.** `gofer run`/`gofer resume` drive a real
-> provider and the builtin tool set through a durable, kill-resumable
-> session journal (see [`docs/M1-PROOF.md`](docs/M1-PROOF.md)); `gofer demo`
-> still streams a faux-provider session with no network. The daemon,
-> supervisor, and TUI land at M2 (see the [roadmap](#roadmap)).
+> **Status: M2 — the daemon.** `gofer daemon` hosts a session supervisor
+> behind an ACP-over-WebSocket listener (optional bearer token), so an ACP
+> client — e.g. a phone over your tailnet — can create and drive a session
+> that appears live in the laptop TUI roster (bare `gofer`, `gofer attach`).
+> `gofer run`/`resume` route through a running daemon or fall back in-process;
+> `gofer ps`/`kill`/`archive` manage the roster; `gofer demo` still streams a
+> faux-provider session with no network. See
+> [`docs/M2-PROOF.md`](docs/M2-PROOF.md) (M1:
+> [`docs/M1-PROOF.md`](docs/M1-PROOF.md)) and the [roadmap](#roadmap).
 
 ## What it will be
 
@@ -94,8 +98,8 @@ stream, so scripts and CI never hit the TUI.
 | Stage | Ships |
 |---|---|
 | **M0 · scaffold** ✅ | repo + `gofer demo` streaming the SDK's faux provider |
-| **M1 · one good session** (in progress) | real provider, builtin tools, resumable sessions, cost accounting |
-| M2 · the daemon | supervisor, roster, overview⇄peek⇄attach TUI, native ACP |
+| **M1 · one good session** ✅ | real provider, builtin tools, resumable sessions, cost accounting |
+| **M2 · the daemon** ✅ | supervisor, roster, overview⇄peek⇄attach TUI, native ACP over WebSocket, bearer auth |
 | M3 · guardrails | permission engine + approvals UX, sandboxed exec, headless mode |
 | M4 · ecosystem | MCP servers, SKILL.md skills, out-of-process plugins |
 | M5 · auto + polish | auto mode with reviewer pipeline, multi-machine discovery |

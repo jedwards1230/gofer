@@ -471,3 +471,25 @@ func TestArchiveRunningRejected(t *testing.T) {
 		t.Fatalf("Interrupt (cleanup): %v", err)
 	}
 }
+
+// TestSubscribeAfterCloseErrors asserts that a Subscribe after Close returns an
+// error rather than silently creating a fresh broker — one that nothing would
+// ever close or publish to, hanging the subscription forever and leaking the
+// broker.
+func TestSubscribeAfterCloseErrors(t *testing.T) {
+	sup := newTestSupervisor(t, fauxProvider)
+	url := newTestDaemon(t, sup)
+	b := newBridge(t, url)
+
+	if err := b.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	sub, err := b.Subscribe(context.Background(), "no-such-session")
+	if err == nil {
+		t.Fatal("Subscribe after Close: want an error, got nil (would leak a broker)")
+	}
+	if sub != nil {
+		t.Fatal("Subscribe after Close: want a nil subscription")
+	}
+}
