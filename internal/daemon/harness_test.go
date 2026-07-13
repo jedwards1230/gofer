@@ -194,6 +194,15 @@ func (c *wsClient) register(id string) chan rpcFrame {
 	return ch
 }
 
+// close tears down the underlying WebSocket connection mid-test (a client
+// disconnect), so the daemon's peer.run observes the read error and runs its
+// deregister-on-close path. The harness's own t.Cleanup also closes the
+// connection; a second Close is a harmless no-op.
+func (c *wsClient) close() {
+	c.t.Helper()
+	_ = c.conn.Close(websocket.StatusNormalClosure, "")
+}
+
 // writeRaw sends raw text verbatim, bypassing JSON-RPC envelope construction
 // — used to exercise the parse-error path with deliberately malformed input.
 func (c *wsClient) writeRaw(raw string) {
@@ -321,7 +330,8 @@ type blockingStream struct {
 
 func (s *blockingStream) Next() (provider.StreamEvent, error) {
 	s.n++
-	if s.n == 1 {
+	switch s.n {
+	case 1:
 		close(s.p.started)
 		select {
 		case <-s.p.release:
@@ -332,8 +342,16 @@ func (s *blockingStream) Next() (provider.StreamEvent, error) {
 			// the type doc.
 		}
 		return provider.StreamEvent{Type: provider.StreamTextDelta, Text: "hello"}, nil
+	case 2:
+		// Only reached on the RELEASE path: a clean StreamFinished so a
+		// released (as opposed to cancelled) turn terminates with end_turn.
+		// The cancel path never reaches here — the loop's pre-Next ctx check
+		// turns the cancellation into a cancelled turn.finished after the
+		// first delta, before Next is called again (see the type doc).
+		return provider.StreamEvent{Type: provider.StreamFinished, StopReason: provider.StopEndTurn}, nil
+	default:
+		return provider.StreamEvent{}, io.EOF
 	}
-	return provider.StreamEvent{}, io.EOF
 }
 
 func (s *blockingStream) Close() error { return nil }
