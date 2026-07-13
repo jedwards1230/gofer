@@ -11,8 +11,11 @@ personally — there is no hermetic CI equivalent for the phone-to-daemon leg
 **A bearer token is REQUIRED for any non-loopback bind.** The M2 daemon runs
 every tool call — including `bash` — completely **unattended**: the loop's
 permission-hook seam isn't wired until M3, so a `session/prompt` proceeds
-through every tool call with no approval gate at all (see §4 below).
-Reaching the daemon is therefore the ability to run your agent's tools —
+through every tool call with no approval gate at all (see §4 below). A phone
+driving a session has **no way to deny an individual tool call**, and those
+tools read/write files and run commands in the session's working directory on
+the host. Reaching the daemon is therefore the ability to run your agent's
+tools —
 **RCE-by-design** for whoever can connect. `gofer daemon` enforces this: it
 refuses to start on a non-loopback (tailnet, LAN, or bind-all `0.0.0.0`/`::`)
 address unless `--token`/`$GOFER_TOKEN` is set, with a `--listen 127.0.0.1:…`
