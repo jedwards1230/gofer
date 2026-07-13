@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/jedwards1230/agent-sdk-go/acp"
@@ -93,6 +95,70 @@ func handleAuthenticate(_ *Daemon, _ context.Context, _ *peer, _ json.RawMessage
 	return struct{}{}, nil
 }
 
+// cwdErrRef formats a cwd for an invalid-params error: always the raw string
+// the client sent (so they can match the error to what they typed), plus the
+// resolved path when a "~" expansion or filepath.Clean changed it (so they
+// also see where it actually pointed — the exact ambiguity behind the literal
+// "~/orchestration" bug). Used for every resolveSessionCwd rejection so the
+// messages stay consistent.
+func cwdErrRef(raw, resolved string) string {
+	if resolved == raw {
+		return fmt.Sprintf("%q", raw)
+	}
+	return fmt.Sprintf("%q (resolved to %q)", raw, resolved)
+}
+
+// resolveSessionCwd validates and normalizes an ACP session cwd. ACP v1
+// requires cwd to be an absolute path (both NewSessionRequest.cwd and
+// LoadSessionRequest.cwd — src/v1/agent.rs); as a DX nicety for phone clients
+// that let a user type a path, a leading "~" or "~/" is expanded against the
+// daemon's own home. An empty cwd defaults to the daemon's own working
+// directory (os.Getwd) — the same effective root a zero-value
+// [supervisor.CreateOptions]/[supervisor.ResumeOptions] has always resolved
+// to (see their doc comments), now explicit and validated here rather than
+// left to flow down unchecked. The result must be an existing directory;
+// otherwise a clear invalid-params error naming the path (raw, plus the
+// resolved form when they differ — see [cwdErrRef]) is returned instead of
+// creating a session whose every tool call silently fails (the live bug this
+// guards: an ACP client sending the literal, unexpanded string
+// "~/orchestration" as cwd).
+func resolveSessionCwd(raw string) (string, *rpcError) {
+	if strings.TrimSpace(raw) == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", internalErr(fmt.Errorf("session cwd: resolve daemon working directory: %w", err))
+		}
+		return cwd, nil
+	}
+
+	cwd := raw
+	if raw == "~" || strings.HasPrefix(raw, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", internalErr(fmt.Errorf("session cwd: resolve daemon home directory: %w", err))
+		}
+		if raw == "~" {
+			cwd = home
+		} else {
+			cwd = filepath.Join(home, raw[2:])
+		}
+	}
+	cwd = filepath.Clean(cwd)
+
+	if !filepath.IsAbs(cwd) {
+		return "", invalidParamsMsg(fmt.Sprintf("session cwd %s must be an absolute path (a leading ~ is expanded to the daemon's home)", cwdErrRef(raw, cwd)))
+	}
+
+	fi, err := os.Stat(cwd)
+	if err != nil {
+		return "", invalidParamsMsg(fmt.Sprintf("session cwd %s does not exist: %v", cwdErrRef(raw, cwd), err))
+	}
+	if !fi.IsDir() {
+		return "", invalidParamsMsg(fmt.Sprintf("session cwd %s is not a directory", cwdErrRef(raw, cwd)))
+	}
+	return cwd, nil
+}
+
 // handleSessionNew creates an idle session (no first turn — the prompt
 // arrives via a subsequent session/prompt) and replies its id.
 func handleSessionNew(d *Daemon, ctx context.Context, _ *peer, params json.RawMessage) (any, *rpcError) {
@@ -100,7 +166,11 @@ func handleSessionNew(d *Daemon, ctx context.Context, _ *peer, params json.RawMe
 	if rerr != nil {
 		return nil, rerr
 	}
-	info, err := d.sup.Create(ctx, "", supervisor.CreateOptions{Cwd: op.Cwd, Model: d.cfg.DefaultModel})
+	cwd, rerr := resolveSessionCwd(op.Cwd)
+	if rerr != nil {
+		return nil, rerr
+	}
+	info, err := d.sup.Create(ctx, "", supervisor.CreateOptions{Cwd: cwd, Model: d.cfg.DefaultModel})
 	if err != nil {
 		return nil, appError(err)
 	}
@@ -143,7 +213,11 @@ func handleSessionLoad(d *Daemon, ctx context.Context, p *peer, params json.RawM
 	if err := json.Unmarshal(params, &req); err != nil {
 		return nil, invalidParams(fmt.Errorf("acp: decode %s params: %w", acp.MethodSessionLoad, err))
 	}
-	if _, err := d.sup.Resume(ctx, op.SessionID, supervisor.ResumeOptions{Cwd: req.Cwd, Model: d.cfg.DefaultModel}); err != nil {
+	cwd, rerr := resolveSessionCwd(req.Cwd)
+	if rerr != nil {
+		return nil, rerr
+	}
+	if _, err := d.sup.Resume(ctx, op.SessionID, supervisor.ResumeOptions{Cwd: cwd, Model: d.cfg.DefaultModel}); err != nil {
 		return nil, appError(err)
 	}
 	d.log.Info("session resumed", "session", op.SessionID)
