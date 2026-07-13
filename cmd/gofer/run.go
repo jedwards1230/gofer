@@ -12,6 +12,7 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/runner"
 
 	"github.com/jedwards1230/gofer/internal/daemon"
+	"github.com/jedwards1230/gofer/internal/supervisor"
 )
 
 // defaultSystemPrompt is the system prompt a run/resume session uses absent
@@ -147,7 +148,10 @@ func runRun(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 	// credential-lookup cost at all. A dial failure that ISN'T "nothing is
 	// listening" (e.g. a wrong token) is a real problem to surface, not a
 	// silent fallback — see [daemonUnreachable]. --local skips the probe
-	// outright, forcing the in-process path.
+	// outright, forcing the in-process path. dialDaemon's own root resolution
+	// (via daemon.ReadEndpoint) already falls back through
+	// [supervisor.ResolveRoot], so the raw --root flag (possibly "") is
+	// passed through unresolved here.
 	var daemonClient *daemon.Client
 	daemonRunning := false
 	if !*local {
@@ -165,6 +169,18 @@ func runRun(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 		noteDaemonDeviations(stderr, "run", *model, *root, *asJSON)
 	}
 
+	// Resolve --root through gofer's own default (~/.gofer, never the SDK's)
+	// before any store/credential construction. Skipped when a daemon is
+	// driving the session — the daemon owns its own store; --root is inert
+	// there (see noteDaemonDeviations above).
+	var rootDir string
+	if !daemonRunning {
+		rootDir, err = supervisor.ResolveRoot(*root)
+		if err != nil {
+			return err
+		}
+	}
+
 	// Resolve the model before acquiring the prompt (which may block on an
 	// interactive stdin read): a caller with no usable credential should fail
 	// fast, not sit at a prompt> indicator first. Skipped entirely on the
@@ -174,7 +190,7 @@ func runRun(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 		modelID = *model
 		if modelID == "" {
 			var rerr error
-			modelID, rerr = resolveRunModel(ctx, *root)
+			modelID, rerr = resolveRunModel(ctx, rootDir)
 			if rerr != nil {
 				return rerr
 			}
@@ -212,7 +228,7 @@ func runRun(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 	}
 
 	r, err := runner.New(ctx, runner.Options{
-		Root:   *root,
+		Root:   rootDir,
 		Cwd:    cwd,
 		Model:  modelID,
 		System: defaultSystemPrompt,

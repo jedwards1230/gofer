@@ -14,6 +14,7 @@ import (
 
 	"github.com/jedwards1230/agent-sdk-go/auth"
 	"github.com/jedwards1230/agent-sdk-go/runner"
+	"github.com/jedwards1230/gofer/internal/supervisor"
 )
 
 // maxCodeAttempts is how many times `gofer login` re-prompts for the pasted
@@ -121,13 +122,14 @@ func parseFlags(fs *flag.FlagSet, args []string) (help bool, err error) {
 }
 
 // newAuthStore builds the auth.Store the login/logout/auth commands share.
-// An empty root uses the store's default (~/.gofer).
+// An empty root resolves to gofer's own default (~/.gofer, via
+// [supervisor.ResolveRoot]) rather than relying on any SDK default.
 func newAuthStore(root string) (*auth.Store, error) {
-	var opts []auth.Option
-	if root != "" {
-		opts = append(opts, auth.WithRoot(root))
+	resolved, err := supervisor.ResolveRoot(root)
+	if err != nil {
+		return nil, err
 	}
-	store, err := auth.New(opts...)
+	store, err := auth.New(auth.WithRoot(resolved))
 	if err != nil {
 		return nil, fmt.Errorf("open auth store: %w", err)
 	}
