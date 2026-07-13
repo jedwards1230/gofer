@@ -358,6 +358,8 @@ func (s *Supervisor) handleNotification(n daemon.Notification) {
 		return // supervisor closing: drop the update
 	}
 	switch disc.SessionUpdate {
+	case "user_message_chunk":
+		s.handleUserMessage(rec, w.Update)
 	case "agent_message_chunk":
 		s.appendDelta(rec, event.MessageText, w.Update)
 	case "agent_thought_chunk":
@@ -370,14 +372,30 @@ func (s *Supervisor) handleNotification(n daemon.Notification) {
 		// Unrecognized/future session/update variant: no event.Event
 		// projection exists for it in the minimal attach surface, so it is
 		// accepted and ignored, mirroring tui.Model.Ingest's own tolerance of
-		// event kinds it doesn't render. user_message_chunk is the one
-		// variant actually seen here in practice — [acp.ToSessionUpdate]
-		// (the LIVE projection, driving handleSessionPrompt) never emits it
-		// per its own doc, but [acp.ReplayNotifications] (the HISTORY
-		// projection loadHistory triggers) does, once per persisted user
-		// turn; tui.Model never renders past user turns either way (see its
-		// Ingest), so dropping it here is consistent, not a regression.
+		// event kinds it doesn't render.
 	}
+}
+
+// handleUserMessage reconstructs a user_message_chunk notification into a
+// MessageStarted{MessageUser}/MessageFinished{MessageUser} pair — the shape
+// tui.Model.Ingest expects to render one user transcript item (see its doc).
+// Unlike agent_message_chunk/agent_thought_chunk, a user_message_chunk
+// carries the WHOLE prompt text in one shot rather than incremental deltas
+// (event.MessageUser is never streamed — see its doc), so this synthesizes
+// the settled pair directly instead of going through appendDelta's
+// open-message bookkeeping. Both [acp.ToSessionUpdate] (the LIVE projection,
+// once per session/prompt call) and [acp.ReplayNotifications] (the HISTORY
+// projection, once per persisted user turn) emit this variant, so it is
+// reconstructed the same way regardless of which path triggered it. Any
+// still-open assistant message is flushed first for defense in depth, though
+// in practice none should be open here: a user_message_chunk always precedes
+// that turn's own assistant content on both the live and replay paths.
+func (s *Supervisor) handleUserMessage(rec *sessionState, raw json.RawMessage) {
+	s.flushOpenMessage(rec)
+	var c contentChunkWire
+	_ = json.Unmarshal(raw, &c) // best-effort: a decode failure just yields empty text
+	rec.broker.Publish(event.NewMessageStarted(rec.id, event.MessageUser))
+	rec.broker.Publish(event.NewMessageFinished(rec.id, event.MessageUser, c.Content.Text))
 }
 
 // appendDelta opens a message of kind (flushing a different-kind or

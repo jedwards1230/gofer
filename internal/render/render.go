@@ -60,6 +60,15 @@ func (h *Human) Render(e event.Event) error {
 			h.write(ev.Text)
 		}
 	case event.MessageFinished:
+		// event.MessageUser (the user's own prompt) never deltas — see its
+		// doc — so its settled MessageFinished is the only signal this
+		// renderer gets; print it directly rather than the bare newline
+		// every other kind gets (which closes out a stream already written
+		// via MessageDelta above).
+		if ev.MessageKind == event.MessageUser {
+			h.write(fmt.Sprintf("you › %s\n", ev.Content))
+			break
+		}
 		h.write("\n")
 	case event.TurnFinished:
 		h.write(fmt.Sprintf("· turn.finished  stop=%s  usage=%din/%dout\n",

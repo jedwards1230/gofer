@@ -74,6 +74,18 @@ func TestHuman(t *testing.T) {
 			events: []event.Event{event.NewSessionError(sid, "boom", true)},
 			want:   "· session.error  boom\n",
 		},
+		{
+			// event.MessageUser (the user's own prompt) never deltas — see its
+			// doc — so unlike reasoning/text, MessageStarted writes nothing and
+			// the settled MessageFinished is the only content this renderer
+			// ever sees for it.
+			name: "user message echoed",
+			events: []event.Event{
+				event.NewMessageStarted(sid, event.MessageUser),
+				event.NewMessageFinished(sid, event.MessageUser, "ship it"),
+			},
+			want: "you › ship it\n",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

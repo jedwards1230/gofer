@@ -18,7 +18,7 @@ fable-5 · ~/orchestration
 
 
 
-
+you › Wire the app root.
 Wired the app root; nav contract is in.
 ○ idle  stop=end_turn  usage=20in/11out
 j/k switch · →/enter attach · ← back · ctrl-c quit

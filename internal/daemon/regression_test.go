@@ -27,6 +27,10 @@ func twoTurnProvider() func() provider.Provider {
 // wantNotifs session/update notifications' text content before reading the
 // terminal response — mirroring TestSessionNewPromptStream's pattern, where
 // the exact notification count is known up front from the scripted turn.
+// wantNotifs and the returned texts cover assistant content only: the
+// prompt's own settled user_message_chunk echo (always the turn's first
+// notification — see TestSessionNewPromptStream) is drained and verified
+// here first, so callers keep asserting on assistant text exactly as before.
 func drivePrompt(t *testing.T, c *wsClient, sid, text string, wantNotifs int) (rpcFrame, []string) {
 	t.Helper()
 
@@ -37,6 +41,18 @@ func drivePrompt(t *testing.T, c *wsClient, sid, text string, wantNotifs int) (r
 			Prompt:    []acp.ContentBlock{acp.TextBlock(text)},
 		})
 	}()
+
+	userNotif := c.waitNotification()
+	if userNotif.Method != acp.MethodSessionUpdate {
+		t.Fatalf("user echo: method = %q, want %q", userNotif.Method, acp.MethodSessionUpdate)
+	}
+	var userUp sessionUpdateParams
+	if err := json.Unmarshal(userNotif.Params, &userUp); err != nil {
+		t.Fatalf("user echo: unmarshal params: %v", err)
+	}
+	if userUp.Update.SessionUpdate != "user_message_chunk" || userUp.Update.Content.Text != text {
+		t.Fatalf("user echo = %+v, want user_message_chunk(text=%q)", userUp.Update, text)
+	}
 
 	texts := make([]string, 0, wantNotifs)
 	for i := 0; i < wantNotifs; i++ {
