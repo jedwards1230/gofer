@@ -155,6 +155,94 @@ func TestSessionNewCwdResolution(t *testing.T) {
 	})
 }
 
+// TestSessionListCwdFilterMatchesTildeAndResolvedForms is the regression test
+// for the session/list cwd filter bug: sessions are stored with an absolute,
+// tilde-expanded cwd (see resolveSessionCwd), but the filter used to compare
+// req.Cwd against it RAW, so a client filtering by the same "~/<sub>" form it
+// created the session with (the natural phone-client flow) could never match
+// — the list came back empty for a live session. Both the tilde form and the
+// already-resolved absolute form must match; a relative or nonexistent filter
+// must match nothing, without erroring.
+func TestSessionListCwdFilterMatchesTildeAndResolvedForms(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+
+	sub := filepath.Join(fakeHome, "myproject")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+
+	sup := newTestSupervisor(t, fauxProvider)
+	_, url := newTestDaemon(t, sup, "")
+	c := dial(t, context.Background(), url, nil)
+
+	sid := newSession(t, c, "~/myproject")
+
+	t.Run("tilde form matches", func(t *testing.T) {
+		got := listSessionIDs(t, c, "~/myproject")
+		if !containsID(got, sid) {
+			t.Errorf("session/list cwd=%q: got %v, want it to include %s", "~/myproject", got, sid)
+		}
+	})
+
+	t.Run("resolved absolute form matches", func(t *testing.T) {
+		got := listSessionIDs(t, c, sub)
+		if !containsID(got, sid) {
+			t.Errorf("session/list cwd=%q: got %v, want it to include %s", sub, got, sid)
+		}
+	})
+
+	t.Run("relative filter matches nothing, no error", func(t *testing.T) {
+		resp := c.request(acp.MethodSessionList, acp.ListSessionsRequest{Cwd: "myproject"})
+		if resp.Error != nil {
+			t.Fatalf("session/list with relative cwd filter: unexpected error %+v", resp.Error)
+		}
+		got := listSessionIDs(t, c, "myproject")
+		if containsID(got, sid) {
+			t.Errorf("session/list cwd=%q: got %v, want it to NOT include %s", "myproject", got, sid)
+		}
+	})
+
+	t.Run("nonexistent filter matches nothing, no error", func(t *testing.T) {
+		resp := c.request(acp.MethodSessionList, acp.ListSessionsRequest{Cwd: filepath.Join(fakeHome, "does-not-exist")})
+		if resp.Error != nil {
+			t.Fatalf("session/list with nonexistent cwd filter: unexpected error %+v", resp.Error)
+		}
+		got := listSessionIDs(t, c, filepath.Join(fakeHome, "does-not-exist"))
+		if containsID(got, sid) {
+			t.Errorf("session/list cwd=%q: got %v, want it to NOT include %s", "does-not-exist", got, sid)
+		}
+	})
+}
+
+// listSessionIDs issues session/list filtered by cwd and returns the ids of
+// every returned session.
+func listSessionIDs(t *testing.T, c *wsClient, cwd string) []string {
+	t.Helper()
+	resp := c.request(acp.MethodSessionList, acp.ListSessionsRequest{Cwd: cwd})
+	if resp.Error != nil {
+		t.Fatalf("session/list error: %+v", resp.Error)
+	}
+	var got acp.ListSessionsResponse
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	ids := make([]string, 0, len(got.Sessions))
+	for _, s := range got.Sessions {
+		ids = append(ids, s.SessionID)
+	}
+	return ids
+}
+
+func containsID(ids []string, id string) bool {
+	for _, got := range ids {
+		if got == id {
+			return true
+		}
+	}
+	return false
+}
+
 // TestSessionLoadCwdResolution asserts session/load rejects a bad cwd the
 // same way session/new does (see resolveSessionCwd), rather than resuming a
 // session into a nonexistent working directory.
