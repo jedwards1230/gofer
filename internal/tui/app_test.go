@@ -30,9 +30,10 @@ type fakeSup struct {
 	roster  []tui.SessionInfo
 	brokers map[string]*event.Broker
 
-	created []string
-	sent    []string
-	ops     []string
+	created    []string
+	createdCwd []string
+	sent       []string
+	ops        []string
 }
 
 func newFakeSup(roster []tui.SessionInfo) *fakeSup {
@@ -60,10 +61,11 @@ func (f *fakeSup) Subscribe(_ context.Context, id string) (*event.Subscription, 
 	return f.broker(id).Subscribe(event.FilterAll, 16), nil
 }
 
-func (f *fakeSup) Create(_ context.Context, prompt string, _ tui.CreateOptions) (tui.SessionInfo, error) {
+func (f *fakeSup) Create(_ context.Context, prompt string, opts tui.CreateOptions) (tui.SessionInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.created = append(f.created, prompt)
+	f.createdCwd = append(f.createdCwd, opts.Cwd)
 	info := tui.SessionInfo{ID: "created-1", Title: prompt, Status: tui.StatusWorking}
 	f.roster = append(f.roster, info)
 	return info, nil
@@ -221,6 +223,13 @@ func TestNavDispatchCreatesSession(t *testing.T) {
 
 	if len(sup.created) != 1 || sup.created[0] != "fix the flaky peek test" {
 		t.Fatalf("sup.created = %v; want one entry %q", sup.created, "fix the flaky peek test")
+	}
+	// The dispatch bar must pass this client's cwd (the roster header's value,
+	// appTestMeta().Cwd) so the created session carries the client's project
+	// dir — not the daemon's launch dir — and stays visible to a cwd-filtered
+	// client (e.g. a phone).
+	if len(sup.createdCwd) != 1 || sup.createdCwd[0] != appTestMeta().Cwd {
+		t.Fatalf("created cwd = %v; want one entry %q (the App's cwd)", sup.createdCwd, appTestMeta().Cwd)
 	}
 }
 

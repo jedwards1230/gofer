@@ -39,6 +39,7 @@ type itemKind int
 const (
 	itemAssistantText itemKind = iota
 	itemAssistantReasoning
+	itemUser
 	itemTool
 	itemError
 	itemApproval
@@ -48,7 +49,7 @@ const (
 // other kind.
 type item struct {
 	kind itemKind
-	text string // settled/streaming content for text, reasoning, error, approval
+	text string // settled/streaming content for text, reasoning, user, error, approval
 	done bool   // MessageFinished / ToolCallFinished has been seen
 
 	toolName   string
@@ -119,6 +120,16 @@ func (m Model) Ingest(e event.Event) Model {
 		m.cost = ev.Cost
 
 	case event.MessageStarted:
+		// event.MessageUser (the user's own prompt turn) is a settled
+		// Started/Finished pair with no deltas — see event.MessageUser's doc —
+		// so it never opens a streaming item the way assistant text/reasoning
+		// does. Ignoring MessageStarted here and building the whole item on
+		// MessageFinished (below) makes this Ingest robust to either arrival
+		// order, and keeps a user message from ever colliding with
+		// openText/openReasoning's single-open-item-per-kind bookkeeping.
+		if ev.MessageKind == event.MessageUser {
+			break
+		}
 		idx := len(m.items)
 		kind := itemAssistantText
 		if ev.MessageKind == event.MessageReasoning {
@@ -133,6 +144,10 @@ func (m Model) Ingest(e event.Event) Model {
 		}
 
 	case event.MessageFinished:
+		if ev.MessageKind == event.MessageUser {
+			m.items = append(m.items, item{kind: itemUser, text: ev.Content, done: true})
+			break
+		}
 		if idx, ok := m.openIndex(ev.MessageKind); ok {
 			m.items[idx].text = ev.Content
 			m.items[idx].done = true
@@ -297,6 +312,9 @@ func (m Model) renderItemLines(it item) []string {
 	switch it.kind {
 	case itemAssistantReasoning:
 		return []string{m.theme.MutedStyle().Render("» " + it.text)}
+
+	case itemUser:
+		return []string{m.theme.AccentStyle().Render("you › " + it.text)}
 
 	case itemTool:
 		return m.renderToolLines(it)

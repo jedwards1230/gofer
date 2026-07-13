@@ -2,6 +2,7 @@ package tui_test
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/jedwards1230/agent-sdk-go/event"
@@ -42,6 +43,41 @@ func TestGoldenPlainTextTurn(t *testing.T) {
 		event.NewMessageFinished(sid, event.MessageText, "Hello! How can I help you today?"),
 		event.NewTurnFinished(sid, "end_turn", provider.Usage{InputTokens: 9, OutputTokens: 7}),
 	)
+}
+
+// TestGoldenUserAndAssistantTurn covers a full turn including the user's own
+// prompt: runner.Prompt publishes it as a MessageStarted/MessageFinished
+// {MessageUser} pair with no deltas (see event.MessageUser's doc), which
+// Ingest renders as one "you › " prefixed transcript item ABOVE the agent's
+// reply — mirroring how itemAssistantReasoning prefixes its own line with
+// "» ".
+func TestGoldenUserAndAssistantTurn(t *testing.T) {
+	render(t, "user_and_assistant_turn",
+		event.NewMessageStarted(sid, event.MessageUser),
+		event.NewMessageFinished(sid, event.MessageUser, "Say hello."),
+		event.NewTurnStarted(sid),
+		event.NewMessageStarted(sid, event.MessageText),
+		event.NewMessageDelta(sid, event.MessageText, "Hello"),
+		event.NewMessageDelta(sid, event.MessageText, "! How can "),
+		event.NewMessageDelta(sid, event.MessageText, "I help you today?"),
+		event.NewMessageFinished(sid, event.MessageText, "Hello! How can I help you today?"),
+		event.NewTurnFinished(sid, "end_turn", provider.Usage{InputTokens: 9, OutputTokens: 7}),
+	)
+}
+
+// TestUserMessageRendersWithoutMessageStarted verifies Ingest is robust to a
+// MessageFinished{MessageUser} with no preceding MessageStarted{MessageUser}
+// — exactly the shape internal/daemonbridge/reconstruct.go's
+// handleUserMessage synthesizes is a full Started+Finished pair, but Ingest
+// itself never depends on having seen the Started half first: it is a pure
+// no-op for MessageKind==MessageUser (see Ingest's MessageStarted case), so
+// ordering (or a missing Started altogether) can never lose the item.
+func TestUserMessageRendersWithoutMessageStarted(t *testing.T) {
+	m := ingest(event.NewMessageFinished(sid, event.MessageUser, "no preceding Started"))
+	got := testkit.Render(m, testkit.Width, testkit.Height)
+	if !strings.Contains(got, "you › no preceding Started") {
+		t.Errorf("rendered output = %q, want it to contain the user item", got)
+	}
 }
 
 // TestGoldenReasoningAndText covers a turn that streams reasoning before

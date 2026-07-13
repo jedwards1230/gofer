@@ -41,6 +41,13 @@ type App struct {
 	over Overview // roster screen
 	sess Model    // transcript of the peeked/attached session
 
+	// cwd is this client's working directory (the same value the roster
+	// header shows). The dispatch bar passes it as the new session's cwd so a
+	// session created from the TUI carries the client's project directory —
+	// not the daemon's launch dir — and is therefore visible to other clients
+	// (e.g. a phone) filtering session/list by that cwd.
+	cwd string
+
 	sessID string // id `sess` is subscribed to ("" = none)
 	sub    *event.Subscription
 
@@ -60,6 +67,7 @@ func NewApp(th theme.Theme, sup Supervisor, meta OverviewMeta) App {
 		over:  NewOverview(th, meta),
 		sess:  New(th),
 		scr:   screenOverview,
+		cwd:   meta.Cwd,
 	}
 	// `gofer attach <id>`: open straight into the session's attach screen and
 	// pre-select it in the roster, so backing out with ← lands on it. The
@@ -149,13 +157,16 @@ func waitForEvent(id string, sub *event.Subscription) tea.Cmd {
 	}
 }
 
-// doCreate starts a new session via the Supervisor. The dispatch bar creates
-// with default options (credential-driven model, daemon cwd) — a zero-value
-// CreateOptions; per-session model/cwd overrides arrive with the config/`-m`
-// wiring in a later milestone.
+// doCreate starts a new session via the Supervisor. The dispatch bar passes
+// this client's cwd (a.cwd, the roster header's value) so the new session
+// carries the client's project directory rather than defaulting to the
+// daemon's launch dir — otherwise a TUI-created session is invisible to a
+// client (e.g. a phone) filtering session/list by that cwd. A
+// credential-driven model is still the default; per-session model overrides
+// arrive with the config/`-m` wiring in a later milestone.
 func (a App) doCreate(prompt string) tea.Cmd {
 	return func() tea.Msg {
-		info, err := a.sup.Create(context.Background(), prompt, CreateOptions{})
+		info, err := a.sup.Create(context.Background(), prompt, CreateOptions{Cwd: a.cwd})
 		return createdMsg{info: info, err: err}
 	}
 }

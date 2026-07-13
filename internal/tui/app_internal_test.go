@@ -174,9 +174,15 @@ func TestGoldenAppAttach(t *testing.T) {
 }
 
 // appTranscriptEvents is a small, fixed turn shared by the peek and attach
-// goldens so both show the same populated transcript.
+// goldens so both show the same populated transcript. It leads with the
+// user's own prompt — event.NewMessageStarted/Finished(MessageUser), the
+// shape runner.Prompt publishes (see event.MessageUser's doc) — so both
+// goldens also cover the App root rendering the user turn above the agent's
+// reply.
 func appTranscriptEvents(sid string) []event.Event {
 	return []event.Event{
+		event.NewMessageStarted(sid, event.MessageUser),
+		event.NewMessageFinished(sid, event.MessageUser, "Wire the app root."),
 		event.NewTurnStarted(sid),
 		event.NewMessageStarted(sid, event.MessageText),
 		event.NewMessageFinished(sid, event.MessageText, "Wired the app root; nav contract is in."),
