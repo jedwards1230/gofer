@@ -1,10 +1,13 @@
 package tui
 
 import (
+	"strings"
+
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/jedwards1230/agent-sdk-go/event"
 
+	"github.com/jedwards1230/gofer/internal/tui/layout"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
 
@@ -91,7 +94,35 @@ func (p Program) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 // View satisfies tea.Model, rendering the wrapped Model at the last known
-// terminal size.
+// terminal size. It requests the alternate screen so the live, height-clipped
+// frames never touch the normal buffer; bubbletea exits the alt screen on
+// quit, and driveTUI then flushes the full transcript to the scrollback (see
+// [Program.FinalTranscript]).
+//
+// It prepends [layout.TopPadding] blank rows and shrinks the content height
+// budget by the same amount, mirroring [App.render]'s accounting — some
+// terminal emulators (observed on a macOS beta running fullscreen) clip the
+// top row of the alt-screen frame, and this is the single-session TUI's
+// render path (it renders [Model] directly, bypassing App.render, so it
+// needs its own copy of the same padding).
 func (p Program) View() tea.View {
-	return tea.NewView(p.inner.View(p.width, p.height))
+	h := p.height - layout.TopPadding
+	body := strings.Repeat("\n", layout.TopPadding) + p.inner.View(p.width, h)
+	v := tea.NewView(body)
+	v.AltScreen = true
+	return v
+}
+
+// FinalTranscript renders the wrapped Model's full transcript at the last known
+// terminal width, for flushing to the scrollback on exit. A caller running the
+// program in the alternate screen (so the live, height-clipped frames leave no
+// residue) prints this to stdout after [tea.Program.Run] returns, giving the
+// user the whole conversation instead of the clipped final frame. Width
+// defaults to 80 when no [tea.WindowSizeMsg] has been seen.
+func (p Program) FinalTranscript() string {
+	width := p.width
+	if width < 1 {
+		width = 80
+	}
+	return p.inner.FullTranscript(width)
 }

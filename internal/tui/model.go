@@ -39,6 +39,7 @@ type itemKind int
 const (
 	itemAssistantText itemKind = iota
 	itemAssistantReasoning
+	itemUser
 	itemTool
 	itemError
 	itemApproval
@@ -48,7 +49,7 @@ const (
 // other kind.
 type item struct {
 	kind itemKind
-	text string // settled/streaming content for text, reasoning, error, approval
+	text string // settled/streaming content for text, reasoning, user, error, approval
 	done bool   // MessageFinished / ToolCallFinished has been seen
 
 	toolName   string
@@ -59,7 +60,10 @@ type item struct {
 // Model is gofer's minimal attach surface. It is immutable from the
 // caller's perspective: [Model.Ingest] and the input-editing methods return
 // an updated copy rather than mutating in place, so a fixed event sequence
-// replays to the same rendered output in every test.
+// replays to the same rendered output in every test. The one exception is
+// [Model.TakeSubmitted], which has a pointer receiver and mutates in place to
+// ensure its take-once semantics (each submitted prompt is observed exactly
+// once).
 type Model struct {
 	theme theme.Theme
 
@@ -119,6 +123,16 @@ func (m Model) Ingest(e event.Event) Model {
 		m.cost = ev.Cost
 
 	case event.MessageStarted:
+		// event.MessageUser (the user's own prompt turn) is a settled
+		// Started/Finished pair with no deltas — see event.MessageUser's doc —
+		// so it never opens a streaming item the way assistant text/reasoning
+		// does. Ignoring MessageStarted here and building the whole item on
+		// MessageFinished (below) makes this Ingest robust to either arrival
+		// order, and keeps a user message from ever colliding with
+		// openText/openReasoning's single-open-item-per-kind bookkeeping.
+		if ev.MessageKind == event.MessageUser {
+			break
+		}
 		idx := len(m.items)
 		kind := itemAssistantText
 		if ev.MessageKind == event.MessageReasoning {
@@ -133,6 +147,10 @@ func (m Model) Ingest(e event.Event) Model {
 		}
 
 	case event.MessageFinished:
+		if ev.MessageKind == event.MessageUser {
+			m.items = append(m.items, item{kind: itemUser, text: ev.Content, done: true})
+			break
+		}
 		if idx, ok := m.openIndex(ev.MessageKind); ok {
 			m.items[idx].text = ev.Content
 			m.items[idx].done = true
@@ -227,6 +245,11 @@ func (m Model) Backspace() Model {
 	return m
 }
 
+// InputEmpty reports whether the input buffer has no pending text. The app
+// root consults this to resolve the navigation contract's left-arrow (← in
+// an empty attach input backs out to the overview; with text it edits).
+func (m Model) InputEmpty() bool { return m.input == "" }
+
 // Submit records the current input buffer as submitted (retrievable via
 // [Model.TakeSubmitted]) and clears it. Submitting an empty buffer is a
 // no-op: there is nothing to send.
@@ -271,7 +294,9 @@ func (m Model) View(width, height int) string {
 
 	lines := make([]string, 0, len(m.items)+2)
 	for _, it := range m.items {
-		lines = append(lines, truncate(m.renderItem(it), width))
+		for _, line := range m.renderItemLines(it) {
+			lines = append(lines, truncate(line, width))
+		}
 	}
 
 	const reserved = 2 // status line + input line
@@ -283,32 +308,64 @@ func (m Model) View(width, height int) string {
 	return strings.Join(lines, "\n")
 }
 
-// renderItem renders a single transcript item to one line.
-func (m Model) renderItem(it item) string {
+// renderItemLines renders a single transcript item to its display lines. A
+// tool item is a collapsed tree block spanning header + up to three
+// result lines; every other kind renders to exactly one line.
+func (m Model) renderItemLines(it item) []string {
 	switch it.kind {
 	case itemAssistantReasoning:
-		return m.theme.MutedStyle().Render("» " + it.text)
+		return []string{m.theme.MutedStyle().Render("» " + it.text)}
+
+	case itemUser:
+		return []string{m.theme.AccentStyle().Render("you › " + it.text)}
 
 	case itemTool:
-		glyph := m.theme.GlyphStreaming
-		if it.done {
-			glyph = m.theme.GlyphOK
-		}
-		line := fmt.Sprintf("%s %s(%s)", glyph, it.toolName, it.toolInput)
-		if it.done {
-			line += " → " + it.toolResult
-		}
-		return line
+		return m.renderToolLines(it)
 
 	case itemError:
-		return m.theme.DangerStyle().Render(m.theme.GlyphErr + " " + it.text)
+		return []string{m.theme.DangerStyle().Render(m.theme.GlyphErr + " " + it.text)}
 
 	case itemApproval:
-		return m.theme.WarnStyle().Render(m.theme.GlyphApproval + " " + it.text)
+		return []string{m.theme.WarnStyle().Render(m.theme.GlyphApproval + " " + it.text)}
 
 	default: // itemAssistantText
-		return it.text
+		return []string{it.text}
 	}
+}
+
+// renderToolLines renders a tool call as a collapsed tree block: a header
+// line, then — once the call has finished with a non-empty result — up to
+// three tree-indented result lines, collapsing any remainder into a single
+// "… +N lines" line.
+func (m Model) renderToolLines(it item) []string {
+	// TODO(SDK): style the header glyph for a failed call once
+	// ToolCallFinished carries IsError through the Event contract; for now
+	// every finished call renders with GlyphOK regardless of outcome.
+	glyph := m.theme.GlyphStreaming
+	if it.done {
+		glyph = m.theme.GlyphOK
+	}
+	lines := []string{fmt.Sprintf("%s %s(%s)", glyph, it.toolName, it.toolInput)}
+
+	if !it.done || it.toolResult == "" {
+		return lines
+	}
+
+	resultLines := strings.Split(it.toolResult, "\n")
+	lines = append(lines, "   └ "+resultLines[0])
+	const maxExtra = 2
+	shown := 1
+	for _, l := range resultLines[1:] {
+		if shown >= 1+maxExtra {
+			break
+		}
+		lines = append(lines, "     "+l)
+		shown++
+	}
+	if extra := len(resultLines) - shown; extra > 0 {
+		lines = append(lines, fmt.Sprintf("     … +%d lines", extra))
+	}
+	return lines
 }
 
 // statusLine reports the turn's lifecycle state and, once TurnFinished has
@@ -331,6 +388,64 @@ func (m Model) statusLine() string {
 // inputLine renders the input buffer with a trailing cursor marker.
 func (m Model) inputLine() string {
 	return "> " + m.input + "▏"
+}
+
+// TailView renders a read-only tail of the transcript for the peek pane: the
+// most recent transcript items above the status line, bottom-aligned like a
+// live terminal, with no input line — peek steals no input. Output is exactly
+// height rows.
+func (m Model) TailView(width, height int) string {
+	if width < 1 {
+		width = 1
+	}
+	if height < 1 {
+		height = 1
+	}
+
+	lines := make([]string, 0, len(m.items))
+	for _, it := range m.items {
+		for _, line := range m.renderItemLines(it) {
+			lines = append(lines, truncate(line, width))
+		}
+	}
+
+	avail := height - 1 // status line
+	if avail < 0 {
+		avail = 0
+	}
+	if len(lines) > avail {
+		lines = lines[len(lines)-avail:]
+	}
+	// Top-pad so the transcript sits just above the status line.
+	if n := avail - len(lines); n > 0 {
+		lines = append(make([]string, n), lines...)
+	}
+	lines = append(lines, truncate(m.statusLine(), width))
+	return strings.Join(lines, "\n")
+}
+
+// FullTranscript renders every transcript item unclipped by height, followed
+// by the final status line. It is what the attach TUI flushes to the terminal
+// on exit, so the scrollback holds the whole conversation — not the
+// viewport-clipped final frame the live view leaves behind (the M1
+// exit-truncation bug). The input line is omitted: there is no more input once
+// the program has exited.
+func (m Model) FullTranscript(width int) string {
+	if width < 1 {
+		width = 1
+	}
+	if len(m.items) == 0 {
+		return "" // nothing streamed; nothing to flush
+	}
+
+	lines := make([]string, 0, len(m.items)+1)
+	for _, it := range m.items {
+		for _, line := range m.renderItemLines(it) {
+			lines = append(lines, truncate(line, width))
+		}
+	}
+	lines = append(lines, truncate(m.statusLine(), width))
+	return strings.Join(lines, "\n")
 }
 
 // truncate clips s to at most w runes, marking a clipped line with a

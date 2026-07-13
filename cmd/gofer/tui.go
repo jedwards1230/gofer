@@ -24,6 +24,11 @@ func driveTUI(ctx context.Context, r sessionDriver, prompt string, stdout, stder
 	defer cancel()
 
 	prog := tui.NewProgram(theme.Default())
+	// The live view runs in the alternate screen (requested by Program.View)
+	// so its height-clipped frames leave no residue on the normal buffer; on
+	// exit the alt screen is torn down and the full transcript is flushed to
+	// the scrollback (see below), fixing the M1 bug where only the
+	// viewport-clipped final frame remained.
 	opts := []tea.ProgramOption{tea.WithContext(ctx), tea.WithInput(os.Stdin)}
 	if f, ok := stdout.(*os.File); ok {
 		opts = append(opts, tea.WithOutput(f))
@@ -60,13 +65,24 @@ func driveTUI(ctx context.Context, r sessionDriver, prompt string, stdout, stder
 	// ctx cancellation is an expected interrupt, not a UI failure, so it falls
 	// through to the run-outcome handling below; any other p.Run error is a
 	// genuine TUI failure.
-	_, uiErr := p.Run()
+	finalModel, uiErr := p.Run()
 
 	// Cancel unconditionally: a no-op once the turn has already settled, or the
 	// signal that interrupts an in-flight one when the user quit early —
 	// mirroring driveSession's Ctrl-C handling.
 	cancel()
 	runErr := <-runDone
+
+	// Flush the full transcript to the (now-restored) normal buffer, so the
+	// scrollback holds the whole conversation rather than the clipped final
+	// frame. Runs on every exit path that yields a program model — clean
+	// stream-end, esc/ctrl-c, or a cancelled context — since Run always tears
+	// down the alt screen before returning.
+	if prog, ok := finalModel.(tui.Program); ok {
+		if ft := prog.FinalTranscript(); ft != "" {
+			_, _ = fmt.Fprintln(stdout, ft)
+		}
+	}
 
 	if uiErr != nil && !errors.Is(uiErr, tea.ErrProgramKilled) {
 		return fmt.Errorf("tui: %w", uiErr)

@@ -60,7 +60,9 @@ hermetic CI test that proves the same mechanics with a scripted provider.
 
 ## Automated CI proof
 
-`internal/runner/runner_test.go`:
+This suite lived in gofer's `internal/runner` at M1; the SDK-promotion in M2
+moved the package (unchanged) to `agent-sdk-go/runner`, so it now runs there —
+see that repo's `runner/runner_test.go`.
 
 - **`TestRunner_KillAndResume`** — the milestone proof. A gofer-local
   scripted `provider.Provider` (`provider.SliceStream`, no network) drives a
@@ -81,32 +83,29 @@ hermetic CI test that proves the same mechanics with a scripted provider.
 - **`TestRunner_TextTurn`** — a plain (no tool call) turn: the user prompt
   and settled assistant reply (text + reasoning) both land as journal
   entries, and `Fold` projects them back losslessly.
-- **`TestRunner_KillDuringToolStreaming`** (`internal/runner/consume_test.go`)
-  — the harder kill: the run is cancelled *while a tool call is still
-  streaming its input* (announced, but no result), after the turn's assistant
+- **`TestRunner_KillDuringToolStreaming`** (`runner/consume_test.go`) — the
+  harder kill: the run is cancelled *while a tool call is still streaming its
+  input* (announced, but no result), after the turn's assistant
   text/reasoning has already settled. The settled text must still be journaled
   (it is written at `turn.finished`, decoupled from tool execution) and the
   orphaned, never-executed tool call is dropped — no stranded text, no dangling
   `tool_use` to corrupt the fold on resume.
 
-Run it: `go test -race ./internal/runner/...`.
+Run it (from `agent-sdk-go`): `go test -race ./runner/...`.
 
-## Known M1 limitations
+## Known M1 limitations (resolved in M2)
 
-The runner journals from the **lossy event stream** (`message.finished` carries
-settled text as a string, not the provider's content blocks), so its stored
-blocks carry no per-block `Meta`. Two consequences, both accepted for M1:
+At M1, the runner journaled from the **lossy event stream** (`message.finished`
+carried settled text as a string, not the provider's content blocks), so its
+stored blocks carried no per-block `Meta`. Two consequences were accepted for
+M1:
 
-- **Reasoning signatures are not preserved across resume.** A *resumed*
-  Anthropic thinking+tools session degrades to reasoning-without-signature
-  (the provider adapter drops unsigned reasoning rather than replaying it) —
-  safe, but the prior turn's reasoning context is lost across the resume
-  boundary. Within a single run, the adapter's own signature replay (SDK #19)
-  is unaffected. This mirrors the OpenAI reasoning-item-id handling.
-- **Tool errors journal as non-error.** `tool.call.finished` carries no error
-  flag, so a tool `Result` is always recorded with `IsError=false`.
+- Reasoning signatures were not preserved across resume: a *resumed*
+  Anthropic thinking+tools session degraded to reasoning-without-signature.
+- Tool errors journaled as non-error: `tool.call.finished` carried no error
+  flag, so a tool `Result` was always recorded with `IsError=false`.
 
-**M2 path:** either the event contract gains per-block `Meta` (so gofer's
-event-sourced journaling stays lossless), or the runner journals the settled
-`loop.Run` result messages (verbatim provider blocks) instead of reconstructing
-from events.
+**Resolved in M2:** the event contract now carries `ToolCallFinished.IsError`
+and per-block `Meta` (e.g. Anthropic reasoning signatures), and the
+SDK-promoted `agent-sdk-go/runner` package journals both through. Reasoning
+signatures and tool error flags now survive a resume.

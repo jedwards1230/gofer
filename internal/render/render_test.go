@@ -60,7 +60,7 @@ func TestHuman(t *testing.T) {
 			name: "tool and permission markers",
 			events: []event.Event{
 				event.NewToolCallStarted(sid, "call-1", "bash", nil),
-				event.NewToolCallFinished(sid, "call-1", "ok", nil),
+				event.NewToolCallFinished(sid, "call-1", "ok", false, nil),
 				event.NewPermissionRequested(sid, "perm-1", "bash", nil, nil),
 				event.NewPermissionResolved(sid, "perm-1", event.VerdictAllow, "rule-42"),
 			},
@@ -73,6 +73,18 @@ func TestHuman(t *testing.T) {
 			name:   "session error",
 			events: []event.Event{event.NewSessionError(sid, "boom", true)},
 			want:   "· session.error  boom\n",
+		},
+		{
+			// event.MessageUser (the user's own prompt) never deltas — see its
+			// doc — so unlike reasoning/text, MessageStarted writes nothing and
+			// the settled MessageFinished is the only content this renderer
+			// ever sees for it.
+			name: "user message echoed",
+			events: []event.Event{
+				event.NewMessageStarted(sid, event.MessageUser),
+				event.NewMessageFinished(sid, event.MessageUser, "ship it"),
+			},
+			want: "you › ship it\n",
 		},
 	}
 	for _, tt := range tests {

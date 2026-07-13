@@ -82,9 +82,16 @@ func TestRunResumeExitCodes(t *testing.T) {
 // Model resolution now runs before prompt acquisition, so this test isolates
 // it (HOME + exactly one credentialed provider) rather than exercising it —
 // see resolveRunModel's own tests for the none/one/many resolution behavior.
+//
+// hermeticDaemonEnv is also required: bare `gofer` and `run` dial for a
+// daemon before prompt acquisition (see runRun's doc) and none of these
+// cases pass --daemon, so without it a real `gofer daemon` on the host could
+// get discovered — worst case, silently routing the "prompt from piped
+// stdin"/"prompt from args" cases through it for real instead of hitting the
+// expected in-process unknown-model failure (see hermeticDaemonEnv's doc).
 func TestRunPromptAcquisition(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("HOME", t.TempDir()) // bare `gofer` takes no --root; isolate its default (~/.gofer) credential lookup from the real machine
+	hermeticDaemonEnv(t) // bare `gofer` takes no --root; isolate its default (~/.gofer) daemon discovery + credential lookup from the real machine
 	t.Setenv("ANTHROPIC_API_KEY", "sk-test-key")
 	t.Setenv("OPENAI_API_KEY", "")
 

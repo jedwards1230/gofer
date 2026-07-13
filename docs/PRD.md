@@ -48,7 +48,8 @@ would need it unchanged.
 
 ```
 gofer                       # TUI: health-probe daemon → auto-spawn if absent → overview
-gofer attach <session>      # attach straight into one session
+gofer attach [<session>]    # daemon roster TUI; with <session>, attach straight into it
+gofer agents [<session>]    # alias for `gofer attach` (M2)
 gofer demo                  # M0: offline faux-provider stream
 gofer exec [-p prompt] [--agent name] [--json] [--output-schema file]
                             # headless one-shot: JSONL events on stdout (M3)
@@ -56,12 +57,28 @@ gofer serve [--host unix://…|tcp://…]   # run the daemon in the foreground
 gofer acp serve             # ACP over stdio (editors, stdio→ws bridges)
 gofer ps [--all]            # roster (--all includes archived; later: fleet)
 gofer kill|archive <id>     # stop running / clear finished (journal kept)
-gofer agents|skills|plugins # list what's composed; `plugins install <module>`
+gofer skills|plugins        # list what's composed; `plugins install <module>` (M5)
 gofer import claude         # idempotent import of CC skills/commands (M5)
                             #   (settings.json permissions honored natively from M3)
 gofer doctor                # providers, LSP servers on PATH, daemon, sandbox
 gofer config get|set …      # global or project config
 ```
+
+**Daemon discovery** (`ps`/`kill`/`archive`/`attach`/`agents`, and
+`run`/`resume`/bare `gofer` when one is reachable): the daemon address and
+bearer token are resolved in precedence order — an explicit `--daemon`/
+`--token` flag, then `$GOFER_DAEMON`/`$GOFER_TOKEN`, then the endpoint a
+running `gofer daemon` advertised at `<root>/daemon.json` (mode 0600,
+written on startup and removed on clean shutdown), then the loopback
+default `127.0.0.1:7333`. So on the same host, once a daemon is up, clients
+need no flags at all — this closes the M2 gap where a daemon bound to a
+non-loopback address (e.g. a tailnet IP) required every client invocation to
+pass `--daemon`/`--token` by hand. `run`/`resume` read the endpoint file at
+their own `--root` (defaulting to `~/.gofer`), so a daemon and a client given
+the SAME `--root` discover each other automatically; `ps`/`kill`/`archive`/
+`attach`/`agents`/bare `gofer` take no `--root` of their own and always use
+the default `~/.gofer` — a daemon started with a different `--root` needs an
+explicit `--daemon`/`$GOFER_DAEMON` on those clients.
 
 Daemon lifecycle: the client auto-spawns the daemon on launch (health probe →
 detached spawn); a version/build mismatch triggers graceful shutdown →
@@ -111,6 +128,32 @@ precedence: flags > env > project .gofer/ > ~/.gofer/ > embedded defaults
 (permissions: deny wins from any layer)
 ```
 
+## Observability
+
+gofer owns telemetry; the SDK stays dependency-light and exposes the seams
+(context propagation, optional `*slog.Logger` injection, the Event/Op stream as
+the instrumentation source — see agent-sdk-go `DESIGN.md`). All exporters point
+at **generic OTLP endpoints**, configurable and **off by default** — no
+phone-home.
+
+- **M2 (now): leveled structured logging** via `log/slog` (stderr text handler),
+  `--log-level debug|info|warn|error` (default `info`, env `GOFER_LOG_LEVEL`).
+  Covers connection lifecycle, every inbound request (method, id, outcome,
+  duration), session lifecycle (created/resumed/killed/archived), and unknown
+  methods at WARN (the smoking gun for client-compat work). **Hard redaction
+  rule**: never logs params, prompt text, message content, tool inputs/outputs,
+  or the bearer token — identifiers, codes, and durations only.
+- **M3 (committed): full OpenTelemetry.** gofer takes the otel dependency + OTLP
+  exporters; the SDK does not.
+  - **Traces**: a span per turn, with child spans for provider calls and tool
+    executions. The SDK's typed Event/Op stream is the natural span source —
+    `*.started`/`*.finished` events open and close spans without the SDK
+    knowing tracing exists.
+  - **Metrics**: sessions (live/archived), turns, tokens and cost, error rates.
+  - **OTLP export**: traces + metrics to a generic OTLP endpoint.
+  - **Log correlation**: trace and span ids stamped into slog records so logs
+    and traces join.
+
 ## Milestones
 
 | Stage | Ships | Proof |
@@ -140,8 +183,8 @@ would double-encode).
 - **License: Apache-2.0** both repos (NOTICE-based attribution).
 - **Supervisor stays in the app** — promoted to the SDK only if a second app
   needs it unchanged.
-- **Claude-subscription OAuth ships at M3** with API-key fallback from day
-  one.
+- **Claude-subscription OAuth shipped at M1** (`gofer login`, earlier than the
+  original M3 target), with API-key fallback from day one.
 - **TUI is bubbletea v2**; plugin-contributed UI is a declarative widget
   vocabulary rendered by the host (plugins ship data + structure, never
   in-process code). Full design: [`TUI.md`](TUI.md).

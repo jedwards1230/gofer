@@ -6,11 +6,12 @@ screen stack. Golden-file tests come first: the `testkit` harness pins fixed
 sizes, forces `termenv.Ascii`, and uses a test theme (see
 [`TESTING.md`](TESTING.md)).
 
-**Status**: `internal/tui` currently holds only the minimal attach surface —
-`Model` (transcript + input buffer + status line, driven by `Model.Ingest`)
-plus a thin bubbletea v2 adapter — as the seed of the design below and its
-`testkit`/`theme` packages. The screen stack, dialogs, keymap, roster/peek,
-and everything else in this doc are M2+.
+**Status**: `internal/tui` holds the M2 TUI — the attach `Model` (transcript +
+input, driven by `Model.Ingest`), the `Overview` roster screen, the `Peek`
+split, collapsed tool-block rendering, and the `App` screen-stack root that
+composes them under the navigation contract (see [Roster &
+navigation](#roster--navigation-m2) below). Still ahead: the dialog stack and
+central keymap registry, then slash commands and plugin UI (M4+).
 
 ## The three altitudes
 
@@ -39,6 +40,80 @@ the sandbox said, what the reviewer decided):
 **Remember-as-rule** — a grant never widens silently: the dialog offers
 exact / prefix / broad patterns, but dangerous commands are force-downgraded
 to exact-match regardless, scoped (agent/global) and TTL'd.
+
+## Roster & navigation (M2)
+
+The `Overview` screen is the concrete M2 roster. Like `Model`, it is a pure
+value — every method returns an updated copy, so a fixed input sequence renders
+identically in every golden test — and it consumes the daemon through the
+consumer-side `Supervisor` interface (`supervisor.go`), never a privileged
+path.
+
+Layout, top to bottom:
+
+- **Header** — app name + version, then `model · cwd`, then a status-count line
+  `N awaiting input · M working · K completed`. The counts are the roster
+  tallied by status; the wording mirrors the group labels.
+- **Roster body** — one line per session:
+  `‹caret› ‹status glyph› ‹title› ‹one-line summary› ‹cost · age›`. The caret
+  (`▸`) marks selection so it reads without color (golden tests force
+  `termenv.Ascii`). The status glyph promotes to `✋` when approvals are
+  pending. Cost comes from the SDK's usage accounting (PRD: cost in every
+  roster row); age is a compact relative string (`now`/`5m`/`3h`/`2d`) computed
+  against an injected reference time so tests stay deterministic. The body
+  windows to keep the selected row visible.
+- **Dispatch bar** — a rule, an input line (a placeholder until the user
+  types), and a one-line shortcut hint. Typing anywhere in the roster edits the
+  bar; `enter` on a non-empty bar creates a new session from that text and
+  attaches into it (`Supervisor.Create`).
+
+**Two roster views**, toggled by `tab`: flat (every session, most-recently-active
+first) and grouped (Working / Needs input / Finished sections, each
+recency-sorted). Selection is tracked by session id, not row index, so it
+survives the reorder a toggle causes. (`tab` rather than a letter key so the
+dispatch bar stays freely typeable — a plain `v` is text, not a shortcut.)
+
+**Peek** is the read-only split: the roster rail (the overview's header + body,
+no dispatch bar) alongside a live tail of the selected session's transcript. It
+steals no input — `j`/`k` move the rail selection and the app root swaps the
+tail to the newly selected session. The panes stack vertically (roster above
+tail) by default and split side-by-side once the terminal reaches
+`layout.PeekHorizontalMinWidth` (120 cols) — below that a horizontal split
+leaves each pane too narrow for a roster row. The `layout` package owns the
+geometry (orientation, pane-size division, column zipping) as pure int/string
+math so both arrangements stay golden-testable.
+
+**Navigation contract** — enforced by the app root (`App` in `app.go`, the
+bubbletea root that composes overview/peek/attach): `enter` peeks the selected
+session (with dispatch-bar text, it instead creates a session from that text
+and attaches into it); `→` attaches the selected session; `esc`
+interrupts/acts on the *active* session (never "go back"); `←` in an **empty**
+input backs out to the overview (with text, it edits); `ctrl-x` kills a running
+session or archives a finished one; `ctrl-c` quits. In peek, `j`/`k` switch the
+peeked session and `←` returns to the overview.
+
+The app root is a **client** like any other (repo invariant): it reads the
+roster by polling `Supervisor.Roster` on a timer (the supervisor's roster is
+pull-based) and drives one live `event.Subscription` at a time for the
+peeked/attached session, issuing the same create/send/interrupt/kill/archive
+Ops an ACP client would. Switching sessions closes the old subscription and
+stale events (tagged with a since-left session id) are dropped. It has no cmd
+wiring yet — a thin adapter bridges the concrete daemon supervisor to this
+`Supervisor` interface once both land on the integration branch.
+
+These patterns are adapted from Claude Code's agent-roster and collapsed
+tool-block rendering — a status-count header, grouped sections, a one-line
+session row, and a bottom dispatch bar with a hint line — reimplemented here
+for gofer's Event/Op model.
+
+**Tool blocks** in the attach/peek transcript render as a collapsed tree: a
+header line `‹glyph› tool(args)` (streaming glyph while the call runs, ok glyph
+once done), then the result tree-indented beneath — the first line on a `└`,
+up to two more indented, and any remainder collapsed to `… +N lines`. A failed
+call reuses the ok glyph until the SDK carries an error flag on
+`ToolCallFinished`. Because a tool item now spans several lines, the transcript
+renderers flatten every item to its lines before width-truncating and
+height-windowing.
 
 ## Two trees, one renderer
 

@@ -2,6 +2,7 @@ package tui_test
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/jedwards1230/agent-sdk-go/event"
@@ -44,6 +45,41 @@ func TestGoldenPlainTextTurn(t *testing.T) {
 	)
 }
 
+// TestGoldenUserAndAssistantTurn covers a full turn including the user's own
+// prompt: runner.Prompt publishes it as a MessageStarted/MessageFinished
+// {MessageUser} pair with no deltas (see event.MessageUser's doc), which
+// Ingest renders as one "you › " prefixed transcript item ABOVE the agent's
+// reply — mirroring how itemAssistantReasoning prefixes its own line with
+// "» ".
+func TestGoldenUserAndAssistantTurn(t *testing.T) {
+	render(t, "user_and_assistant_turn",
+		event.NewMessageStarted(sid, event.MessageUser),
+		event.NewMessageFinished(sid, event.MessageUser, "Say hello."),
+		event.NewTurnStarted(sid),
+		event.NewMessageStarted(sid, event.MessageText),
+		event.NewMessageDelta(sid, event.MessageText, "Hello"),
+		event.NewMessageDelta(sid, event.MessageText, "! How can "),
+		event.NewMessageDelta(sid, event.MessageText, "I help you today?"),
+		event.NewMessageFinished(sid, event.MessageText, "Hello! How can I help you today?"),
+		event.NewTurnFinished(sid, "end_turn", provider.Usage{InputTokens: 9, OutputTokens: 7}),
+	)
+}
+
+// TestUserMessageRendersWithoutMessageStarted verifies Ingest is robust to a
+// MessageFinished{MessageUser} with no preceding MessageStarted{MessageUser}
+// — exactly the shape internal/daemonbridge/reconstruct.go's
+// handleUserMessage synthesizes is a full Started+Finished pair, but Ingest
+// itself never depends on having seen the Started half first: it is a pure
+// no-op for MessageKind==MessageUser (see Ingest's MessageStarted case), so
+// ordering (or a missing Started altogether) can never lose the item.
+func TestUserMessageRendersWithoutMessageStarted(t *testing.T) {
+	m := ingest(event.NewMessageFinished(sid, event.MessageUser, "no preceding Started"))
+	got := testkit.Render(m, testkit.Width, testkit.Height)
+	if !strings.Contains(got, "you › no preceding Started") {
+		t.Errorf("rendered output = %q, want it to contain the user item", got)
+	}
+}
+
 // TestGoldenReasoningAndText covers a turn that streams reasoning before
 // its settled text, mirroring the SDK faux provider's canned turn.
 func TestGoldenReasoningAndText(t *testing.T) {
@@ -67,7 +103,26 @@ func TestGoldenReasoningAndText(t *testing.T) {
 func TestGoldenToolCall(t *testing.T) {
 	render(t, "tool_call",
 		event.NewToolCallStarted(sid, "call-1", "bash", json.RawMessage(`{"cmd":"echo hi"}`)),
-		event.NewToolCallFinished(sid, "call-1", "hi", nil),
+		event.NewToolCallFinished(sid, "call-1", "hi", false, nil),
+	)
+}
+
+// TestGoldenToolCallRunning covers a tool call that has started but not
+// finished, rendered as a header line only with the streaming glyph — no
+// result line, since none has settled yet.
+func TestGoldenToolCallRunning(t *testing.T) {
+	render(t, "tool_call_running",
+		event.NewToolCallStarted(sid, "call-1", "bash", json.RawMessage(`{"cmd":"echo hi"}`)),
+	)
+}
+
+// TestGoldenToolCallMultiline covers a finished tool call whose result spans
+// more lines than the collapsed tree block shows, exercising the "… +N
+// lines" collapse line.
+func TestGoldenToolCallMultiline(t *testing.T) {
+	render(t, "tool_call_multiline",
+		event.NewToolCallStarted(sid, "call-1", "bash", json.RawMessage(`{"cmd":"seq 1 6"}`)),
+		event.NewToolCallFinished(sid, "call-1", "1\n2\n3\n4\n5\n6", false, nil),
 	)
 }
 
@@ -95,6 +150,31 @@ func TestGoldenApproval(t *testing.T) {
 	render(t, "approval",
 		event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"cmd": "rm -rf /tmp/x"}, []string{"no rule"}),
 	)
+}
+
+// TestGoldenFullTranscript covers the exit-flush render: every transcript item
+// plus the final status line, unclipped by height and with no input line —
+// what the attach TUI writes to the scrollback when it exits.
+func TestGoldenFullTranscript(t *testing.T) {
+	m := ingest(
+		event.NewTurnStarted(sid),
+		event.NewMessageStarted(sid, event.MessageReasoning),
+		event.NewMessageFinished(sid, event.MessageReasoning, "Plan: greet, then run a check."),
+		event.NewMessageStarted(sid, event.MessageText),
+		event.NewMessageFinished(sid, event.MessageText, "Hello! Running a quick check."),
+		event.NewToolCallStarted(sid, "call-1", "bash", json.RawMessage(`{"cmd":"echo hi"}`)),
+		event.NewToolCallFinished(sid, "call-1", "hi", false, nil),
+		event.NewTurnFinished(sid, "end_turn", provider.Usage{InputTokens: 12, OutputTokens: 9}),
+	)
+	testkit.AssertGolden(t, "full_transcript", m.FullTranscript(testkit.Width))
+}
+
+// TestFullTranscriptEmpty verifies an untouched transcript flushes nothing, so
+// an immediately-interrupted run doesn't print a bare status line.
+func TestFullTranscriptEmpty(t *testing.T) {
+	if got := tui.New(theme.Test()).FullTranscript(testkit.Width); got != "" {
+		t.Errorf("empty FullTranscript = %q; want empty string", got)
+	}
 }
 
 // TestGoldenInputBuffer covers the input line with a typed buffer, driven
