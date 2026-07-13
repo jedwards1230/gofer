@@ -30,6 +30,18 @@ system (component contracts, slash commands, plugin UI);
 4. **Journals are never deleted**: `session.kill` interrupts + terminates,
    `session.archive` drops from the roster — both keep the JSONL journal.
 
+## Design discipline
+
+- **Opinions are config.** Before hardcoding a behavior, ask: config default,
+  plugin, or genuinely core? A value a user might reasonably change becomes a
+  default, never a literal.
+- **Visible artifacts over hidden state.** Prefer on-disk, greppable artifacts
+  (journals, per-call output files) to in-memory state a client can't inspect.
+- **Context-cost discipline.** Keep prompt assembly small and auditable; load
+  tool/MCP schemas index-first, full schemas on demand.
+- **Code style.** Inline single-call-site helpers; never hardcode a config
+  value — add a default; ask before removing intentional code.
+
 ## Commands
 
 ```bash
