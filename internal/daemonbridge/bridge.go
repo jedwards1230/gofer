@@ -51,6 +51,13 @@ var errClosed = errors.New("daemonbridge: supervisor is closed")
 // blocking a Send goroutine on delivery.
 const turnEndChanBuffer = 16
 
+// loadChanBuffer bounds how many in-flight [Supervisor.loadHistory] calls can
+// have their completion queued for the demuxer at once before that goroutine
+// would block sending — sized the same as turnEndChanBuffer and for the same
+// reason: a handful of sessions attaching for the first time at once
+// comfortably fits.
+const loadChanBuffer = 16
+
 // Supervisor is a [tui.Supervisor] backed by a running `gofer daemon`,
 // reached over a [*daemon.Client] connection. It owns one background demuxer
 // goroutine (started by [New]) that drains the client's inbound notification
@@ -63,6 +70,7 @@ type Supervisor struct {
 	sessions map[string]*sessionState
 
 	turnEndCh chan turnEnd
+	loadCh    chan *sessionState
 	closed    chan struct{}
 	wg        sync.WaitGroup
 
@@ -83,6 +91,7 @@ func New(client *daemon.Client) *Supervisor {
 		client:    client,
 		sessions:  make(map[string]*sessionState),
 		turnEndCh: make(chan turnEnd, turnEndChanBuffer),
+		loadCh:    make(chan *sessionState, loadChanBuffer),
 		closed:    make(chan struct{}),
 	}
 	s.wg.Add(1)
@@ -118,16 +127,49 @@ type sessionState struct {
 	hasOpen  bool
 	openKind event.MessageKind
 	text     string
+
+	// loadDone gates history-before-live ordering: it is closed either
+	// immediately (registerFresh, for a session THIS bridge just created via
+	// Create — a session/new response carries no history by construction) or
+	// once a triggered session/load's replay has been fully applied to broker
+	// (finishLoad, in reconstruct.go). [Supervisor.Send] waits on it before
+	// publishing or dispatching anything for a session, so a live turn can
+	// never race a still-settling history replay onto the broker ahead of it
+	// — see loadHistory's doc in reconstruct.go for the full argument.
+	loadDone chan struct{}
 }
 
-// session returns id's reconstruction state, creating it (with a fresh
-// broker) on first reference from any of Subscribe, Send, or the demuxer.
-// Guarded by mu since it is called from arbitrary caller goroutines (TUI ops)
-// as well as the single demuxer goroutine.
+// newSessionState returns id's zero-value reconstruction record: an empty
+// broker and an open (not yet closed) loadDone. Both of session's/
+// registerFresh's creation paths build one; they differ only in whether they
+// leave loadDone open (session, pending a triggered load) or close it right
+// away (registerFresh, a session known to have no history).
+func newSessionState(id string) *sessionState {
+	return &sessionState{
+		id:       id,
+		broker:   event.NewBroker(event.WithReplay(replayDepth)),
+		loadDone: make(chan struct{}),
+	}
+}
+
+// session returns id's reconstruction state, creating it on first reference
+// from any of Subscribe, Send, or the demuxer. Guarded by mu since it is
+// called from arbitrary caller goroutines (TUI ops) as well as the single
+// demuxer goroutine.
+//
+// Creating a brand-new entry here — as opposed to finding one Create already
+// pre-registered via [Supervisor.registerFresh] — is this bridge's ONE
+// trigger for a session/load-driven history replay: it starts
+// [Supervisor.loadHistory] on a dedicated goroutine (never inline on this
+// method's own caller, and especially never inline on the demuxer — see
+// loadHistory's doc for why) before returning. Because the map insert happens
+// under mu before that goroutine is started, and every other caller of
+// session for the same id will find the map entry already present and return
+// early, loadHistory is started at most once per session id.
 func (s *Supervisor) session(id string) *sessionState {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if rec, ok := s.sessions[id]; ok {
+		s.mu.Unlock()
 		return rec
 	}
 	// After Close (s.closed is closed and closeAllBrokers has reaped the map),
@@ -137,13 +179,40 @@ func (s *Supervisor) session(id string) *sessionState {
 	// closeAllBrokers, so a broker created just before Close is still reaped.
 	select {
 	case <-s.closed:
+		s.mu.Unlock()
 		return nil
 	default:
 	}
-	rec := &sessionState{
-		id:     id,
-		broker: event.NewBroker(event.WithReplay(replayDepth)),
+	rec := newSessionState(id)
+	s.sessions[id] = rec
+	s.mu.Unlock()
+
+	go s.loadHistory(rec)
+	return rec
+}
+
+// registerFresh pre-registers id's reconstruction state with loadDone
+// already closed, for a session THIS Supervisor just created via
+// [Supervisor.Create]: a session/new response carries no history by
+// construction, so there is nothing to load. Calling it before Create
+// returns id to its caller guarantees the Subscribe (and, when Create was
+// given a first prompt, the Send) that follows finds the entry already
+// mapped and never triggers a history load — see session's doc. A nil
+// return (supervisor closed) is a safe no-op for the caller, matching
+// session's own nil-on-closed contract.
+func (s *Supervisor) registerFresh(id string) *sessionState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if rec, ok := s.sessions[id]; ok {
+		return rec
 	}
+	select {
+	case <-s.closed:
+		return nil
+	default:
+	}
+	rec := newSessionState(id)
+	close(rec.loadDone)
 	s.sessions[id] = rec
 	return rec
 }
@@ -165,6 +234,11 @@ type sessionInfoDTO struct {
 	Updated time.Time      `json:"updated"`
 	Project string         `json:"project"`
 	Live    bool           `json:"live"`
+	// Cwd, like the rest of this DTO, mirrors internal/daemon/wire.go's field
+	// of the same name — used internally by [Supervisor.sessionCwd] to drive
+	// session/load's required cwd (see loadHistory), not currently surfaced
+	// through [toTUISessionInfo]/[tui.SessionInfo].
+	Cwd string `json:"cwd"`
 }
 
 // statusFromWire maps the daemon's roster Status string — literally
@@ -206,8 +280,11 @@ func toTUISessionInfo(d sessionInfoDTO) tui.SessionInfo {
 	}
 }
 
-// Roster calls gofer/roster and maps the result to the TUI's row type.
-func (s *Supervisor) Roster(ctx context.Context) ([]tui.SessionInfo, error) {
+// rosterDTOs calls gofer/roster and decodes the raw wire rows, shared by
+// [Supervisor.Roster] (which maps them to the TUI's row type) and
+// [Supervisor.sessionCwd] (which needs the Cwd field Roster's mapped
+// tui.SessionInfo doesn't carry).
+func (s *Supervisor) rosterDTOs(ctx context.Context) ([]sessionInfoDTO, error) {
 	raw, err := s.client.Call(ctx, methodGoferRoster, nil)
 	if err != nil {
 		return nil, fmt.Errorf("daemonbridge: roster: %w", err)
@@ -216,11 +293,41 @@ func (s *Supervisor) Roster(ctx context.Context) ([]tui.SessionInfo, error) {
 	if err := json.Unmarshal(raw, &dtos); err != nil {
 		return nil, fmt.Errorf("daemonbridge: decode %s response: %w", methodGoferRoster, err)
 	}
+	return dtos, nil
+}
+
+// Roster calls gofer/roster and maps the result to the TUI's row type.
+func (s *Supervisor) Roster(ctx context.Context) ([]tui.SessionInfo, error) {
+	dtos, err := s.rosterDTOs(ctx)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]tui.SessionInfo, len(dtos))
 	for i, d := range dtos {
 		out[i] = toTUISessionInfo(d)
 	}
 	return out, nil
+}
+
+// sessionCwd looks up sessionID's persisted working directory from the live
+// roster (the same gofer/roster wire call [Supervisor.Roster] makes), for
+// [Supervisor.loadHistory] to pass as session/load's required cwd. It
+// returns "" if the session isn't (yet, or ever) in the roster or the call
+// itself fails — not a guess at a real path, but exactly the fallback the
+// daemon's own resolveSessionCwd already applies to an empty session/load
+// cwd (its own working directory, see internal/daemon/handlers.go), so it is
+// a value the daemon is guaranteed to accept.
+func (s *Supervisor) sessionCwd(ctx context.Context, sessionID string) string {
+	dtos, err := s.rosterDTOs(ctx)
+	if err != nil {
+		return ""
+	}
+	for _, d := range dtos {
+		if d.ID == sessionID {
+			return d.Cwd
+		}
+	}
+	return ""
 }
 
 // Subscribe returns the reconstructed event stream for sessionID, creating
@@ -242,6 +349,14 @@ func (s *Supervisor) Subscribe(_ context.Context, sessionID string) (*event.Subs
 // fire-and-forget path a subsequent Send call would take) and returns a
 // minimal row immediately; the App's 1s roster poll refreshes it with the
 // daemon's authoritative state.
+//
+// Create pre-registers the new session's reconstruction state via
+// [Supervisor.registerFresh] as soon as it has an id — before optionally
+// calling Send, and well before the TUI's own follow-up Subscribe can
+// possibly reach this Supervisor (see app.go's createdMsg handling: it
+// switchSession/Subscribes only after Create's tea.Cmd returns) — so neither
+// ever triggers a needless session/load for a session that, by construction,
+// has no history yet.
 func (s *Supervisor) Create(ctx context.Context, prompt string, opts tui.CreateOptions) (tui.SessionInfo, error) {
 	raw, err := s.client.Call(ctx, acp.MethodSessionNew, acp.NewSessionRequest{Cwd: opts.Cwd})
 	if err != nil {
@@ -251,6 +366,7 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts tui.CreateO
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return tui.SessionInfo{}, fmt.Errorf("daemonbridge: decode %s response: %w", acp.MethodSessionNew, err)
 	}
+	s.registerFresh(resp.SessionID)
 
 	now := time.Now()
 	info := tui.SessionInfo{

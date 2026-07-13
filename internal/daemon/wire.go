@@ -31,6 +31,13 @@ type sessionInfoDTO struct {
 	// Live is false for a disk-only (archived/offline) entry from gofer/ps;
 	// always true from gofer/roster, which only ever returns live sessions.
 	Live bool `json:"live"`
+	// Cwd is the session's working directory (see [supervisor.SessionInfo.Cwd]),
+	// added so a client can drive session/load's required cwd (see
+	// handleSessionLoad) for a session it discovers via gofer/roster or
+	// gofer/ps, rather than guessing — see internal/daemonbridge's
+	// loadHistory. Additive field: an older client decoding this DTO simply
+	// never reads it.
+	Cwd string `json:"cwd,omitempty"`
 }
 
 func toSessionInfoDTO(info supervisor.SessionInfo) sessionInfoDTO {
@@ -46,6 +53,7 @@ func toSessionInfoDTO(info supervisor.SessionInfo) sessionInfoDTO {
 		Updated: info.Updated,
 		Project: info.Project,
 		Live:    info.Live,
+		Cwd:     info.Cwd,
 	}
 }
 
