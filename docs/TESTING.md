@@ -22,3 +22,10 @@ The SDK owns loop/provider/session/permission testing (see agent-sdk-go's
 Fast PR lane (unit + golden); `go test -race` runs on push to main and
 release tags (`.github/workflows/ci.yml`). The e2e socket test runs on the
 push lane now that the M2 daemon has landed.
+
+## M3 exit gate
+
+Before M3 closes, a **live multi-client pass** is required: two clients on one
+session (one of them a phone) exercising fan-out + approvals. Automated PR
+review caught zero of M2's cross-connection/ordering bugs; live client testing
+caught all of them — the golden/integration matrix can't stand in for it here.

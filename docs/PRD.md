@@ -44,6 +44,22 @@ would need it unchanged.
 - **Cost everywhere**: per-session and per-model $ / tokens in roster rows and
   `/session`, from the SDK's usage accounting (P0, lands M1).
 
+## Constraints & tenets
+
+- **Daemon ACP surface stays spec-general.** Clients are many — phone app,
+  editor, web later — so the daemon speaks generic ACP with no client-specific
+  behavior, ever. A client identifies itself for display, never to unlock a
+  code path.
+- **Approvals are the thesis; containment complements them.** Supervision —
+  approvals reaching your phone — is the product; the sandbox reduces how often
+  a human is asked, it never replaces the human gate.
+- **Context-cost discipline.** Prompt assembly stays small and auditable; tool
+  and MCP schemas load index-first (name + one-liner), full schemas on demand —
+  never the whole registry up front.
+- **Open decision — session visibility (decide during M3 fan-out).** Does
+  `session/list` return cwd-scoped sessions or the fleet-global set with a cwd
+  label? It gates cross-client sync, so it lands with the fan-out registry.
+
 ## CLI surface
 
 ```
@@ -59,7 +75,7 @@ gofer ps [--all]            # roster (--all includes archived; later: fleet)
 gofer kill|archive <id>     # stop running / clear finished (journal kept)
 gofer skills|plugins        # list what's composed; `plugins install <module>` (M5)
 gofer import claude         # idempotent import of CC skills/commands (M5)
-                            #   (settings.json permissions honored natively from M3)
+                            #   (settings.json permissions via the vendor-format adapter, M4/M5)
 gofer doctor                # providers, LSP servers on PATH, daemon, sandbox
 gofer config get|set …      # global or project config
 ```
@@ -111,7 +127,10 @@ tool call
 
 Entering auto mode drops broad grants — `Bash(*)` can never bypass ③. Stages
 ①+② ship before ③ exists; each is independently useful. The reviewer is one
-more SDK loop invocation with a different system prompt.
+more SDK loop invocation with a different system prompt. Stage ① is a
+format-agnostic rule engine over typed rules; vendor rule formats (Claude Code
+`settings.json`, native YAML) are import adapters that land with the
+vendor-format work (M4/M5).
 
 ## On-disk layout & config precedence
 
@@ -161,8 +180,8 @@ phone-home.
 | **M0 · scaffold** ✅ shipped 2026-07-12 | repo + `gofer demo` streaming the SDK faux provider | typed events flow end-to-end offline |
 | **M1 · one good session** ✅ shipped 2026-07-12 | real provider + tools via SDK, minimal attach TUI | a real coding task, streaming, resumable after kill |
 | **M2 · the daemon** ✅ shipped 2026-07-13 | supervisor + roster + overview⇄peek⇄attach + native ACP | an ACP client on a phone drives a session on a laptop |
-| M3 · guardrails | approvals UX + grants + sandbox + headless exec | Claude Code `settings.json` honored; approval from the phone |
-| M4 · ecosystem | MCP + skills + plugins surfaced in the TUI | a third-party plugin adds a tool with one config line |
+| M3 · guardrails | **① daemon session→peers fan-out registry** (every registered peer gets every `session/update`; echo/dedup so prompts don't double-render) → **② sandbox** (seatbelt / bwrap+seccomp) → **③ approvals relay + phone approval UX**; then headless exec, daemon-as-service ([#42](https://github.com/jedwards1230/gofer/issues/42), first-use install prompt), lossless attach (daemonbridge reconstruction → lossless path), OTel | a phone approves a laptop tool call; a TUI attached to the same session watches the turn stream live |
+| M4 · ecosystem | MCP on by default (tool-search index-first) + subagents first-class (roster tree, peek/attach into children, linked journals) + skills + plugin UX | a third-party plugin adds a tool with one config line |
 | M5 · auto + polish | auto mode (reviewer pipeline), CC-asset import, mDNS pairing | auto mode survives a week of real ops without a bad allow |
 
 ## Fleet & multi-machine (design-ahead)
@@ -174,7 +193,7 @@ rosters; attach is transparent because the Event/Op stream is the same bytes
 locally or remote. Remote transport carries identity (TLS fingerprint in the
 beacon, rendezvous-issued tokens) from day one.
 
-*Open question (decide at M2)*: rendezvous protocol — leaning native-contract
+*Open question (decide at M5)*: rendezvous protocol — leaning native-contract
 passthrough, terminating ACP at each daemon (ACP is a projection; tunneling it
 would double-encode).
 
