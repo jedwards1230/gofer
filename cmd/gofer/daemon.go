@@ -80,18 +80,26 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		return err
 	}
 
+	// Resolve --root through gofer's own default (~/.gofer, never any SDK
+	// default) once, up front, and reuse it for both credential resolution
+	// and the supervisor's session store.
+	rootDir, err := supervisor.ResolveRoot(*root)
+	if err != nil {
+		return err
+	}
+
 	// Resolve the model before starting anything: a daemon with no usable
 	// credential should fail fast at startup, not on the first session/new.
 	modelID := *model
 	if modelID == "" {
 		var rerr error
-		modelID, rerr = resolveRunModel(ctx, *root)
+		modelID, rerr = resolveRunModel(ctx, rootDir)
 		if rerr != nil {
 			return rerr
 		}
 	}
 
-	sup, err := supervisor.New(supervisor.Config{Root: *root})
+	sup, err := supervisor.New(supervisor.Config{Root: rootDir})
 	if err != nil {
 		return fmt.Errorf("build supervisor: %w", err)
 	}

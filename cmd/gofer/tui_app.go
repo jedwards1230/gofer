@@ -115,7 +115,15 @@ func selectTUIBackend(ctx context.Context, df *daemonFlags, cwd, root string) (t
 		return tuiBackend{}, daemonDialErr(df.addr, dialErr)
 	}
 
-	sup, err := supervisor.New(supervisor.Config{Root: root})
+	// Resolve --root through gofer's own default (~/.gofer, never any SDK
+	// default) once, up front, and reuse it for both the supervisor's session
+	// store and the overview header's credential probe.
+	rootDir, err := supervisor.ResolveRoot(root)
+	if err != nil {
+		return tuiBackend{}, err
+	}
+
+	sup, err := supervisor.New(supervisor.Config{Root: rootDir})
 	if err != nil {
 		return tuiBackend{}, fmt.Errorf("build supervisor: %w", err)
 	}
@@ -126,7 +134,7 @@ func selectTUIBackend(ctx context.Context, df *daemonFlags, cwd, root string) (t
 		meta: tui.OverviewMeta{
 			App:     "gofer",
 			Version: version,
-			Model:   resolveOverviewModel(ctx, root),
+			Model:   resolveOverviewModel(ctx, rootDir),
 			Cwd:     cwd,
 			Now:     time.Now(),
 		},

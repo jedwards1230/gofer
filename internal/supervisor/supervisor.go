@@ -18,8 +18,9 @@ import (
 
 // Config configures a [Supervisor].
 type Config struct {
-	// Root is the shared session store's root directory. Empty uses the SDK
-	// default (~/.gofer).
+	// Root is the shared session store's root directory. Empty resolves to
+	// gofer's own default (~/.gofer) via [ResolveRoot] — gofer, not the SDK,
+	// owns that default.
 	Root string
 	// Clock overrides the wall clock used to timestamp roster entries.
 	// Defaults to time.Now. Test seam.
@@ -84,11 +85,7 @@ func New(cfg Config) (*Supervisor, error) {
 	store := cfg.Store
 	ownsStore := false
 	if store == nil {
-		var storeOpts []session.StoreOption
-		if cfg.Root != "" {
-			storeOpts = append(storeOpts, session.WithRoot(cfg.Root))
-		}
-		store, err = session.NewFileStore(storeOpts...)
+		store, err = session.NewFileStore(session.WithRoot(root))
 		if err != nil {
 			return nil, fmt.Errorf("supervisor: open session store: %w", err)
 		}
@@ -128,11 +125,13 @@ func New(cfg Config) (*Supervisor, error) {
 	}, nil
 }
 
-// ResolveRoot mirrors the SDK FileStore's default-root resolution (~/.gofer)
-// so the supervisor can enumerate <root>/sessions itself in List — the SDK
-// exposes no store-wide "list every session" call. Exported so
-// internal/daemon can resolve the same default when locating the endpoint
-// file it advertises alongside the session store (see
+// ResolveRoot is gofer's single source of the ~/.gofer default — the SDK
+// invents no directory name of its own, so every store/auth/runner
+// construction in this binary must resolve an empty root through here before
+// it reaches the SDK. It also lets the supervisor enumerate <root>/sessions
+// itself in List — the SDK exposes no store-wide "list every session" call.
+// Exported so internal/daemon can resolve the same default when locating the
+// endpoint file it advertises alongside the session store (see
 // internal/daemon.EndpointPath) — an empty root always means the same
 // directory to every part of gofer, never re-derived independently.
 func ResolveRoot(root string) (string, error) {

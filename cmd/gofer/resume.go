@@ -12,6 +12,7 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/runner"
 
 	"github.com/jedwards1230/gofer/internal/daemon"
+	"github.com/jedwards1230/gofer/internal/supervisor"
 )
 
 // runResume implements `gofer resume`: it reopens an existing session by id
@@ -40,11 +41,19 @@ func runResume(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 	}
 	id, promptArgs := rest[0], rest[1:]
 
+	// Resolve --root through gofer's own default (~/.gofer, never any SDK
+	// default) up front — every path below that touches the session store or
+	// an auth store needs an explicit root.
+	rootDir, err := supervisor.ResolveRoot(*root)
+	if err != nil {
+		return err
+	}
+
 	if len(promptArgs) == 0 {
 		// A read-only transcript view needs no provider and no credential — it
 		// reads the journal directly, so `gofer resume <id>` works even with
 		// nothing configured, and never touches a daemon.
-		msgs, err := runner.Transcript(ctx, id, *root)
+		msgs, err := runner.Transcript(ctx, id, rootDir)
 		if err != nil {
 			return err
 		}
@@ -59,6 +68,9 @@ func runResume(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 	var daemonClient *daemon.Client
 	daemonRunning := false
 	if !*local {
+		// dialDaemon's own root resolution (via daemon.ReadEndpoint) already
+		// falls back through [supervisor.ResolveRoot], so the raw --root flag
+		// (possibly "") is passed through unresolved here.
 		c, dialErr := dialDaemon(ctx, df, *root)
 		switch {
 		case dialErr == nil:
@@ -77,7 +89,7 @@ func runResume(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 	if !daemonRunning {
 		modelID = *model
 		if modelID == "" {
-			modelID, err = resolveRunModel(ctx, *root)
+			modelID, err = resolveRunModel(ctx, rootDir)
 			if err != nil {
 				return err
 			}
@@ -97,7 +109,7 @@ func runResume(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 	}
 
 	r, err := runner.Resume(ctx, id, runner.Options{
-		Root:   *root,
+		Root:   rootDir,
 		Cwd:    cwd,
 		Model:  modelID,
 		System: defaultSystemPrompt,
