@@ -2,12 +2,14 @@ package tui
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/jedwards1230/agent-sdk-go/event"
 
+	"github.com/jedwards1230/gofer/internal/tui/layout"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
 
@@ -452,12 +454,17 @@ func (a App) handleAttachKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
-// render builds the current screen's output as a plain string, including
-// the trailing status line when set. It is the pure core [App.View] wraps
-// into a tea.View, kept separate so golden tests can assert on it directly
-// without a bubbletea dependency.
+// render builds the current screen's output as a plain string: this is the
+// single point every screen (overview, peek, attach) flows through, so it is
+// also where [layout.TopPadding] blank leading rows go — one insertion point
+// rather than three. The content budget is shrunk by the same amount so the
+// padded frame still totals a.height rows (status/input lines stay on
+// screen instead of being pushed off the bottom). The trailing status line
+// is included when set. This is the pure core [App.View] wraps into a
+// tea.View, kept separate so golden tests can assert on it directly without
+// a bubbletea dependency.
 func (a App) render() string {
-	h := a.height
+	h := a.height - layout.TopPadding
 
 	var footer string
 	if a.status != "" {
@@ -478,7 +485,7 @@ func (a App) render() string {
 	if footer != "" {
 		body += "\n" + footer
 	}
-	return body
+	return strings.Repeat("\n", layout.TopPadding) + body
 }
 
 // View satisfies tea.Model, rendering the current screen at the last known
