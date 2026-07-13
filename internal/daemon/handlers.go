@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"sort"
+	"time"
 
 	"github.com/jedwards1230/agent-sdk-go/acp"
 	"github.com/jedwards1230/agent-sdk-go/event"
@@ -38,6 +41,7 @@ var methodTable = map[string]methodHandler{
 	acp.MethodSessionLoad:   handleSessionLoad,
 	acp.MethodSessionPrompt: handleSessionPrompt,
 	acp.MethodSessionCancel: handleSessionCancel,
+	acp.MethodSessionList:   handleSessionList,
 
 	methodGoferRoster:  handleGoferRoster,
 	methodGoferPS:      handleGoferPS,
@@ -68,12 +72,18 @@ func decodeOp[T event.Op](method string, params json.RawMessage) (T, *rpcError) 
 
 // handleInitialize negotiates the protocol version. It always replies at
 // [acp.ProtocolVersion]; a client that cannot speak it is expected to
-// disconnect.
+// disconnect. The response advertises session/load (with full-history
+// replay, see handleSessionLoad) and session/list support.
 func handleInitialize(_ *Daemon, _ context.Context, _ *peer, params json.RawMessage) (any, *rpcError) {
 	if _, err := acp.DecodeInitialize(params); err != nil {
 		return nil, invalidParams(err)
 	}
-	return acp.NewInitializeResponse(), nil
+	resp := acp.NewInitializeResponse()
+	resp.AgentCapabilities = acp.AgentCapabilities{
+		LoadSession:         true,
+		SessionCapabilities: acp.SessionCapabilities{List: &acp.SessionListCapabilities{}},
+	}
+	return resp, nil
 }
 
 // handleAuthenticate is a no-op success: the WebSocket bearer token (see
@@ -94,12 +104,34 @@ func handleSessionNew(d *Daemon, ctx context.Context, _ *peer, params json.RawMe
 	if err != nil {
 		return nil, appError(err)
 	}
+	d.log.Info("session created", "session", info.ID)
 	return acp.NewSessionResponse{SessionID: info.ID}, nil
 }
 
-// handleSessionLoad reopens a persisted session (best-effort for M2: no
-// resumption of ACP-side client state beyond the supervisor's own session).
-func handleSessionLoad(d *Daemon, ctx context.Context, _ *peer, params json.RawMessage) (any, *rpcError) {
+// handleSessionLoad reopens a persisted session and replays its folded
+// conversation history as session/update notifications before returning the
+// session/load response, per ACP v1's "the Agent MUST replay the entire
+// conversation to the Client in the form of session/update notifications"
+// requirement.
+//
+// Ordering contract (spec-critical): every replay notification is written
+// strictly before this handler's response reaches the wire. This holds
+// without extra synchronization here because [peer.handleFrame] sends the
+// handler's returned result as the response only AFTER the handler itself
+// returns, and every frame — this handler's notify calls and handleFrame's
+// eventual reply — goes through the same p.writeMu-serialized [peer.writeJSON]
+// path, so they can never interleave or reorder on the wire.
+//
+// Concurrency note: replay reads Fold(), a snapshot of the settled journal
+// taken at call time. A concurrent session/prompt on the same session (a
+// client is not expected to do this mid-load, but nothing here forbids it)
+// streams NEW notifications from its own goroutine onto the same peer; both
+// paths only ever reach the wire through p.notify -> p.writeJSON, whose
+// writeMu already serializes frame-by-frame, so no additional locking is
+// needed to keep replay and live streaming from corrupting each other's
+// frames — only their relative ordering (which is unspecified once a prompt
+// races a load) is left unguaranteed, and ACP does not require otherwise.
+func handleSessionLoad(d *Daemon, ctx context.Context, p *peer, params json.RawMessage) (any, *rpcError) {
 	op, rerr := decodeOp[event.SessionResume](acp.MethodSessionLoad, params)
 	if rerr != nil {
 		return nil, rerr
@@ -114,7 +146,27 @@ func handleSessionLoad(d *Daemon, ctx context.Context, _ *peer, params json.RawM
 	if _, err := d.sup.Resume(ctx, op.SessionID, supervisor.ResumeOptions{Cwd: req.Cwd, Model: d.cfg.DefaultModel}); err != nil {
 		return nil, appError(err)
 	}
-	return loadSessionResult{}, nil
+	d.log.Info("session resumed", "session", op.SessionID)
+
+	msgs, err := d.sup.History(ctx, op.SessionID)
+	if err != nil {
+		return nil, appError(err)
+	}
+	notifs := acp.ReplayNotifications(op.SessionID, msgs)
+	// This handler never subscribes to the session's event broker — it
+	// replays the folded journal directly — so it never triggers the
+	// broker's retained-backlog replay handleSessionPrompt guards against.
+	// The subsequent session/prompt on this now-loaded session uses
+	// SubscribeLive, so it won't re-deliver this history as a duplicate
+	// broker-replayed session/update either; the two replay paths are
+	// disjoint by construction.
+	d.log.Debug("session load replay", "session", op.SessionID, "notifications", len(notifs))
+	for _, n := range notifs {
+		if werr := p.notify(ctx, acp.MethodSessionUpdate, n); werr != nil {
+			return nil, internalErr(fmt.Errorf("session/load %s: write replay session/update: %w", op.SessionID, werr))
+		}
+	}
+	return acp.LoadSessionResponse{}, nil
 }
 
 // handleSessionCancel interrupts id's in-flight turn. It is normally sent as
@@ -131,6 +183,88 @@ func handleSessionCancel(d *Daemon, ctx context.Context, _ *peer, params json.Ra
 	return struct{}{}, nil
 }
 
+// sessionListPageSize bounds a single session/list response's Sessions slice.
+const sessionListPageSize = 50
+
+// handleSessionList answers session/list: every on-disk session (live and
+// archived — see [supervisor.Supervisor.List]), optionally filtered by cwd,
+// newest-first, opaquely paginated at [sessionListPageSize] entries per page.
+//
+// A disk-only (archived) [supervisor.SessionInfo] carries no cwd — the
+// journal does not persist it — so Cwd falls back to the daemon's own
+// working directory for those entries; a cwd filter therefore only ever
+// matches live sessions in M2, which is an accepted limitation (see the
+// task brief).
+func handleSessionList(d *Daemon, ctx context.Context, _ *peer, params json.RawMessage) (any, *rpcError) {
+	var req acp.ListSessionsRequest
+	if len(params) > 0 {
+		if err := json.Unmarshal(params, &req); err != nil {
+			return nil, invalidParams(fmt.Errorf("acp: decode %s params: %w", acp.MethodSessionList, err))
+		}
+	}
+
+	offset, err := decodeSessionCursor(req.Cursor)
+	if err != nil {
+		return nil, invalidParamsMsg(err.Error())
+	}
+
+	infos, err := d.sup.List(ctx)
+	if err != nil {
+		return nil, appError(err)
+	}
+
+	if req.Cwd != "" {
+		filtered := infos[:0:0]
+		for _, info := range infos {
+			if info.Cwd == req.Cwd {
+				filtered = append(filtered, info)
+			}
+		}
+		infos = filtered
+	}
+
+	sort.Slice(infos, func(i, j int) bool {
+		if !infos[i].Updated.Equal(infos[j].Updated) {
+			return infos[i].Updated.After(infos[j].Updated)
+		}
+		return infos[i].ID > infos[j].ID
+	})
+
+	if offset > len(infos) {
+		offset = len(infos)
+	}
+	end := offset + sessionListPageSize
+	if end > len(infos) {
+		end = len(infos)
+	}
+	page := infos[offset:end]
+
+	// daemonCwd is the fallback for a disk-only entry's empty Cwd (see the
+	// doc above); resolved once, best-effort — an error here just leaves the
+	// fallback "" rather than failing the whole request.
+	daemonCwd, _ := os.Getwd()
+
+	sessions := make([]acp.SessionInfo, 0, len(page))
+	for _, info := range page {
+		cwd := info.Cwd
+		if cwd == "" {
+			cwd = daemonCwd
+		}
+		sessions = append(sessions, acp.SessionInfo{
+			SessionID: info.ID,
+			Cwd:       cwd,
+			Title:     info.Title,
+			UpdatedAt: info.Updated.UTC().Format(time.RFC3339),
+		})
+	}
+
+	resp := acp.ListSessionsResponse{Sessions: sessions}
+	if end < len(infos) {
+		resp.NextCursor = encodeSessionCursor(end)
+	}
+	return resp, nil
+}
+
 // handleSessionPrompt is the streaming heart of the daemon. It subscribes to
 // the session's event stream BEFORE dispatching the prompt (so no event
 // between dispatch and subscribe is missed), sends the prompt, and then
@@ -139,6 +273,20 @@ func handleSessionCancel(d *Daemon, ctx context.Context, _ *peer, params json.Ra
 // handler returns as soon as it observes a terminal turn.finished (one whose
 // stop reason [acp.ToPromptResponse] projects — end_turn, max_tokens,
 // refusal, or cancelled).
+//
+// It subscribes via [supervisor.Supervisor.SubscribeLive], not Subscribe: the
+// broker replays its retained must-deliver backlog (lifecycle + terminal
+// events) into every new Subscribe-based subscription, a feature meant for
+// mid-session attach/peek recovering events it missed. A plain Subscribe here
+// would instead hand THIS prompt a PRIOR turn's retained turn.finished, which
+// the wait loop below would consume immediately and return as this prompt's
+// own response in ~0ms — the second prompt on a connection would appear to
+// resolve instantly with no session/update at all, while the actual turn
+// streamed into a subscription nobody was reading (torn down by the deferred
+// sub.Close() before it produced anything). SubscribeLive delivers only
+// events published after the call, so combined with subscribing BEFORE
+// sending the prompt, this handler observes exactly this turn's events and
+// nothing from any earlier one.
 //
 // M2 contract: one outstanding session/prompt per session. A turn.finished
 // with stop reason "tool_use" is mid-turn (the loop is about to run tool
@@ -165,7 +313,7 @@ func handleSessionPrompt(d *Daemon, ctx context.Context, p *peer, params json.Ra
 		return nil, rerr
 	}
 
-	sub, err := d.sup.Subscribe(ctx, op.SessionID)
+	sub, err := d.sup.SubscribeLive(ctx, op.SessionID)
 	if err != nil {
 		return nil, appError(fmt.Errorf("session/prompt %s: %w", op.SessionID, err))
 	}
@@ -176,6 +324,7 @@ func handleSessionPrompt(d *Daemon, ctx context.Context, p *peer, params json.Ra
 	}
 
 	var lastFatal string
+	var updates int
 	for {
 		select {
 		case e, ok := <-sub.C:
@@ -191,6 +340,7 @@ func handleSessionPrompt(d *Daemon, ctx context.Context, p *peer, params json.Ra
 				if werr := p.notify(ctx, acp.MethodSessionUpdate, notif); werr != nil {
 					return nil, internalErr(fmt.Errorf("session/prompt %s: write session/update: %w", op.SessionID, werr))
 				}
+				updates++
 			}
 
 			tf, isTurnFinished := e.(event.TurnFinished)
@@ -198,6 +348,7 @@ func handleSessionPrompt(d *Daemon, ctx context.Context, p *peer, params json.Ra
 				continue
 			}
 			if resp, ok := acp.ToPromptResponse(tf); ok {
+				d.log.Debug("session prompt updates", "session", op.SessionID, "notifications", updates)
 				return resp, nil
 			}
 			if tf.StopReason == "tool_use" {
@@ -243,6 +394,7 @@ func handleGoferKill(d *Daemon, ctx context.Context, _ *peer, params json.RawMes
 	if err := d.sup.Kill(ctx, req.SessionID); err != nil {
 		return nil, appError(err)
 	}
+	d.log.Info("session killed", "session", req.SessionID)
 	return struct{}{}, nil
 }
 
@@ -258,5 +410,6 @@ func handleGoferArchive(d *Daemon, ctx context.Context, _ *peer, params json.Raw
 	if err := d.sup.Archive(ctx, req.SessionID); err != nil {
 		return nil, appError(err)
 	}
+	d.log.Info("session archived", "session", req.SessionID)
 	return struct{}{}, nil
 }

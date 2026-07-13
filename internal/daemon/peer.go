@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"sync"
+	"time"
 
 	"github.com/coder/websocket"
 )
@@ -99,16 +100,25 @@ func (p *peer) run(ctx context.Context) {
 }
 
 // handleFrame parses one JSON-RPC frame and dispatches it. A notification
-// (no id) never receives a response, even on error, per JSON-RPC 2.0 — a
-// malformed notification is logged nowhere in M2 and simply dropped, since
-// the daemon has no operator-facing log sink yet.
+// (no id) never receives a response, even on error, per JSON-RPC 2.0.
+//
+// This is the daemon's single per-request logging chokepoint — every inbound
+// frame's method, id, and outcome are known here. REDACTION RULE: log ONLY
+// method names, JSON-RPC ids, rpc error codes/messages, durations, and
+// (elsewhere, at connection accept/close) remote addrs and session ids.
+// NEVER log env.Params, a handler's result, or the raw frame bytes — they may
+// carry prompt text, message content, or tool inputs/outputs. If in doubt,
+// leave it out.
 func (p *peer) handleFrame(ctx context.Context, data []byte) {
+	log := p.daemon.log
 	var env inboundEnvelope
 	if err := json.Unmarshal(data, &env); err != nil {
+		log.Warn("parse error", "err", err)
 		p.reply(ctx, nil, nil, parseError(err))
 		return
 	}
 	if env.Method == "" {
+		log.Warn("invalid request: missing method")
 		if !env.isNotification() {
 			p.reply(ctx, env.ID, nil, invalidRequest("missing method"))
 		}
@@ -117,15 +127,29 @@ func (p *peer) handleFrame(ctx context.Context, data []byte) {
 
 	h, ok := methodTable[env.Method]
 	if !ok {
+		// WARN, not DEBUG: an unrecognized method name is the smoking gun for
+		// client-compat debugging (a client speaking a method this daemon
+		// version doesn't implement).
+		log.Warn("unknown method", "method", env.Method, "id", string(env.ID))
 		if !env.isNotification() {
 			p.reply(ctx, env.ID, nil, methodNotFound(env.Method))
 		}
 		return
 	}
 
+	start := time.Now()
 	result, rerr := h(p.daemon, ctx, p, env.Params)
+	durMS := time.Since(start).Milliseconds()
+
 	if env.isNotification() {
+		log.Debug("notification handled", "method", env.Method, "dur_ms", durMS)
 		return
+	}
+
+	if rerr != nil {
+		log.Info("request handled", "method", env.Method, "id", string(env.ID), "outcome", "error", "code", rerr.Code, "message", rerr.Message, "dur_ms", durMS)
+	} else {
+		log.Info("request handled", "method", env.Method, "id", string(env.ID), "outcome", "ok", "dur_ms", durMS)
 	}
 	p.reply(ctx, env.ID, result, rerr)
 }

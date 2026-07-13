@@ -34,4 +34,17 @@
 // upgraded (see [Daemon.Handler]). ACP's own "authenticate" method is
 // answered as a no-op success — the bearer token is the daemon's only auth
 // boundary in M2.
+//
+// # Logging
+//
+// [Config.Logger] (default: a discarding logger, so an embedder that passes
+// none stays silent) receives structured, leveled logs: connection open/
+// close and accept failures at INFO/WARN (remote addr only — see
+// [Daemon.serveWS]), per-request method/id/outcome/duration at INFO and
+// unknown-method/parse-failure warnings at WARN (see [peer.handleFrame], the
+// router's single logging chokepoint), notifications at DEBUG, and session
+// lifecycle (create/resume/kill/archive) at INFO (see handlers.go). The hard
+// rule everywhere: log method names, JSON-RPC ids, error codes/messages,
+// durations, remote addrs, and session ids — never request/response params,
+// prompt text, message content, tool inputs/outputs, or the bearer token.
 package daemon

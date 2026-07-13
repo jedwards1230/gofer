@@ -5,7 +5,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/jedwards1230/gofer/internal/daemon"
 	"github.com/jedwards1230/gofer/internal/supervisor"
@@ -27,6 +29,11 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	token := fs.String("token", "", "bearer token required of ws clients (default: $GOFER_TOKEN; empty disables auth)")
 	model := fs.String("model", "", "default model for sessions created over ACP (default: the sole logged-in provider's model)")
 	root := fs.String("root", "", "session store root (default ~/.gofer)")
+	// Same explicit-fallback pattern as token/GOFER_TOKEN above: the flag's own
+	// default is "", not os.Getenv("GOFER_LOG_LEVEL"), purely for symmetry
+	// (there's no leak risk here, but one env-fallback convention in this
+	// command is easier to read than two).
+	logLevel := fs.String("log-level", "", "log level: debug, info, warn, or error (default: $GOFER_LOG_LEVEL, or \"info\")")
 	if help, err := parseFlags(fs, args); err != nil {
 		return err
 	} else if help {
@@ -37,6 +44,19 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	if bearerToken == "" {
 		bearerToken = os.Getenv("GOFER_TOKEN")
 	}
+
+	levelStr := *logLevel
+	if levelStr == "" {
+		levelStr = os.Getenv("GOFER_LOG_LEVEL")
+	}
+	if levelStr == "" {
+		levelStr = "info"
+	}
+	lvl, err := parseLogLevel(levelStr)
+	if err != nil {
+		return err
+	}
+	logger := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: lvl}))
 
 	// Fail fast, before building a supervisor or resolving a model: a
 	// non-loopback bind with no bearer token is a misconfiguration that
@@ -69,6 +89,7 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		ListenAddr:   *listen,
 		BearerToken:  bearerToken,
 		DefaultModel: modelID,
+		Logger:       logger,
 	})
 
 	// Install the interrupt handler around the whole serve loop: the daemon
@@ -80,11 +101,30 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	// The listen address is operationally useful (an operator watching a log,
 	// or copy-pasting it into an ACP client); the token, configured or not, is
 	// never printed — see docs/M2-PROOF.md for how to mint and pass one.
-	_, _ = fmt.Fprintf(stderr, "gofer daemon: listening on %s\n", *listen)
+	logger.Info("daemon listening", "addr", *listen)
 
 	serveErr := d.Serve(ctx)
 	if cerr := sup.Close(); cerr != nil && serveErr == nil {
 		serveErr = fmt.Errorf("close supervisor: %w", cerr)
 	}
 	return serveErr
+}
+
+// parseLogLevel maps a --log-level flag value to a [slog.Level]. Only the
+// four canonical names are accepted (case-insensitive); anything else is a
+// clean usage error rather than slog's own zero-value fallback (which would
+// silently accept garbage as "info").
+func parseLogLevel(s string) (slog.Level, error) {
+	switch strings.ToLower(s) {
+	case "debug":
+		return slog.LevelDebug, nil
+	case "info":
+		return slog.LevelInfo, nil
+	case "warn", "warning":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	default:
+		return 0, fmt.Errorf("--log-level: unrecognized level %q (want debug, info, warn, or error)", s)
+	}
 }

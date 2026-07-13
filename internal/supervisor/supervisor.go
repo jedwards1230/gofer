@@ -172,7 +172,7 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts CreateOptio
 		return SessionInfo{}, fmt.Errorf("supervisor: create session: %w", err)
 	}
 
-	m, err := s.register(sess, opts.Model)
+	m, err := s.register(sess, opts.Model, opts.Cwd)
 	if err != nil {
 		// Lost a race with Close between the isClosed check above and here:
 		// tear down the just-built session so it does not leak. Its store is
@@ -226,7 +226,7 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 		return SessionInfo{}, fmt.Errorf("supervisor: resume %s: %w", id, err)
 	}
 
-	m, err := s.register(sess, opts.Model)
+	m, err := s.register(sess, opts.Model, opts.Cwd)
 	if err != nil {
 		_ = sess.Close()
 		return SessionInfo{}, fmt.Errorf("supervisor: resume %s: %w", id, err)
@@ -242,13 +242,13 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 // racing Close can never insert a session (and leak its pump) into a roster
 // Close has already drained. The managed value (and its context) is built
 // only once the insert is committed, so a rejected registration leaks nothing.
-func (s *Supervisor) register(sess Session, model string) (*managed, error) {
+func (s *Supervisor) register(sess Session, model, cwd string) (*managed, error) {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		return nil, ErrClosed
 	}
-	m := newManaged(sess, model, s.clock(), s.clock, s.notify)
+	m := newManaged(sess, model, s.clock(), s.clock, s.notify, cwd)
 	s.roster[m.id] = m
 	s.mu.Unlock()
 
@@ -490,6 +490,38 @@ func (s *Supervisor) Subscribe(ctx context.Context, sessionID string) (*event.Su
 		return nil, fmt.Errorf("supervisor: subscribe %s: %w", sessionID, err)
 	}
 	return m.sess.Events(), nil
+}
+
+// SubscribeLive is [Supervisor.Subscribe] without the retained must-deliver
+// backlog replay — for a caller driving a new turn that must not observe a
+// prior turn's retained terminal event (see [Session.EventsLive]). Subscribe
+// (with replay) stays the right call for attach/peek, where recovering
+// missed events is the point.
+func (s *Supervisor) SubscribeLive(ctx context.Context, sessionID string) (*event.Subscription, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m, err := s.lookup(sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("supervisor: subscribe %s: %w", sessionID, err)
+	}
+	return m.sess.EventsLive(), nil
+}
+
+// History returns id's folded conversation history as provider messages —
+// the same settled-journal snapshot [Supervisor.Subscribe]'s live stream
+// builds on. It errors with [ErrNotLive] if the session is not live (M2:
+// history is only readable while a session is registered, mirroring
+// Subscribe).
+func (s *Supervisor) History(ctx context.Context, id string) ([]provider.Message, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m, err := s.lookup(id)
+	if err != nil {
+		return nil, fmt.Errorf("supervisor: history %s: %w", id, err)
+	}
+	return m.sess.Fold(), nil
 }
 
 // LastError returns id's most recent turn's Prompt error, if any — a

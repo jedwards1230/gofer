@@ -259,6 +259,76 @@ func TestSupervisor_Kill(t *testing.T) {
 	}
 }
 
+// TestSupervisor_SubscribeLive mirrors TestSupervisor_Kill's Subscribe usage:
+// SubscribeLive returns a working subscription for a live session (it
+// observes an event published after the call, same as Subscribe would), and
+// errors the same way Subscribe does — [ErrNotLive] — for an unknown id.
+func TestSupervisor_SubscribeLive(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	entry, err := h.sup.Create(ctx, "", supervisor.CreateOptions{Cwd: "/proj", Model: "m"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	sub, err := h.sup.SubscribeLive(ctx, entry.ID)
+	if err != nil {
+		t.Fatalf("SubscribeLive: %v", err)
+	}
+
+	if err := h.sup.Kill(ctx, entry.ID); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+	assertEventKind(t, sub, event.KindSessionKilled)
+
+	if _, err := h.sup.SubscribeLive(ctx, "does-not-exist"); !errors.Is(err, supervisor.ErrNotLive) {
+		t.Fatalf("SubscribeLive unknown id = %v, want ErrNotLive", err)
+	}
+}
+
+// TestSupervisor_SubscribeLiveSkipsRetainedBacklog is the supervisor-level
+// regression test for the bug this package's EventsLive/SubscribeLive exist
+// to fix: a must-deliver event published BEFORE a caller subscribes is
+// replayed into a new [Supervisor.Subscribe] subscription (by design, for
+// mid-session attach) but must NOT be replayed into a new
+// [Supervisor.SubscribeLive] one — otherwise a caller driving a fresh turn
+// would observe a stale retained event (e.g. a prior turn's turn.finished)
+// as if it belonged to the turn it just started.
+func TestSupervisor_SubscribeLiveSkipsRetainedBacklog(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	entry, err := h.sup.Create(ctx, "", supervisor.CreateOptions{Cwd: "/proj", Model: "m"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	fs := h.session(entry.ID)
+
+	// Emit a must-deliver event and let it settle into the fake's retained
+	// backlog before either subscription is opened.
+	fs.Emit(event.NewSessionKilled(entry.ID))
+
+	live, err := h.sup.SubscribeLive(ctx, entry.ID)
+	if err != nil {
+		t.Fatalf("SubscribeLive: %v", err)
+	}
+	select {
+	case e := <-live.C:
+		t.Fatalf("SubscribeLive replayed a retained event: %s", e.Kind())
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Subscribe (with replay), by contrast, still delivers it — confirming
+	// the backlog genuinely exists and SubscribeLive's silence above isn't
+	// just an empty broker.
+	replayed, err := h.sup.Subscribe(ctx, entry.ID)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	assertEventKind(t, replayed, event.KindSessionKilled)
+}
+
 // TestSupervisor_Archive asserts Archive rejects a running session with
 // ErrRunning, and archives (emitting session.archived, dropping from the
 // roster) an idle one.

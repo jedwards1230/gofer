@@ -111,6 +111,32 @@ precedence: flags > env > project .gofer/ > ~/.gofer/ > embedded defaults
 (permissions: deny wins from any layer)
 ```
 
+## Observability
+
+gofer owns telemetry; the SDK stays dependency-light and exposes the seams
+(context propagation, optional `*slog.Logger` injection, the Event/Op stream as
+the instrumentation source — see agent-sdk-go `DESIGN.md`). All exporters point
+at **generic OTLP endpoints**, configurable and **off by default** — no
+phone-home.
+
+- **M2 (now): leveled structured logging** via `log/slog` (stderr text handler),
+  `--log-level debug|info|warn|error` (default `info`, env `GOFER_LOG_LEVEL`).
+  Covers connection lifecycle, every inbound request (method, id, outcome,
+  duration), session lifecycle (created/resumed/killed/archived), and unknown
+  methods at WARN (the smoking gun for client-compat work). **Hard redaction
+  rule**: never logs params, prompt text, message content, tool inputs/outputs,
+  or the bearer token — identifiers, codes, and durations only.
+- **M3 (committed): full OpenTelemetry.** gofer takes the otel dependency + OTLP
+  exporters; the SDK does not.
+  - **Traces**: a span per turn, with child spans for provider calls and tool
+    executions. The SDK's typed Event/Op stream is the natural span source —
+    `*.started`/`*.finished` events open and close spans without the SDK
+    knowing tracing exists.
+  - **Metrics**: sessions (live/archived), turns, tokens and cost, error rates.
+  - **OTLP export**: traces + metrics to a generic OTLP endpoint.
+  - **Log correlation**: trace and span ids stamped into slog records so logs
+    and traces join.
+
 ## Milestones
 
 | Stage | Ships | Proof |
