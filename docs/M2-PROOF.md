@@ -81,7 +81,16 @@ From the client:
    protocol version 1.
 2. Create a new session (ACP `session/new`), pointed at a working directory
    the daemon process can read/write (a scratch checkout on the laptop, not a
-   path that only exists on the phone).
+   path that only exists on the phone). **`cwd` must be an absolute path**
+   (per the ACP v1 spec); a leading `~` (or `~/...`) is expanded against the
+   *daemon's* home as a convenience for phone clients, an empty `cwd`
+   defaults to the daemon's own working directory, and a relative or
+   nonexistent `cwd` is rejected with a clear `invalid params` error at
+   `session/new`/`session/load` rather than silently creating a session whose
+   every tool call then fails (`bash [exit -1]`, `ls: not found`, etc. — the
+   symptom if a client sends an unexpanded `~/...` string literally). If your
+   client (e.g. Agmente) has a "default working directory" setting, set it to
+   an absolute path on the laptop, not `~/...`.
 3. Send a prompt (ACP `session/prompt`), e.g. "list the files in this
    directory and summarize what this project is."
 4. Watch the response stream in: reasoning and text arrive as incremental
