@@ -152,7 +152,7 @@ func reportCmdErr(cmd string, err error, stderr io.Writer) int {
 
 // usage writes the command listing to w.
 func usage(w io.Writer) {
-	_, _ = fmt.Fprint(w, `gofer — supervise coding agents (M1)
+	_, _ = fmt.Fprint(w, `gofer — supervise coding agents
 
 Usage:
   gofer                           Launch the roster TUI (interactive terminal): prefers a
