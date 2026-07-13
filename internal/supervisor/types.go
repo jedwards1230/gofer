@@ -65,6 +65,11 @@ type Session interface {
 	Fold() []provider.Message
 	// Events returns a subscription to every event the session emits.
 	Events() *event.Subscription
+	// EventsLive returns a subscription to events emitted AFTER the call,
+	// without the retained must-deliver backlog Events replays (see
+	// [runner.Runner.EventsLive]). It is for a caller driving a new turn that
+	// must not observe a prior turn's retained terminal event.
+	EventsLive() *event.Subscription
 	// Prompt drives one turn; a cancelled ctx interrupts it, leaving whatever
 	// prefix had already settled durable on disk.
 	Prompt(ctx context.Context, text string) error
@@ -103,4 +108,10 @@ type SessionInfo struct {
 	JournalPath string
 	Queued      int
 	Live        bool // false for disk-only archived entries from List
+
+	// Cwd is the working directory a live session was created/resumed
+	// into. Populated for live sessions only — the on-disk journal does not
+	// persist it, so a disk-only entry from [Supervisor.List] leaves this
+	// "".
+	Cwd string
 }

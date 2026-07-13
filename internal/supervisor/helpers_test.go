@@ -30,6 +30,7 @@ type fakeSession struct {
 	mu     sync.Mutex
 	calls  []string
 	closed bool
+	fold   []provider.Message
 
 	// started delivers the prompt text each time Prompt is entered — one
 	// receive per dispatched turn. Buffered generously; a test only ever
@@ -52,11 +53,37 @@ func newFakeSession(id, path string) *fakeSession {
 	}
 }
 
-func (f *fakeSession) ID() string                  { return f.id }
-func (f *fakeSession) JournalPath() string         { return f.path }
-func (f *fakeSession) Fold() []provider.Message    { return nil }
+func (f *fakeSession) ID() string          { return f.id }
+func (f *fakeSession) JournalPath() string { return f.path }
+
+// Fold returns the fake's canned fold, set via setFold. Defaults to nil —
+// the tests that don't care about folded history never observe a change.
+func (f *fakeSession) Fold() []provider.Message {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.fold
+}
+
+// setFold sets the messages a subsequent Fold call returns — the test seam
+// [Supervisor.History] tests use.
+func (f *fakeSession) setFold(msgs []provider.Message) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fold = msgs
+}
+
 func (f *fakeSession) Events() *event.Subscription { return f.broker.Subscribe(event.FilterAll, 64) }
-func (f *fakeSession) Emit(e event.Event)          { f.broker.Publish(e) }
+
+// EventsLive mirrors [runner.Runner.EventsLive]: f.broker is a real
+// [event.Broker] (constructed with [event.WithReplay]), so this calls its
+// SubscribeLive to get genuine no-replay semantics consistent with Events'
+// real-broker Subscribe above — not a plain-channel stand-in, so the two
+// stay behaviorally distinct here exactly as they are for a real Runner.
+func (f *fakeSession) EventsLive() *event.Subscription {
+	return f.broker.SubscribeLive(event.FilterAll, 64)
+}
+
+func (f *fakeSession) Emit(e event.Event) { f.broker.Publish(e) }
 
 // Cost returns a canned tally so SessionInfo.Cost/Usage are populated
 // deterministically without a real journal.

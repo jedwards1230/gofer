@@ -1,7 +1,10 @@
 package daemon
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/jedwards1230/agent-sdk-go/provider"
@@ -70,10 +73,29 @@ func decodeSessionIDParams(method string, params json.RawMessage) (sessionIDPara
 	return req, nil
 }
 
-// loadSessionResult is the (reserved-empty) result of a session/load request.
-// ACP's session/load response carries no fields the client doesn't already
-// know (it supplied sessionId in the request); the acp package does not
-// export a response type for it (unlike session/new's
-// [acp.NewSessionResponse]), so this local type fills that gap per its own
-// documented convention.
-type loadSessionResult struct{}
+// encodeSessionCursor renders a session/list pagination offset as an opaque
+// cursor token (base64 of the decimal offset) — opaque so a client never
+// depends on its internal shape, only round-trips it via
+// [acp.ListSessionsResponse.NextCursor]/[acp.ListSessionsRequest.Cursor].
+func encodeSessionCursor(offset int) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(strconv.Itoa(offset)))
+}
+
+// decodeSessionCursor is encodeSessionCursor's inverse. An empty cursor
+// decodes to offset 0 (first page); a malformed cursor is an error so
+// handleSessionList can surface it as invalid params rather than silently
+// restarting at page 1.
+func decodeSessionCursor(cursor string) (int, error) {
+	if cursor == "" {
+		return 0, nil
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return 0, fmt.Errorf("invalid cursor: %w", err)
+	}
+	offset, err := strconv.Atoi(string(raw))
+	if err != nil || offset < 0 {
+		return 0, fmt.Errorf("invalid cursor: %q", cursor)
+	}
+	return offset, nil
+}

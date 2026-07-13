@@ -24,6 +24,7 @@ type managed struct {
 	id        string
 	project   string
 	model     string
+	cwd       string
 	createdAt time.Time
 	clock     func() time.Time
 	// notify pushes a fresh roster snapshot to WatchRoster subscribers. The
@@ -83,13 +84,14 @@ type managed struct {
 
 // newManaged builds a managed session ready to register: idle, empty queue,
 // its own cancellable base context.
-func newManaged(sess Session, model string, now time.Time, clock func() time.Time, notify func()) *managed {
+func newManaged(sess Session, model string, now time.Time, clock func() time.Time, notify func(), cwd string) *managed {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &managed{
 		sess:       sess,
 		id:         sess.ID(),
 		project:    filepath.Base(filepath.Dir(sess.JournalPath())),
 		model:      model,
+		cwd:        cwd,
 		createdAt:  now,
 		updated:    now,
 		clock:      clock,
@@ -132,6 +134,7 @@ func (m *managed) info() SessionInfo {
 		JournalPath: m.sess.JournalPath(),
 		Queued:      len(m.queue),
 		Live:        true,
+		Cwd:         m.cwd,
 	}
 }
 

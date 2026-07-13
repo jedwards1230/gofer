@@ -130,7 +130,7 @@ func (p *peer) handleFrame(ctx context.Context, data []byte) {
 		// WARN, not DEBUG: an unrecognized method name is the smoking gun for
 		// client-compat debugging (a client speaking a method this daemon
 		// version doesn't implement).
-		log.Warn("unknown method", "method", env.Method)
+		log.Warn("unknown method", "method", env.Method, "id", string(env.ID))
 		if !env.isNotification() {
 			p.reply(ctx, env.ID, nil, methodNotFound(env.Method))
 		}

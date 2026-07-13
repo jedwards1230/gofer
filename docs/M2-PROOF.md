@@ -42,6 +42,13 @@ Notes:
   --listen <tailnet-ip>:7333` works without the flag — handy for a launchd/
   systemd unit that keeps the token out of `ps` output.
 - `gofer daemon` prints the listen address on startup — never the token.
+- **Debugging a client-compat issue?** Add `--log-level debug` (or
+  `GOFER_LOG_LEVEL=debug`) — default is `info`. The daemon logs every inbound
+  request (method, id, outcome, duration) and, crucially, logs an **unknown
+  method at WARN with the method name** — the fastest way to spot a client
+  calling a method this daemon version doesn't implement. Logs carry method
+  names, ids, error codes, durations, remote addrs, and session ids only —
+  never params, prompt text, message content, or the token.
 - `--model` picks the model new ACP sessions use; omitted, it resolves the
   same way `gofer run` does (the sole logged-in provider's model — log in
   first with `gofer login <provider>` if none is configured, or pass
