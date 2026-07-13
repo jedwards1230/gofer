@@ -95,6 +95,19 @@ func handleAuthenticate(_ *Daemon, _ context.Context, _ *peer, _ json.RawMessage
 	return struct{}{}, nil
 }
 
+// cwdErrRef formats a cwd for an invalid-params error: always the raw string
+// the client sent (so they can match the error to what they typed), plus the
+// resolved path when a "~" expansion or filepath.Clean changed it (so they
+// also see where it actually pointed — the exact ambiguity behind the literal
+// "~/orchestration" bug). Used for every resolveSessionCwd rejection so the
+// messages stay consistent.
+func cwdErrRef(raw, resolved string) string {
+	if resolved == raw {
+		return fmt.Sprintf("%q", raw)
+	}
+	return fmt.Sprintf("%q (resolved to %q)", raw, resolved)
+}
+
 // resolveSessionCwd validates and normalizes an ACP session cwd. ACP v1
 // requires cwd to be an absolute path (both NewSessionRequest.cwd and
 // LoadSessionRequest.cwd — src/v1/agent.rs); as a DX nicety for phone clients
@@ -104,7 +117,8 @@ func handleAuthenticate(_ *Daemon, _ context.Context, _ *peer, _ json.RawMessage
 // [supervisor.CreateOptions]/[supervisor.ResumeOptions] has always resolved
 // to (see their doc comments), now explicit and validated here rather than
 // left to flow down unchecked. The result must be an existing directory;
-// otherwise a clear invalid-params error naming raw is returned instead of
+// otherwise a clear invalid-params error naming the path (raw, plus the
+// resolved form when they differ — see [cwdErrRef]) is returned instead of
 // creating a session whose every tool call silently fails (the live bug this
 // guards: an ACP client sending the literal, unexpanded string
 // "~/orchestration" as cwd).
@@ -132,15 +146,15 @@ func resolveSessionCwd(raw string) (string, *rpcError) {
 	cwd = filepath.Clean(cwd)
 
 	if !filepath.IsAbs(cwd) {
-		return "", invalidParamsMsg(fmt.Sprintf("session cwd %q must be an absolute path (a leading ~ is expanded to the daemon's home)", raw))
+		return "", invalidParamsMsg(fmt.Sprintf("session cwd %s must be an absolute path (a leading ~ is expanded to the daemon's home)", cwdErrRef(raw, cwd)))
 	}
 
 	fi, err := os.Stat(cwd)
 	if err != nil {
-		return "", invalidParamsMsg(fmt.Sprintf("session cwd %q does not exist: %v", raw, err))
+		return "", invalidParamsMsg(fmt.Sprintf("session cwd %s does not exist: %v", cwdErrRef(raw, cwd), err))
 	}
 	if !fi.IsDir() {
-		return "", invalidParamsMsg(fmt.Sprintf("session cwd %q is not a directory", cwd))
+		return "", invalidParamsMsg(fmt.Sprintf("session cwd %s is not a directory", cwdErrRef(raw, cwd)))
 	}
 	return cwd, nil
 }
