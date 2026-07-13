@@ -9,7 +9,8 @@
 // [Model.Ingest] (the bubbletea [Program] adapter in adapter.go does this
 // for a real terminal, wrapping each event as an [EventMsg]). This is the
 // seed of the full screen-stack design in docs/TUI.md (overview ⇄ peek ⇄
-// attach); the navigation, dialogs, and keymap system land in M2+.
+// attach); the overview⇄peek⇄attach navigation shipped in M2, while the
+// dialog and keymap systems land later.
 package tui
 
 import (
@@ -267,7 +268,7 @@ func (m Model) Submit() Model {
 // and clears it, so each submission is observed exactly once. The second
 // return value reports whether a submission was pending.
 //
-// There is no daemon in M1 to send the text to; a caller wiring this into a
+// [Model] does not send the text itself; a caller wiring this into a
 // live session forwards it as the session's prompt Op.
 func (m *Model) TakeSubmitted() (string, bool) {
 	if !m.hasSubmitted {
@@ -338,8 +339,8 @@ func (m Model) renderItemLines(it item) []string {
 // three tree-indented result lines, collapsing any remainder into a single
 // "… +N lines" line.
 func (m Model) renderToolLines(it item) []string {
-	// TODO(SDK): style the header glyph for a failed call once
-	// ToolCallFinished carries IsError through the Event contract; for now
+	// TODO: style the header glyph for a failed call. The SDK now carries
+	// IsError on ToolCallFinished, but this Model doesn't yet track it, so
 	// every finished call renders with GlyphOK regardless of outcome.
 	glyph := m.theme.GlyphStreaming
 	if it.done {
