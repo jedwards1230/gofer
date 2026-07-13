@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -75,6 +76,12 @@ type Config struct {
 	// provider's model) before constructing Config; the daemon does not
 	// re-derive it.
 	DefaultModel string
+	// Logger receives the daemon's structured logs (connection lifecycle,
+	// per-request outcome, session lifecycle — see the package doc's Logging
+	// section). Nil defaults to a discarding logger in [New], so embedders and
+	// tests that pass no logger stay silent rather than hitting a nil
+	// dereference.
+	Logger *slog.Logger
 }
 
 // Daemon hosts a [supervisor.Supervisor] behind an ACP-over-WebSocket
@@ -82,6 +89,7 @@ type Config struct {
 type Daemon struct {
 	sup *supervisor.Supervisor
 	cfg Config
+	log *slog.Logger
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -100,8 +108,12 @@ func New(sup *supervisor.Supervisor, cfg Config) *Daemon {
 	if cfg.ListenAddr == "" {
 		cfg.ListenAddr = DefaultListenAddr
 	}
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Daemon{sup: sup, cfg: cfg, ctx: ctx, cancel: cancel, connSem: make(chan struct{}, maxConns)}
+	return &Daemon{sup: sup, cfg: cfg, log: logger, ctx: ctx, cancel: cancel, connSem: make(chan struct{}, maxConns)}
 }
 
 // Handler returns the daemon's WebSocket upgrade handler, exported so tests
@@ -141,10 +153,19 @@ func (d *Daemon) serveWS(w http.ResponseWriter, r *http.Request) {
 	// way.
 	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {
+		// r.RemoteAddr only — never r.URL, which may carry the ?token=
+		// fallback (see authorized's doc).
+		d.log.Warn("ws accept failed", "remote", r.RemoteAddr, "err", err)
 		return
 	}
 	conn.SetReadLimit(maxMessageBytes)
 	defer conn.CloseNow() //nolint:errcheck // best-effort; the connection is already gone or about to be
+
+	// r.RemoteAddr only — never r.URL/r.Header (bearer token, ?token=
+	// fallback). See handleFrame's redaction comment for the same rule
+	// applied to request bodies.
+	d.log.Info("ws connected", "remote", r.RemoteAddr)
+	defer d.log.Info("ws disconnected", "remote", r.RemoteAddr)
 
 	connCtx, cancel := context.WithCancel(d.ctx)
 	defer cancel()

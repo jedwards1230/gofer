@@ -94,6 +94,7 @@ func handleSessionNew(d *Daemon, ctx context.Context, _ *peer, params json.RawMe
 	if err != nil {
 		return nil, appError(err)
 	}
+	d.log.Info("session created", "session", info.ID)
 	return acp.NewSessionResponse{SessionID: info.ID}, nil
 }
 
@@ -114,6 +115,7 @@ func handleSessionLoad(d *Daemon, ctx context.Context, _ *peer, params json.RawM
 	if _, err := d.sup.Resume(ctx, op.SessionID, supervisor.ResumeOptions{Cwd: req.Cwd, Model: d.cfg.DefaultModel}); err != nil {
 		return nil, appError(err)
 	}
+	d.log.Info("session resumed", "session", op.SessionID)
 	return loadSessionResult{}, nil
 }
 
@@ -243,6 +245,7 @@ func handleGoferKill(d *Daemon, ctx context.Context, _ *peer, params json.RawMes
 	if err := d.sup.Kill(ctx, req.SessionID); err != nil {
 		return nil, appError(err)
 	}
+	d.log.Info("session killed", "session", req.SessionID)
 	return struct{}{}, nil
 }
 
@@ -258,5 +261,6 @@ func handleGoferArchive(d *Daemon, ctx context.Context, _ *peer, params json.Raw
 	if err := d.sup.Archive(ctx, req.SessionID); err != nil {
 		return nil, appError(err)
 	}
+	d.log.Info("session archived", "session", req.SessionID)
 	return struct{}{}, nil
 }
