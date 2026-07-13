@@ -15,12 +15,16 @@ orchestration repo (`docs/projects/gofer-m3-plan-and-docs-refresh.md`).
        once all clients see all events. This is the one missing primitive behind
        the CLI⇄ACP live-sync gap, and it shares plumbing with the approvals relay
        (③). SDK broker already fans out to N subscribers — this is gofer-side.
-2. [ ] **Session-visibility model — OPEN DECISION.** `session/list` is cwd-scoped
-       today; decide cwd-scoped vs fleet-global-with-cwd-as-label. Gates what
-       "seamless sync" even means (a client can't sync a session it can't see).
-       Decide during the fan-out work.
+2. [ ] **Session-visibility model — DECIDED (2026-07-13): fleet-global, cwd as a
+       label.** `session/list` returns every session; the working dir is a
+       filterable tag, not a wall — so all clients see one roster and any client
+       can sync any session. (cwd-scoped isolation may return later as opt-in
+       config, but the default is global.)
 3. [ ] **Sandbox (stage ②).** seatbelt (macOS) / bwrap+seccomp (Linux) containment
-       for tool execution. Binary policy: contain if possible, else ask.
+       for tool execution. Binary policy: contain if possible; if a call **can't
+       be contained on this host** (no sandbox available, or an inherently
+       un-sandboxable tool), **fall back to a human approval** — never silently
+       block, never silently run uncontained (decided 2026-07-13).
 4. [ ] **Approvals relay + phone approval UX.** Route `permission.requested` to
        every attached client (built on ①); `permission.reply` gates execution;
        TUI approval dialog. Agmente already ships the `session/request_permission`
