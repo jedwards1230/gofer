@@ -839,6 +839,13 @@ func handlePermissionReply(d *Daemon, _ context.Context, _ *peer, params json.Ra
 	if err := d.sup.Reply(sessionID, event.PermissionReply{ID: req.ID, Verdict: req.Verdict, Remember: req.Remember}); err != nil {
 		return nil, appError(err)
 	}
+	// Clean up eagerly, mirroring the PermissionResolved event-stream path
+	// (the resolved case above): drop the call->session route and cancel any
+	// outstanding ACP session/request_permission requests at other peers. Both
+	// are idempotent, so the PermissionResolved this reply triggers no-ops when
+	// it repeats them — this just closes the one-hop window before it arrives.
+	d.clearPermRoute(req.ID)
+	d.cancelPermRequest(req.ID)
 	d.log.Debug("permission reply routed", "session", sessionID, "verdict", string(req.Verdict))
 	return struct{}{}, nil
 }
