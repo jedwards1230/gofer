@@ -305,7 +305,7 @@ func (s *scriptedToolTurnSession) Prompt(_ context.Context, text string) error {
 	s.broker.Publish(event.NewToolCallStarted(s.id, "tc-1", "read_file", json.RawMessage(`{}`)))
 	s.broker.Publish(event.NewToolCallDelta(s.id, "tc-1", `{"partial`))
 	s.broker.Publish(event.NewToolCallDelta(s.id, "tc-1", `":"a.txt"}`))
-	s.broker.Publish(event.NewToolCallFinished(s.id, "tc-1", "file contents", false, nil))
+	s.broker.Publish(event.NewToolCallFinished(s.id, "tc-1", json.RawMessage(`{"partial":"a.txt"}`), "file contents", false, nil))
 	s.broker.Publish(event.NewMessageStarted(s.id, event.MessageText))
 	s.broker.Publish(event.NewMessageDelta(s.id, event.MessageText, "done"))
 	s.broker.Publish(event.NewMessageFinished(s.id, event.MessageText, "done"))

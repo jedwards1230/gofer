@@ -7,7 +7,7 @@ require (
 	charm.land/lipgloss/v2 v2.0.5
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/coder/websocket v1.8.15
-	github.com/jedwards1230/agent-sdk-go v0.2.1-0.20260714012857-b49751452e34
+	github.com/jedwards1230/agent-sdk-go v0.2.1-0.20260714161021-3e05d218102f
 	github.com/muesli/termenv v0.16.0
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc v1.44.0

@@ -60,7 +60,7 @@ func (f *toolCallSession) Prompt(ctx context.Context, text string) error {
 		return err
 	}
 	f.broker.Publish(event.NewPermissionResolved(f.id, f.callID, reply.Verdict, "human"))
-	f.broker.Publish(event.NewToolCallFinished(f.id, f.callID, "file1\nfile2\n", false, nil))
+	f.broker.Publish(event.NewToolCallFinished(f.id, f.callID, json.RawMessage(`{"command":"ls"}`), "file1\nfile2\n", false, nil))
 	f.broker.Publish(event.NewTurnFinished(f.id, "end_turn", provider.Usage{}))
 	return nil
 }

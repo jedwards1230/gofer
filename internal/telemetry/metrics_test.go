@@ -22,7 +22,7 @@ func TestMetrics_TwoTurnsToolErrorSessionError(t *testing.T) {
 		// Turn 1: a tool call that errors.
 		events <- event.NewTurnStarted("sess-1")
 		events <- event.NewToolCallStarted("sess-1", "call-A", "bash", json.RawMessage(`{}`))
-		events <- event.NewToolCallFinished("sess-1", "call-A", "boom", true, nil)
+		events <- event.NewToolCallFinished("sess-1", "call-A", json.RawMessage(`{}`), "boom", true, nil)
 		events <- event.NewSessionError("sess-1", "transient failure", false)
 		events <- event.NewTurnFinishedCost("sess-1", string(provider.StopEndTurn),
 			provider.Usage{InputTokens: 10, OutputTokens: 20}, &provider.Cost{USD: 0.05})

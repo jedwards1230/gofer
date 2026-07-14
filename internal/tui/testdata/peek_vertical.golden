@@ -14,11 +14,11 @@ fable-5 · ~/orchestration
 
 
 
-
-
 » Checking the ACP handshake path.
-✓ bash({"cmd":"go test ./acp"})
+
+✓ bash(go test ./acp)
    └ ok  acp  0.4s
+
 Tests pass. The listener is wired.
 ○ idle  stop=end_turn  usage=40in/18out
 j/k switch · →/enter attach · ← back · ctrl-c quit

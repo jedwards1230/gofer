@@ -59,7 +59,7 @@ func historyEvents(sessionID string, msgs []provider.Message) []event.Event {
 				events = append(events, event.NewToolCallStarted(sessionID, b.ToolUseID, b.ToolName, b.ToolInput))
 
 			case provider.BlockToolResult:
-				events = append(events, event.NewToolCallFinished(sessionID, b.ToolUseID, b.ToolResult, b.IsError, nil))
+				events = append(events, event.NewToolCallFinished(sessionID, b.ToolUseID, nil, b.ToolResult, b.IsError, nil))
 
 			case provider.BlockImage:
 				// M1 placeholder; unmodeled — mirrors acp.ReplayNotifications.

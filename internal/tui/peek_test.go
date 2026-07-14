@@ -21,7 +21,7 @@ func peekTail() tui.Model {
 		event.NewMessageStarted(sid, event.MessageReasoning),
 		event.NewMessageFinished(sid, event.MessageReasoning, "Checking the ACP handshake path."),
 		event.NewToolCallStarted(sid, "call-1", "bash", json.RawMessage(`{"cmd":"go test ./acp"}`)),
-		event.NewToolCallFinished(sid, "call-1", "ok  acp  0.4s", false, nil),
+		event.NewToolCallFinished(sid, "call-1", json.RawMessage(`{"cmd":"go test ./acp"}`), "ok  acp  0.4s", false, nil),
 		event.NewMessageStarted(sid, event.MessageText),
 		event.NewMessageFinished(sid, event.MessageText, "Tests pass. The listener is wired."),
 		event.NewTurnFinished(sid, "end_turn", provider.Usage{InputTokens: 40, OutputTokens: 18}),

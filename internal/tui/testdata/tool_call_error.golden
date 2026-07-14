@@ -1,0 +1,4 @@
+✗ bash(go test ./...)
+   └ FAIL  session  0.1s
+○ idle
+> ▏

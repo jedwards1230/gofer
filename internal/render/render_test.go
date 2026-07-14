@@ -60,7 +60,7 @@ func TestHuman(t *testing.T) {
 			name: "tool and permission markers",
 			events: []event.Event{
 				event.NewToolCallStarted(sid, "call-1", "bash", nil),
-				event.NewToolCallFinished(sid, "call-1", "ok", false, nil),
+				event.NewToolCallFinished(sid, "call-1", nil, "ok", false, nil),
 				event.NewPermissionRequested(sid, "perm-1", "bash", nil, nil),
 				event.NewPermissionResolved(sid, "perm-1", event.VerdictAllow, "rule-42"),
 			},

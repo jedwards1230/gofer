@@ -31,8 +31,7 @@ Approvals are actionable without attaching.
 
 A pending permission request is **not** a centered modal — it renders inline in
 the conversation's bottom UI. The transcript keeps a permanent `✋ <tool>` badge
-(and, once answered, a `✓ permission <verdict> (<rule>)` line) in the flow,
-while the live prompt **commandeers the input line**: it takes the spot the text
+in the flow, while the live prompt **commandeers the input line**: it takes the spot the text
 input normally occupies and stays anchored there until answered, then the input
 returns. It reads as a confirm prompt — the tool + args, the question, the
 action row, and a dim footer — keyed `a`/`d`/`r` (`r` toggles remember), `esc`
@@ -45,6 +44,13 @@ it):
    [a] allow   [d] deny   [r] remember: off
  esc cancel · session 0192a1b2-…
 ```
+
+Resolution is deliberately quiet. A routine **allow** adds *no* transcript
+line — the `✋` badge already recorded that the call was gated, and a
+`✓ permission allow (config)` line on every approved call (printed *after* the
+result, reading as if config auto-allowed it) was pure noise. A **deny** keeps
+a `✗ permission deny` line, because a blocked call changed what happened. The
+old rule-source parenthetical is dropped either way.
 
 The fuller pipeline trace (which rail matched, what the sandbox said, what the
 reviewer decided) and the richer action set (`edit cmd`, `why?`) land later; M3
@@ -119,13 +125,32 @@ session row, and a bottom dispatch bar with a hint line — reimplemented here
 for gofer's Event/Op model.
 
 **Tool blocks** in the attach/peek transcript render as a collapsed tree: a
-header line `‹glyph› tool(args)` (streaming glyph while the call runs, ok glyph
-once done), then the result tree-indented beneath — the first line on a `└`,
-up to two more indented, and any remainder collapsed to `… +N lines`. A failed
-call reuses the ok glyph: the SDK now carries `IsError` on `ToolCallFinished`,
-but the transcript renderer doesn't yet style the failure glyph. Because a
-tool item now spans several lines, the transcript renderers flatten every
-item to its lines before width-truncating and height-windowing.
+header line `‹glyph› tool(command)`, then the result tree-indented beneath — the
+first line on a `└`, up to two more indented, and any remainder collapsed to
+`… +N lines`. The header command is the **authoritative** input from
+`ToolCallFinished.Input`, not `ToolCallStarted.Input` (which is only the
+start-of-block seed — an empty `{}` when a provider streams the arguments as
+`input_json_delta` fragments, so building the header from it rendered every call
+as `bash({})`). A command-shaped input is summarized to its own text
+(`bash(find . -type f | wc -l)` rather than `bash({"command":"…"})`); unknown
+tool shapes fall back to compact JSON. While a call is still running its input is
+usually just the empty seed, so the header shows the **bare tool name** (`◐ bash`)
+until the real command lands on finish. `ToolCallDelta` is ignored — it carries
+input fragments, not result text (it used to be mis-appended to the result).
+
+A **failed** call (`ToolCallFinished.IsError`) is styled distinctly: the ✗ glyph
+and header render in the warn accent — deliberately softer than the red a fatal
+`SessionError` uses — and the result body is dimmed, so an internal/transient
+error (e.g. `sandbox: … command is required`) reads as a de-emphasized
+diagnostic rather than prominent, genuine-looking output. A clean call keeps the
+ok glyph and an unstyled body.
+
+Transcript blocks are separated by a blank line (`transcriptGap`) for vertical
+rhythm — user turn, assistant reply, and tool blocks each get breathing room.
+Because a tool item spans several lines and the gaps are ordinary lines, the
+three transcript renderers (`View`, `TailView`, `FullTranscript`) share one
+`transcriptLines` helper that flattens every item to its lines — with the gaps
+between — before width-truncating and height-windowing.
 
 ## Two trees, one renderer
 
@@ -219,6 +244,57 @@ tui/
   ≥ 140 cols, else unified).
 - Deferred: mouse, animations beyond one shared spinner, a second theme,
   raw-ANSI subprocess remapping.
+
+## How the TUI is tested
+
+Three layers, each catching what the one below can't:
+
+1. **Ascii goldens = structure.** `testkit` renders a `Model` at a fixed size
+   through `theme.Test()` (forced `termenv.Ascii`, so lipgloss emits no color
+   codes) and diffs byte-for-byte against a checked-in `testdata/*.golden`.
+   This locks the *layout* — line breaks, glyphs, spacing, truncation — free of
+   any per-machine color nondeterminism. Regenerate:
+   `go test ./internal/tui/... -run TestGolden -update`, then **review the
+   diff** (a golden is a committed assertion, not a cache). A transcript golden
+   also lives in `internal/daemonbridge` (history-replay render) — regenerate
+   it the same way with its own `-update`.
+2. **`ansi.Strip(colored) == plain` = ANSI-width.** An Ascii golden can't see a
+   color code, so it can't catch a styling bug that changes *display width*
+   (the #61 color-scatter: a styled pane measured wider than its cells and tore
+   the layout). The color tests (`color_layout_test.go`, `dialog_color_test.go`)
+   render the same component twice — once plain, once through a real color
+   profile (`colorTheme()`) — and assert that stripping ANSI from the colored
+   render reproduces the plain one exactly, and that no line exceeds its width.
+   Every render change here ships with both a golden and a colored width test.
+3. **VHS = visual/pixel.** Goldens and width tests both run on plain text; they
+   can't tell you whether the amber actually reads as caution or the spacing
+   looks right. VHS renders real frames to GIF/PNG for a human eye (below).
+
+The pyramid: goldens catch structure regressions cheaply on every run; the
+colored tests catch the ANSI-width class the goldens are blind to; VHS is the
+on-demand visual check for the pixels neither can assert.
+
+## Visual capture with VHS
+
+The Ascii golden tests are the authoritative assertion, but they render
+`termenv.Ascii` — they can't show color, and by construction miss ANSI-width
+bugs (the #61 color-scatter regression shipped past green goldens). For a
+human-eye check of real rendered frames, `vhs/` holds on-demand
+[charmbracelet VHS](https://github.com/charmbracelet/vhs) tooling:
+
+- `vhs/harness/` — a tiny `main` that drives the **real** `internal/tui` render
+  path (`theme.Default`, live `tui.Program`, `Program.Send`) through a fixed,
+  scripted event stream, exactly as `cmd/gofer`'s `driveTUI` forwards a
+  session. Pick a scene with `-scenario tool-call | approval`.
+- `vhs/tool-call.tape` — a clean turn with a bash tool call (real command in the
+  header, block rhythm). `vhs/approval.tape` — a turn ending in the inline
+  permission prompt, with a failed call's softened error styling above it.
+
+Run `scripts/tui-vhs.sh [tool-call|approval]` (no arg = all). It prebuilds
+`vhs/.bin/harness`, then renders each tape to `vhs/out/` (GIF of the whole turn
++ PNG of the key frame); both are gitignored. If VHS isn't installed the script
+prints an install hint and exits. This is **not** a CI gate — VHS complements,
+never replaces, the golden tests.
 
 ## Slash commands
 

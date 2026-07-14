@@ -103,16 +103,19 @@ func TestGoldenReasoningAndText(t *testing.T) {
 func TestGoldenToolCall(t *testing.T) {
 	render(t, "tool_call",
 		event.NewToolCallStarted(sid, "call-1", "bash", json.RawMessage(`{"cmd":"echo hi"}`)),
-		event.NewToolCallFinished(sid, "call-1", "hi", false, nil),
+		event.NewToolCallFinished(sid, "call-1", json.RawMessage(`{"cmd":"echo hi"}`), "hi", false, nil),
 	)
 }
 
 // TestGoldenToolCallRunning covers a tool call that has started but not
 // finished, rendered as a header line only with the streaming glyph — no
-// result line, since none has settled yet.
+// result line, since none has settled yet. The started input is an empty
+// seed ("{}", the shape a provider streams before the real arguments land),
+// exercising the name-only header — a real command header only appears once
+// ToolCallFinished's authoritative Input arrives.
 func TestGoldenToolCallRunning(t *testing.T) {
 	render(t, "tool_call_running",
-		event.NewToolCallStarted(sid, "call-1", "bash", json.RawMessage(`{"cmd":"echo hi"}`)),
+		event.NewToolCallStarted(sid, "call-1", "bash", json.RawMessage(`{}`)),
 	)
 }
 
@@ -122,7 +125,20 @@ func TestGoldenToolCallRunning(t *testing.T) {
 func TestGoldenToolCallMultiline(t *testing.T) {
 	render(t, "tool_call_multiline",
 		event.NewToolCallStarted(sid, "call-1", "bash", json.RawMessage(`{"cmd":"seq 1 6"}`)),
-		event.NewToolCallFinished(sid, "call-1", "1\n2\n3\n4\n5\n6", false, nil),
+		event.NewToolCallFinished(sid, "call-1", json.RawMessage(`{"cmd":"seq 1 6"}`), "1\n2\n3\n4\n5\n6", false, nil),
+	)
+}
+
+// TestGoldenToolCallError covers a finished tool call that reported an error
+// (ToolCallFinished.IsError): the header glyph flips to the error glyph and
+// the real command still renders. This Ascii golden locks the structure
+// (✗ glyph + command header + result body); the color styling that sets an
+// error apart — the warn-accent header and dimmed body — can't show under
+// termenv.Ascii and is asserted separately in TestColorToolCallErrorStyling.
+func TestGoldenToolCallError(t *testing.T) {
+	render(t, "tool_call_error",
+		event.NewToolCallStarted(sid, "call-1", "bash", json.RawMessage(`{}`)),
+		event.NewToolCallFinished(sid, "call-1", json.RawMessage(`{"command":"go test ./..."}`), "FAIL  session  0.1s", true, nil),
 	)
 }
 
@@ -198,7 +214,7 @@ func TestGoldenFullTranscript(t *testing.T) {
 		event.NewMessageStarted(sid, event.MessageText),
 		event.NewMessageFinished(sid, event.MessageText, "Hello! Running a quick check."),
 		event.NewToolCallStarted(sid, "call-1", "bash", json.RawMessage(`{"cmd":"echo hi"}`)),
-		event.NewToolCallFinished(sid, "call-1", "hi", false, nil),
+		event.NewToolCallFinished(sid, "call-1", json.RawMessage(`{"cmd":"echo hi"}`), "hi", false, nil),
 		event.NewTurnFinished(sid, "end_turn", provider.Usage{InputTokens: 12, OutputTokens: 9}),
 	)
 	testkit.AssertGolden(t, "full_transcript", m.FullTranscript(testkit.Width))
