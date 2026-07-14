@@ -30,15 +30,6 @@ import (
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
 
-// turnState is the attach surface's coarse turn lifecycle, shown in the
-// status line.
-type turnState int
-
-const (
-	turnIdle turnState = iota
-	turnStreaming
-)
-
 // itemKind distinguishes transcript item shapes.
 type itemKind int
 
@@ -101,7 +92,6 @@ type Model struct {
 	// reallocates and repoints.
 	pending *pendingApproval
 
-	turn  turnState
 	usage *provider.Usage
 	cost  *provider.Cost
 
@@ -134,11 +124,7 @@ func (m Model) Ingest(e event.Event) Model {
 	m.toolIndex = toolIndex
 
 	switch ev := e.(type) {
-	case event.TurnStarted:
-		m.turn = turnStreaming
-
 	case event.TurnFinished:
-		m.turn = turnIdle
 		usage := ev.Usage
 		m.usage = &usage
 		m.cost = ev.Cost
@@ -449,11 +435,12 @@ func (m Model) View(width, height int) string {
 		footer = prompt
 	} else {
 		rule := strings.Repeat("─", width)
-		footer = []string{
-			rule,
-			truncate(m.inputLine(), width),
-			rule,
-			truncate(m.statusLine(), width),
+		footer = []string{rule, truncate(m.inputLine(), width), rule}
+		// The status line carries only usage/cost now, and only once a turn has
+		// finished — omit it (no blank row) until then, so the box sits flush
+		// against the transcript.
+		if status := m.statusLine(); status != "" {
+			footer = append(footer, truncate(status, width))
 		}
 	}
 
@@ -577,21 +564,20 @@ func (m Model) renderToolLines(it item) []string {
 	return lines
 }
 
-// statusLine reports the turn's lifecycle state and, once TurnFinished has
-// been seen, its usage and cost.
+// statusLine reports the turn's token usage and cost once TurnFinished has
+// been seen, muted; it returns "" before then (while streaming, mid tool call,
+// or before any turn has finished). The per-line marker colors already carry
+// turn/tool state, so a bottom state word would only repeat it — usage/cost is
+// the one thing that surfaces nowhere else, so it is all this line shows.
 func (m Model) statusLine() string {
-	style, label := m.theme.OKStyle(), "idle"
-	if m.turn == turnStreaming {
-		style, label = m.theme.WarnStyle(), "streaming"
+	if m.usage == nil {
+		return ""
 	}
-	line := label
-	if m.usage != nil {
-		line += fmt.Sprintf("  usage=%din/%dout", m.usage.InputTokens, m.usage.OutputTokens)
-		if m.cost != nil {
-			line += fmt.Sprintf("  $%.4f", m.cost.USD)
-		}
+	line := fmt.Sprintf("usage=%din/%dout", m.usage.InputTokens, m.usage.OutputTokens)
+	if m.cost != nil {
+		line += fmt.Sprintf("  $%.4f", m.cost.USD)
 	}
-	return markerLine(style, m.theme.GlyphAgent, m.theme.MutedStyle().Render(line))
+	return m.theme.MutedStyle().Render(line)
 }
 
 // inputLine renders the input buffer with a trailing cursor marker.
@@ -600,11 +586,11 @@ func (m Model) inputLine() string {
 }
 
 // FullTranscript renders every transcript item unclipped by height, followed
-// by the final status line. It is what the attach TUI flushes to the terminal
-// on exit, so the scrollback holds the whole conversation — not the
-// viewport-clipped final frame the live view leaves behind (the M1
-// exit-truncation bug). The input line is omitted: there is no more input once
-// the program has exited.
+// by the final usage/cost status line when there is one. It is what the attach
+// TUI flushes to the terminal on exit, so the scrollback holds the whole
+// conversation — not the viewport-clipped final frame the live view leaves
+// behind (the M1 exit-truncation bug). The input line is omitted: there is no
+// more input once the program has exited.
 func (m Model) FullTranscript(width int) string {
 	if width < 1 {
 		width = 1
@@ -614,7 +600,9 @@ func (m Model) FullTranscript(width int) string {
 	}
 
 	lines := m.transcriptLines(width)
-	lines = append(lines, truncate(m.statusLine(), width))
+	if status := m.statusLine(); status != "" {
+		lines = append(lines, truncate(status, width))
+	}
 	return strings.Join(lines, "\n")
 }
 
