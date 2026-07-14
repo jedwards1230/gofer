@@ -13,8 +13,10 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/tui"
 	"github.com/jedwards1230/gofer/internal/tui/testkit"
+	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
 
 // dispatchSlash types cmd into the overview dispatch bar and presses enter,
@@ -135,5 +137,70 @@ func TestSlashFromAttachOpensPanel(t *testing.T) {
 	}
 	if len(sup.sent) != 0 {
 		t.Errorf("sup.sent = %v; want none — a slash command must not be sent as a prompt", sup.sent)
+	}
+}
+
+// TestPanelConfigEscClearsFilterThenCloses verifies the Config tab's
+// two-stage Esc contract end to end through App's exported surface: a first
+// Esc with a filter typed clears it and leaves the panel open, and only a
+// second Esc — filter now empty — closes the panel back to the overview
+// underneath it.
+func TestPanelConfigEscClearsFilterThenCloses(t *testing.T) {
+	before := content(newTestApp(t, newFakeSup(tui.GoldenRoster())))
+
+	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
+	m = dispatchSlash(t, m, "/config")
+	m = type_(t, m, "model")
+
+	if got := content(m); !strings.Contains(got, "Search: model") {
+		t.Fatalf("expected the typed filter rendered, got:\n%s", got)
+	}
+
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
+	if got := content(m); !strings.Contains(got, "[Config]") || strings.Contains(got, "Search: model") {
+		t.Fatalf("expected the first Esc to clear the filter but keep the panel open, got:\n%s", got)
+	}
+
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
+	if got := content(m); got != before {
+		t.Fatalf("expected the second Esc to close the panel and restore the overview;\ngot:\n%s\nwant:\n%s", got, before)
+	}
+}
+
+// TestPanelConfigEditPersistsViaSaveConfig verifies the end-to-end wiring
+// from a committed Config-tab edit through to [CommandEnv.SaveConfig]: this
+// builds App directly (rather than through newTestApp/GoldenCommandEnv) so
+// the test can supply its own SaveConfig closure and observe what was
+// written.
+func TestPanelConfigEditPersistsViaSaveConfig(t *testing.T) {
+	var saved []config.Config
+	env := tui.GoldenCommandEnv()
+	env.SaveConfig = func(c config.Config) error {
+		saved = append(saved, c)
+		return nil
+	}
+
+	var m tea.Model = tui.NewApp(theme.Test(), newFakeSup(tui.GoldenRoster()), tui.GoldenMeta(), env)
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, _ = m.Update(m.Init()())
+
+	m = dispatchSlash(t, m, "/config")
+	// session.model, session.permission_mode, tui.roster_view,
+	// telemetry.enabled — four ↓ presses (the first selects row 0) land on
+	// telemetry.enabled, a bool row that saves on Enter with no further
+	// input needed.
+	for i := 0; i < 4; i++ {
+		m = press(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	if len(saved) != 1 {
+		t.Fatalf("SaveConfig called %d times, want 1", len(saved))
+	}
+	if !saved[0].Telemetry.Enabled {
+		t.Fatalf("saved Telemetry.Enabled = false, want true")
+	}
+	if got := content(m); !strings.Contains(got, "Telemetry enabled … true") {
+		t.Fatalf("expected the toggled row rendered, got:\n%s", got)
 	}
 }

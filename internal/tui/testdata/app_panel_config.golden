@@ -9,16 +9,16 @@ fable-5 · ~/orchestration
 
 
 
-
-
-
-
-
 ────────────────────────────────────────────────────────────────────────────────
 ❯ describe a task for a new session
 enter peek · → attach · tab toggle view · ctrl-x kill · ? shortcuts
 ────────────────────────────────────────────────────────────────────────────────
 Status  [Config]  Model
 ────────────────────────────────────────────────────────────────────────────────
-Config — coming soon.
-←/→ to switch tabs · esc to close
+Search settings…
+  Default model … 
+  Permission mode … ask
+  Roster view … flat
+  Telemetry enabled … false
+  Telemetry endpoint … 
+Type to filter · Enter/↓ to select · ↑ to tabs · Esc to clear

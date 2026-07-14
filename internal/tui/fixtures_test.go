@@ -29,14 +29,19 @@ func GoldenMeta() OverviewMeta {
 // GoldenCommandEnv returns the shared [CommandEnv] the App/command-panel
 // golden tests build through: fixed version/cwd/root and the
 // auth-independence default (zero providers authenticated, no persisted
-// config) — the state every panel view must open cleanly in.
+// config) — the state every panel view must open cleanly in. SaveConfig is a
+// no-op (never touches disk) — it exists so /config's edit paths exercise a
+// non-nil closure in golden tests without leaving files behind; tests that
+// need to observe what was written supply their own CommandEnv (see
+// config_view_test.go).
 func GoldenCommandEnv() CommandEnv {
 	return CommandEnv{
-		Version: "0.3.0",
-		Cwd:     "~/orchestration",
-		Root:    "~/.gofer",
-		Auth:    func() ([]ProviderAuth, error) { return nil, nil },
-		Config:  func() (config.Config, error) { return config.Config{}, nil },
+		Version:    "0.3.0",
+		Cwd:        "~/orchestration",
+		Root:       "~/.gofer",
+		Auth:       func() ([]ProviderAuth, error) { return nil, nil },
+		Config:     func() (config.Config, error) { return config.Config{}, nil },
+		SaveConfig: func(config.Config) error { return nil },
 	}
 }
 
