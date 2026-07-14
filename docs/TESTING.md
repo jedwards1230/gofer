@@ -23,6 +23,15 @@ Fast PR lane (unit + golden); `go test -race` runs on push to main and
 release tags (`.github/workflows/ci.yml`). The e2e socket test runs on the
 push lane now that the M2 daemon has landed.
 
+**Visual capture (advisory).** A separate lane
+(`.github/workflows/vhs-capture.yml`) fires on PRs touching `internal/tui/**`,
+`vhs/**`, or `scripts/tui-vhs.sh`: it renders every `vhs/*.tape` and embeds the
+frames inline in the job summary and a sticky PR comment, so TUI changes can be
+eyeballed without pulling the branch. Frames are published to the orphan
+`vhs-captures` branch under `pr-<n>/<sha>/`. This is **not** a required check —
+it complements, never gates. Fork PRs get a read-only token and degrade to a
+`vhs-frames` artifact upload instead of a push+comment.
+
 ## M3 exit gate — satisfied
 
 M3's close required a **live multi-client pass**: two clients on one session
