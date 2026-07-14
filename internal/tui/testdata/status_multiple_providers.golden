@@ -1,0 +1,8 @@
+Version: 0.3.0
+Session: —
+Session ID: —
+Cwd: ~/orchestration
+Providers:
+  anthropic  OAuth (expired)
+  openai  API key
+Model: —

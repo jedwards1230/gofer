@@ -5,9 +5,9 @@ package tui
 // rather than being a fourth [screen]. Its routing mirrors the approval
 // overlay's exactly (see dialog.go) — one field on [App], checked ahead of
 // the per-screen key handlers in App.Update, and one insertion point in
-// App.render(). M4 step 1 proves this seam only: each tab's body is a
-// placeholder naming the tab. The real /status, /config, and /model views
-// replace the stub body in follow-up PRs without changing this host.
+// App.render(). M4 step 1 proved this seam with a one-line placeholder per
+// tab; M4 step 2 lands the real /status body (see status.go) — Config and
+// Model stay placeholders until their own steps.
 
 import (
 	"strings"
@@ -42,8 +42,15 @@ var panelTabs = []panelTab{
 }
 
 // panelHeight is the fixed number of rows the command panel occupies in the
-// lower region of whichever screen it overlays.
-const panelHeight = 8
+// lower region of whichever screen it overlays: 4 fixed rows (two rules, the
+// tab bar, the footer) plus up to panelBodyRows for the active tab's body —
+// sized for /status's worst realistic case (two providers, both config
+// layers present; gofer supports at most two providers today, see
+// runner.SupportedProviders).
+const (
+	panelBodyRows = 10
+	panelHeight   = panelBodyRows + 4
+)
 
 // commandPanel is the bottom panel a slash command opens: a tab bar plus the
 // active tab's body. Like [Overview]/[Model]/[Peek] it is a pure value —
@@ -52,11 +59,20 @@ const panelHeight = 8
 type commandPanel struct {
 	theme  theme.Theme
 	active commandPanelTab
+
+	// env, sess, and defaultModel are the data the Status tab's [statusView]
+	// reads (see status.go); the Config/Model placeholders ignore them until
+	// their own steps land.
+	env          CommandEnv
+	sess         *SessionInfo
+	defaultModel string
 }
 
-// newCommandPanel returns a panel open on tab, rendering through th.
-func newCommandPanel(th theme.Theme, tab commandPanelTab) commandPanel {
-	return commandPanel{theme: th, active: tab}
+// newCommandPanel returns a panel open on tab, rendering through th, with env
+// and the current session snapshot (nil on the overview) captured at open
+// time for the Status tab to read.
+func newCommandPanel(th theme.Theme, tab commandPanelTab, env CommandEnv, sess *SessionInfo, defaultModel string) commandPanel {
+	return commandPanel{theme: th, active: tab, env: env, sess: sess, defaultModel: defaultModel}
 }
 
 // handleKey applies one key press to the panel. ←/→ move the active tab;
@@ -88,8 +104,15 @@ func (p commandPanel) moveTab(delta int) commandPanel {
 	return p
 }
 
+// panelFixedRows is the row count every tab spends on chrome — two rules,
+// the tab bar, and the footer — before the active tab's body gets whatever
+// remains of the panel's height budget.
+const panelFixedRows = 4
+
 // View renders the panel's tab bar and active-tab body at the given size,
-// clipped to at most panelHeight rows.
+// clipped to at most panelHeight rows. The body may itself be multiple
+// lines (the Status tab's [statusView] is); each is truncated to width and
+// the whole block is capped to the rows left after the fixed chrome.
 func (p commandPanel) View(width, height int) string {
 	if width < 1 {
 		width = 1
@@ -103,18 +126,55 @@ func (p commandPanel) View(width, height int) string {
 	}
 
 	rule := strings.Repeat("─", width)
-	lines := []string{
-		rule,
-		truncate(p.tabBar(), width),
-		rule,
-		truncate(p.body(), width),
-		truncate(p.theme.MutedStyle().Render("←/→ to switch tabs · esc to close"), width),
+	tabBar := truncate(p.tabBar(), width)
+	footer := truncate(p.theme.MutedStyle().Render("←/→ to switch tabs · esc to close"), width)
+
+	bodyRows := h - panelFixedRows
+	if bodyRows < 0 {
+		bodyRows = 0
 	}
+	var bodyLines []string
+	if text := p.body(width, bodyRows); text != "" {
+		bodyLines = strings.Split(text, "\n")
+		if len(bodyLines) > bodyRows {
+			bodyLines = bodyLines[:bodyRows]
+		}
+		for i, l := range bodyLines {
+			bodyLines[i] = truncate(l, width)
+		}
+	}
+
+	lines := make([]string, 0, panelFixedRows+len(bodyLines))
+	lines = append(lines, rule, tabBar, rule)
+	lines = append(lines, bodyLines...)
+	lines = append(lines, footer)
 
 	if len(lines) > h {
 		lines = lines[:h]
 	}
 	return strings.Join(lines, "\n")
+}
+
+// Height returns the number of rows p.View(width, panelHeight) will actually
+// render — the fixed chrome plus however many lines the active tab's body
+// needs, capped to panelHeight. [App.render] reserves exactly this many rows
+// rather than always the worst-case panelHeight, so a short body (the
+// Config/Model placeholders, or Status with little to report) doesn't steal
+// screen space the roster above it could use.
+func (p commandPanel) Height(width int) int {
+	bodyRows := panelHeight - panelFixedRows
+	lines := 0
+	if text := p.body(width, bodyRows); text != "" {
+		lines = strings.Count(text, "\n") + 1
+		if lines > bodyRows {
+			lines = bodyRows
+		}
+	}
+	h := panelFixedRows + lines
+	if h > panelHeight {
+		h = panelHeight
+	}
+	return h
 }
 
 // tabBar renders the tab labels, bracketing the active one.
@@ -130,10 +190,14 @@ func (p commandPanel) tabBar() string {
 	return strings.Join(parts, "  ")
 }
 
-// body renders the active tab's placeholder content. Each tab's real body
-// (a statusView, configView, or the model picker) replaces this stub in a
-// follow-up PR — the panel host itself doesn't change.
-func (p commandPanel) body() string {
+// body renders the active tab's content at the given width/bodyRows budget.
+// The Status tab renders the real [statusView]; Config and Model still
+// render their step-1 placeholder until their own steps land.
+func (p commandPanel) body(width, bodyRows int) string {
+	if p.active == panelStatus {
+		v := statusView{theme: p.theme, env: p.env, sess: p.sess, defaultModel: p.defaultModel}
+		return v.View(width, bodyRows)
+	}
 	for _, t := range panelTabs {
 		if t.tab == p.active {
 			return t.label + " — coming soon."

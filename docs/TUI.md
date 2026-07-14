@@ -11,9 +11,10 @@ input, driven by `Model.Ingest`), the `Overview` roster screen, the `Peek`
 split, collapsed tool-block rendering, the inline permission prompt (M3), and
 the `App` screen-stack root that composes them under the navigation contract
 (see [Roster & navigation](#roster--navigation-m2) below). M4 step 1 added the
-slash dispatcher + command panel host (`command.go`, `panel.go`) — see
-[Slash commands](#slash-commands) below; `/status`, `/config`, and `/model`
-still render as placeholder tabs until their own steps land. Still ahead: a
+slash dispatcher + command panel host (`command.go`, `panel.go`); M4 step 2
+added the `CommandEnv` data seam (`env.go`) and the real `/status` view
+(`status.go`) — see [Slash commands](#slash-commands) below. `/config` and
+`/model` still render as placeholder tabs until their own steps land. Still ahead: a
 general reusable dialog abstraction, the central keymap registry, and plugin
 UI.
 
@@ -344,11 +345,29 @@ registry instead of creating/sending a prompt; an unmatched name sets the
 transient status line. `panel.go` holds the command panel: a bottom overlay
 (`App.panel`, nil = closed) composed over whichever screen `App` is showing,
 routed with the same precedence as the approval overlay — `panel > approval >
-active screen > global` — and closed by Esc. Three builtins
-(`/status`, `/config`, `/model`) register now and open the panel on their tab;
-each tab's body is a placeholder ("`<Tab> — coming soon.`") until its own step
-lands. `@` and `!` are not implemented — the intercept only switches on a
-leading `/` so they can slot in later.
+active screen > global` — and closed by Esc, sized to whatever the active
+tab's body actually renders (`commandPanel.Height`) rather than always a
+worst-case max. Three builtins (`/status`, `/config`, `/model`) register now
+and open the panel on their tab; `/config` and `/model` still render a
+placeholder ("`<Tab> — coming soon.`") until their own steps land. `@` and
+`!` are not implemented — the intercept only switches on a leading `/` so
+they can slot in later.
+
+**Built (M4 step 2)**: `env.go` adds `CommandEnv` — the panel's read-only
+data seam: `Version`/`Cwd`/`Root` plus `Auth`/`Config` closures wrapping the
+SDK auth store and gofer's config loader. `cmd/gofer` builds one per process
+(`buildCommandEnv`, `cmd/gofer/tui_app.go`) from the resolved store root and
+passes it to `tui.NewApp`; `App` hands it to the panel at open time
+(`command.go`'s `openPanel`), and every read happens lazily on render — never
+a cached snapshot — so a `/login` elsewhere or an edited `config.json` shows
+up the next time the panel opens. `status.go` is the real `/status` body: a
+pure `statusView{env, sess}` rendering version/cwd, session identity (from
+whichever session is peeked/attached, `App.currentSessionInfo`), one row per
+authenticated provider (never a singular login/org/email block — gofer is
+multi-provider; "not signed in" when none), the resolved model, and which
+config layers exist on disk — omitting any row it can't answer honestly
+rather than blank-filling it. Opens cleanly with zero providers
+authenticated and never resolves a credential (auth-independence).
 
 - **P0**: user markdown commands (`~/.gofer/commands` + project
   `.gofer/commands`, with `$1`, `$ARGUMENTS`, `${1:-def}`, `${@:N}`

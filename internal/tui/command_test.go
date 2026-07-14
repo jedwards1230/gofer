@@ -33,6 +33,26 @@ func TestGoldenPanelStatus(t *testing.T) {
 	testkit.AssertGolden(t, "app_panel_status", content(m))
 }
 
+// TestStatusReflectsAttachedSession verifies the end-to-end wiring from App
+// into the panel (openPanel capturing [App.currentSessionInfo] at open
+// time, command.go): /status opened after attaching to a session shows that
+// session's name and id, not the overview's "—" (see status_test.go's
+// statusView-level goldens for the field mapping itself).
+func TestStatusReflectsAttachedSession(t *testing.T) {
+	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected (recency-first) session
+
+	m = dispatchSlash(t, m, "/status")
+
+	got := content(m)
+	if !strings.Contains(got, "Session: wire the app root") {
+		t.Errorf("expected the attached session's title, got:\n%s", got)
+	}
+	if !strings.Contains(got, "Session ID: 0192a1b2-app0-7000-8000-000000000001") {
+		t.Errorf("expected the attached session's id, got:\n%s", got)
+	}
+}
+
 // TestGoldenPanelConfig verifies /config opens the command panel on the
 // Config tab.
 func TestGoldenPanelConfig(t *testing.T) {

@@ -31,7 +31,7 @@ import (
 func newColorAppWithApproval(t *testing.T, th theme.Theme) App {
 	t.Helper()
 	sup := newInternalFakeSup(GoldenRoster())
-	a := NewApp(th, sup, GoldenMeta())
+	a := NewApp(th, sup, GoldenMeta(), GoldenCommandEnv())
 
 	mdl, _ := a.Update(tea.WindowSizeMsg{Width: testkit.Width, Height: testkit.Height})
 	a = mdl.(App)

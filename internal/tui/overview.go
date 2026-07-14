@@ -121,6 +121,12 @@ func (o Overview) move(delta int) Overview {
 // roster is empty.
 func (o Overview) SelectedID() string { return o.selectedID }
 
+// DefaultModel returns the resolved credential-driven default model this
+// overview's header shows (meta.Model) — "" if none/ambiguous. The command
+// panel's /status view falls back to this when no session is active, or the
+// active session carries no model override.
+func (o Overview) DefaultModel() string { return o.meta.Model }
+
 // Selected returns the currently selected session's full info and true, or a
 // zero value and false when the roster is empty. The app root reads it to
 // route ctrl-x to kill (running) or archive (finished).
