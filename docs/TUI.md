@@ -122,6 +122,34 @@ compaction entries, HEAD) share a single row renderer. Fork/branch/compact
 are first-class: the session is an append-only tree and context is
 fold(root→head), so a "what if" fork costs nothing.
 
+## Subagent sessions (M4)
+
+A subagent is **not a black box within a turn** — it is a real child session
+with its own journal, cost, and transcript, linked to its parent
+(`session.spawned` event + `parent_id`; depth ≤ 5). The overview renders the
+parent with its children indented beneath it, each child row carrying its own
+description, run duration, and cumulative token/cost tally — the same
+one-line-per-session shape as a top-level row:
+
+```
+● main
+  ○ tui-inline-perm-owner   Own the M3 TUI change…      5m 9s · ↓ 214.7k tokens
+  ○ sandbox-shell-fix-owner Own the M3 sandbox fix…      5m 30s · ↓ 185.3k tokens
+  ○ go-developer            Editing model.go doc comment 6m 47s · ↓ 128.0k tokens
+  ↑/↓ to select · enter to view
+```
+
+`↑`/`↓` selects a child; `enter` navigates *into* that child's full session —
+its complete transcript, tool blocks, and approvals — exactly as if it were a
+top-level session (`esc`/`←` returns to the parent). So a supervisor watching
+one task drills into any subagent's whole history without losing the parent
+context, and an approval waiting deep in the tree still surfaces as `✋ N` on
+the ancestor row. This is the fan-out tree above made navigable: the tree shows
+*who is working*; entering a node shows *what they did*. It reuses the shared
+row renderer and the id-tracked selection/windowing the M2 roster already
+established — a child session is just a session, so no new navigation model is
+needed, only the parent→child link and the indent.
+
 ## Responsive layout
 
 The root layout picks **compact stack** (< ~90 cols: one screen at a time)
