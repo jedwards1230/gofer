@@ -41,6 +41,18 @@ type App struct {
 	over Overview // roster screen
 	sess Model    // transcript of the peeked/attached session
 
+	// panel is the open command-panel overlay a slash command opens (see
+	// command.go, panel.go); nil = none. It composes over whatever screen
+	// scr currently shows rather than being a fourth [screen] — a stub tab
+	// bar for M4 step 1, with the real /status, /config, and /model bodies
+	// landing in follow-up PRs. Dispatch precedence: panel > approval >
+	// active screen > global (see Update).
+	panel *commandPanel
+
+	// registry resolves a submitted "/name arg…" buffer's command token to
+	// the [Command] that runs it.
+	registry Registry
+
 	// cwd is this client's working directory (the same value the roster
 	// header shows). The dispatch bar passes it as the new session's cwd so a
 	// session created from the TUI carries the client's project directory —
@@ -67,12 +79,13 @@ type App struct {
 // screen seeded from meta.
 func NewApp(th theme.Theme, sup Supervisor, meta OverviewMeta) App {
 	a := App{
-		theme: th,
-		sup:   sup,
-		over:  NewOverview(th, meta),
-		sess:  New(th),
-		scr:   screenOverview,
-		cwd:   meta.Cwd,
+		theme:    th,
+		sup:      sup,
+		over:     NewOverview(th, meta),
+		sess:     New(th),
+		scr:      screenOverview,
+		cwd:      meta.Cwd,
+		registry: newBuiltinRegistry(),
 	}
 	// `gofer attach <id>`: open straight into the session's attach screen and
 	// pre-select it in the roster, so backing out with ← lands on it. The
@@ -301,6 +314,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyPressMsg:
 		a.status = ""
+		// The command panel takes every key ahead of the approval overlay and
+		// the per-screen handlers (dispatch precedence: panel > approval >
+		// active screen > global) — see handlePanelKey.
+		if a.panel != nil {
+			return a.handlePanelKey(msg)
+		}
 		// Approval keys apply on the attach screen only — that is the sole
 		// screen backed by a live session transcript (a.sess). Peek renders a
 		// roster-only card with its own reply input and never subscribes, so a
@@ -366,6 +385,15 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			a.scr = screenPeek
 			a.peekReply = ""
 			return a, nil
+		}
+		// A leading "/" is a command, not a prompt — dispatch it instead of
+		// creating a session from the literal text. The intercept switches on
+		// the first rune so "@" (file mention) / "!" (shell escape) can slot
+		// in beside it later (docs/TUI.md); out of scope here.
+		if strings.HasPrefix(a.over.input, "/") {
+			a.over = a.over.Submit()
+			buf, _ := a.over.TakeSubmitted()
+			return a.dispatchSlash(buf)
 		}
 		a.over = a.over.Submit()
 		var cmd tea.Cmd
@@ -490,6 +518,14 @@ func (a App) handleAttachKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case key.Code == tea.KeyEnter:
+		// A leading "/" is a command, not a prompt — same intercept as the
+		// dispatch bar (handleOverviewKey), applied here too so /status,
+		// /config, and /model work from the attach input as well.
+		if strings.HasPrefix(a.sess.input, "/") {
+			a.sess = a.sess.Submit()
+			buf, _ := a.sess.TakeSubmitted()
+			return a.dispatchSlash(buf)
+		}
 		a.sess = a.sess.Submit()
 		var cmd tea.Cmd
 		if txt, ok := a.sess.TakeSubmitted(); ok && a.sessID != "" {
@@ -528,6 +564,18 @@ func (a App) render() string {
 		h--
 	}
 
+	// A command panel takes a fixed slice out of the bottom of the content
+	// budget — the screen above it shrinks to fit, the same way the status
+	// footer already does.
+	panelH := 0
+	if a.panel != nil {
+		panelH = panelHeight
+		if panelH > h {
+			panelH = h
+		}
+		h -= panelH
+	}
+
 	var body string
 	switch a.scr {
 	case screenPeek:
@@ -536,6 +584,10 @@ func (a App) render() string {
 		body = a.sess.View(a.width, h)
 	default:
 		body = a.over.View(a.width, h)
+	}
+
+	if a.panel != nil {
+		body += "\n" + a.panel.View(a.width, panelH)
 	}
 
 	if footer != "" {

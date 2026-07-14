@@ -10,9 +10,12 @@ sizes, forces `termenv.Ascii`, and uses a test theme (see
 input, driven by `Model.Ingest`), the `Overview` roster screen, the `Peek`
 split, collapsed tool-block rendering, the inline permission prompt (M3), and
 the `App` screen-stack root that composes them under the navigation contract
-(see [Roster & navigation](#roster--navigation-m2) below). Still ahead: a
-general reusable dialog abstraction and the central keymap registry, then slash
-commands and plugin UI (M4+).
+(see [Roster & navigation](#roster--navigation-m2) below). M4 step 1 added the
+slash dispatcher + command panel host (`command.go`, `panel.go`) — see
+[Slash commands](#slash-commands) below; `/status`, `/config`, and `/model`
+still render as placeholder tabs until their own steps land. Still ahead: a
+general reusable dialog abstraction, the central keymap registry, and plugin
+UI.
 
 ## The three altitudes
 
@@ -332,6 +335,20 @@ never replaces, the golden tests.
 `/` is reserved for commands; file mentions are `@` (fuzzy path completion).
 ONE registry powers the palette, slash parsing, and keybindings. Collision
 order: extension commands > markdown templates > builtins.
+
+**Built (M4 step 1)**: `command.go` holds `Command{Name, Aliases, Summary,
+ArgHint, Hidden, Run}` and `Registry` (name/alias → `Command`). Both submit
+paths — the overview dispatch bar and the attach input — parse a leading `/`
+at Enter time (`/name arg…`, whitespace-split) and dispatch through the
+registry instead of creating/sending a prompt; an unmatched name sets the
+transient status line. `panel.go` holds the command panel: a bottom overlay
+(`App.panel`, nil = closed) composed over whichever screen `App` is showing,
+routed with the same precedence as the approval overlay — `panel > approval >
+active screen > global` — and closed by Esc. Three builtins
+(`/status`, `/config`, `/model`) register now and open the panel on their tab;
+each tab's body is a placeholder ("`<Tab> — coming soon.`") until its own step
+lands. `@` and `!` are not implemented — the intercept only switches on a
+leading `/` so they can slot in later.
 
 - **P0**: user markdown commands (`~/.gofer/commands` + project
   `.gofer/commands`, with `$1`, `$ARGUMENTS`, `${1:-def}`, `${@:N}`
