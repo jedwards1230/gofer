@@ -144,12 +144,47 @@ func TestGoldenSessionError(t *testing.T) {
 	render(t, "session_error", event.NewSessionError(sid, "boom", true))
 }
 
-// TestGoldenApproval covers a pending permission request, rendered as a
-// display-only line (no interactive approval pipeline in M1).
+// TestGoldenApproval covers a pending permission request: the transcript's
+// permanent ✋ badge (itemApproval) plus the interactive inline prompt that
+// commandeers the bottom input line while it's unresolved (see Model.pending,
+// approval.go).
 func TestGoldenApproval(t *testing.T) {
 	render(t, "approval",
 		event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"cmd": "rm -rf /tmp/x"}, []string{"no rule"}),
 	)
+}
+
+// TestGoldenApprovalPromptInline covers the same pending permission request
+// as TestGoldenApproval, named explicitly for the inline prompt this PR adds
+// — the ✋ bash badge in the transcript, and at the bottom the input-replacing
+// prompt (tool·args, the question, the a/d/r action row, and a dim esc/session
+// footer), replacing the old centered-overlay modal.
+func TestGoldenApprovalPromptInline(t *testing.T) {
+	render(t, "approval_prompt_inline",
+		event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"cmd": "rm -rf /tmp/x"}, []string{"no rule"}),
+	)
+}
+
+// TestColorApprovalPromptInlineNarrow proves the inline prompt's lines clamp
+// to a narrow width (24) instead of overrunning it — the #61 display-width
+// lesson, checked here as a colored render since an Ascii golden alone can't
+// catch an ANSI-width regression.
+func TestColorApprovalPromptInlineNarrow(t *testing.T) {
+	events := []event.Event{
+		event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"cmd": "rm -rf /tmp/x"}, []string{"no rule"}),
+	}
+	build := func(th theme.Theme) tui.Model {
+		m := tui.New(th)
+		for _, e := range events {
+			m = m.Ingest(e)
+		}
+		return m
+	}
+
+	const width = 24
+	plain := testkit.Render(build(theme.Test()), width, testkit.Height)
+	colored := testkit.Render(build(colorTheme()), width, testkit.Height)
+	assertColorLayout(t, plain, colored, width)
 }
 
 // TestGoldenFullTranscript covers the exit-flush render: every transcript item

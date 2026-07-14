@@ -10,8 +10,9 @@
 // for a real terminal, wrapping each event as an [EventMsg]). This is the
 // seed of the full screen-stack design in docs/TUI.md (overview ⇄ peek ⇄
 // attach); the overview⇄peek⇄attach navigation shipped in M2, a first
-// interactive dialog (the approval modal — see dialog.go) landed in M3, and
-// the fuller dialog/keymap system lands later.
+// interactive prompt — the inline permission-approval block rendered by
+// View/TailView (see approval.go, and dialog.go for the key handling)
+// landed in M3, and the fuller dialog/keymap system lands later.
 package tui
 
 import (
@@ -88,6 +89,16 @@ type Model struct {
 
 	// toolIndex maps an in-flight tool call's ID to its item index.
 	toolIndex map[string]int
+
+	// pending is the session's current unresolved permission request, if any
+	// (nil = none) — the backing state for the interactive inline approval
+	// prompt. It is transient client-side state (like input), NOT a transcript
+	// item: while set, it commandeers the bottom input line (see View/TailView),
+	// and disappears on resolve or dismiss (the input returns), while the
+	// itemApproval badge and itemApprovalResolved line stay as the permanent
+	// record. Following Model's copy-on-write discipline the pointer is never
+	// mutated in place — every mutator reallocates and repoints.
+	pending *pendingApproval
 
 	turn       turnState
 	stopReason string
@@ -193,18 +204,28 @@ func (m Model) Ingest(e event.Event) Model {
 		m.items = append(m.items, item{kind: itemError, text: ev.Err, done: true})
 
 	case event.PermissionRequested:
+		// The inline badge is the permanent transcript record; m.pending is
+		// the transient interactive prompt state rendered beneath it (see
+		// View). A second request supersedes the first — last one shown wins;
+		// the superseded request stays pending server-side and its own
+		// PermissionResolved simply finds m.pending pointed elsewhere below.
 		m.items = append(m.items, item{kind: itemApproval, text: ev.Tool, done: true})
+		m.pending = &pendingApproval{id: ev.ID, tool: ev.Tool, spec: ev.Spec, session: ev.SessionID()}
 
 	case event.PermissionResolved:
-		// The interactive decision itself happens in the App-level modal
-		// (see dialog.go); this is just the transcript's log line so the
-		// request/resolution pair reads coherently once the dialog is gone.
+		// The transcript log line so the request/resolution pair reads
+		// coherently, plus clearing the interactive prompt if it was still
+		// showing this request (this client answered via resolveApproval, or
+		// another attached client answered first).
 		m.items = append(m.items, item{
 			kind:            itemApprovalResolved,
 			approvalVerdict: string(ev.Verdict),
 			approvalRule:    ev.Rule,
 			done:            true,
 		})
+		if m.pending != nil && m.pending.id == ev.ID {
+			m.pending = nil
+		}
 
 		// event.SessionCreated, event.SessionResumed, event.SessionForked,
 		// event.SessionCompacted, event.SessionKilled, and
@@ -235,6 +256,43 @@ func (m *Model) setOpen(kind event.MessageKind, idx int) {
 	} else {
 		m.openText = idx
 	}
+}
+
+// HasPendingApproval reports whether an unresolved permission request is
+// awaiting a decision on this session — the app root consults it to route the
+// a/d/r keys to the approval prompt (see App.Update).
+func (m Model) HasPendingApproval() bool { return m.pending != nil }
+
+// PendingApproval returns the id and remember-toggle state of the pending
+// permission request, for the app root to build the Supervisor.Reply. ok is
+// false when nothing is pending.
+func (m Model) PendingApproval() (id string, remember bool, ok bool) {
+	if m.pending == nil {
+		return "", false, false
+	}
+	return m.pending.id, m.pending.remember, true
+}
+
+// ToggleApprovalRemember flips the pending request's remember toggle,
+// reallocating rather than mutating in place (Model's copy-on-write
+// discipline). A no-op when nothing is pending.
+func (m Model) ToggleApprovalRemember() Model {
+	if m.pending == nil {
+		return m
+	}
+	p := *m.pending
+	p.remember = !p.remember
+	m.pending = &p
+	return m
+}
+
+// DismissApproval clears the pending request without resolving it — the esc
+// dismiss and the optimistic local clear after a reply. The underlying request
+// stays pending server-side; a re-attach replays PermissionRequested and
+// re-surfaces it.
+func (m Model) DismissApproval() Model {
+	m.pending = nil
+	return m
 }
 
 // compactJSON renders raw JSON as a single-line, whitespace-collapsed
@@ -321,13 +379,40 @@ func (m Model) View(width, height int) string {
 		}
 	}
 
-	const reserved = 2 // status line + input line
-	if avail := height - reserved; avail >= 0 && len(lines) > avail {
-		lines = lines[len(lines)-avail:]
+	// The bottom UI is the status line plus either the input line or — while a
+	// permission request is pending — the approval prompt, which commandeers
+	// the input's spot (the input is suppressed until the request is answered,
+	// then returns). Whichever footer shows, the transcript above tails to fit
+	// so the footer stays anchored to the bottom however long the conversation
+	// grows.
+	footer := []string{truncate(m.statusLine(), width)}
+	if prompt := m.promptLines(width); prompt != nil {
+		footer = append(footer, prompt...)
+	} else {
+		footer = append(footer, truncate(m.inputLine(), width))
 	}
 
-	lines = append(lines, truncate(m.statusLine(), width), truncate(m.inputLine(), width))
+	if avail := height - len(footer); avail >= 0 && len(lines) > avail {
+		lines = lines[len(lines)-avail:]
+	}
+	lines = append(lines, footer...)
 	return strings.Join(lines, "\n")
+}
+
+// promptLines renders the pending approval as the bottom-anchored, input-
+// replacing prompt's lines, each truncated to width. Empty when nothing is
+// pending. Shared by View and TailView so the attach and peek surfaces render
+// the prompt identically.
+func (m Model) promptLines(width int) []string {
+	if m.pending == nil {
+		return nil
+	}
+	raw := renderApprovalPrompt(m.theme, *m.pending)
+	out := make([]string, len(raw))
+	for i, l := range raw {
+		out[i] = truncate(l, width)
+	}
+	return out
 }
 
 // renderItemLines renders a single transcript item to its display lines. A
@@ -442,18 +527,20 @@ func (m Model) TailView(width, height int) string {
 		}
 	}
 
-	avail := height - 1 // status line
+	prompt := m.promptLines(width)
+	avail := height - 1 - len(prompt) // status line + approval prompt (input-replacing)
 	if avail < 0 {
 		avail = 0
 	}
 	if len(lines) > avail {
 		lines = lines[len(lines)-avail:]
 	}
-	// Top-pad so the transcript sits just above the status line.
+	// Top-pad so the transcript sits just above the status/prompt footer.
 	if n := avail - len(lines); n > 0 {
 		lines = append(make([]string, n), lines...)
 	}
 	lines = append(lines, truncate(m.statusLine(), width))
+	lines = append(lines, prompt...) // pending approval anchors to the bottom, matching attach
 	return strings.Join(lines, "\n")
 }
 

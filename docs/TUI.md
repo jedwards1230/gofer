@@ -28,16 +28,29 @@ approval); `J/K` cycles agents within the session, `j/k` cycles sessions.
 Approvals are actionable without attaching.
 
 **Attach** — full transcript + input; `esc` detaches back to overview.
-An approval block shows the full pipeline trace (which rail matched, what
-the sandbox said, what the reviewer decided):
+
+A pending permission request is **not** a centered modal — it renders inline in
+the conversation's bottom UI. The transcript keeps a permanent `✋ <tool>` badge
+(and, once answered, a `✓ permission <verdict> (<rule>)` line) in the flow,
+while the live prompt **commandeers the input line**: it takes the spot the text
+input normally occupies and stays anchored there until answered, then the input
+returns. It reads as a confirm prompt — the tool + args, the question, the
+action row, and a dim footer — keyed `a`/`d`/`r` (`r` toggles remember), `esc`
+dismisses without answering (the request stays pending; a re-attach re-surfaces
+it):
 
 ```
- ✋ approval ─ Bash(kubectl delete replica pvc-9f21-r-x7ab -n longhorn-system)
-    rails: no rule → sandbox: n/a (cluster write) → reviewer: RISKY (irreversible)
-    [y] once  [r] remember rule…  [e] edit cmd  [n] deny  [tab] why?
+ ✋ bash · cmd=rm -rf /tmp/session-fixtures
+ Allow this tool call?
+   [a] allow   [d] deny   [r] remember: off
+ esc cancel · session 0192a1b2-…
 ```
 
-**Remember-as-rule** — a grant never widens silently: the dialog offers
+The fuller pipeline trace (which rail matched, what the sandbox said, what the
+reviewer decided) and the richer action set (`edit cmd`, `why?`) land later; M3
+ships the inline allow/deny/remember prompt above.
+
+**Remember-as-rule** — a grant never widens silently: the prompt offers
 exact / prefix / broad patterns, but dangerous commands are force-downgraded
 to exact-match regardless, scoped (agent/global) and TTL'd.
 
