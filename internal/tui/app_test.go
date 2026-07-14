@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -105,34 +104,6 @@ func (f *fakeSup) Archive(_ context.Context, id string) error {
 // access to.
 func (f *fakeSup) Reply(_ context.Context, _, _ string, _, _ bool) error { return nil }
 
-var appTestNow = time.Date(2026, 7, 12, 18, 0, 0, 0, time.UTC)
-
-func appTestMeta() tui.OverviewMeta {
-	return tui.OverviewMeta{App: "gofer", Version: "0.2.0", Model: "fable-5", Cwd: "~/orchestration", Now: appTestNow}
-}
-
-// appTestRoster is the shared fixture the behavioral tests navigate: a
-// working session (selected first — most recently active) and an idle one
-// awaiting input.
-func appTestRoster() []tui.SessionInfo {
-	return []tui.SessionInfo{
-		{
-			ID:      "0192a1b2-appt-7000-8000-000000000001",
-			Title:   "wire the app root",
-			Summary: "overview <-> peek <-> attach nav",
-			Status:  tui.StatusWorking,
-			Updated: appTestNow.Add(-2 * time.Minute),
-		},
-		{
-			ID:      "0192a1b2-appt-7000-8000-000000000002",
-			Title:   "review the supervisor contract",
-			Summary: "turn finished — awaiting the next prompt",
-			Status:  tui.StatusNeedsInput,
-			Updated: appTestNow.Add(-5 * time.Minute),
-		},
-	}
-}
-
 // content renders m the way a real frame would, returning just the string
 // content for substring assertions.
 func content(m tea.Model) string {
@@ -145,7 +116,7 @@ func content(m tea.Model) string {
 // concrete type is unexported), but Update accepts it all the same.
 func newTestApp(t *testing.T, sup tui.Supervisor) tea.Model {
 	t.Helper()
-	var m tea.Model = tui.NewApp(theme.Test(), sup, appTestMeta())
+	var m tea.Model = tui.NewApp(theme.Test(), sup, tui.GoldenMeta())
 	m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 
 	cmd := m.Init()
@@ -188,7 +159,7 @@ const ctrl = tea.ModCtrl
 // TestNavEnterPeeksSelected verifies enter, with an empty dispatch input,
 // peeks the selected session rather than dispatching a new one.
 func TestNavEnterPeeksSelected(t *testing.T) {
-	m := newTestApp(t, newFakeSup(appTestRoster()))
+	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 
 	if got := content(m); !strings.Contains(got, "space to close") {
@@ -199,7 +170,7 @@ func TestNavEnterPeeksSelected(t *testing.T) {
 // TestNavPeekSpaceClosesToOverview verifies space, with an empty reply
 // buffer, closes peek back to the overview.
 func TestNavPeekSpaceClosesToOverview(t *testing.T) {
-	m := newTestApp(t, newFakeSup(appTestRoster()))
+	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // enter peek
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeySpace}) // empty reply: close
 
@@ -211,7 +182,7 @@ func TestNavPeekSpaceClosesToOverview(t *testing.T) {
 // TestNavPeekEnterAttaches verifies enter, with an empty reply buffer,
 // attaches the peeked session.
 func TestNavPeekEnterAttaches(t *testing.T) {
-	m := newTestApp(t, newFakeSup(appTestRoster()))
+	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // enter peek
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // empty reply: attach
 
@@ -223,14 +194,14 @@ func TestNavPeekEnterAttaches(t *testing.T) {
 // TestNavPeekReplySends verifies typing a reply on the peek card and
 // pressing enter sends it via Supervisor.Send and stays on peek.
 func TestNavPeekReplySends(t *testing.T) {
-	sup := newFakeSup(appTestRoster())
+	sup := newFakeSup(tui.GoldenRoster())
 	m := newTestApp(t, sup)
 
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // enter peek
 	m = type_(t, m, "status?")
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // send the reply
 
-	want := "0192a1b2-appt-7000-8000-000000000001:status?"
+	want := "0192a1b2-app0-7000-8000-000000000001:status?"
 	if len(sup.sent) != 1 || sup.sent[0] != want {
 		t.Fatalf("sup.sent = %v; want one entry %q", sup.sent, want)
 	}
@@ -242,13 +213,13 @@ func TestNavPeekReplySends(t *testing.T) {
 // TestNavPeekKillsSelected verifies ctrl-x on the peek screen kills the
 // selected (non-finished) session.
 func TestNavPeekKillsSelected(t *testing.T) {
-	sup := newFakeSup(appTestRoster())
+	sup := newFakeSup(tui.GoldenRoster())
 	m := newTestApp(t, sup)
 
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // enter peek
 	press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl})
 
-	want := "kill:0192a1b2-appt-7000-8000-000000000001"
+	want := "kill:0192a1b2-app0-7000-8000-000000000001"
 	if len(sup.ops) != 1 || sup.ops[0] != want {
 		t.Fatalf("sup.ops = %v; want one entry %q", sup.ops, want)
 	}
@@ -257,7 +228,7 @@ func TestNavPeekKillsSelected(t *testing.T) {
 // TestNavRightAttachesSelected verifies → attaches the selected session
 // directly, skipping peek.
 func TestNavRightAttachesSelected(t *testing.T) {
-	m := newTestApp(t, newFakeSup(appTestRoster()))
+	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
 
 	if got := content(m); !strings.Contains(got, "> ▏") {
@@ -268,7 +239,7 @@ func TestNavRightAttachesSelected(t *testing.T) {
 // TestNavTabTogglesView verifies tab flips the roster from the flat to the
 // grouped ordering, surfacing its section headers.
 func TestNavTabTogglesView(t *testing.T) {
-	m := newTestApp(t, newFakeSup(appTestRoster()))
+	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyTab})
 
 	if got := content(m); !strings.Contains(got, "Working") || !strings.Contains(got, "Needs input") {
@@ -279,7 +250,7 @@ func TestNavTabTogglesView(t *testing.T) {
 // TestNavDispatchCreatesSession verifies typing into the dispatch bar and
 // pressing enter dispatches the prompt to Supervisor.Create.
 func TestNavDispatchCreatesSession(t *testing.T) {
-	sup := newFakeSup(appTestRoster())
+	sup := newFakeSup(tui.GoldenRoster())
 	m := newTestApp(t, sup)
 
 	m = type_(t, m, "fix the flaky peek test")
@@ -289,11 +260,11 @@ func TestNavDispatchCreatesSession(t *testing.T) {
 		t.Fatalf("sup.created = %v; want one entry %q", sup.created, "fix the flaky peek test")
 	}
 	// The dispatch bar must pass this client's cwd (the roster header's value,
-	// appTestMeta().Cwd) so the created session carries the client's project
+	// tui.GoldenMeta().Cwd) so the created session carries the client's project
 	// dir — not the daemon's launch dir — and stays visible to a cwd-filtered
 	// client (e.g. a phone).
-	if len(sup.createdCwd) != 1 || sup.createdCwd[0] != appTestMeta().Cwd {
-		t.Fatalf("created cwd = %v; want one entry %q (the App's cwd)", sup.createdCwd, appTestMeta().Cwd)
+	if len(sup.createdCwd) != 1 || sup.createdCwd[0] != tui.GoldenMeta().Cwd {
+		t.Fatalf("created cwd = %v; want one entry %q (the App's cwd)", sup.createdCwd, tui.GoldenMeta().Cwd)
 	}
 }
 
@@ -301,14 +272,14 @@ func TestNavDispatchCreatesSession(t *testing.T) {
 // pressing enter sends the prompt to Supervisor.Send for the attached
 // session.
 func TestNavAttachSendsPrompt(t *testing.T) {
-	sup := newFakeSup(appTestRoster())
+	sup := newFakeSup(tui.GoldenRoster())
 	m := newTestApp(t, sup)
 
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected (working) session
 	m = type_(t, m, "status?")
 	press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 
-	want := "0192a1b2-appt-7000-8000-000000000001:status?"
+	want := "0192a1b2-app0-7000-8000-000000000001:status?"
 	if len(sup.sent) != 1 || sup.sent[0] != want {
 		t.Fatalf("sup.sent = %v; want one entry %q", sup.sent, want)
 	}
@@ -317,12 +288,12 @@ func TestNavAttachSendsPrompt(t *testing.T) {
 // TestNavKillWorkingSession verifies ctrl-x on a working (non-finished)
 // session kills it rather than archiving it.
 func TestNavKillWorkingSession(t *testing.T) {
-	sup := newFakeSup(appTestRoster())
+	sup := newFakeSup(tui.GoldenRoster())
 	m := newTestApp(t, sup)
 
 	press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl})
 
-	want := "kill:0192a1b2-appt-7000-8000-000000000001"
+	want := "kill:0192a1b2-app0-7000-8000-000000000001"
 	if len(sup.ops) != 1 || sup.ops[0] != want {
 		t.Fatalf("sup.ops = %v; want one entry %q", sup.ops, want)
 	}
@@ -332,9 +303,9 @@ func TestNavKillWorkingSession(t *testing.T) {
 // app directly on the attach screen (the `gofer attach <id>` entry point), and
 // that ← still backs out to the overview from there.
 func TestAttachOpenStartsOnAttach(t *testing.T) {
-	sup := newFakeSup(appTestRoster())
-	meta := appTestMeta()
-	meta.AttachSessionID = "0192a1b2-appt-7000-8000-000000000002"
+	sup := newFakeSup(tui.GoldenRoster())
+	meta := tui.GoldenMeta()
+	meta.AttachSessionID = "0192a1b2-app0-7000-8000-000000000002"
 
 	var m tea.Model = tui.NewApp(theme.Test(), sup, meta)
 	m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
@@ -355,7 +326,7 @@ func TestAttachOpenStartsOnAttach(t *testing.T) {
 // TestNavAttachLeftBacksOutWhenEmpty verifies ← in the attach screen backs
 // out to the overview only when the input buffer is empty.
 func TestNavAttachLeftBacksOutWhenEmpty(t *testing.T) {
-	m := newTestApp(t, newFakeSup(appTestRoster()))
+	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach
 
 	if got := content(m); !strings.Contains(got, "> ▏") {

@@ -233,26 +233,25 @@ func (o Overview) row(s SessionInfo, width int, showStatus bool) string {
 	return line
 }
 
-// statusGlyph maps a session's status to its roster glyph, promoting to the
-// approval glyph — with the live pending count, e.g. "✋2" — when a
-// permission request is pending. The count clamps to a single digit ("✋9+")
-// so the glyph never grows past two columns and skews row alignment
-// (rowPrefixW budgets exactly one extra column for it).
+// statusGlyph renders a session's state-colored ● marker (marker-only
+// styling): yellow while working or awaiting input (a pending approval keeps
+// it yellow too — see effectiveStatus), green once finished. A pending
+// permission request additionally appends its live count, e.g. "●2", clamped
+// to a single digit ("●9+") so the marker never grows past two columns and
+// skews row alignment (rowPrefixW budgets exactly one extra column for it).
 func (o Overview) statusGlyph(s SessionInfo) string {
+	style := o.theme.WarnStyle()
+	if effectiveStatus(s) == StatusFinished {
+		style = o.theme.OKStyle()
+	}
+	marker := style.Render(o.theme.GlyphAgent)
 	if s.Pending > 0 {
 		if s.Pending > 9 {
-			return o.theme.GlyphApproval + "+"
+			return marker + "+"
 		}
-		return fmt.Sprintf("%s%d", o.theme.GlyphApproval, s.Pending)
+		return marker + fmt.Sprintf("%d", s.Pending)
 	}
-	switch s.Status {
-	case StatusWorking:
-		return o.theme.GlyphStreaming
-	case StatusFinished:
-		return o.theme.GlyphOK
-	default:
-		return o.theme.GlyphIdle
-	}
+	return marker
 }
 
 // age renders the right-aligned compact relative age for a row.

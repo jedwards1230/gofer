@@ -17,7 +17,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/charmbracelet/x/ansi"
-	"github.com/muesli/termenv"
 
 	"github.com/jedwards1230/agent-sdk-go/event"
 
@@ -25,27 +24,18 @@ import (
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
 
-// colorTestTheme is theme.Test with a real color profile forced on, so
-// lipgloss actually emits ANSI. The rendered geometry must be identical to
-// the colorless render — color changes styling, never layout.
-func colorTestTheme() theme.Theme {
-	th := theme.Test()
-	th.Profile = termenv.TrueColor
-	return th
-}
-
 // newColorAppWithApproval builds an App through th, drives it into the attach
 // screen of the recency-first session, and feeds it a pending
 // PermissionRequested — the state that renders the inline approval prompt
 // above the attach screen's status/input lines.
 func newColorAppWithApproval(t *testing.T, th theme.Theme) App {
 	t.Helper()
-	sup := newInternalFakeSup(appGoldenRoster())
-	a := NewApp(th, sup, appGoldenMeta())
+	sup := newInternalFakeSup(GoldenRoster())
+	a := NewApp(th, sup, GoldenMeta())
 
 	mdl, _ := a.Update(tea.WindowSizeMsg{Width: testkit.Width, Height: testkit.Height})
 	a = mdl.(App)
-	mdl, _ = a.Update(rosterMsg{sessions: appGoldenRoster()})
+	mdl, _ = a.Update(rosterMsg{sessions: GoldenRoster()})
 	a = mdl.(App)
 
 	mdl, cmd := a.Update(tea.KeyPressMsg{Code: tea.KeyRight})
@@ -70,12 +60,12 @@ func newColorAppWithApproval(t *testing.T, th theme.Theme) App {
 
 // TestColorApprovalDialogComposite is the inline prompt's version of the #61
 // display-width lesson: the same App state is rendered twice — once
-// colorless (theme.Test), once colored (colorTestTheme) — and the colored
+// colorless (theme.Test), once colored (testkit.ColorTheme) — and the colored
 // frame, stripped of ANSI, must equal the colorless frame exactly, with no
 // line overrunning the terminal width.
 func TestColorApprovalDialogComposite(t *testing.T) {
 	plain := newColorAppWithApproval(t, theme.Test()).render()
-	colored := newColorAppWithApproval(t, colorTestTheme()).render()
+	colored := newColorAppWithApproval(t, testkit.ColorTheme()).render()
 
 	if stripped := ansi.Strip(colored); stripped != plain {
 		t.Errorf("colored approval-prompt frame, stripped of ANSI, != colorless frame\n"+

@@ -545,7 +545,7 @@ func (a App) render() string {
 
 	// A pending approval, when there is one, is already rendered inline by
 	// a.sess.View/Peek.View above — the overview screen shows only the
-	// roster's ✋ badge (see overview_render.go's statusGlyph), never the
+	// roster's ● badge (see overview_render.go's statusGlyph), never the
 	// prompt itself, even though a.sess can stay pointed at a pending
 	// approval while backed out to it (so re-entering the same session's
 	// peek/attach redisplays it).

@@ -12,10 +12,6 @@ import (
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
 
-// overviewNow is the fixed reference time the roster ages rows against, so
-// humanAge output is deterministic across machines and CI.
-var overviewNow = time.Date(2026, 7, 12, 18, 0, 0, 0, time.UTC)
-
 // rosterFixture is the shared session set the overview golden tests render: a
 // working session, a working session with pending approvals, an idle session
 // awaiting input, and two finished sessions of different ages.
@@ -28,7 +24,7 @@ func rosterFixture() []tui.SessionInfo {
 			Status:  tui.StatusWorking,
 			Model:   "fable-5",
 			Cost:    provider.Cost{USD: 0.3821},
-			Updated: overviewNow.Add(-2 * time.Minute),
+			Updated: tui.GoldenNow.Add(-2 * time.Minute),
 		},
 		{
 			ID:      "0192a1b2-0000-7000-8000-000000000002",
@@ -38,7 +34,7 @@ func rosterFixture() []tui.SessionInfo {
 			Model:   "fable-5",
 			Cost:    provider.Cost{USD: 0.0912},
 			Pending: 2,
-			Updated: overviewNow.Add(-30 * time.Second),
+			Updated: tui.GoldenNow.Add(-30 * time.Second),
 		},
 		{
 			ID:      "0192a1b2-0000-7000-8000-000000000003",
@@ -47,7 +43,7 @@ func rosterFixture() []tui.SessionInfo {
 			Status:  tui.StatusNeedsInput,
 			Model:   "fable-5",
 			Cost:    provider.Cost{USD: 0.1204},
-			Updated: overviewNow.Add(-5 * time.Minute),
+			Updated: tui.GoldenNow.Add(-5 * time.Minute),
 		},
 		{
 			ID:      "0192a1b2-0000-7000-8000-000000000004",
@@ -56,7 +52,7 @@ func rosterFixture() []tui.SessionInfo {
 			Status:  tui.StatusFinished,
 			Model:   "fable-5",
 			Cost:    provider.Cost{USD: 1.4230},
-			Updated: overviewNow.Add(-time.Hour),
+			Updated: tui.GoldenNow.Add(-time.Hour),
 		},
 		{
 			ID:      "0192a1b2-0000-7000-8000-000000000005",
@@ -65,19 +61,13 @@ func rosterFixture() []tui.SessionInfo {
 			Status:  tui.StatusFinished,
 			Model:   "fable-5",
 			Cost:    provider.Cost{USD: 0.0311},
-			Updated: overviewNow.Add(-26 * time.Hour),
+			Updated: tui.GoldenNow.Add(-26 * time.Hour),
 		},
 	}
 }
 
 func newOverview() tui.Overview {
-	return tui.NewOverview(theme.Test(), tui.OverviewMeta{
-		App:     "gofer",
-		Version: "0.2.0",
-		Model:   "fable-5",
-		Cwd:     "~/orchestration",
-		Now:     overviewNow,
-	})
+	return tui.NewOverview(theme.Test(), tui.GoldenMeta())
 }
 
 // TestGoldenOverviewFlat renders the flat, recency-sorted roster with the
@@ -85,6 +75,15 @@ func newOverview() tui.Overview {
 func TestGoldenOverviewFlat(t *testing.T) {
 	o := newOverview().WithSessions(rosterFixture())
 	testkit.AssertGolden(t, "overview_flat", testkit.Render(o, testkit.Width, testkit.Height))
+}
+
+// TestGoldenStyledOverviewFlat is TestGoldenOverviewFlat's styled-golden
+// counterpart: the same roster, rendered through testkit.ColorTheme, locks
+// the working/needs-input rows' yellow "●" markers against the finished
+// rows' green ones — a distinction the Ascii golden's bare "●" can't make.
+func TestGoldenStyledOverviewFlat(t *testing.T) {
+	o := tui.NewOverview(testkit.ColorTheme(), tui.GoldenMeta()).WithSessions(rosterFixture())
+	testkit.AssertGoldenStyled(t, "overview_flat", testkit.Render(o, testkit.Width, testkit.Height))
 }
 
 // TestGoldenOverviewGrouped renders the grouped view: Working / Needs input /
@@ -120,18 +119,18 @@ func TestGoldenOverviewEmpty(t *testing.T) {
 }
 
 // TestOverviewPendingGlyphShowsCount verifies a session with a positive
-// Pending count renders the approval glyph WITH the live count (e.g. "✋2"),
-// not the bare glyph — the roster's half of the M3 approvals-relay contract:
+// Pending count renders the marker WITH the live count (e.g. "●2"), not the
+// bare marker — the roster's half of the M3 approvals-relay contract:
 // [tui.SessionInfo.Pending] plumbed all the way from the wire (see
 // internal/daemonbridge's toTUISessionInfo) into the row a client actually
 // sees.
 func TestOverviewPendingGlyphShowsCount(t *testing.T) {
 	o := newOverview().WithSessions([]tui.SessionInfo{
-		{ID: "sess-1", Title: "blocked on approval", Status: tui.StatusWorking, Pending: 2, Updated: overviewNow},
+		{ID: "sess-1", Title: "blocked on approval", Status: tui.StatusWorking, Pending: 2, Updated: tui.GoldenNow},
 	})
 	got := testkit.Render(o, testkit.Width, testkit.Height)
-	if !strings.Contains(got, "✋2") {
-		t.Errorf("rendered roster does not contain %q:\n%s", "✋2", got)
+	if !strings.Contains(got, "●2") {
+		t.Errorf("rendered roster does not contain %q:\n%s", "●2", got)
 	}
 }
 
@@ -139,13 +138,13 @@ func TestOverviewPendingGlyphShowsCount(t *testing.T) {
 // permission-blocked session (Status still StatusWorking, Pending>0 — the
 // daemon's coarse status doesn't demote while the turn is technically in
 // flight) as "awaiting input", not "working" — the same reclassification
-// [Overview.statusGlyph] already applies to the ✋ glyph, so the header and
-// the roster rows agree.
+// [effectiveStatus] already applies for [Overview.statusGlyph]'s marker
+// color, so the header and the roster rows agree.
 func TestOverviewCountsPendingAwaitsInput(t *testing.T) {
 	o := newOverview().WithSessions([]tui.SessionInfo{
-		{ID: "sess-1", Title: "blocked one", Status: tui.StatusWorking, Pending: 1, Updated: overviewNow},
-		{ID: "sess-2", Title: "blocked two", Status: tui.StatusWorking, Pending: 1, Updated: overviewNow},
-		{ID: "sess-3", Title: "done", Status: tui.StatusFinished, Updated: overviewNow},
+		{ID: "sess-1", Title: "blocked one", Status: tui.StatusWorking, Pending: 1, Updated: tui.GoldenNow},
+		{ID: "sess-2", Title: "blocked two", Status: tui.StatusWorking, Pending: 1, Updated: tui.GoldenNow},
+		{ID: "sess-3", Title: "done", Status: tui.StatusFinished, Updated: tui.GoldenNow},
 	})
 	got := testkit.Render(o, testkit.Width, testkit.Height)
 	if !strings.Contains(got, "2 awaiting input · 0 working") {
@@ -164,7 +163,7 @@ func multiCwdFixture() []tui.SessionInfo {
 			Summary: "M2 launched; awaiting sketch review + 4 decisions",
 			Status:  tui.StatusWorking,
 			Cwd:     "~/orchestration",
-			Updated: overviewNow.Add(-2 * time.Minute),
+			Updated: tui.GoldenNow.Add(-2 * time.Minute),
 		},
 		{
 			ID:      "0192a1b2-cwd0-7000-8000-000000000002",
@@ -173,7 +172,7 @@ func multiCwdFixture() []tui.SessionInfo {
 			Status:  tui.StatusWorking,
 			Cwd:     "~/orchestration",
 			Pending: 2,
-			Updated: overviewNow.Add(-30 * time.Second),
+			Updated: tui.GoldenNow.Add(-30 * time.Second),
 		},
 		{
 			ID:      "0192a1b2-cwd1-7000-8000-000000000003",
@@ -181,7 +180,7 @@ func multiCwdFixture() []tui.SessionInfo {
 			Summary: "phase 1 scoped; sketch review pending",
 			Status:  tui.StatusNeedsInput,
 			Cwd:     "~/scrim",
-			Updated: overviewNow.Add(-5 * time.Minute),
+			Updated: tui.GoldenNow.Add(-5 * time.Minute),
 		},
 	}
 }

@@ -18,7 +18,7 @@ commands and plugin UI (M4+).
 
 **Overview** — one row per session (a session = a task, titled by the work).
 A row may be a whole fan-out hierarchy; it collapses to aggregate state,
-agent count, and total pending approvals (`✋ N`), and expands inline to the
+agent count, and total pending approvals (`● N`), and expands inline to the
 subagent tree. `space` peek · `enter` attach · `a` approve · `n` new ·
 `ctrl-x` kill (running; confirm; subtree interrupted) or archive (finished).
 Journals are never deleted — `gofer ps --all` lists archived sessions.
@@ -32,27 +32,31 @@ carries no transcript tail — it is a roster-only projection.
 **Attach** — full transcript + input; `esc` detaches back to overview.
 
 A pending permission request is **not** a centered modal — it renders inline in
-the conversation's bottom UI. The transcript keeps a permanent `✋ <tool>` badge
-in the flow, while the live prompt **commandeers the input line**: it takes the spot the text
-input normally occupies and stays anchored there until answered, then the input
-returns. It reads as a confirm prompt — the tool + args, the question, the
+the conversation's bottom UI. The transcript records a permanent `● <tool>`
+badge the moment the request arrives, but while it's unresolved the live
+prompt **commandeers the whole footer** (status line, input box, and its
+framing rules) and the badge is suppressed from the transcript so it isn't
+shown twice; once answered, the footer returns and the badge becomes visible
+again. It reads as a confirm prompt — the tool + args, the question, the
 action row, and a dim footer — keyed `a`/`d`/`r` (`r` toggles remember), `esc`
-dismisses without answering (the request stays pending; a re-attach re-surfaces
-it):
+dismisses without answering (the request stays pending; a re-attach
+re-surfaces it):
 
 ```
- ✋ bash · cmd=rm -rf /tmp/session-fixtures
+ ● bash · cmd=rm -rf /tmp/session-fixtures
+
  Allow this tool call?
    [a] allow   [d] deny   [r] remember: off
+
  esc cancel · session 0192a1b2-…
 ```
 
 Resolution is deliberately quiet. A routine **allow** adds *no* transcript
-line — the `✋` badge already recorded that the call was gated, and a
-`✓ permission allow (config)` line on every approved call (printed *after* the
-result, reading as if config auto-allowed it) was pure noise. A **deny** keeps
-a `✗ permission deny` line, because a blocked call changed what happened. The
-old rule-source parenthetical is dropped either way.
+line — the `●` badge already recorded that the call was gated, and a
+`permission allow` line on every approved call (printed *after* the result,
+reading as if config auto-allowed it) was pure noise. A **deny** keeps a red
+`permission deny` line, because a blocked call changed what happened. The old
+rule-source parenthetical is dropped either way.
 
 The fuller pipeline trace (which rail matched, what the sandbox said, what the
 reviewer decided) and the richer action set (`edit cmd`, `why?`) land later; M3
@@ -76,12 +80,14 @@ Layout, top to bottom:
   `N awaiting input · M working · K completed`. The counts are the roster
   tallied by status; the wording mirrors the group labels.
 - **Roster body** — one line per session:
-  `‹caret› ‹status glyph› ‹title› ‹status word · one-line summary› ‹age›`. The
+  `‹caret› ‹status marker› ‹title› ‹status word · one-line summary› ‹age›`. The
   caret (`▸`) marks selection so it reads without color (golden tests force
-  `termenv.Ascii`). The status glyph promotes to `✋` when approvals are
-  pending. The summary is prefixed with the status word (`Working ·` /
-  `Needs input ·` / `Finished ·`) in the flat view, where no status section
-  states it; the grouped view omits it (the section header already does).
+  `termenv.Ascii`). The status marker is `●` — yellow while working or
+  awaiting input, green once finished — with a live pending count appended
+  (`●2`) when approvals are queued. The summary is prefixed with the status
+  word (`Working ·` / `Needs input ·` / `Finished ·`) in the flat view, where
+  no status section states it; the grouped view omits it (the section header
+  already does).
   Age is a compact relative string (`now`/`5m`/`3h`/`2d`) computed against an
   injected reference time so tests stay deterministic, right-aligned as the
   sole right-column metadata. The body windows to keep the selected row
@@ -133,7 +139,7 @@ session row, and a bottom dispatch bar with a hint line — reimplemented here
 for gofer's Event/Op model.
 
 **Tool blocks** in the attach transcript render as a collapsed tree: a
-header line `‹glyph› tool(command)`, then the result tree-indented beneath — the
+header line `‹marker› tool(command)`, then the result tree-indented beneath — the
 first line on a `└`, up to two more indented, and any remainder collapsed to
 `… +N lines`. The header command is the **authoritative** input from
 `ToolCallFinished.Input`, not `ToolCallStarted.Input` (which is only the
@@ -142,16 +148,19 @@ start-of-block seed — an empty `{}` when a provider streams the arguments as
 as `bash({})`). A command-shaped input is summarized to its own text
 (`bash(find . -type f | wc -l)` rather than `bash({"command":"…"})`); unknown
 tool shapes fall back to compact JSON. While a call is still running its input is
-usually just the empty seed, so the header shows the **bare tool name** (`◐ bash`)
-until the real command lands on finish. `ToolCallDelta` is ignored — it carries
-input fragments, not result text (it used to be mis-appended to the result).
+usually just the empty seed, so the header shows the **bare tool name** (yellow
+`● bash`) until the real command lands on finish. `ToolCallDelta` is ignored —
+it carries input fragments, not result text (it used to be mis-appended to the
+result).
 
-A **failed** call (`ToolCallFinished.IsError`) is styled distinctly: the ✗ glyph
-and header render in the warn accent — deliberately softer than the red a fatal
-`SessionError` uses — and the result body is dimmed, so an internal/transient
-error (e.g. `sandbox: … command is required`) reads as a de-emphasized
-diagnostic rather than prominent, genuine-looking output. A clean call keeps the
-ok glyph and an unstyled body.
+The marker carries the whole state: yellow while running, green once done,
+**red** on a failed call (`ToolCallFinished.IsError`) — same red as a fatal
+`SessionError`, since a failed tool call *is* an error, just a scoped one. Only
+the marker is colored; the header text keeps its own styling. What sets a
+failed call apart from a real `SessionError` is the **body**, not the header:
+its result lines are dimmed, so an internal/transient error (e.g.
+`sandbox: … command is required`) reads as a de-emphasized diagnostic rather
+than prominent, genuine-looking output. A clean call's body is unstyled.
 
 Transcript blocks are separated by a blank line (`transcriptGap`) for vertical
 rhythm — user turn, assistant reply, and tool blocks each get breathing room.
@@ -189,7 +198,7 @@ one-line-per-session shape as a top-level row:
 its complete transcript, tool blocks, and approvals — exactly as if it were a
 top-level session (`esc`/`←` returns to the parent). So a supervisor watching
 one task drills into any subagent's whole history without losing the parent
-context, and an approval waiting deep in the tree still surfaces as `✋ N` on
+context, and an approval waiting deep in the tree still surfaces as `● N` on
 the ancestor row. This is the fan-out tree above made navigable: the tree shows
 *who is working*; entering a node shows *what they did*. It reuses the shared
 row renderer and the id-tracked selection/windowing the M2 roster already
@@ -226,7 +235,7 @@ tui/
 - **Capability interfaces** opted into per component: `Focusable`, `Helper`,
   `Sizeable` (later `MouseClickable`).
 - **Theme**: ~20 semantic tokens (bg/panel/ink×3/accent/ok/warn/danger/info
-  + state glyphs `○⚙◐✋✓✗` + spacing). Area styles are *functions of tokens*,
+  + state markers `○●` + spacing). Area styles are *functions of tokens*,
   not pre-baked struct fields. Detect the color profile once and let
   lipgloss downsample — no hand-kept per-profile palettes.
 - **Keymap**: one central registry with user overrides + conflict detection;
@@ -255,32 +264,41 @@ tui/
 
 ## How the TUI is tested
 
-Three layers, each catching what the one below can't:
+Four layers, each catching what the one below can't:
 
 1. **Ascii goldens = structure.** `testkit` renders a `Model` at a fixed size
    through `theme.Test()` (forced `termenv.Ascii`, so lipgloss emits no color
    codes) and diffs byte-for-byte against a checked-in `testdata/*.golden`.
-   This locks the *layout* — line breaks, glyphs, spacing, truncation — free of
-   any per-machine color nondeterminism. Regenerate:
+   This locks the *layout* — line breaks, markers, spacing, truncation — free
+   of any per-machine color nondeterminism. Regenerate:
    `go test ./internal/tui/... -run TestGolden -update`, then **review the
    diff** (a golden is a committed assertion, not a cache). A transcript golden
    also lives in `internal/daemonbridge` (history-replay render) — regenerate
    it the same way with its own `-update`.
-2. **`ansi.Strip(colored) == plain` = ANSI-width.** An Ascii golden can't see a
-   color code, so it can't catch a styling bug that changes *display width*
-   (the #61 color-scatter: a styled pane measured wider than its cells and tore
-   the layout). The color tests (`color_layout_test.go`, `dialog_color_test.go`)
-   render the same component twice — once plain, once through a real color
-   profile (`colorTheme()`) — and assert that stripping ANSI from the colored
-   render reproduces the plain one exactly, and that no line exceeds its width.
-   Every render change here ships with both a golden and a colored width test.
-3. **VHS = visual/pixel.** Goldens and width tests both run on plain text; they
-   can't tell you whether the amber actually reads as caution or the spacing
+2. **Styled goldens = color state.** The marker vocabulary carries state only
+   through color (running/done/failed are all the same `●`), so an Ascii
+   golden can't tell them apart. `testkit.AssertGoldenStyled` renders the same
+   component through `testkit.ColorTheme()` (a real color profile), translates
+   the ANSI it emits into stable `<yellow>●</yellow>`-style tags keyed to the
+   theme's semantic styles, and diffs that against a checked-in
+   `testdata/*.styled.golden` — an unrecognized escape fails loudly rather than
+   silently passing. Same `-update` flag as the Ascii goldens.
+3. **`ansi.Strip(colored) == plain` = ANSI-width.** Neither golden layer above
+   catches a styling bug that changes *display width* (the #61 color-scatter: a
+   styled pane measured wider than its cells and tore the layout). The color
+   tests (`color_layout_test.go`, `dialog_color_test.go`) render the same
+   component twice — once plain, once through `testkit.ColorTheme()` — and
+   assert that stripping ANSI from the colored render reproduces the plain one
+   exactly, and that no line exceeds its width. Every render change here ships
+   with both a golden and a colored width test.
+4. **VHS = visual/pixel.** Goldens and width tests both run on plain text; they
+   can't tell you whether the color actually reads as intended or the spacing
    looks right. VHS renders real frames to GIF/PNG for a human eye (below).
 
-The pyramid: goldens catch structure regressions cheaply on every run; the
-colored tests catch the ANSI-width class the goldens are blind to; VHS is the
-on-demand visual check for the pixels neither can assert.
+The pyramid: Ascii goldens catch structure regressions cheaply on every run;
+styled goldens catch the color-state class Ascii is blind to; the colored
+width tests catch the ANSI-width class neither golden layer asserts; VHS is
+the on-demand visual check for the pixels none of them can.
 
 ## Visual capture with VHS
 
@@ -291,14 +309,18 @@ human-eye check of real rendered frames, `vhs/` holds on-demand
 [charmbracelet VHS](https://github.com/charmbracelet/vhs) tooling:
 
 - `vhs/harness/` — a tiny `main` that drives the **real** `internal/tui` render
-  path (`theme.Default`, live `tui.Program`, `Program.Send`) through a fixed,
-  scripted event stream, exactly as `cmd/gofer`'s `driveTUI` forwards a
-  session. Pick a scene with `-scenario tool-call | approval`.
+  path (`theme.Default`, live `tui.Program`, `Program.Send`), exactly as
+  `cmd/gofer`'s `driveTUI` forwards a session. Pick a scene with
+  `-scenario tool-call | approval | overview`: the attach scenes replay a
+  scripted event stream, the overview scene renders a static roster snapshot.
 - `vhs/tool-call.tape` — a clean turn with a bash tool call (real command in the
   header, block rhythm). `vhs/approval.tape` — a turn ending in the inline
-  permission prompt, with a failed call's softened error styling above it.
+  permission prompt, with a failed call's red error marker and dimmed body
+  above it. `vhs/overview.tape` — the roster with mixed states, showing the ●
+  markers in color (yellow working/awaiting incl. the ●2 pending count vs
+  green finished) — the state that now lives only in color.
 
-Run `scripts/tui-vhs.sh [tool-call|approval]` (no arg = all). It prebuilds
+Run `scripts/tui-vhs.sh [tool-call|approval|overview]` (no arg = all). It prebuilds
 `vhs/.bin/harness`, then renders each tape to `vhs/out/` (GIF of the whole turn
 + PNG of the key frame); both are gitignored. If VHS isn't installed the script
 prints an install hint and exits. This is **not** a CI gate — VHS complements,

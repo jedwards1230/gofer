@@ -66,7 +66,7 @@ type SessionInfo struct {
 	Cost  provider.Cost  // accumulated cost, from the SDK's usage accounting
 	Usage provider.Usage // accumulated token usage
 
-	Pending   int // pending permission requests, surfaced as ✋N
+	Pending   int // pending permission requests, surfaced as ●N
 	Artifacts int // artifact/PR count; best-effort, 0 until later milestones
 
 	Created time.Time // session start

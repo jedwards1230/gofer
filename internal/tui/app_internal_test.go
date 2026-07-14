@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -84,50 +83,23 @@ func (f *internalFakeSup) Reply(_ context.Context, sessionID, id string, allow, 
 	return nil
 }
 
-var appGoldenNow = time.Date(2026, 7, 12, 18, 0, 0, 0, time.UTC)
-
-func appGoldenMeta() OverviewMeta {
-	return OverviewMeta{App: "gofer", Version: "0.2.0", Model: "fable-5", Cwd: "~/orchestration", Now: appGoldenNow}
-}
-
-func appGoldenRoster() []SessionInfo {
-	return []SessionInfo{
-		{
-			ID:      "0192a1b2-app0-7000-8000-000000000001",
-			Title:   "wire the app root",
-			Summary: "overview <-> peek <-> attach nav",
-			Status:  StatusWorking,
-			Cost:    provider.Cost{USD: 0.1120},
-			Updated: appGoldenNow.Add(-2 * time.Minute),
-		},
-		{
-			ID:      "0192a1b2-app0-7000-8000-000000000002",
-			Title:   "review the supervisor contract",
-			Summary: "turn finished — awaiting the next prompt",
-			Status:  StatusNeedsInput,
-			Cost:    provider.Cost{USD: 0.0450},
-			Updated: appGoldenNow.Add(-5 * time.Minute),
-		},
-	}
-}
-
 // newAppForGolden builds an App wired to a fresh internalFakeSup, sized and
 // with the roster seeded via a real Update(rosterMsg{...}) round trip.
 func newAppForGolden(t *testing.T, sup *internalFakeSup) App {
 	t.Helper()
-	a := NewApp(theme.Test(), sup, appGoldenMeta())
+	a := NewApp(theme.Test(), sup, GoldenMeta())
 
 	mdl, _ := a.Update(tea.WindowSizeMsg{Width: testkit.Width, Height: testkit.Height})
 	a = mdl.(App)
 
-	mdl, _ = a.Update(rosterMsg{sessions: appGoldenRoster()})
+	mdl, _ = a.Update(rosterMsg{sessions: GoldenRoster()})
 	return mdl.(App)
 }
 
 // TestGoldenAppOverview renders the freshly seeded roster screen — App's
 // default screen after the first roster fetch resolves.
 func TestGoldenAppOverview(t *testing.T) {
-	a := newAppForGolden(t, newInternalFakeSup(appGoldenRoster()))
+	a := newAppForGolden(t, newInternalFakeSup(GoldenRoster()))
 	testkit.AssertGolden(t, "app_overview", a.render())
 }
 
@@ -135,7 +107,7 @@ func TestGoldenAppOverview(t *testing.T) {
 // (recency-first) selected session. Peek no longer subscribes — this is a
 // pure Update/render round trip, unlike TestGoldenAppAttach below.
 func TestGoldenAppPeek(t *testing.T) {
-	a := newAppForGolden(t, newInternalFakeSup(appGoldenRoster()))
+	a := newAppForGolden(t, newInternalFakeSup(GoldenRoster()))
 
 	mdl, _ := a.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	a = mdl.(App)
@@ -151,7 +123,7 @@ func TestGoldenAppPeek(t *testing.T) {
 // transcript, and types a pending reply into the input line before
 // rendering.
 func TestGoldenAppAttach(t *testing.T) {
-	a := newAppForGolden(t, newInternalFakeSup(appGoldenRoster()))
+	a := newAppForGolden(t, newInternalFakeSup(GoldenRoster()))
 
 	mdl, cmd := a.Update(tea.KeyPressMsg{Code: tea.KeyRight})
 	a = mdl.(App)
@@ -271,7 +243,7 @@ func pendingRemember(t *testing.T, a App) bool {
 // in-flow above the attach screen's status/input lines for a pending
 // event.PermissionRequested.
 func TestGoldenAppApprovalDialog(t *testing.T) {
-	sup := newInternalFakeSup(appGoldenRoster())
+	sup := newInternalFakeSup(GoldenRoster())
 	a := attachForDialogTest(t, sup)
 
 	a = requestApproval(t, a, "perm-1")
@@ -285,7 +257,7 @@ func TestGoldenAppApprovalDialog(t *testing.T) {
 // TestGoldenAppApprovalDialogRememberToggled covers the same inline prompt
 // with the remember toggle flipped on via the 'r' key.
 func TestGoldenAppApprovalDialogRememberToggled(t *testing.T) {
-	sup := newInternalFakeSup(appGoldenRoster())
+	sup := newInternalFakeSup(GoldenRoster())
 	a := attachForDialogTest(t, sup)
 	a = requestApproval(t, a, "perm-1")
 
@@ -302,7 +274,7 @@ func TestGoldenAppApprovalDialogRememberToggled(t *testing.T) {
 // PermissionResolved — another attached client answered first — clears the
 // pending approval without this client ever sending a reply of its own.
 func TestAppApprovalDialogDismissedOnResolved(t *testing.T) {
-	sup := newInternalFakeSup(appGoldenRoster())
+	sup := newInternalFakeSup(GoldenRoster())
 	a := attachForDialogTest(t, sup)
 	a = requestApproval(t, a, "perm-1")
 	if !a.sess.HasPendingApproval() {
@@ -325,7 +297,7 @@ func TestAppApprovalDialogDismissedOnResolved(t *testing.T) {
 // TestAppApprovalDialogAllowSendsReply verifies 'a' sends an allow reply via
 // Supervisor.Reply and dismisses the pending approval immediately.
 func TestAppApprovalDialogAllowSendsReply(t *testing.T) {
-	sup := newInternalFakeSup(appGoldenRoster())
+	sup := newInternalFakeSup(GoldenRoster())
 	a := attachForDialogTest(t, sup)
 	a = requestApproval(t, a, "perm-1")
 
@@ -351,7 +323,7 @@ func TestAppApprovalDialogAllowSendsReply(t *testing.T) {
 // TestAppApprovalDialogDenyWithRememberSendsReply verifies 'r' (toggle
 // remember) then 'd' (deny) sends a deny reply with remember=true.
 func TestAppApprovalDialogDenyWithRememberSendsReply(t *testing.T) {
-	sup := newInternalFakeSup(appGoldenRoster())
+	sup := newInternalFakeSup(GoldenRoster())
 	a := attachForDialogTest(t, sup)
 	a = requestApproval(t, a, "perm-1")
 
@@ -380,7 +352,7 @@ func TestAppApprovalDialogDenyWithRememberSendsReply(t *testing.T) {
 // TestAppApprovalDialogEscDismissesWithoutReply verifies esc hides the
 // prompt without sending any reply — the underlying request stays pending.
 func TestAppApprovalDialogEscDismissesWithoutReply(t *testing.T) {
-	sup := newInternalFakeSup(appGoldenRoster())
+	sup := newInternalFakeSup(GoldenRoster())
 	a := attachForDialogTest(t, sup)
 	a = requestApproval(t, a, "perm-1")
 
@@ -408,7 +380,7 @@ func TestAppApprovalDialogHiddenOnOverview(t *testing.T) {
 	sess := New(th).Ingest(event.NewPermissionRequested("sess-x", "perm-1", "bash", nil, nil))
 	a := App{
 		theme:  th,
-		over:   NewOverview(th, appGoldenMeta()),
+		over:   NewOverview(th, GoldenMeta()),
 		sess:   sess,
 		scr:    screenOverview,
 		width:  testkit.Width,

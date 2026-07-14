@@ -31,6 +31,23 @@ func render(t *testing.T, name string, events ...event.Event) {
 	testkit.AssertGolden(t, name, got)
 }
 
+// ingestColor is ingest's styled-golden counterpart: it builds the Model
+// through testkit.ColorTheme so the marker vocabulary's state colors actually
+// render, for renderStyled below to capture as a *.styled.golden.
+func ingestColor(events ...event.Event) tui.Model {
+	m := tui.New(testkit.ColorTheme())
+	for _, e := range events {
+		m = m.Ingest(e)
+	}
+	return m
+}
+
+func renderStyled(t *testing.T, name string, events ...event.Event) {
+	t.Helper()
+	got := testkit.Render(ingestColor(events...), testkit.Width, testkit.Height)
+	testkit.AssertGoldenStyled(t, name, got)
+}
+
 // TestGoldenPlainTextTurn is the first golden test: a turn that streams
 // assistant text and finishes with usage, no reasoning or tools involved.
 func TestGoldenPlainTextTurn(t *testing.T) {
@@ -48,11 +65,29 @@ func TestGoldenPlainTextTurn(t *testing.T) {
 // TestGoldenUserAndAssistantTurn covers a full turn including the user's own
 // prompt: runner.Prompt publishes it as a MessageStarted/MessageFinished
 // {MessageUser} pair with no deltas (see event.MessageUser's doc), which
-// Ingest renders as one "you › " prefixed transcript item ABOVE the agent's
-// reply — mirroring how itemAssistantReasoning prefixes its own line with
-// "» ".
+// Ingest renders as one "○ "-marked transcript item ABOVE the agent's "● "
+// reply — the only hollow marker in the vocabulary (see theme.GlyphHuman).
 func TestGoldenUserAndAssistantTurn(t *testing.T) {
 	render(t, "user_and_assistant_turn",
+		event.NewMessageStarted(sid, event.MessageUser),
+		event.NewMessageFinished(sid, event.MessageUser, "Say hello."),
+		event.NewTurnStarted(sid),
+		event.NewMessageStarted(sid, event.MessageText),
+		event.NewMessageDelta(sid, event.MessageText, "Hello"),
+		event.NewMessageDelta(sid, event.MessageText, "! How can "),
+		event.NewMessageDelta(sid, event.MessageText, "I help you today?"),
+		event.NewMessageFinished(sid, event.MessageText, "Hello! How can I help you today?"),
+		event.NewTurnFinished(sid, "end_turn", provider.Usage{InputTokens: 9, OutputTokens: 7}),
+	)
+}
+
+// TestGoldenStyledUserAndAssistantTurn is TestGoldenUserAndAssistantTurn's
+// styled-golden counterpart: the same finished turn, rendered through a real
+// color profile, locks the ink "○" human marker and the green "●" agent
+// marker + status — the ok/finished state an Ascii golden can't distinguish
+// from a streaming one.
+func TestGoldenStyledUserAndAssistantTurn(t *testing.T) {
+	renderStyled(t, "user_and_assistant_turn",
 		event.NewMessageStarted(sid, event.MessageUser),
 		event.NewMessageFinished(sid, event.MessageUser, "Say hello."),
 		event.NewTurnStarted(sid),
@@ -75,7 +110,7 @@ func TestGoldenUserAndAssistantTurn(t *testing.T) {
 func TestUserMessageRendersWithoutMessageStarted(t *testing.T) {
 	m := ingest(event.NewMessageFinished(sid, event.MessageUser, "no preceding Started"))
 	got := testkit.Render(m, testkit.Width, testkit.Height)
-	if !strings.Contains(got, "you › no preceding Started") {
+	if !strings.Contains(got, "○ no preceding Started") {
 		t.Errorf("rendered output = %q, want it to contain the user item", got)
 	}
 }
@@ -130,13 +165,26 @@ func TestGoldenToolCallMultiline(t *testing.T) {
 }
 
 // TestGoldenToolCallError covers a finished tool call that reported an error
-// (ToolCallFinished.IsError): the header glyph flips to the error glyph and
-// the real command still renders. This Ascii golden locks the structure
-// (✗ glyph + command header + result body); the color styling that sets an
-// error apart — the warn-accent header and dimmed body — can't show under
-// termenv.Ascii and is asserted separately in TestColorToolCallErrorStyling.
+// (ToolCallFinished.IsError): the header still shows the real command, marked
+// with the same "●" every other item uses. This Ascii golden locks the
+// structure (marker + command header + result body); the color styling that
+// sets an error apart — the red marker and dimmed body — can't show under
+// termenv.Ascii and is asserted separately by the styled golden
+// tool_call_error.styled.golden (see golden_test.go's TestGoldenStyledToolCallError).
 func TestGoldenToolCallError(t *testing.T) {
 	render(t, "tool_call_error",
+		event.NewToolCallStarted(sid, "call-1", "bash", json.RawMessage(`{}`)),
+		event.NewToolCallFinished(sid, "call-1", json.RawMessage(`{"command":"go test ./..."}`), "FAIL  session  0.1s", true, nil),
+	)
+}
+
+// TestGoldenStyledToolCallError is TestGoldenToolCallError's styled-golden
+// counterpart: proves the failed marker is actually red (DangerStyle), not
+// merely structurally distinct — the Ascii golden above can't see color, and
+// this replaces the old TestColorToolCallErrorStyling assertion-based test
+// now that the styled golden is the state oracle.
+func TestGoldenStyledToolCallError(t *testing.T) {
+	renderStyled(t, "tool_call_error",
 		event.NewToolCallStarted(sid, "call-1", "bash", json.RawMessage(`{}`)),
 		event.NewToolCallFinished(sid, "call-1", json.RawMessage(`{"command":"go test ./..."}`), "FAIL  session  0.1s", true, nil),
 	)
@@ -154,27 +202,49 @@ func TestGoldenMidStream(t *testing.T) {
 	)
 }
 
+// TestGoldenStyledMidStream is TestGoldenMidStream's styled-golden
+// counterpart: locks the yellow "●" agent marker and yellow "streaming"
+// status a mid-flight turn renders in — the in-progress state an Ascii
+// golden can't distinguish from done or error.
+func TestGoldenStyledMidStream(t *testing.T) {
+	renderStyled(t, "mid_stream",
+		event.NewTurnStarted(sid),
+		event.NewMessageStarted(sid, event.MessageText),
+		event.NewMessageDelta(sid, event.MessageText, "Hello"),
+		event.NewMessageDelta(sid, event.MessageText, ", wor"),
+	)
+}
+
 // TestGoldenSessionError covers a fatal session error with no turn in
 // flight.
 func TestGoldenSessionError(t *testing.T) {
 	render(t, "session_error", event.NewSessionError(sid, "boom", true))
 }
 
-// TestGoldenApproval covers a pending permission request: the transcript's
-// permanent ✋ badge (itemApproval) plus the interactive inline prompt that
-// commandeers the bottom input line while it's unresolved (see Model.pending,
-// approval.go).
+// TestGoldenApproval covers a pending permission request: the interactive
+// inline prompt that commandeers the whole footer while it's unresolved (see
+// Model.pending, approval.go) — the transcript's own itemApproval badge is
+// suppressed while the prompt shows it (see transcriptLines).
 func TestGoldenApproval(t *testing.T) {
 	render(t, "approval",
 		event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"cmd": "rm -rf /tmp/x"}, []string{"no rule"}),
 	)
 }
 
+// TestGoldenStyledApproval is TestGoldenApproval's styled-golden counterpart:
+// locks the yellow "●" marker on the prompt's tool·args line and the muted
+// footer — the pending state an Ascii golden can't distinguish from done or
+// error.
+func TestGoldenStyledApproval(t *testing.T) {
+	renderStyled(t, "approval",
+		event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"cmd": "rm -rf /tmp/x"}, []string{"no rule"}),
+	)
+}
+
 // TestGoldenApprovalPromptInline covers the same pending permission request
-// as TestGoldenApproval, named explicitly for the inline prompt this PR adds
-// — the ✋ bash badge in the transcript, and at the bottom the input-replacing
-// prompt (tool·args, the question, the a/d/r action row, and a dim esc/session
-// footer), replacing the old centered-overlay modal.
+// as TestGoldenApproval, named explicitly for the inline prompt: the
+// footer-commandeering block (tool·args, the question, the a/d/r action row,
+// and a dim esc/session footer), replacing the old centered-overlay modal.
 func TestGoldenApprovalPromptInline(t *testing.T) {
 	render(t, "approval_prompt_inline",
 		event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"cmd": "rm -rf /tmp/x"}, []string{"no rule"}),
@@ -199,7 +269,7 @@ func TestColorApprovalPromptInlineNarrow(t *testing.T) {
 
 	const width = 24
 	plain := testkit.Render(build(theme.Test()), width, testkit.Height)
-	colored := testkit.Render(build(colorTheme()), width, testkit.Height)
+	colored := testkit.Render(build(testkit.ColorTheme()), width, testkit.Height)
 	assertColorLayout(t, plain, colored, width)
 }
 

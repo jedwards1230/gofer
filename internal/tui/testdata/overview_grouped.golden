@@ -1,17 +1,17 @@
-gofer v0.2.0
+gofer v0.3.0
 fable-5 · ~/orchestration
 2 awaiting input · 1 working · 2 completed
 
 Working
-  ◐  explore three agent ecosyst…  M2 launched; awaiting sketch review + 4…   2m
+  ●  explore three agent ecosyst…  M2 launched; awaiting sketch review + 4…   2m
 
 Needs input
-▸ ✋2wire the websocket ACP list…  blocked: approve Bash(kubectl delete po…  now
-  ○  keycloak path-b groundwork    turn finished — awaiting the next prompt   5m
+▸ ●2 wire the websocket ACP list…  blocked: approve Bash(kubectl delete po…  now
+  ●  keycloak path-b groundwork    turn finished — awaiting the next prompt   5m
 
 Finished
-  ✓  authentik token exchange rf…  Keycloak Path-B foundation complete and…   1h
-  ✓  openclaw dev setup            Heartbeat revamp spec'd and handed off     1d
+  ●  authentik token exchange rf…  Keycloak Path-B foundation complete and…   1h
+  ●  openclaw dev setup            Heartbeat revamp spec'd and handed off     1d
 
 
 
