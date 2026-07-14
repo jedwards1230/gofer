@@ -3,11 +3,11 @@ fable-5 · ~/orchestration
 2 awaiting input · 1 working · 2 completed
 
 ~/orchestration
-▸ ●2 wire the websocket ACP list…  Needs input · blocked: approve Bash(kubectl delete pod)                                     now
-  ●  explore three agent ecosyst…  Working · M2 launched; awaiting sketch review + 4 decisions                                  2m
-  ●  keycloak path-b groundwork    Needs input · turn finished — awaiting the next prompt                                       5m
-  ●  authentik token exchange rf…  Finished · Keycloak Path-B foundation complete and verified                                  1h
-  ●  openclaw dev setup            Finished · Heartbeat revamp spec'd and handed off                                            1d
+▸ wire the websocket ACP list…  Needs input · blocked: approve Bash(kubectl delete pod)                                        now
+  explore three agent ecosyst…  Working · M2 launched; awaiting sketch review + 4 decisions                                     2m
+  keycloak path-b groundwork    Needs input · turn finished — awaiting the next prompt                                          5m
+  authentik token exchange rf…  Finished · Keycloak Path-B foundation complete and verified                                     1h
+  openclaw dev setup            Finished · Heartbeat revamp spec'd and handed off                                               1d
 
 
 

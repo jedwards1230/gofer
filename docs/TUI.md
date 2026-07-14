@@ -18,7 +18,7 @@ commands and plugin UI (M4+).
 
 **Overview** — one row per session (a session = a task, titled by the work).
 A row may be a whole fan-out hierarchy; it collapses to aggregate state,
-agent count, and total pending approvals (`● N`), and expands inline to the
+agent count, and whether approvals are pending, and expands inline to the
 subagent tree. `space` peek · `enter` attach · `a` approve · `n` new ·
 `ctrl-x` kill (running; confirm; subtree interrupted) or archive (finished).
 Journals are never deleted — `gofer ps --all` lists archived sessions.
@@ -80,14 +80,15 @@ Layout, top to bottom:
   `N awaiting input · M working · K completed`. The counts are the roster
   tallied by status; the wording mirrors the group labels.
 - **Roster body** — one line per session:
-  `‹caret› ‹status marker› ‹title› ‹status word · one-line summary› ‹age›`. The
-  caret (`▸`) marks selection so it reads without color (golden tests force
-  `termenv.Ascii`). The status marker is `●` — yellow while working or
-  awaiting input, green once finished — with a live pending count appended
-  (`●2`) when approvals are queued. The summary is prefixed with the status
-  word (`Working ·` / `Needs input ·` / `Finished ·`) in the flat view, where
-  no status section states it; the grouped view omits it (the section header
-  already does).
+  `‹caret› ‹title› ‹status word · one-line summary› ‹age›`. The caret (`▸`)
+  marks selection so it reads without color (golden tests force
+  `termenv.Ascii`). There is no status glyph — state rides the **color of the
+  status word**: yellow while working or awaiting input, green once finished. A
+  pending approval simply reclassifies the row to `Needs input` (no count — one
+  or many pending reads the same). The status word (`Working` / `Needs input` /
+  `Finished`) prefixes the summary in the flat view, where no status section
+  states it; the grouped view omits it from the row and colors the section
+  header instead.
   Age is a compact relative string (`now`/`5m`/`3h`/`2d`) computed against an
   injected reference time so tests stay deterministic, right-aligned as the
   sole right-column metadata. The body windows to keep the selected row
@@ -198,8 +199,8 @@ one-line-per-session shape as a top-level row:
 its complete transcript, tool blocks, and approvals — exactly as if it were a
 top-level session (`esc`/`←` returns to the parent). So a supervisor watching
 one task drills into any subagent's whole history without losing the parent
-context, and an approval waiting deep in the tree still surfaces as `● N` on
-the ancestor row. This is the fan-out tree above made navigable: the tree shows
+context, and an approval waiting deep in the tree still surfaces as a
+`Needs input` state on the ancestor row. This is the fan-out tree above made navigable: the tree shows
 *who is working*; entering a node shows *what they did*. It reuses the shared
 row renderer and the id-tracked selection/windowing the M2 roster already
 established — a child session is just a session, so no new navigation model is
@@ -316,9 +317,9 @@ human-eye check of real rendered frames, `vhs/` holds on-demand
 - `vhs/tool-call.tape` — a clean turn with a bash tool call (real command in the
   header, block rhythm). `vhs/approval.tape` — a turn ending in the inline
   permission prompt, with a failed call's red error marker and dimmed body
-  above it. `vhs/overview.tape` — the roster with mixed states, showing the ●
-  markers in color (yellow working/awaiting incl. the ●2 pending count vs
-  green finished) — the state that now lives only in color.
+  above it. `vhs/overview.tape` — the roster with mixed states, showing the
+  status words in color (yellow working/awaiting vs green finished) — the state
+  that now lives only in color.
 
 Run `scripts/tui-vhs.sh [tool-call|approval|overview]` (no arg = all). It prebuilds
 `vhs/.bin/harness`, then renders each tape to `vhs/out/` (GIF of the whole turn

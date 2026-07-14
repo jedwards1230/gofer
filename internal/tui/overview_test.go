@@ -79,8 +79,8 @@ func TestGoldenOverviewFlat(t *testing.T) {
 
 // TestGoldenStyledOverviewFlat is TestGoldenOverviewFlat's styled-golden
 // counterpart: the same roster, rendered through testkit.ColorTheme, locks
-// the working/needs-input rows' yellow "●" markers against the finished
-// rows' green ones — a distinction the Ascii golden's bare "●" can't make.
+// the working/needs-input rows' yellow status words against the finished
+// rows' green ones — a distinction the Ascii golden's plain text can't make.
 func TestGoldenStyledOverviewFlat(t *testing.T) {
 	o := tui.NewOverview(testkit.ColorTheme(), tui.GoldenMeta()).WithSessions(rosterFixture())
 	testkit.AssertGoldenStyled(t, "overview_flat", testkit.Render(o, testkit.Width, testkit.Height))
@@ -118,19 +118,26 @@ func TestGoldenOverviewEmpty(t *testing.T) {
 	testkit.AssertGolden(t, "overview_empty", testkit.Render(o, testkit.Width, testkit.Height))
 }
 
-// TestOverviewPendingGlyphShowsCount verifies a session with a positive
-// Pending count renders the marker WITH the live count (e.g. "●2"), not the
-// bare marker — the roster's half of the M3 approvals-relay contract:
-// [tui.SessionInfo.Pending] plumbed all the way from the wire (see
-// internal/daemonbridge's toTUISessionInfo) into the row a client actually
-// sees.
-func TestOverviewPendingGlyphShowsCount(t *testing.T) {
+// TestOverviewPendingReadsAsNeedsInput verifies a session with pending
+// permission requests reads as a plain "Needs input" row — pending is a
+// boolean folded into the status (colored via the state style), not a count:
+// one or many pending approvals both surface the same signal, with no digit
+// and no leading glyph. [tui.SessionInfo.Pending] is still plumbed from the
+// wire (see internal/daemonbridge's toTUISessionInfo) — it just reclassifies
+// the row's effective status rather than printing a number.
+func TestOverviewPendingReadsAsNeedsInput(t *testing.T) {
 	o := newOverview().WithSessions([]tui.SessionInfo{
 		{ID: "sess-1", Title: "blocked on approval", Status: tui.StatusWorking, Pending: 2, Updated: tui.GoldenNow},
 	})
 	got := testkit.Render(o, testkit.Width, testkit.Height)
-	if !strings.Contains(got, "●2") {
-		t.Errorf("rendered roster does not contain %q:\n%s", "●2", got)
+	if !strings.Contains(got, "Needs input") {
+		t.Errorf("rendered roster does not contain the %q status word:\n%s", "Needs input", got)
+	}
+	// No glyph, and no pending count anywhere — pending is boolean now.
+	for _, absent := range []string{"●", "●2", "(2)", "2"} {
+		if strings.Contains(got, absent) {
+			t.Errorf("rendered roster unexpectedly contains %q (glyph/count should be gone):\n%s", absent, got)
+		}
 	}
 }
 
@@ -138,8 +145,8 @@ func TestOverviewPendingGlyphShowsCount(t *testing.T) {
 // permission-blocked session (Status still StatusWorking, Pending>0 — the
 // daemon's coarse status doesn't demote while the turn is technically in
 // flight) as "awaiting input", not "working" — the same reclassification
-// [effectiveStatus] already applies for [Overview.statusGlyph]'s marker
-// color, so the header and the roster rows agree.
+// [effectiveStatus] already applies for the row's status-word color, so the
+// header and the roster rows agree.
 func TestOverviewCountsPendingAwaitsInput(t *testing.T) {
 	o := newOverview().WithSessions([]tui.SessionInfo{
 		{ID: "sess-1", Title: "blocked one", Status: tui.StatusWorking, Pending: 1, Updated: tui.GoldenNow},
