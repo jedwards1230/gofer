@@ -31,4 +31,6 @@ func (unsupportedServiceManager) load(_ context.Context, _ string) error { retur
 
 func (unsupportedServiceManager) unload(_ context.Context, _ string) error { return unsupportedErr() }
 
+func (unsupportedServiceManager) reloadAfterRemove(_ context.Context) error { return nil }
+
 func (unsupportedServiceManager) running(_ context.Context) (bool, error) { return false, nil }

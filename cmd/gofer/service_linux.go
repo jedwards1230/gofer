@@ -55,12 +55,22 @@ func (systemdManager) load(ctx context.Context, _ string) error {
 	return runQuiet(ctx, "systemctl", "--user", "enable", "--now", systemdUnitName)
 }
 
-// unload disables + stops the unit, then reloads the manager. The command layer
-// removes the unit file (see runDaemonUninstall); a subsequent daemon-reload
-// here lets systemd forget the removed unit cleanly. Both steps tolerate an
-// already-disabled unit so uninstall stays idempotent.
+// unload disables + stops the unit (`disable --now`). The command layer then
+// removes the unit file and calls reloadAfterRemove, so the full uninstall
+// sequence is: disable --now → remove file → daemon-reload. The disable step is
+// best-effort — an already-disabled/absent unit is tolerated so uninstall stays
+// idempotent.
 func (systemdManager) unload(ctx context.Context, _ string) error {
 	_ = runQuiet(ctx, "systemctl", "--user", "disable", "--now", systemdUnitName)
+	return nil
+}
+
+// reloadAfterRemove runs `systemctl --user daemon-reload` so systemd forgets the
+// unit file the command layer has just deleted. Best-effort/idempotent: a reload
+// with no matching unit left is a clean no-op, so a transient failure never
+// blocks an otherwise-complete uninstall.
+func (systemdManager) reloadAfterRemove(ctx context.Context) error {
+	_ = runQuiet(ctx, "systemctl", "--user", "daemon-reload")
 	return nil
 }
 

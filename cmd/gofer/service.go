@@ -63,6 +63,12 @@ type serviceManager interface {
 	load(ctx context.Context, path string) error
 	// unload stops + deregisters the service (the command removes the file).
 	unload(ctx context.Context, path string) error
+	// reloadAfterRemove lets the manager forget a just-removed unit cleanly. The
+	// command layer calls it in runDaemonUninstall AFTER os.Remove(path) succeeds
+	// — on systemd this is `daemon-reload` (so the manager drops the deleted
+	// unit from memory); launchd and unsupported platforms make it a no-op.
+	// Idempotent and tolerant of an already-gone unit.
+	reloadAfterRemove(ctx context.Context) error
 	// running reports whether the service is currently active.
 	running(ctx context.Context) (bool, error)
 }
@@ -238,6 +244,12 @@ func runDaemonUninstall(ctx context.Context, args []string, stdout, stderr io.Wr
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove service unit %s: %w", path, err)
+	}
+	// Only now that the unit file is gone: let the manager forget it (systemd
+	// daemon-reload; a no-op on launchd). Running this BEFORE the remove would
+	// reload while the file still exists and forget nothing.
+	if err := mgr.reloadAfterRemove(ctx); err != nil {
+		return fmt.Errorf("reload service manager after removing %s: %w", mgr.label(), err)
 	}
 	resolvedRoot, err := supervisor.ResolveRoot(*root)
 	if err != nil {

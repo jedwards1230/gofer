@@ -69,6 +69,11 @@ func (m launchdManager) unload(ctx context.Context, path string) error {
 	return nil
 }
 
+// reloadAfterRemove is a no-op on launchd: bootout in unload already dropped the
+// job from the domain, so removing the plist file needs no follow-up reload
+// (the systemd path is the only one that must forget a deleted unit).
+func (launchdManager) reloadAfterRemove(_ context.Context) error { return nil }
+
 // running reports whether launchctl knows the label in the GUI domain.
 func (m launchdManager) running(ctx context.Context) (bool, error) {
 	domain := "gui/" + strconv.Itoa(os.Getuid())

@@ -117,6 +117,12 @@ type fakeServiceManager struct {
 	loadCalls   int
 	unloadCalls int
 	loadErr     error
+
+	// reloadCalls counts reloadAfterRemove invocations; fileGoneAtReload records
+	// whether the unit file was already removed by the time reloadAfterRemove
+	// ran — proof the command layer reloads AFTER os.Remove, not before.
+	reloadCalls      int
+	fileGoneAtReload bool
 }
 
 func (f *fakeServiceManager) label() string             { return "gofer.test" }
@@ -140,6 +146,14 @@ func (f *fakeServiceManager) load(_ context.Context, _ string) error {
 
 func (f *fakeServiceManager) unload(_ context.Context, _ string) error {
 	f.unloadCalls++
+	return nil
+}
+
+func (f *fakeServiceManager) reloadAfterRemove(_ context.Context) error {
+	f.reloadCalls++
+	if _, err := os.Stat(f.path); os.IsNotExist(err) {
+		f.fileGoneAtReload = true
+	}
 	return nil
 }
 
@@ -279,6 +293,14 @@ func TestRunDaemonUninstallViaSeam(t *testing.T) {
 	}
 	if fake.unloadCalls != 1 {
 		t.Errorf("uninstall called unload %d times, want 1", fake.unloadCalls)
+	}
+	// The manager reload must run exactly once, and only AFTER the unit file was
+	// removed (systemd's daemon-reload would forget nothing if it ran first).
+	if fake.reloadCalls != 1 {
+		t.Errorf("uninstall called reloadAfterRemove %d times, want 1", fake.reloadCalls)
+	}
+	if !fake.fileGoneAtReload {
+		t.Errorf("reloadAfterRemove ran while the unit file still existed; it must run after os.Remove")
 	}
 }
 
