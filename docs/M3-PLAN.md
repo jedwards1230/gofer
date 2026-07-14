@@ -55,8 +55,13 @@ orchestration repo (`docs/projects/gofer-m3-plan-and-docs-refresh.md`).
        bind carries its token only via a 0600 `<root>/daemon.env` file (never
        the unit or argv). First-use prompt fires only on a fully interactive
        terminal (pure `shouldPromptInstall` gate), a complete no-op otherwise.
-7. [ ] **Lossless attach.** Promote the daemonbridge's client-side reconstruction
-       to a lossless/byte-exact path.
+7. [x] **Lossless attach.** ✅ shipped. A `gofer/event` notification carries each
+       source `event.Event`'s own MarshalJSON envelope, fanned uniformly to every
+       attached peer alongside `session/update`; the bridge ignores
+       `session/update` and replays `gofer/event` verbatim via `event.New*`
+       (incl. `tool.call.delta` and `tool.call.finished`'s Diagnostics/Spill*,
+       both entirely dropped by ACP's projection). History replay on
+       `session/load` gets the same treatment (`historyEvents`).
 8. [x] **OTel.** ✅ shipped, in a new `internal/telemetry/` package: spans per
        turn / provider-call proxy / tool execution off the Event/Op stream;
        session/turn/token/cost/error metrics; OTLP export, off by default;

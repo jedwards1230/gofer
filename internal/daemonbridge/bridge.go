@@ -35,6 +35,13 @@ const (
 	// reconstruct.go's handlePermissionRequested/handlePermissionResolved.
 	methodGoferPermissionRequested = "gofer/permission_requested"
 	methodGoferPermissionResolved  = "gofer/permission_resolved"
+
+	// methodGoferEvent is the M3 lossless-attach notification carrying a
+	// source [event.Event]'s own MarshalJSON envelope, verbatim — mirroring
+	// internal/daemon/handlers.go's own methodGoferEvent constant (unexported
+	// there; redeclared here for the same reason as the others above). See
+	// reconstruct.go's handleGoferEvent.
+	methodGoferEvent = "gofer/event"
 )
 
 // methodPermissionReply is the JSON-RPC method literal the daemon exposes to
@@ -131,19 +138,23 @@ func (s *Supervisor) Close() error {
 	return s.closeErr
 }
 
-// sessionState is one session's reconstruction state plus its
-// reconstructed event broker. The broker is safe for concurrent use on its
-// own (see [event.Broker]); the open-message fields (hasOpen/openKind/text)
-// are mutated ONLY by the demuxer goroutine (see reconstruct.go) — no
-// additional locking is needed for them, since that goroutine is the sole
-// writer.
+// sessionState is one session's replay state plus its reconstructed event
+// broker. The broker is safe for concurrent use on its own (see
+// [event.Broker]); turnTerminated is mutated ONLY by the demuxer goroutine
+// (see reconstruct.go's handleGoferEvent/handleTurnEnd) — no additional
+// locking is needed for it, since that goroutine is the sole writer and
+// reader.
 type sessionState struct {
 	id     string
 	broker *event.Broker
 
-	hasOpen  bool
-	openKind event.MessageKind
-	text     string
+	// turnTerminated reports whether a terminal gofer/event turn.finished
+	// (stop reason != "tool_use") has already been replayed for the
+	// currently-open turn — see handleGoferEvent. handleTurnEnd reads it to
+	// decide whether Send's Call outcome still needs a FALLBACK terminal
+	// event published (the ordinary case does not: the real one already
+	// arrived via gofer/event).
+	turnTerminated bool
 
 	// loadDone gates history-before-live ordering: it is closed either
 	// immediately (registerFresh, for a session THIS bridge just created via

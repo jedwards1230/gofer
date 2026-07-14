@@ -278,19 +278,34 @@ func (c *wsClient) waitRawResponse() rpcFrame {
 	return rpcFrame{}
 }
 
-// waitNotification blocks for the next session/update notification.
+// waitNotification blocks for the next session/update notification, silently
+// skipping any interleaved "gofer/event" frame. The M3 lossless-attach fanout
+// (see internal/daemon/handlers.go's broadcastGoferEvent) sends the daemon's
+// full-fidelity event stream on the SAME connection, for every event a
+// session/update would carry and many it wouldn't (turn.started,
+// session.error, tool.call.delta, ...) — so every existing session/update-
+// focused test in this package goes through this one shared primitive to see
+// only the ACP projection it's actually testing. TestPromptFanOutGoferEventFullFidelity
+// (fanout_test.go) is this package's dedicated proof that gofer/event itself
+// carries the full stream; it reads c.notifications directly instead of this
+// helper.
 func (c *wsClient) waitNotification() rpcFrame {
 	c.t.Helper()
-	select {
-	case f, ok := <-c.notifications:
-		if !ok {
-			c.t.Fatalf("connection closed waiting for a notification")
+	deadline := time.After(defaultWait)
+	for {
+		select {
+		case f, ok := <-c.notifications:
+			if !ok {
+				c.t.Fatalf("connection closed waiting for a notification")
+			}
+			if f.Method == "gofer/event" {
+				continue
+			}
+			return f
+		case <-deadline:
+			c.t.Fatalf("timed out waiting for a notification")
 		}
-		return f
-	case <-time.After(defaultWait):
-		c.t.Fatalf("timed out waiting for a notification")
 	}
-	return rpcFrame{}
 }
 
 const jsonrpcVersion = "2.0"

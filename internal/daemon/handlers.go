@@ -39,6 +39,23 @@ const (
 	methodGoferPermissionRequested = "gofer/permission_requested"
 	methodGoferPermissionResolved  = "gofer/permission_resolved"
 
+	// methodGoferEvent is the gofer-native, full-fidelity notification the M3
+	// lossless-attach work fans a session's ENTIRE non-permission event stream
+	// out through: its params are the source [event.Event]'s own MarshalJSON
+	// envelope, verbatim, sent UNIFORMLY to every attached peer alongside (not
+	// instead of) the lossy acp.ToSessionUpdate projection on session/update —
+	// see broadcastGoferEvent and handleSessionPrompt. An ACP-only client
+	// ignores this unknown notification (per JSON-RPC 2.0); a gofer client
+	// (internal/daemonbridge) ignores session/update instead and reconstructs
+	// its Event stream from this one, byte-exactly, via the SDK's exported
+	// event.New* constructors. Mirrors the gofer/permission_* precedent, just
+	// for every OTHER event kind too, so nothing the daemon observes is lost
+	// to a gofer client the way it is to an ACP one (turn.started, session.error,
+	// message.started, tool.call.delta, and ToolCallFinished's
+	// Diagnostics/Spill* fields all have no session/update projection at all —
+	// see acp.ToSessionUpdate).
+	methodGoferEvent = "gofer/event"
+
 	// methodPermissionReply is the inbound op a client sends to answer a
 	// permission request (contract: JSON-RPC method "permission.reply", params
 	// {id, verdict, remember?}). It is a notification — no result.
@@ -216,7 +233,12 @@ func handleSessionNew(d *Daemon, ctx context.Context, _ *peer, params json.RawMe
 // conversation history as session/update notifications before returning the
 // session/load response, per ACP v1's "the Agent MUST replay the entire
 // conversation to the Client in the form of session/update notifications"
-// requirement.
+// requirement. As of the M3 lossless-attach work, it ALSO replays the same
+// folded history as gofer/event notifications (see historyEvents and
+// methodGoferEvent's doc) — the ACP replay serves an ACP client, the
+// gofer/event replay serves a gofer client (internal/daemonbridge), which
+// ignores session/update entirely; both go out to this peer before the
+// response, per the SAME ordering contract.
 //
 // Ordering contract (spec-critical): every replay notification is written
 // strictly before this handler's response reaches the wire. This holds
@@ -292,6 +314,24 @@ func handleSessionLoad(d *Daemon, ctx context.Context, p *peer, params json.RawM
 	for _, n := range notifs {
 		if werr := p.notify(ctx, acp.MethodSessionUpdate, n); werr != nil {
 			return nil, internalErr(fmt.Errorf("session/load %s: write replay session/update: %w", op.SessionID, werr))
+		}
+	}
+
+	// ALSO replay the same folded history as gofer/event frames (see
+	// historyEvents and methodGoferEvent's doc), so a gofer client — which
+	// ignores session/update entirely — still gets a full history replay on
+	// attach, not just an ACP one. Both replays go out to THIS peer before
+	// this handler returns its response, preserving the same
+	// notifications-before-response wire-order guarantee documented above.
+	events := historyEvents(op.SessionID, msgs)
+	d.log.Debug("session load gofer/event replay", "session", op.SessionID, "events", len(events))
+	for _, ev := range events {
+		raw, merr := json.Marshal(ev)
+		if merr != nil {
+			return nil, internalErr(fmt.Errorf("session/load %s: marshal replay gofer/event: %w", op.SessionID, merr))
+		}
+		if werr := p.notify(ctx, methodGoferEvent, json.RawMessage(raw)); werr != nil {
+			return nil, internalErr(fmt.Errorf("session/load %s: write replay gofer/event: %w", op.SessionID, werr))
 		}
 	}
 	return acp.LoadSessionResponse{}, nil
@@ -503,6 +543,17 @@ func handleSessionPrompt(d *Daemon, ctx context.Context, p *peer, params json.Ra
 				continue
 			}
 
+			// Every non-permission event reaches a gofer client's reconstruction
+			// verbatim via gofer/event — see methodGoferEvent's doc — BEFORE the
+			// lossy acp.ToSessionUpdate projectability check below, so a kind
+			// ToSessionUpdate drops entirely (turn.started, session.error,
+			// message.started, tool.call.delta, turn.finished, ...) still
+			// crosses the wire for this path. This runs for turn.finished too
+			// (see below): every event that reaches this point is fanned,
+			// unconditionally, before any of this loop's return/continue
+			// branches.
+			d.broadcastGoferEvent(ctx, op.SessionID, e)
+
 			if notif, ok := acp.ToSessionUpdate(op.SessionID, e); ok {
 				// The user-message echo (a settled event.MessageUser projects
 				// to user_message_chunk) is suppressed to the ORIGINATOR — the
@@ -601,6 +652,34 @@ func (d *Daemon) broadcastPermission(ctx context.Context, sessionID, method stri
 			// Session id + method only — never the params (tool input/spec);
 			// see handleFrame's redaction rule.
 			d.log.Debug("permission broadcast: peer notify failed", "session", sessionID, "method", method, "err", werr)
+		}
+	}
+}
+
+// broadcastGoferEvent fans e out to EVERY peer attached to sessionID as a
+// gofer/event notification (see methodGoferEvent's doc) — e's own MarshalJSON
+// envelope, verbatim, marshaled ONCE and reused for every peer. Modeled on
+// broadcastPermission, not broadcastUpdate: there is no user-echo suppression
+// or origin special-casing (the daemon ACP surface stays spec-general — every
+// peer, including the one driving the turn, gets the identical frame, same as
+// a permission broadcast), and a write failure to any single peer — origin
+// included — is non-fatal and only logged, never aborting the turn a
+// possibly-unrelated peer's wedged socket has nothing to do with. A marshal
+// failure (e's own MarshalJSON erroring) is likewise non-fatal: the frame is
+// simply skipped rather than aborting the turn over a client-visibility
+// concern. The peer set is snapshotted under the registry RLock and released
+// before any notify runs (see peersForSession).
+func (d *Daemon) broadcastGoferEvent(ctx context.Context, sessionID string, e event.Event) {
+	raw, err := json.Marshal(e)
+	if err != nil {
+		d.log.Debug("gofer/event broadcast: marshal failed", "session", sessionID, "kind", e.Kind(), "err", err)
+		return
+	}
+	for _, pr := range d.peersForSession(sessionID) {
+		if werr := pr.notify(ctx, methodGoferEvent, json.RawMessage(raw)); werr != nil {
+			// Session id + kind only — never the marshaled event (may carry
+			// prompt/message content); see handleFrame's redaction rule.
+			d.log.Debug("gofer/event broadcast: peer notify failed", "session", sessionID, "kind", e.Kind(), "err", werr)
 		}
 	}
 }

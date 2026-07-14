@@ -16,10 +16,12 @@ package daemonbridge
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/jedwards1230/agent-sdk-go/event"
+	"github.com/jedwards1230/agent-sdk-go/provider"
 
 	"github.com/jedwards1230/gofer/internal/daemon"
 )
@@ -103,6 +105,138 @@ func TestHandleNotificationReconstructsPermissionResolved(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for the reconstructed PermissionResolved")
+	}
+}
+
+// stripSeqTime marshals e (invoking its own MarshalJSON) and returns its
+// envelope as a generic map with the "seq"/"time" fields removed — the ONLY
+// fields a gofer/event round trip doesn't preserve byte-for-byte (event.New*
+// always builds seq=0/time=zero; [event.Broker.Publish] reassigns REAL
+// seq/time locally — see reconstruct.go's package doc, "seq/time note": this
+// is by design, not a fidelity gap). A field-for-field fidelity comparison
+// strips them before comparing two envelopes.
+func stripSeqTime(t *testing.T, e event.Event) map[string]any {
+	t.Helper()
+	raw, err := json.Marshal(e)
+	if err != nil {
+		t.Fatalf("marshal %T: %v", e, err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("unmarshal %T: %v", e, err)
+	}
+	delete(m, "seq")
+	delete(m, "time")
+	return m
+}
+
+// TestHandleNotificationReplaysGoferEventKinds is the unit-level fidelity
+// proof for handleGoferEvent's dispatch table: for every non-permission
+// [event.Event] kind, marshal a source event built with event.New* (its own
+// MarshalJSON — the exact bytes the daemon's broadcastGoferEvent sends),
+// push it through s.handleNotification as a gofer/event notification (the
+// SAME internal seam TestHandleNotificationReconstructsPermissionRequested
+// uses — no real daemon.Client needed), and assert the event the broker
+// actually publishes is field-for-field equal to the source, ignoring
+// seq/time (see stripSeqTime). tool.call.delta and a tool.call.finished
+// carrying Diagnostics + all three Spill* fields are the two cases the OLD
+// ACP-projection reconstruction could never round-trip at all — the entire
+// point of this feature.
+func TestHandleNotificationReplaysGoferEventKinds(t *testing.T) {
+	const sid = "sess-1"
+
+	cases := []event.Event{
+		event.NewSessionCreated(sid),
+		event.NewSessionResumed(sid),
+		event.NewSessionForked(sid),
+		event.NewSessionCompacted(sid),
+		event.NewSessionKilled(sid),
+		event.NewSessionArchived(sid),
+		event.NewSessionError(sid, "boom", true),
+		event.NewTurnStarted(sid),
+		event.NewTurnFinishedCost(sid, "end_turn",
+			provider.Usage{InputTokens: 100, OutputTokens: 42, CacheReadTokens: 7, CacheWriteTokens: 3},
+			&provider.Cost{USD: 0.0123, InputUSD: 0.01, OutputUSD: 0.0023}),
+		event.NewTurnFinished(sid, "tool_use", provider.Usage{InputTokens: 5}), // no cost: nil ok (spec table note)
+		event.NewMessageStarted(sid, event.MessageReasoning),
+		event.NewMessageDelta(sid, event.MessageText, "a fragment of streamed text"),
+		event.NewMessageFinishedMeta(sid, event.MessageReasoning, "the settled reasoning content",
+			map[string]string{"anthropic.signature": "sig-abc123"}),
+		event.NewToolCallStarted(sid, "tc-1", "bash", json.RawMessage(`{"command":"ls -la"}`)),
+		// tool.call.delta: a fragment of the streaming INPUT (partial JSON
+		// arguments) — entirely dropped by ACP's session/update (no
+		// incremental-tool concept). This is the headline loss.
+		event.NewToolCallDelta(sid, "tc-1", `{"comm`),
+		// tool.call.finished with Diagnostics + all three Spill* fields —
+		// also entirely dropped by the ACP projection.
+		event.NewToolCallFinishedSpill(sid, "tc-1", "bounded excerpt of the output",
+			true, []string{"lint: unused variable x", "vet: possible nil deref"},
+			"sessions/proj/sess-1/calls/tc-1.log", 123456, "deadbeefcafef00d"),
+	}
+
+	for _, src := range cases {
+		t.Run(src.Kind(), func(t *testing.T) {
+			s := newReconstructTestSupervisor()
+			s.registerFresh(sid)
+			sub, err := s.Subscribe(context.Background(), sid)
+			if err != nil {
+				t.Fatalf("Subscribe: %v", err)
+			}
+			defer sub.Close()
+
+			raw, err := json.Marshal(src)
+			if err != nil {
+				t.Fatalf("marshal source %T: %v", src, err)
+			}
+			s.handleNotification(daemon.Notification{Method: methodGoferEvent, Params: raw})
+
+			select {
+			case dst := <-sub.C:
+				if dst.Kind() != src.Kind() {
+					t.Fatalf("Kind() = %q, want %q", dst.Kind(), src.Kind())
+				}
+				if dst.SessionID() != sid {
+					t.Errorf("SessionID() = %q, want %q", dst.SessionID(), sid)
+				}
+				want := stripSeqTime(t, src)
+				got := stripSeqTime(t, dst)
+				if !reflect.DeepEqual(got, want) {
+					t.Errorf("replayed payload = %+v, want %+v", got, want)
+				}
+			case <-time.After(time.Second):
+				t.Fatalf("timed out waiting for the replayed %s", src.Kind())
+			}
+		})
+	}
+}
+
+// TestHandleNotificationIgnoresPermissionKindsViaGoferEvent asserts that a
+// permission.requested/permission.resolved envelope arriving via the
+// gofer/event method (which should never happen — see methodGoferEvent's
+// doc — but is defensively guarded) is dropped rather than mis-dispatched:
+// handleGoferEvent's dispatch table has no case for either kind, so it falls
+// to the default branch and returns without publishing anything.
+func TestHandleNotificationIgnoresPermissionKindsViaGoferEvent(t *testing.T) {
+	const sid = "sess-1"
+	s := newReconstructTestSupervisor()
+	s.registerFresh(sid)
+	sub, err := s.Subscribe(context.Background(), sid)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer sub.Close()
+
+	for _, raw := range []json.RawMessage{
+		[]byte(`{"type":"permission.requested","session_id":"sess-1","id":"perm-1","tool":"bash"}`),
+		[]byte(`{"type":"permission.resolved","session_id":"sess-1","id":"perm-1","verdict":"allow"}`),
+	} {
+		s.handleNotification(daemon.Notification{Method: methodGoferEvent, Params: raw})
+	}
+
+	select {
+	case ev := <-sub.C:
+		t.Fatalf("got %+v, want nothing published for a permission.* gofer/event envelope", ev)
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 
