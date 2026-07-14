@@ -69,4 +69,26 @@ func TestSeatbeltContainer_Smoke(t *testing.T) {
 			}
 		})
 	}
+
+	// Confinement guard: a write to the shared, world-writable /tmp must be
+	// DENIED. /private/tmp is deliberately kept out of the profile's write set
+	// (only the per-user /private/var/folders is granted), so a contained tool
+	// cannot drop files other processes on the host can see. This locks in that
+	// the temp grant stays scoped to per-user scratch — re-adding /private/tmp
+	// write would flip this to a success and fail the test.
+	t.Run("shared /tmp write denied", func(t *testing.T) {
+		input, err := json.Marshal(containedBashInput{
+			Command: "echo confinement-probe > /tmp/gofer-confinement-probe",
+		})
+		if err != nil {
+			t.Fatalf("marshal input: %v", err)
+		}
+		res, err := b.Run(context.Background(), json.RawMessage(input))
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+		if !res.IsError {
+			t.Fatalf("write to shared /tmp unexpectedly succeeded — confinement hole:\n%s", res.Content)
+		}
+	})
 }
