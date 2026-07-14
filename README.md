@@ -19,7 +19,7 @@ approvals reach your phone over ACP; see the [roadmap](#roadmap).)
 > [`docs/M3-PLAN.md`](docs/M3-PLAN.md) and [`docs/PRD.md`](docs/PRD.md) (proofs:
 > [M2](docs/M2-PROOF.md), [M1](docs/M1-PROOF.md)) and the [roadmap](#roadmap).
 
-## What it will be
+## What it is
 
 ```
 ┌ overview ────────────────────────────────────────────┐
@@ -36,9 +36,9 @@ approvals reach your phone over ACP; see the [roadmap](#roadmap).)
 - **Everything is a client** — the TUI, ACP clients (phone/editor), and
   headless exec all consume the same typed Event/Op stream. Attach from
   anywhere; the bytes are identical.
-- **Structural permissions** — allow/ask/deny rules (Claude Code
-  settings-compatible), approvals as protocol messages that render in the TUI
-  or on your phone.
+- **Structural permissions** — allow/ask/deny rules; approvals are protocol
+  messages that render in the TUI or on your phone (Claude Code
+  settings-format import lands later).
 - **Session lifecycle you can trust** — event-sourced JSONL journals; kill or
   archive from the roster, resume after a crash, fork at any point. Journals
   are never deleted.

@@ -23,9 +23,10 @@ Fast PR lane (unit + golden); `go test -race` runs on push to main and
 release tags (`.github/workflows/ci.yml`). The e2e socket test runs on the
 push lane now that the M2 daemon has landed.
 
-## M3 exit gate
+## M3 exit gate — satisfied
 
-Before M3 closes, a **live multi-client pass** is required: two clients on one
-session (one of them a phone) exercising fan-out + approvals. Automated PR
-review caught zero of M2's cross-connection/ordering bugs; live client testing
-caught all of them — the golden/integration matrix can't stand in for it here.
+M3's close required a **live multi-client pass**: two clients on one session
+(one of them a phone) exercising fan-out + approvals — met at milestone close
+(#53). Automated PR review caught zero of M2's cross-connection/ordering bugs;
+live client testing caught all of them, so the golden/integration matrix could
+not stand in for it here.

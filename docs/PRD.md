@@ -174,7 +174,7 @@ the instrumentation source — see agent-sdk-go `DESIGN.md`). All exporters poin
 at **generic OTLP endpoints**, configurable and **off by default** — no
 phone-home.
 
-- **M2 (now): leveled structured logging** via `log/slog` (stderr text handler),
+- **M2: leveled structured logging** via `log/slog` (stderr text handler),
   `--log-level debug|info|warn|error` (default `info`, env `GOFER_LOG_LEVEL`).
   Covers connection lifecycle, every inbound request (method, id, outcome,
   duration), session lifecycle (created/resumed/killed/archived), and unknown
