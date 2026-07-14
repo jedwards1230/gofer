@@ -218,3 +218,62 @@ func TestColorAttachApprovalOverLongTranscript(t *testing.T) {
 		})
 	}
 }
+
+// toolCallModel replays a started+finished bash call (empty seed, then the
+// authoritative command on finish) with the given result and error flag,
+// rendering through th. The first two rendered lines are the tool block's
+// header and its single result line.
+func toolCallModel(th theme.Theme, id, result string, isError bool) tui.Model {
+	m := tui.New(th)
+	for _, e := range []event.Event{
+		event.NewToolCallStarted(sid, id, "bash", json.RawMessage(`{}`)),
+		event.NewToolCallFinished(sid, id, json.RawMessage(`{"command":"go test ./..."}`), result, isError, nil),
+	} {
+		m = m.Ingest(e)
+	}
+	return m
+}
+
+// TestColorToolCallErrorStyling proves the softened error styling is actually
+// applied, not merely structurally present (the Ascii golden can't see color):
+// a failed tool call's header is rendered in the warn accent — deliberately
+// softer than the DangerStyle red a fatal SessionError uses — and its result
+// body is dimmed, while a clean call's header and body carry no styling at all.
+func TestColorToolCallErrorStyling(t *testing.T) {
+	th := colorTheme()
+
+	failed := strings.Split(testkit.Render(toolCallModel(th, "call-1", "FAIL session 0.1s", true), testkit.Width, testkit.Height), "\n")
+	clean := strings.Split(testkit.Render(toolCallModel(th, "call-2", "ok session 0.1s", false), testkit.Width, testkit.Height), "\n")
+	failedHeader, failedBody := failed[0], failed[1]
+	cleanHeader, cleanBody := clean[0], clean[1]
+
+	// Same plain geometry — styling changes color, not the text or the glyph
+	// positions; only the ok/error glyph differs.
+	if got, want := ansi.Strip(failedHeader), "✗ bash(go test ./...)"; got != want {
+		t.Fatalf("failed header (stripped) = %q, want %q", got, want)
+	}
+	if got, want := ansi.Strip(cleanHeader), "✓ bash(go test ./...)"; got != want {
+		t.Fatalf("clean header (stripped) = %q, want %q", got, want)
+	}
+
+	// The failed header is exactly its plain text run through WarnStyle, and is
+	// NOT the DangerStyle red — the whole point of the softer accent.
+	if want := th.WarnStyle().Render(ansi.Strip(failedHeader)); failedHeader != want {
+		t.Errorf("failed header not warn-styled:\n got %q\nwant %q", failedHeader, want)
+	}
+	if danger := th.DangerStyle().Render(ansi.Strip(failedHeader)); failedHeader == danger {
+		t.Error("failed header is danger-styled; item wants the softer warn accent, not the SessionError red")
+	}
+
+	// The failed result body is dimmed (MutedStyle); the clean call carries no
+	// styling on either line.
+	if want := th.MutedStyle().Render(ansi.Strip(failedBody)); failedBody != want {
+		t.Errorf("failed body not muted:\n got %q\nwant %q", failedBody, want)
+	}
+	if cleanHeader != ansi.Strip(cleanHeader) {
+		t.Errorf("clean header should be unstyled, got %q", cleanHeader)
+	}
+	if cleanBody != ansi.Strip(cleanBody) {
+		t.Errorf("clean body should be unstyled, got %q", cleanBody)
+	}
+}

@@ -129,6 +129,19 @@ func TestGoldenToolCallMultiline(t *testing.T) {
 	)
 }
 
+// TestGoldenToolCallError covers a finished tool call that reported an error
+// (ToolCallFinished.IsError): the header glyph flips to the error glyph and
+// the real command still renders. This Ascii golden locks the structure
+// (✗ glyph + command header + result body); the color styling that sets an
+// error apart — the warn-accent header and dimmed body — can't show under
+// termenv.Ascii and is asserted separately in TestColorToolCallErrorStyling.
+func TestGoldenToolCallError(t *testing.T) {
+	render(t, "tool_call_error",
+		event.NewToolCallStarted(sid, "call-1", "bash", json.RawMessage(`{}`)),
+		event.NewToolCallFinished(sid, "call-1", json.RawMessage(`{"command":"go test ./..."}`), "FAIL  session  0.1s", true, nil),
+	)
+}
+
 // TestGoldenMidStream captures a turn mid-flight: deltas have arrived but
 // MessageFinished and TurnFinished haven't, so the item is still open and
 // the status line still reads streaming.
