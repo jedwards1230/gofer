@@ -66,4 +66,6 @@ go run ./cmd/gofer demo                            # offline faux-provider strea
 - `internal/daemon/` — ACP-over-WebSocket listener hosting the supervisor
   (`gofer daemon`); see its package doc and `docs/M2-PROOF.md`.
 - `internal/tui/` (bubbletea) — the attach/peek/overview frontend.
-- Planned: `internal/config/`.
+- `internal/config/` — gofer's native on-disk config (JSON at
+  `<root>/config.json`); M3 defines the permissions ruleset the guard consults,
+  with more sections to follow. See its package doc.

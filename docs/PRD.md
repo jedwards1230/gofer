@@ -56,9 +56,10 @@ would need it unchanged.
 - **Context-cost discipline.** Prompt assembly stays small and auditable; tool
   and MCP schemas load index-first (name + one-liner), full schemas on demand —
   never the whole registry up front.
-- **Open decision — session visibility (decide during M3 fan-out).** Does
-  `session/list` return cwd-scoped sessions or the fleet-global set with a cwd
-  label? It gates cross-client sync, so it lands with the fan-out registry.
+- **Session visibility — decided (M3, 2026-07-13): fleet-global, cwd as a
+  label.** `session/list` returns every session with the working dir as a
+  filterable tag, not a wall — so all clients share one roster (cwd-scoped
+  isolation may return later as opt-in config).
 
 ## CLI surface
 
@@ -206,7 +207,7 @@ phone-home.
 | **M0 · scaffold** ✅ shipped 2026-07-12 | repo + `gofer demo` streaming the SDK faux provider | typed events flow end-to-end offline |
 | **M1 · one good session** ✅ shipped 2026-07-12 | real provider + tools via SDK, minimal attach TUI | a real coding task, streaming, resumable after kill |
 | **M2 · the daemon** ✅ shipped 2026-07-13 | supervisor + roster + overview⇄peek⇄attach + native ACP | an ACP client on a phone drives a session on a laptop |
-| M3 · guardrails | **① daemon session→peers fan-out registry** (every registered peer gets every `session/update`; echo/dedup so prompts don't double-render) → **② sandbox** (seatbelt / bwrap+seccomp) → **③ approvals relay + phone approval UX**; then headless exec, daemon-as-service ([#42](https://github.com/jedwards1230/gofer/issues/42), first-use install prompt), lossless attach (daemonbridge reconstruction → lossless path), OTel | a phone approves a laptop tool call; a TUI attached to the same session watches the turn stream live |
+| **M3 · guardrails** ✅ shipped 2026-07-14 | **① daemon session→peers fan-out registry** (every registered peer gets every `session/update`; echo/dedup so prompts don't double-render) → **② sandbox** (seatbelt / bwrap+seccomp) → **③ approvals relay + phone approval UX**; then headless exec, daemon-as-service ([#42](https://github.com/jedwards1230/gofer/issues/42), first-use install prompt), lossless attach (daemonbridge reconstruction → lossless path), OTel | a phone approves a laptop tool call; a TUI attached to the same session watches the turn stream live |
 | M4 · ecosystem | MCP on by default (tool-search index-first) + subagents first-class (roster tree, peek/attach into children, linked journals) + skills + plugin UX | a third-party plugin adds a tool with one config line |
 | M5 · auto + polish | auto mode (reviewer pipeline), CC-asset import, mDNS pairing | auto mode survives a week of real ops without a bad allow |
 
