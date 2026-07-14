@@ -194,7 +194,12 @@ drain:
 				t.Fatal("notifications channel closed before PromptResponse arrived")
 			}
 			if n.Method != acp.MethodSessionUpdate {
-				t.Fatalf("notification method = %q, want %q", n.Method, acp.MethodSessionUpdate)
+				// The M3 lossless-attach fanout also sends this turn's full
+				// event stream as gofer/event on the SAME connection (see
+				// internal/daemon/handlers.go's broadcastGoferEvent) — this
+				// test is only about the ACP session/update projection, so
+				// skip it rather than fail.
+				continue
 			}
 			gotUpdates++
 			// This client is the originating peer, so the daemon suppresses its
