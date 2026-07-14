@@ -155,18 +155,28 @@ jobs:
           shopt -s nullglob
           raw_base="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/vhs-captures/pr-${PR}/${HEAD_SHA}"
           short="${HEAD_SHA:0:7}"
+          frames=(vhs/out/*.png)
+          count=${#frames[@]}
+          # Collapse the frames behind a default-closed <details> so the PR reads
+          # compact for humans, while the images stay as raw ![](url) markdown
+          # INSIDE it — an agent fetching the comment body still loads them.
           {
             echo "### TUI visual capture"
             echo
-            echo "Rendered VHS frames for commit \`${short}\`. Advisory only — this lane is **not** a required check."
+            echo "TUI captures for \`${short}\` — ${count} frame(s). Advisory only — this lane is **not** a required check."
             echo
-            for f in vhs/out/*.png; do
+            echo "<details>"
+            echo "<summary>🎞️ TUI visual captures — ${count} frames</summary>"
+            echo
+            for f in "${frames[@]}"; do
               name="$(basename "$f")"
               echo "**${name}**"
               echo
               echo "![${name}](${raw_base}/${name})"
               echo
             done
+            echo "</details>"
+            echo
             echo "<sub>Frames live on the \`vhs-captures\` branch under \`pr-${PR}/${HEAD_SHA}/\`. Regenerated on each push to this PR.</sub>"
           } > body.md
           cat body.md >> "$GITHUB_STEP_SUMMARY"
