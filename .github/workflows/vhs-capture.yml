@@ -1,0 +1,222 @@
+# Advisory visual-capture lane: on PRs that touch the TUI or its VHS tapes,
+# render every vhs/*.tape headlessly and surface the frames INLINE in the PR —
+# so TUI changes can be reviewed by eye without pulling the branch.
+#
+# Frames are published to an orphan `vhs-captures` branch under pr-<n>/<sha>/,
+# embedded via raw.githubusercontent URLs in the job summary and a sticky PR
+# comment. This is NOT a required check (own file, never gates merge). Fork PRs
+# get a read-only token, so they degrade to an artifact upload instead of a
+# push+comment.
+name: VHS capture
+run-name: VHS capture · PR #${{ github.event.pull_request.number }}
+
+on:
+  pull_request:
+    paths:
+      - internal/tui/**
+      - vhs/**
+      - scripts/tui-vhs.sh
+      - .github/workflows/vhs-capture.yml
+
+# One run per PR; a newer push cancels the older render so orphan-branch pushes
+# for the same PR never race each other.
+concurrency:
+  group: vhs-capture-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write # push rendered frames to the vhs-captures orphan branch
+  pull-requests: write # maintain the sticky capture comment
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    env:
+      PR: ${{ github.event.pull_request.number }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+
+      # Install the VHS toolchain directly rather than via charmbracelet/vhs-action:
+      # the action's dependency install is unconditional and its bundled ffmpeg
+      # installer is currently broken (dead download URL), so it fails install-only
+      # too. apt carries ttyd/ffmpeg/the font; vhs is pinned by release tag. Unset
+      # CI and force truecolor so termenv emits real ANSI colors in the frames.
+      - name: Install VHS and render deps
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg ttyd fonts-jetbrains-mono
+          # setup-go pins GOTOOLCHAIN=local at the repo's go.mod version; vhs needs a
+          # newer toolchain than that, so let this one build fetch it (auto). The
+          # later harness build still uses the repo's pinned toolchain.
+          GOTOOLCHAIN=auto go install github.com/charmbracelet/vhs@v0.11.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          {
+            echo "CI="
+            echo "COLORTERM=truecolor"
+          } >> "$GITHUB_ENV"
+
+      # Glob the tapes (no hardcoded list) and reuse the repo's own renderer,
+      # which prebuilds vhs/.bin/harness then renders each tape to vhs/out/.
+      - name: Render VHS tapes
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          tapes=()
+          for tape in vhs/*.tape; do
+            tapes+=("$(basename "$tape" .tape)")
+          done
+          if [ ${#tapes[@]} -eq 0 ]; then
+            echo "no vhs/*.tape files found" >&2
+            exit 1
+          fi
+          echo "rendering tapes: ${tapes[*]}"
+          scripts/tui-vhs.sh "${tapes[@]}"
+          echo "--- rendered ---"
+          ls -1 vhs/out/
+
+      # Always upload the raw frames+gifs: the only way fork PRs can see them,
+      # and a backup for same-repo runs.
+      - name: Upload frames artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: vhs-frames
+          path: vhs/out/
+          if-no-files-found: error
+
+      # Publish PNG frames to the orphan vhs-captures branch under a per-PR dir,
+      # overwriting the dir each run so it stays bounded. Same-repo PRs only
+      # (fork tokens are read-only). Retries to tolerate cross-PR push races.
+      - name: Publish frames to vhs-captures branch
+        if: env.SAME_REPO == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          pngs=(vhs/out/*.png)
+          if [ ${#pngs[@]} -eq 0 ]; then
+            echo "no PNG frames to publish" >&2
+            exit 1
+          fi
+          n=0
+          until [ "$n" -ge 5 ]; do
+            work="$(mktemp -d)"
+            # Guarantee cleanup on ANY exit path (a git failure under set -e
+            # would otherwise leak the temp dir); re-armed each iteration to
+            # point at the current dir. The explicit rm -rf below still runs on
+            # the normal retry/success paths.
+            trap 'rm -rf "$work"' EXIT
+            git -C "$work" init -q
+            git -C "$work" remote add origin \
+              "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+            if git -C "$work" fetch -q origin vhs-captures; then
+              git -C "$work" checkout -q -B vhs-captures FETCH_HEAD
+            else
+              echo "vhs-captures branch absent — bootstrapping orphan"
+              git -C "$work" checkout -q --orphan vhs-captures
+            fi
+            # Replace this PR's dir wholesale (drops stale per-sha subdirs).
+            rm -rf "${work:?}/pr-${PR}"
+            mkdir -p "$work/pr-${PR}/${HEAD_SHA}"
+            cp "${pngs[@]}" "$work/pr-${PR}/${HEAD_SHA}/"
+            git -C "$work" add -A "pr-${PR}"
+            if git -C "$work" diff --cached --quiet; then
+              echo "no frame changes to commit"
+              rm -rf "$work"
+              break
+            fi
+            git -C "$work" \
+              -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -q -m "vhs: PR #${PR} @ ${HEAD_SHA}"
+            if git -C "$work" push -q origin vhs-captures; then
+              echo "pushed frames for PR #${PR} @ ${HEAD_SHA}"
+              rm -rf "$work"
+              break
+            fi
+            echo "push rejected (concurrent update?) — retrying"
+            rm -rf "$work"
+            n=$((n + 1))
+            sleep $(((RANDOM % 4) + 2))
+          done
+          if [ "$n" -ge 5 ]; then
+            echo "failed to publish frames after retries" >&2
+            exit 1
+          fi
+
+      # Build the shared markdown (step summary + sticky comment) from whatever
+      # PNGs were rendered — no hardcoded frame names.
+      - name: Compose capture markdown
+        if: env.SAME_REPO == 'true'
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          raw_base="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/vhs-captures/pr-${PR}/${HEAD_SHA}"
+          short="${HEAD_SHA:0:7}"
+          frames=(vhs/out/*.png)
+          count=${#frames[@]}
+          # Collapse the frames behind a default-closed <details> so the PR reads
+          # compact for humans, while the images stay as raw ![](url) markdown
+          # INSIDE it — an agent fetching the comment body still loads them.
+          {
+            echo "### TUI visual capture"
+            echo
+            echo "TUI captures for \`${short}\` — ${count} frame(s). Advisory only — this lane is **not** a required check."
+            echo
+            echo "<details>"
+            echo "<summary>🎞️ TUI visual captures — ${count} frames</summary>"
+            echo
+            for f in "${frames[@]}"; do
+              name="$(basename "$f")"
+              echo "**${name}**"
+              echo
+              echo "![${name}](${raw_base}/${name})"
+              echo
+            done
+            echo "</details>"
+            echo
+            echo "<sub>Frames live on the \`vhs-captures\` branch under \`pr-${PR}/${HEAD_SHA}/\`. Regenerated on each push to this PR.</sub>"
+          } > body.md
+          cat body.md >> "$GITHUB_STEP_SUMMARY"
+
+      # Find-and-update a single marker comment; never spam a new one per push.
+      - name: Upsert sticky PR comment
+        if: env.SAME_REPO == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          marker='<!-- vhs-capture-bot -->'
+          { printf '%s\n\n' "$marker"; cat body.md; } > comment.md
+          existing="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate \
+            -q "[.[] | select(.body | contains(\"$marker\")) | .id] | first // empty")"
+          if [ -n "$existing" ]; then
+            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${existing}" \
+              -F body=@comment.md >/dev/null
+            echo "updated sticky comment ${existing}"
+          else
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" \
+              -F body=@comment.md >/dev/null
+            echo "created sticky comment"
+          fi
+
+      # Fork PRs can't push or comment (read-only token): point reviewers at the
+      # uploaded artifact so the job still succeeds and stays useful.
+      - name: Fork notice (artifact-only)
+        if: env.SAME_REPO != 'true'
+        run: |
+          {
+            echo "### TUI visual capture"
+            echo
+            echo "This PR is from a fork, so the token is read-only — frames can't be"
+            echo "pushed to the capture branch or posted as a comment."
+            echo
+            echo "Rendered frames are attached to this run as the **vhs-frames** artifact."
+          } >> "$GITHUB_STEP_SUMMARY"
