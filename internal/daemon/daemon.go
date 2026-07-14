@@ -125,6 +125,18 @@ type Daemon struct {
 	// restart — bounded by the unique tool-call ids of a session, the same M3
 	// bound the SDK Gate's own pending map carries.
 	permRoutes map[string]string
+
+	// permReqMu guards permReqCancels.
+	permReqMu sync.Mutex
+	// permReqCancels maps a permission request's call id to the cancel func for
+	// the spec-ACP session/request_permission requests the daemon fanned out to
+	// ACP peers for it (see [Daemon.requestPermissionFromPeers]). When the
+	// permission resolves by ANY path — an ACP peer's answer, a gofer-native
+	// permission.reply, or an interrupt — the daemon cancels the outstanding
+	// requests at every OTHER peer so no daemon-side waiter dangles, mirroring
+	// the gofer/permission_resolved fanout timing. Bounded by session call ids,
+	// same as permRoutes.
+	permReqCancels map[string]context.CancelFunc
 }
 
 // New builds a Daemon around sup. It does not start listening — call Serve
@@ -140,14 +152,15 @@ func New(sup *supervisor.Supervisor, cfg Config) *Daemon {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Daemon{
-		sup:          sup,
-		cfg:          cfg,
-		log:          logger,
-		ctx:          ctx,
-		cancel:       cancel,
-		connSem:      make(chan struct{}, maxConns),
-		sessionPeers: make(map[string]map[*peer]struct{}),
-		permRoutes:   make(map[string]string),
+		sup:            sup,
+		cfg:            cfg,
+		log:            logger,
+		ctx:            ctx,
+		cancel:         cancel,
+		connSem:        make(chan struct{}, maxConns),
+		sessionPeers:   make(map[string]map[*peer]struct{}),
+		permRoutes:     make(map[string]string),
+		permReqCancels: make(map[string]context.CancelFunc),
 	}
 }
 
@@ -247,6 +260,34 @@ func (d *Daemon) lookupPermRoute(id string) (string, bool) {
 	defer d.permMu.Unlock()
 	s, ok := d.permRoutes[id]
 	return s, ok
+}
+
+// registerPermCancel records the cancel func for the session/request_permission
+// requests fanned out for call id. A pre-existing entry (a call-id collision,
+// not expected) is cancelled before being replaced so no cancel func is lost.
+func (d *Daemon) registerPermCancel(id string, cancel context.CancelFunc) {
+	d.permReqMu.Lock()
+	old, ok := d.permReqCancels[id]
+	d.permReqCancels[id] = cancel
+	d.permReqMu.Unlock()
+	if ok {
+		old()
+	}
+}
+
+// cancelPermRequest cancels and forgets the outstanding session/request_permission
+// requests for call id. Idempotent: a second call (e.g. the drain loop's
+// permission.resolved and the handler's deferred sweep both firing) is a no-op.
+func (d *Daemon) cancelPermRequest(id string) {
+	d.permReqMu.Lock()
+	cancel, ok := d.permReqCancels[id]
+	if ok {
+		delete(d.permReqCancels, id)
+	}
+	d.permReqMu.Unlock()
+	if ok {
+		cancel()
+	}
 }
 
 // Handler returns the daemon's WebSocket upgrade handler, exported so tests

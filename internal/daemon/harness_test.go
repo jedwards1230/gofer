@@ -110,6 +110,13 @@ type wsClient struct {
 
 	notifications chan rpcFrame
 
+	// inboundRequests carries daemon-initiated REQUESTS (a method AND an id —
+	// session/request_permission), which a pure ACP client answers. A test
+	// reads one via waitRequest and answers with respond/respondError. A gofer-
+	// native test client simply never drains it (the daemon still works — the
+	// request just goes unanswered), so it is buffered generously.
+	inboundRequests chan rpcFrame
+
 	// pending maps a request's marshaled id to the channel readLoop delivers
 	// its matching response to. It exists because multiple requests can be
 	// outstanding on one connection at once (e.g. a blocked session/prompt
@@ -131,12 +138,13 @@ func dial(t *testing.T, ctx context.Context, url string, header map[string][]str
 		t.Fatalf("dial %s: %v", url, err)
 	}
 	c := &wsClient{
-		t:             t,
-		conn:          conn,
-		ctx:           ctx,
-		notifications: make(chan rpcFrame, 64),
-		pending:       make(map[string]chan rpcFrame),
-		unmatched:     make(chan rpcFrame, 16),
+		t:               t,
+		conn:            conn,
+		ctx:             ctx,
+		notifications:   make(chan rpcFrame, 64),
+		inboundRequests: make(chan rpcFrame, 16),
+		pending:         make(map[string]chan rpcFrame),
+		unmatched:       make(chan rpcFrame, 16),
 	}
 	go c.readLoop()
 	t.Cleanup(func() { _ = conn.Close(websocket.StatusNormalClosure, "") })
@@ -154,6 +162,7 @@ func (c *wsClient) readLoop() {
 			c.pending = nil
 			c.mu.Unlock()
 			close(c.notifications)
+			close(c.inboundRequests)
 			close(c.unmatched)
 			return
 		}
@@ -163,6 +172,15 @@ func (c *wsClient) readLoop() {
 		}
 		if f.Method != "" && len(f.ID) == 0 {
 			c.notifications <- f
+			continue
+		}
+		// A daemon-initiated REQUEST: a method AND an id (session/request_permission).
+		if f.Method != "" && len(f.ID) > 0 {
+			select {
+			case c.inboundRequests <- f:
+			case <-c.ctx.Done():
+				return
+			}
 			continue
 		}
 
@@ -237,6 +255,28 @@ func (c *wsClient) request(method string, params any) rpcFrame {
 		c.t.Fatalf("timed out waiting for response id=%d", id)
 	}
 	return rpcFrame{}
+}
+
+// respond answers a daemon-initiated request with a success result, echoing id
+// verbatim (the daemon owns the id space; the client just reflects it back).
+func (c *wsClient) respond(id json.RawMessage, result any) {
+	c.t.Helper()
+	c.write(struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Result  any             `json:"result"`
+	}{jsonrpcVersion, id, result})
+}
+
+// respondError answers a daemon-initiated request with a JSON-RPC error (e.g. a
+// client that does not implement the method), echoing id verbatim.
+func (c *wsClient) respondError(id json.RawMessage, code int, message string) {
+	c.t.Helper()
+	c.write(struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Error   frameError      `json:"error"`
+	}{jsonrpcVersion, id, frameError{Code: code, Message: message}})
 }
 
 // notify sends a JSON-RPC notification (no id, no response expected).

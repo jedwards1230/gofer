@@ -17,16 +17,31 @@ const (
 	codeAppError       = -32000
 )
 
-// inboundEnvelope is the shape of any client->daemon frame: a request (id
-// present), a notification (id absent), or a malformed message. json.RawMessage
-// fields are decoded lazily by the method handler, and ID is echoed back
-// verbatim on a response rather than re-encoded, so a client's own id type
-// (number or string) round-trips exactly.
+// inboundEnvelope is the shape of any client->daemon frame: a request (method +
+// id), a notification (method, no id), a RESPONSE to a daemon-initiated request
+// (id + result/error, no method — see [peer.request]), or a malformed message.
+// json.RawMessage fields are decoded lazily by the method handler, and ID is
+// echoed back verbatim on a response rather than re-encoded, so a client's own
+// id type (number or string) round-trips exactly.
 type inboundEnvelope struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id,omitempty"`
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params,omitempty"`
+	// Result and Error are set only when the frame is a response to a
+	// daemon-initiated request (the daemon acting as a JSON-RPC client on the
+	// connection): the client answers a session/request_permission REQUEST with
+	// one of these. For an inbound request/notification they are absent.
+	Result json.RawMessage `json:"result,omitempty"`
+	Error  *rpcError       `json:"error,omitempty"`
+}
+
+// isResponse reports whether e is a response to a daemon-initiated request: it
+// has an id, no method, and carries a result or error. A request always names a
+// method, so a method-less, id-bearing frame that carries a result/error can
+// only be a response.
+func (e inboundEnvelope) isResponse() bool {
+	return e.Method == "" && len(e.ID) > 0 && (len(e.Result) > 0 || e.Error != nil)
 }
 
 // isNotification reports whether e carries no id, per JSON-RPC 2.0 — a
@@ -56,6 +71,18 @@ type outboundNotification struct {
 	JSONRPC string `json:"jsonrpc"`
 	Method  string `json:"method"`
 	Params  any    `json:"params,omitempty"`
+}
+
+// outboundRequest is a JSON-RPC 2.0 request the daemon sends TO a client (the
+// agent->client direction), for session/request_permission. ID is a raw,
+// pre-marshaled id so the daemon owns its own request-id space (see
+// [peer.request]); the client echoes it back on the response [peer.deliverReply]
+// routes.
+type outboundRequest struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id"`
+	Method  string          `json:"method"`
+	Params  any             `json:"params,omitempty"`
 }
 
 // parseError builds the -32700 error for a frame that failed to parse as
