@@ -1,5 +1,7 @@
-you › Say hello.
+○ Say hello.
 
-Hello! How can I help you today?
-○ idle  stop=end_turn  usage=9in/7out
+● Hello! How can I help you today?
+────────────────────────────────────────────────────────────────────────────────
 > ▏
+────────────────────────────────────────────────────────────────────────────────
+usage=9in/7out

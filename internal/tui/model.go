@@ -21,21 +21,13 @@ import (
 	"fmt"
 	"strings"
 
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
 	"github.com/jedwards1230/gofer/internal/tui/theme"
-)
-
-// turnState is the attach surface's coarse turn lifecycle, shown in the
-// status line.
-type turnState int
-
-const (
-	turnIdle turnState = iota
-	turnStreaming
 )
 
 // itemKind distinguishes transcript item shapes.
@@ -92,17 +84,16 @@ type Model struct {
 	// pending is the session's current unresolved permission request, if any
 	// (nil = none) — the backing state for the interactive inline approval
 	// prompt. It is transient client-side state (like input), NOT a transcript
-	// item: while set, it commandeers the bottom input line (see View),
-	// and disappears on resolve or dismiss (the input returns), while the
-	// itemApproval badge and itemApprovalResolved line stay as the permanent
-	// record. Following Model's copy-on-write discipline the pointer is never
-	// mutated in place — every mutator reallocates and repoints.
+	// item: while set, it commandeers the whole footer (see View) in place of
+	// the status line and input box, and disappears on resolve or dismiss (the
+	// footer returns), while the itemApproval badge and itemApprovalResolved
+	// line stay as the permanent record. Following Model's copy-on-write
+	// discipline the pointer is never mutated in place — every mutator
+	// reallocates and repoints.
 	pending *pendingApproval
 
-	turn       turnState
-	stopReason string
-	usage      *provider.Usage
-	cost       *provider.Cost
+	usage *provider.Usage
+	cost  *provider.Cost
 
 	input string
 
@@ -133,12 +124,7 @@ func (m Model) Ingest(e event.Event) Model {
 	m.toolIndex = toolIndex
 
 	switch ev := e.(type) {
-	case event.TurnStarted:
-		m.turn = turnStreaming
-
 	case event.TurnFinished:
-		m.turn = turnIdle
-		m.stopReason = ev.StopReason
 		usage := ev.Usage
 		m.usage = &usage
 		m.cost = ev.Cost
@@ -215,12 +201,16 @@ func (m Model) Ingest(e event.Event) Model {
 		// View). A second request supersedes the first — last one shown wins;
 		// the superseded request stays pending server-side and its own
 		// PermissionResolved simply finds m.pending pointed elsewhere below.
+		// badgeIdx records the badge's transcript index so transcriptLines can
+		// suppress it while the prompt block is showing (the prompt already
+		// repeats the tool + args line).
+		idx := len(m.items)
 		m.items = append(m.items, item{kind: itemApproval, text: ev.Tool, done: true})
-		m.pending = &pendingApproval{id: ev.ID, tool: ev.Tool, spec: ev.Spec, session: ev.SessionID()}
+		m.pending = &pendingApproval{id: ev.ID, tool: ev.Tool, spec: ev.Spec, session: ev.SessionID(), badgeIdx: idx}
 
 	case event.PermissionResolved:
 		// A routine allow is the expected outcome, and its transcript line is
-		// noise — the ✋ badge already recorded the request. Deny/ask stay
+		// noise — the ● badge already recorded the request. Deny/ask stay
 		// visible because they change what happened. Either way, clear the
 		// interactive prompt if it was still showing this request (this
 		// client answered via resolveApproval, or another attached client
@@ -396,15 +386,22 @@ const transcriptGap = 1
 // transcriptLines renders every item's lines, truncated to width, with
 // transcriptGap blank line(s) between consecutive items — no leading gap
 // before the first item, no trailing gap after the last. Shared by View and
-// FullTranscript so both surfaces render the transcript body identically.
+// FullTranscript so both surfaces render the transcript body identically. A
+// pending approval's badge is skipped — it is shown by the prompt block
+// instead (see promptLines), not duplicated inline.
 func (m Model) transcriptLines(width int) []string {
 	lines := make([]string, 0, len(m.items)+2)
+	first := true
 	for i, it := range m.items {
-		if i > 0 {
+		if m.pending != nil && i == m.pending.badgeIdx {
+			continue // shown by the pending prompt block, not inline
+		}
+		if !first {
 			for range transcriptGap {
 				lines = append(lines, "")
 			}
 		}
+		first = false
 		for _, line := range m.renderItemLines(it) {
 			lines = append(lines, truncate(line, width))
 		}
@@ -412,11 +409,11 @@ func (m Model) transcriptLines(width int) []string {
 	return lines
 }
 
-// View renders the transcript, status line, and input line at the given
-// size. Width wraps nothing (M1's virtualized transcript and stable-prefix
-// markdown cache from docs/TUI.md land later); a line longer than width is
-// truncated. Height keeps only the most recent lines, tailing the
-// transcript like a live attach.
+// View renders the transcript and the footer (status + input, or the
+// approval prompt) at the given size. Width wraps nothing (M1's virtualized
+// transcript and stable-prefix markdown cache from docs/TUI.md land later); a
+// line longer than width is truncated. Height keeps only the most recent
+// lines, tailing the transcript like a live attach.
 func (m Model) View(width, height int) string {
 	if width < 1 {
 		width = 1
@@ -427,17 +424,24 @@ func (m Model) View(width, height int) string {
 
 	lines := m.transcriptLines(width)
 
-	// The bottom UI is the status line plus either the input line or — while a
-	// permission request is pending — the approval prompt, which commandeers
-	// the input's spot (the input is suppressed until the request is answered,
-	// then returns). Whichever footer shows, the transcript above tails to fit
-	// so the footer stays anchored to the bottom however long the conversation
-	// grows.
-	footer := []string{truncate(m.statusLine(), width)}
+	// The input box is framed by full-width rules above and below, with the
+	// status line beneath it. A pending approval commandeers the whole
+	// footer: the rules, input box, and status line are suppressed so the
+	// prompt block stands alone — whichever footer shows, the transcript
+	// above tails to fit so the footer stays anchored to the bottom however
+	// long the conversation grows.
+	var footer []string
 	if prompt := m.promptLines(width); prompt != nil {
-		footer = append(footer, prompt...)
+		footer = prompt
 	} else {
-		footer = append(footer, truncate(m.inputLine(), width))
+		rule := strings.Repeat("─", width)
+		footer = []string{rule, truncate(m.inputLine(), width), rule}
+		// The status line carries only usage/cost now, and only once a turn has
+		// finished — omit it (no blank row) until then, so the box sits flush
+		// against the transcript.
+		if status := m.statusLine(); status != "" {
+			footer = append(footer, truncate(status, width))
+		}
 	}
 
 	if avail := height - len(footer); avail >= 0 && len(lines) > avail {
@@ -462,54 +466,66 @@ func (m Model) promptLines(width int) []string {
 	return out
 }
 
+// markerLine renders a state marker glyph in style, a space, then the
+// caller-styled rest of the line. Only the glyph carries the state color — the
+// text after a marker keeps its own styling — so the styled-golden layer reads
+// the marker as the single source of state truth. Under theme.Test()'s Ascii
+// profile style.Render is a no-op, so the plain golden is just "glyph rest".
+func markerLine(style lipgloss.Style, glyph, rest string) string {
+	return style.Render(glyph) + " " + rest
+}
+
 // renderItemLines renders a single transcript item to its display lines. A
 // tool item is a collapsed tree block spanning header + up to three
-// result lines; every other kind renders to exactly one line.
+// result lines; every other kind renders to exactly one line. Every kind is
+// marker-only styled: the leading glyph carries the state color, the text
+// after it keeps its own styling (plain, or muted for reasoning/status body).
 func (m Model) renderItemLines(it item) []string {
 	switch it.kind {
 	case itemAssistantReasoning:
-		return []string{m.theme.MutedStyle().Render("» " + it.text)}
+		return []string{markerLine(m.theme.WarnStyle(), m.theme.GlyphAgent, m.theme.MutedStyle().Render(it.text))}
 
 	case itemUser:
-		return []string{m.theme.AccentStyle().Render("you › " + it.text)}
+		return []string{markerLine(m.theme.InkStyle(), m.theme.GlyphHuman, it.text)}
 
 	case itemTool:
 		return m.renderToolLines(it)
 
 	case itemError:
-		return []string{m.theme.DangerStyle().Render(m.theme.GlyphErr + " " + it.text)}
+		return []string{markerLine(m.theme.DangerStyle(), m.theme.GlyphAgent, it.text)}
 
 	case itemApproval:
-		return []string{m.theme.WarnStyle().Render(m.theme.GlyphApproval + " " + it.text)}
+		return []string{markerLine(m.theme.WarnStyle(), m.theme.GlyphAgent, it.text)}
 
 	case itemApprovalResolved:
-		glyph, style := m.theme.GlyphOK, m.theme.OKStyle()
+		style := m.theme.OKStyle()
 		if it.approvalVerdict == string(event.VerdictDeny) {
-			glyph, style = m.theme.GlyphErr, m.theme.DangerStyle()
+			style = m.theme.DangerStyle()
 		}
-		return []string{style.Render(glyph + " permission " + it.approvalVerdict)}
+		return []string{markerLine(style, m.theme.GlyphAgent, "permission "+it.approvalVerdict)}
 
 	default: // itemAssistantText
-		return []string{it.text}
+		style := m.theme.WarnStyle()
+		if it.done {
+			style = m.theme.OKStyle()
+		}
+		return []string{markerLine(style, m.theme.GlyphAgent, it.text)}
 	}
 }
 
 // renderToolLines renders a tool call as a collapsed tree block: a header
 // line, then — once the call has finished with a non-empty result — up to
 // three tree-indented result lines, collapsing any remainder into a single
-// "… +N lines" line.
+// "… +N lines" line. Marker-only styled: running is yellow, done is green, a
+// failed call's marker is red like a session error — the muted body is what
+// de-emphasizes the noisy output, not a softer header color.
 func (m Model) renderToolLines(it item) []string {
-	glyph := m.theme.GlyphStreaming
+	style := m.theme.WarnStyle() // running = yellow
 	failed := false
 	if it.done {
-		glyph = m.theme.GlyphOK
+		style = m.theme.OKStyle() // done ok = green
 		if it.toolErr {
-			// An internal/transient tool error (the call ran but reported a
-			// problem) reads as a caution, not a session crash — WarnStyle's
-			// amber is deliberately softer than the DangerStyle reserved for a
-			// fatal SessionError, and the muted body de-emphasizes the error
-			// text so it doesn't look like prominent real output.
-			glyph = m.theme.GlyphErr
+			style = m.theme.DangerStyle() // tool failure = red
 			failed = true
 		}
 	}
@@ -518,11 +534,7 @@ func (m Model) renderToolLines(it item) []string {
 	if summary := summarizeToolInput(it.toolInput); summary != "" {
 		header = fmt.Sprintf("%s(%s)", it.toolName, summary)
 	}
-	headerLine := glyph + " " + header
-	if failed {
-		headerLine = m.theme.WarnStyle().Render(headerLine)
-	}
-	lines := []string{headerLine}
+	lines := []string{markerLine(style, m.theme.GlyphAgent, header)}
 
 	if !it.done || it.toolResult == "" {
 		return lines
@@ -552,19 +564,18 @@ func (m Model) renderToolLines(it item) []string {
 	return lines
 }
 
-// statusLine reports the turn's lifecycle state and, once TurnFinished has
-// been seen, its stop reason, usage, and cost.
+// statusLine reports the turn's token usage and cost once TurnFinished has
+// been seen, muted; it returns "" before then (while streaming, mid tool call,
+// or before any turn has finished). The per-line marker colors already carry
+// turn/tool state, so a bottom state word would only repeat it — usage/cost is
+// the one thing that surfaces nowhere else, so it is all this line shows.
 func (m Model) statusLine() string {
-	glyph, label := m.theme.GlyphIdle, "idle"
-	if m.turn == turnStreaming {
-		glyph, label = m.theme.GlyphStreaming, "streaming"
+	if m.usage == nil {
+		return ""
 	}
-	line := glyph + " " + label
-	if m.usage != nil {
-		line += fmt.Sprintf("  stop=%s  usage=%din/%dout", m.stopReason, m.usage.InputTokens, m.usage.OutputTokens)
-		if m.cost != nil {
-			line += fmt.Sprintf("  $%.4f", m.cost.USD)
-		}
+	line := fmt.Sprintf("usage=%din/%dout", m.usage.InputTokens, m.usage.OutputTokens)
+	if m.cost != nil {
+		line += fmt.Sprintf("  $%.4f", m.cost.USD)
 	}
 	return m.theme.MutedStyle().Render(line)
 }
@@ -575,11 +586,11 @@ func (m Model) inputLine() string {
 }
 
 // FullTranscript renders every transcript item unclipped by height, followed
-// by the final status line. It is what the attach TUI flushes to the terminal
-// on exit, so the scrollback holds the whole conversation — not the
-// viewport-clipped final frame the live view leaves behind (the M1
-// exit-truncation bug). The input line is omitted: there is no more input once
-// the program has exited.
+// by the final usage/cost status line when there is one. It is what the attach
+// TUI flushes to the terminal on exit, so the scrollback holds the whole
+// conversation — not the viewport-clipped final frame the live view leaves
+// behind (the M1 exit-truncation bug). The input line is omitted: there is no
+// more input once the program has exited.
 func (m Model) FullTranscript(width int) string {
 	if width < 1 {
 		width = 1
@@ -589,13 +600,15 @@ func (m Model) FullTranscript(width int) string {
 	}
 
 	lines := m.transcriptLines(width)
-	lines = append(lines, truncate(m.statusLine(), width))
+	if status := m.statusLine(); status != "" {
+		lines = append(lines, truncate(status, width))
+	}
 	return strings.Join(lines, "\n")
 }
 
 // truncate clips s to at most w terminal cells (display width, not rune
-// count — so ANSI styling and wide runes like the ✋ approval glyph are
-// measured correctly), marking a clipped line with a trailing ellipsis.
+// count — so ANSI styling is measured correctly, not counted as visible
+// width), marking a clipped line with a trailing ellipsis.
 func truncate(s string, w int) string {
 	if w < 0 {
 		w = 0

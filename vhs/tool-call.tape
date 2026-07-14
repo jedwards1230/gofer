@@ -20,7 +20,7 @@ Show
 
 Sleep 2s
 Screenshot vhs/out/tool-call-running.png
-Sleep 2s
+Sleep 4s
 Screenshot vhs/out/tool-call.png
 Sleep 500ms
 Ctrl+C

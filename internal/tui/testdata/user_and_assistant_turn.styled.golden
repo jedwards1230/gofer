@@ -1,7 +1,7 @@
-● The user said hello. I'll greet them back.
+<ink>○</ink> Say hello.
 
-● Hello! How can I help you today?
+<green>●</green> Hello! How can I help you today?
 ────────────────────────────────────────────────────────────────────────────────
 > ▏
 ────────────────────────────────────────────────────────────────────────────────
-usage=9in/7out
+<muted>usage=9in/7out</muted>

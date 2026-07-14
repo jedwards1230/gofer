@@ -40,23 +40,31 @@ type step struct {
 }
 
 func main() {
-	scenario := flag.String("scenario", "tool-call", "scripted scene to play: tool-call | approval")
+	scenario := flag.String("scenario", "tool-call", "scripted scene to play: tool-call | approval | overview")
 	flag.Parse()
 
-	var script []step
+	// The attach scenes drive tui.NewProgram (the transcript) with a scripted
+	// event stream; the overview scene is a pure roster snapshot with no event
+	// stream, so it runs a static model and leaves script nil.
+	var (
+		model  tea.Model = tui.NewProgram(theme.Default())
+		script []step
+	)
 	switch *scenario {
 	case "tool-call":
 		script = toolCallScene()
 	case "approval":
 		script = approvalScene()
+	case "overview":
+		model = overviewScene()
 	default:
-		fmt.Fprintf(os.Stderr, "harness: unknown scenario %q (want tool-call | approval)\n", *scenario)
+		fmt.Fprintf(os.Stderr, "harness: unknown scenario %q (want tool-call | approval | overview)\n", *scenario)
 		os.Exit(2)
 	}
 
 	// tea.WithInput(os.Stdin) lets the tape's Ctrl+C reach handleKey, which
 	// quits the program; the same key path a real attach uses.
-	p := tea.NewProgram(tui.NewProgram(theme.Default()), tea.WithInput(os.Stdin))
+	p := tea.NewProgram(model, tea.WithInput(os.Stdin))
 
 	go func() {
 		time.Sleep(600 * time.Millisecond) // let the alt screen settle before the first frame
@@ -119,4 +127,51 @@ func approvalScene() []step {
 		{event.NewTurnFinished(sid, "end_turn", provider.Usage{InputTokens: 88, OutputTokens: 41}), beat},
 		{event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"command": "rm -rf /tmp/session-fixtures"}, []string{"no rule"}), beat},
 	}
+}
+
+// overviewScene builds the roster screen over a mixed-state session set so VHS
+// captures the ● status markers in color — the state the marker redesign moved
+// out of glyph shape and into color alone, which the Ascii goldens are blind
+// to: a working row (yellow ●), a permission-blocked row (yellow ●2, its live
+// pending count), an awaiting-input row (yellow ●), and a finished row
+// (green ●).
+func overviewScene() tea.Model {
+	now := time.Now()
+	meta := tui.OverviewMeta{App: "gofer", Version: "0.3.0", Model: "fable-5", Cwd: "~/orchestration", Now: now}
+	sessions := []tui.SessionInfo{
+		{ID: "sess-1", Title: "wire the websocket ACP listener", Summary: "streaming the daemon handshake", Status: tui.StatusWorking, Updated: now.Add(-30 * time.Second)},
+		{ID: "sess-2", Title: "explore three agent ecosystems", Summary: "blocked: approve Bash(kubectl delete pod)", Status: tui.StatusWorking, Pending: 2, Updated: now.Add(-2 * time.Minute)},
+		{ID: "sess-3", Title: "keycloak path-b groundwork", Summary: "turn finished — awaiting the next prompt", Status: tui.StatusNeedsInput, Updated: now.Add(-5 * time.Minute)},
+		{ID: "sess-4", Title: "authentik token exchange rfc 8693", Summary: "Keycloak Path-B foundation complete and verified", Status: tui.StatusFinished, Updated: now.Add(-time.Hour)},
+	}
+	return overviewModel{over: tui.NewOverview(theme.Default(), meta).WithSessions(sessions)}
+}
+
+// overviewModel wraps a static [tui.Overview] as a bubbletea model so VHS can
+// capture the roster screen. Unlike the attach transcript, the roster carries
+// no event stream — it just redraws its snapshot on resize and quits on
+// Ctrl+C, the same alt-screen frame [tui.App] renders it through live.
+type overviewModel struct {
+	over          tui.Overview
+	width, height int
+}
+
+func (m overviewModel) Init() tea.Cmd { return nil }
+
+func (m overviewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width, m.height = msg.Width, msg.Height
+	case tea.KeyPressMsg:
+		if key := msg.Key(); key.Mod.Contains(tea.ModCtrl) && key.Code == 'c' {
+			return m, tea.Quit
+		}
+	}
+	return m, nil
+}
+
+func (m overviewModel) View() tea.View {
+	v := tea.NewView(m.over.View(m.width, m.height))
+	v.AltScreen = true
+	return v
 }

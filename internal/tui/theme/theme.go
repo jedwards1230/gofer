@@ -32,13 +32,11 @@ type Theme struct {
 	Warn   string
 	Danger string
 
-	// State glyphs. These are plain runes, not styled output, so they
-	// render identically regardless of Profile.
-	GlyphIdle      string // turn is idle, waiting on input
-	GlyphStreaming string // a turn or tool call is in flight
-	GlyphApproval  string // a permission request is pending
-	GlyphOK        string // a tool call or turn finished cleanly
-	GlyphErr       string // a session error occurred
+	// State markers. Plain runes, not styled output — color is applied by the
+	// caller (marker-only styling), so the glyph carries state only through the
+	// style it is rendered in.
+	GlyphHuman string // ○ — a human message (the only hollow circle)
+	GlyphAgent string // ● — everything else; color carries the state
 }
 
 // Test returns a fixed theme for golden-file tests: [termenv.Ascii] forced,
@@ -57,11 +55,8 @@ func Test() Theme {
 		Warn:   "#f9e2af",
 		Danger: "#f38ba8",
 
-		GlyphIdle:      "○",
-		GlyphStreaming: "◐",
-		GlyphApproval:  "✋",
-		GlyphOK:        "✓",
-		GlyphErr:       "✗",
+		GlyphHuman: "○",
+		GlyphAgent: "●",
 	}
 }
 

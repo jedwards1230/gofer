@@ -6,13 +6,17 @@ glyphs — can be reviewed by eye. This **complements** the Ascii golden tests
 (which stay the authoritative assertion); it is **not** a CI gate.
 
 - `harness/` — a tiny `main` that drives the real `internal/tui` render path
-  through a fixed, scripted event stream (`-scenario tool-call | approval`).
+  (`-scenario tool-call | approval | overview`): the attach scenes replay a
+  scripted event stream, the overview scene renders a static roster snapshot.
 - `tool-call.tape` — a clean turn with a bash tool call (real command in the
   header, block rhythm).
 - `approval.tape` — a turn ending in the inline permission prompt, with a
-  failed tool call's softened error styling above it.
+  failed tool call's red error marker and dimmed body above it.
+- `overview.tape` — the roster screen with mixed session states, capturing the
+  ● status markers in color (yellow working / awaiting input incl. the ●2
+  pending count vs green finished).
 
-Run: `scripts/tui-vhs.sh [tool-call|approval]` (no arg = all). It prebuilds
+Run: `scripts/tui-vhs.sh [tool-call|approval|overview]` (no arg = all). It prebuilds
 `vhs/.bin/harness`, then renders each tape to `vhs/out/`. Generated frames
 (`vhs/out/`) and the built binary (`vhs/.bin/`) are gitignored.
 

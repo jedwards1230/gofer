@@ -1,6 +1,8 @@
 
-you › Ship the top-padding fix.
+○ Ship the top-padding fix.
 
-Padding applied; nav contract untouched.
-○ idle  stop=end_turn  usage=9in/7out
+● Padding applied; nav contract untouched.
+────────────────────────────────────────────────────────────────────────────────
 > ▏
+────────────────────────────────────────────────────────────────────────────────
+usage=9in/7out

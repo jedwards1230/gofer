@@ -1,7 +1,7 @@
-» Plan: greet, then run a check.
+● Plan: greet, then run a check.
 
-Hello! Running a quick check.
+● Hello! Running a quick check.
 
-✓ bash(echo hi)
+● bash(echo hi)
    └ hi
-○ idle  stop=end_turn  usage=12in/9out
+usage=12in/9out

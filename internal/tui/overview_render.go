@@ -5,13 +5,14 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
 // Row layout column budgets. The row is prefix + body(title, statusword ·
 // summary) + a right-aligned age. Body flexes with terminal width.
 const (
-	rowPrefixW  = 5  // selection caret, space, status glyph(+pending digit), space
+	rowPrefixW  = 2  // selection caret + trailing space (state now rides the status word's color, not a glyph)
 	rowRightW   = 5  // right-aligned compact age ("now", "59m", "23h", "2d")
 	rowTitleW   = 28 // title column before the summary
 	rowColGap   = 2  // gap between title and summary
@@ -173,7 +174,10 @@ func (o Overview) rows(width int) (lines []string, selLine int) {
 			lines = append(lines, "")
 		}
 		first = false
-		header(st.String())
+		// The section header IS the status field in the grouped view, so it
+		// carries the state color (yellow working/needs-input, green finished)
+		// rather than the muted styling a plain cwd header gets.
+		lines = append(lines, truncate(o.statusColorFor(st).Render(st.String()), width))
 		for _, s := range group {
 			// The section header already states the status, so the row omits it.
 			appendRow(s, false)
@@ -192,20 +196,22 @@ func (o Overview) cwdLabel(s SessionInfo) string {
 	return o.meta.Cwd
 }
 
-// row renders one session as a single line: selection caret, status glyph,
-// title, a one-line summary (optionally prefixed with the status word when the
-// enclosing view has no status section to state it), and a right-aligned age.
+// row renders one session as a single line: a selection caret, the title, a
+// one-line summary, and a right-aligned age. In the flat view (showStatus) the
+// summary is prefixed with the state-colored status word, since that view has
+// no status section to state it; the color is the sole status signal — there
+// is no leading glyph.
 func (o Overview) row(s SessionInfo, width int, showStatus bool) string {
 	caret := " "
 	if s.ID == o.selectedID {
 		caret = "▸"
 	}
-	prefix := padTo(fmt.Sprintf("%s %s", caret, o.statusGlyph(s)), rowPrefixW)
+	prefix := padTo(caret, rowPrefixW)
 
 	right := o.age(s)
 	bodyW := width - rowPrefixW - rowRightW
 	if bodyW < 1 {
-		// Too narrow for the full row; show just caret, glyph, and title.
+		// Too narrow for the full row; show just the caret and title.
 		return truncate(prefix+s.Title, width)
 	}
 
@@ -218,13 +224,17 @@ func (o Overview) row(s SessionInfo, width int, showStatus bool) string {
 	}
 	summaryW := bodyW - titleW - rowColGap
 
-	body := s.Summary
+	// The colored status word rides the summary column in the flat view; padTo
+	// measures display width (ANSI-aware), so the color codes don't skew the
+	// column — the #61 lesson, guarded by the styled-golden + color-layout tests.
+	summary := o.theme.MutedStyle().Render(padTo(s.Summary, summaryW))
 	if showStatus {
-		body = effectiveStatus(s).String() + " · " + s.Summary
+		word := effectiveStatus(s).String()
+		styled := o.statusColorFor(effectiveStatus(s)).Render(word) + o.theme.MutedStyle().Render(" · "+s.Summary)
+		summary = padTo(styled, summaryW)
 	}
 
 	title := padTo(s.Title, titleW)
-	summary := o.theme.MutedStyle().Render(padTo(body, summaryW))
 	line := prefix + title + strings.Repeat(" ", rowColGap) + summary + padLeft(right, rowRightW)
 
 	if s.ID == o.selectedID {
@@ -233,26 +243,16 @@ func (o Overview) row(s SessionInfo, width int, showStatus bool) string {
 	return line
 }
 
-// statusGlyph maps a session's status to its roster glyph, promoting to the
-// approval glyph — with the live pending count, e.g. "✋2" — when a
-// permission request is pending. The count clamps to a single digit ("✋9+")
-// so the glyph never grows past two columns and skews row alignment
-// (rowPrefixW budgets exactly one extra column for it).
-func (o Overview) statusGlyph(s SessionInfo) string {
-	if s.Pending > 0 {
-		if s.Pending > 9 {
-			return o.theme.GlyphApproval + "+"
-		}
-		return fmt.Sprintf("%s%d", o.theme.GlyphApproval, s.Pending)
+// statusColorFor returns the state color a session's effective status renders
+// in: yellow while working or awaiting input (a pending request keeps it
+// yellow — see effectiveStatus), green once finished. Pending is a boolean
+// folded into the status, not a count — one or many pending approvals both
+// read as a plain "Needs input".
+func (o Overview) statusColorFor(st SessionStatus) lipgloss.Style {
+	if st == StatusFinished {
+		return o.theme.OKStyle()
 	}
-	switch s.Status {
-	case StatusWorking:
-		return o.theme.GlyphStreaming
-	case StatusFinished:
-		return o.theme.GlyphOK
-	default:
-		return o.theme.GlyphIdle
-	}
+	return o.theme.WarnStyle()
 }
 
 // age renders the right-aligned compact relative age for a row.

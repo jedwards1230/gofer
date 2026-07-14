@@ -235,7 +235,7 @@ func byRecency(s []SessionInfo) []SessionInfo {
 // pending permission request keeps the daemon's coarse Status at
 // StatusWorking (the turn is technically in flight), but from the roster's
 // point of view the session is blocked awaiting the user — the same
-// condition statusGlyph promotes to the ✋ glyph on. Finished always wins.
+// condition the row's status-word color keys on. Finished always wins.
 func effectiveStatus(s SessionInfo) SessionStatus {
 	if s.Status == StatusFinished {
 		return StatusFinished
