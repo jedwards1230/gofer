@@ -53,6 +53,11 @@ type App struct {
 	// the [Command] that runs it.
 	registry Registry
 
+	// commandEnv is the read-only data source the command panel's views read
+	// (version/cwd/store-root identity, lazy auth/config reads — see
+	// env.go). Handed to the panel at open time by openPanel (command.go).
+	commandEnv CommandEnv
+
 	// cwd is this client's working directory (the same value the roster
 	// header shows). The dispatch bar passes it as the new session's cwd so a
 	// session created from the TUI carries the client's project directory —
@@ -76,16 +81,17 @@ type App struct {
 }
 
 // NewApp returns an App rendering through th, driving sup, with its roster
-// screen seeded from meta.
-func NewApp(th theme.Theme, sup Supervisor, meta OverviewMeta) App {
+// screen seeded from meta and its command panel's views reading env.
+func NewApp(th theme.Theme, sup Supervisor, meta OverviewMeta, env CommandEnv) App {
 	a := App{
-		theme:    th,
-		sup:      sup,
-		over:     NewOverview(th, meta),
-		sess:     New(th),
-		scr:      screenOverview,
-		cwd:      meta.Cwd,
-		registry: newBuiltinRegistry(),
+		theme:      th,
+		sup:        sup,
+		over:       NewOverview(th, meta),
+		sess:       New(th),
+		scr:        screenOverview,
+		cwd:        meta.Cwd,
+		registry:   newBuiltinRegistry(),
+		commandEnv: env,
 	}
 	// `gofer attach <id>`: open straight into the session's attach screen and
 	// pre-select it in the roster, so backing out with ← lands on it. The
@@ -236,6 +242,22 @@ func (a *App) switchSession(id string) tea.Cmd {
 	a.sess = New(a.theme) // a fresh Model has no pending approval either
 	a.sub = nil
 	return a.subscribe(id)
+}
+
+// currentSessionInfo returns the roster snapshot for whichever session is
+// currently peeked or attached, or nil on the overview — there is no active
+// session for a command-panel view (e.g. /status's Session name/ID/Model
+// rows) to describe. The roster keeps a.over.selectedID pointed at that
+// session through peek/attach (see handleOverviewKey's → / Enter cases), so
+// this is just a lookup, not new state.
+func (a App) currentSessionInfo() *SessionInfo {
+	if a.scr == screenOverview {
+		return nil
+	}
+	if s, ok := a.over.Selected(); ok {
+		return &s
+	}
+	return nil
 }
 
 // enter ensures sess is subscribed to id, re-subscribing via
@@ -564,12 +586,13 @@ func (a App) render() string {
 		h--
 	}
 
-	// A command panel takes a fixed slice out of the bottom of the content
-	// budget — the screen above it shrinks to fit, the same way the status
-	// footer already does.
+	// A command panel takes a slice out of the bottom of the content budget —
+	// sized to what the active tab actually renders ([commandPanel.Height]),
+	// not always the worst-case max — the screen above it shrinks to fit, the
+	// same way the status footer already does.
 	panelH := 0
 	if a.panel != nil {
-		panelH = panelHeight
+		panelH = a.panel.Height(a.width)
 		if panelH > h {
 			panelH = h
 		}

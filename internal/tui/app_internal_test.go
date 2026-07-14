@@ -87,7 +87,7 @@ func (f *internalFakeSup) Reply(_ context.Context, sessionID, id string, allow, 
 // with the roster seeded via a real Update(rosterMsg{...}) round trip.
 func newAppForGolden(t *testing.T, sup *internalFakeSup) App {
 	t.Helper()
-	a := NewApp(theme.Test(), sup, GoldenMeta())
+	a := NewApp(theme.Test(), sup, GoldenMeta(), GoldenCommandEnv())
 
 	mdl, _ := a.Update(tea.WindowSizeMsg{Width: testkit.Width, Height: testkit.Height})
 	a = mdl.(App)
@@ -170,7 +170,7 @@ func appTranscriptEvents(sid string) []event.Event {
 // opens on the attach screen, pre-selects the session in the roster (so ← lands
 // on it), and that events for that session ingest into the transcript.
 func TestAttachOpenPreselectsAndIngests(t *testing.T) {
-	a := NewApp(theme.Test(), &internalFakeSup{}, OverviewMeta{AttachSessionID: "sess-x"})
+	a := NewApp(theme.Test(), &internalFakeSup{}, OverviewMeta{AttachSessionID: "sess-x"}, CommandEnv{})
 	if a.scr != screenAttach {
 		t.Fatalf("scr = %v; want screenAttach", a.scr)
 	}

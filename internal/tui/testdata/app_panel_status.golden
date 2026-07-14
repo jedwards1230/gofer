@@ -9,13 +9,16 @@ fable-5 · ~/orchestration
 
 
 
-
-
 ────────────────────────────────────────────────────────────────────────────────
 ❯ describe a task for a new session
 enter peek · → attach · tab toggle view · ctrl-x kill · ? shortcuts
 ────────────────────────────────────────────────────────────────────────────────
 [Status]  Config  Model
 ────────────────────────────────────────────────────────────────────────────────
-Status — coming soon.
+Version: 0.3.0
+Session: —
+Session ID: —
+Cwd: ~/orchestration
+Providers: not signed in
+Model: fable-5
 ←/→ to switch tabs · esc to close

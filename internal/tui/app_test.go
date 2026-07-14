@@ -116,7 +116,7 @@ func content(m tea.Model) string {
 // concrete type is unexported), but Update accepts it all the same.
 func newTestApp(t *testing.T, sup tui.Supervisor) tea.Model {
 	t.Helper()
-	var m tea.Model = tui.NewApp(theme.Test(), sup, tui.GoldenMeta())
+	var m tea.Model = tui.NewApp(theme.Test(), sup, tui.GoldenMeta(), tui.GoldenCommandEnv())
 	m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 
 	cmd := m.Init()
@@ -307,13 +307,13 @@ func TestAttachOpenStartsOnAttach(t *testing.T) {
 	meta := tui.GoldenMeta()
 	meta.AttachSessionID = "0192a1b2-app0-7000-8000-000000000002"
 
-	var m tea.Model = tui.NewApp(theme.Test(), sup, meta)
+	var m tea.Model = tui.NewApp(theme.Test(), sup, meta, tui.GoldenCommandEnv())
 	m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 
 	if got := content(m); !strings.Contains(got, "> ▏") || strings.Contains(got, "enter peek") {
 		t.Fatalf("expected the attach screen on open, got:\n%s", got)
 	}
-	if cmd := tui.NewApp(theme.Test(), sup, meta).Init(); cmd == nil {
+	if cmd := tui.NewApp(theme.Test(), sup, meta, tui.GoldenCommandEnv()).Init(); cmd == nil {
 		t.Error("Init with AttachSessionID returned nil cmd; expected the roster+subscribe batch")
 	}
 

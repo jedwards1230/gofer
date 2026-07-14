@@ -12,6 +12,7 @@ import (
 
 	"github.com/jedwards1230/agent-sdk-go/runner"
 
+	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/daemonbridge"
 	"github.com/jedwards1230/gofer/internal/supervisor"
 	"github.com/jedwards1230/gofer/internal/tui"
@@ -59,7 +60,7 @@ func runTUI(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer) erro
 	// session stores, never merged (see selectTUIBackend's doc).
 	_, _ = fmt.Fprintf(stderr, "gofer: tui backend: %s\n", backend.label)
 
-	app := tui.NewApp(theme.Default(), backend.sup, backend.meta)
+	app := tui.NewApp(theme.Default(), backend.sup, backend.meta, backend.env)
 
 	// Installed after the backend/app construction (neither blocks on
 	// interactive input) so Ctrl-C during the run cancels the program
@@ -82,6 +83,7 @@ func runTUI(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer) erro
 type tuiBackend struct {
 	sup   tui.Supervisor
 	meta  tui.OverviewMeta
+	env   tui.CommandEnv
 	close func() error
 	label string // human-readable, for the startup stderr notice
 }
@@ -102,6 +104,18 @@ type tuiBackend struct {
 // exactly one backend renders per invocation, and its label is always
 // printed so the operator knows which one they're looking at.
 func selectTUIBackend(ctx context.Context, df *daemonFlags, cwd, root string) (tuiBackend, error) {
+	// Resolve --root through gofer's own default (~/.gofer, never any SDK
+	// default) once, up front, and reuse it everywhere a store root is
+	// needed below: the local supervisor's session store, the overview
+	// header's credential probe, and the command panel's env (auth.json and
+	// config.json are always LOCAL to this operator's machine, independent
+	// of whether the roster itself comes from a remote daemon).
+	rootDir, err := supervisor.ResolveRoot(root)
+	if err != nil {
+		return tuiBackend{}, err
+	}
+	env := buildCommandEnv(rootDir, cwd)
+
 	c, dialErr := dialDaemon(ctx, df, "")
 	switch {
 	case dialErr == nil:
@@ -116,17 +130,10 @@ func selectTUIBackend(ctx context.Context, df *daemonFlags, cwd, root string) (t
 				Cwd:     cwd,
 				Now:     time.Now(),
 			},
+			env: env,
 		}, nil
 	case !daemonUnreachable(dialErr):
 		return tuiBackend{}, daemonDialErr(df.addr, dialErr)
-	}
-
-	// Resolve --root through gofer's own default (~/.gofer, never any SDK
-	// default) once, up front, and reuse it for both the supervisor's session
-	// store and the overview header's credential probe.
-	rootDir, err := supervisor.ResolveRoot(root)
-	if err != nil {
-		return tuiBackend{}, err
 	}
 
 	sup, err := supervisor.New(supervisor.Config{Root: rootDir})
@@ -144,7 +151,44 @@ func selectTUIBackend(ctx context.Context, df *daemonFlags, cwd, root string) (t
 			Cwd:     cwd,
 			Now:     time.Now(),
 		},
+		env: env,
 	}, nil
+}
+
+// buildCommandEnv builds the command panel's read-only data source (see
+// [tui.CommandEnv]'s doc): version/cwd/root identity plus lazy wrappers
+// around the SDK auth store and gofer's own config loader, both rooted at
+// root. Auth reuses newAuthStore (the same store `gofer auth`/`gofer
+// login` drive) rather than opening auth.json a second way.
+func buildCommandEnv(root, cwd string) tui.CommandEnv {
+	return tui.CommandEnv{
+		Version: version,
+		Cwd:     cwd,
+		Root:    root,
+		Auth: func() ([]tui.ProviderAuth, error) {
+			store, err := newAuthStore(root)
+			if err != nil {
+				return nil, err
+			}
+			entries, err := store.Status()
+			if err != nil {
+				return nil, err
+			}
+			out := make([]tui.ProviderAuth, len(entries))
+			for i, e := range entries {
+				out[i] = tui.ProviderAuth{
+					Provider: e.Provider,
+					Kind:     tui.AuthKind(e.Kind),
+					Expires:  e.Expires,
+					Expired:  e.Expired,
+				}
+			}
+			return out, nil
+		},
+		Config: func() (config.Config, error) {
+			return config.Load(config.DefaultPath(root))
+		},
+	}
 }
 
 // resolveOverviewModel resolves the model string the LOCAL-backend roster

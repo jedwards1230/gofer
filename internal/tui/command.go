@@ -86,10 +86,13 @@ func newBuiltinRegistry() Registry {
 	return r
 }
 
-// openPanel returns a [Command.Run] that opens the command panel on tab.
+// openPanel returns a [Command.Run] that opens the command panel on tab,
+// capturing a's commandEnv, current session snapshot, and resolved default
+// model at open time — see [App.currentSessionInfo] and
+// [Overview.DefaultModel].
 func openPanel(tab commandPanelTab) func(App, []string) (App, tea.Cmd) {
 	return func(a App, _ []string) (App, tea.Cmd) {
-		p := newCommandPanel(a.theme, tab)
+		p := newCommandPanel(a.theme, tab, a.commandEnv, a.currentSessionInfo(), a.over.DefaultModel())
 		a.panel = &p
 		return a, nil
 	}
