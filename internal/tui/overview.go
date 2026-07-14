@@ -53,7 +53,8 @@ type OverviewMeta struct {
 type rosterView int
 
 const (
-	// viewFlat lists every session in one list, most-recently-active first.
+	// viewFlat lists every session most-recently-active first, grouped under a
+	// cwd header per working directory.
 	viewFlat rosterView = iota
 	// viewGrouped splits the list into Working / Needs input / Finished
 	// sections, each most-recently-active first.

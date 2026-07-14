@@ -153,6 +153,48 @@ func TestOverviewCountsPendingAwaitsInput(t *testing.T) {
 	}
 }
 
+// multiCwdFixture builds a small roster spanning two distinct working
+// directories, so the flat view's cwd grouping has more than one group to
+// render.
+func multiCwdFixture() []tui.SessionInfo {
+	return []tui.SessionInfo{
+		{
+			ID:      "0192a1b2-cwd0-7000-8000-000000000001",
+			Title:   "explore three agent ecosystems",
+			Summary: "M2 launched; awaiting sketch review + 4 decisions",
+			Status:  tui.StatusWorking,
+			Cwd:     "~/orchestration",
+			Updated: overviewNow.Add(-2 * time.Minute),
+		},
+		{
+			ID:      "0192a1b2-cwd0-7000-8000-000000000002",
+			Title:   "wire the websocket ACP listener",
+			Summary: "blocked: approve Bash(kubectl delete pod)",
+			Status:  tui.StatusWorking,
+			Cwd:     "~/orchestration",
+			Pending: 2,
+			Updated: overviewNow.Add(-30 * time.Second),
+		},
+		{
+			ID:      "0192a1b2-cwd1-7000-8000-000000000003",
+			Title:   "live-reload html canvas server",
+			Summary: "phase 1 scoped; sketch review pending",
+			Status:  tui.StatusNeedsInput,
+			Cwd:     "~/scrim",
+			Updated: overviewNow.Add(-5 * time.Minute),
+		},
+	}
+}
+
+// TestGoldenOverviewMultiCwd renders the flat view over a roster spanning two
+// working directories, locking TWO cwd group headers — the most-recently-
+// active cwd's group (~/orchestration, holding the -30s and -2m sessions)
+// first, then ~/scrim.
+func TestGoldenOverviewMultiCwd(t *testing.T) {
+	o := newOverview().WithSessions(multiCwdFixture())
+	testkit.AssertGolden(t, "overview_multi_cwd", testkit.Render(o, testkit.Width, testkit.Height))
+}
+
 // TestOverviewSelectionByID verifies selection tracks a session across a view
 // toggle even when its row index changes.
 func TestOverviewSelectionByID(t *testing.T) {

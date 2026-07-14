@@ -8,11 +8,11 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-// Row layout column budgets. The row is prefix + body(title,summary) + a
-// right-aligned metrics block (cost + age). Body flexes with terminal width.
+// Row layout column budgets. The row is prefix + body(title, statusword ·
+// summary) + a right-aligned age. Body flexes with terminal width.
 const (
 	rowPrefixW  = 5  // selection caret, space, status glyph(+pending digit), space
-	rowRightW   = 16 // right-aligned "$cost  age" block
+	rowRightW   = 5  // right-aligned compact age ("now", "59m", "23h", "2d")
 	rowTitleW   = 28 // title column before the summary
 	rowColGap   = 2  // gap between title and summary
 	headerLines = 4  // app line, model·cwd line, counts line, blank
@@ -123,20 +123,42 @@ func (o Overview) body(width, avail int) []string {
 }
 
 // rows renders the roster into display lines and reports the line index of the
-// selected row (-1 when nothing is selected). Grouped view interleaves section
-// headers and a blank line between sections.
+// selected row (-1 when nothing is selected). The flat view groups rows under a
+// cwd header per working directory (recency within each group); the grouped
+// view interleaves Working / Needs input / Finished section headers. Both
+// interleave a blank line between groups.
 func (o Overview) rows(width int) (lines []string, selLine int) {
 	selLine = -1
-	appendRow := func(s SessionInfo) {
+	appendRow := func(s SessionInfo, showStatus bool) {
 		if s.ID == o.selectedID {
 			selLine = len(lines)
 		}
-		lines = append(lines, o.row(s, width))
+		lines = append(lines, o.row(s, width, showStatus))
 	}
+	header := func(label string) { lines = append(lines, truncate(o.theme.MutedStyle().Render(label), width)) }
 
 	if o.view == viewFlat {
+		// Group the recency-ordered roster by cwd, preserving first-appearance
+		// order so the most-recently-active cwd's group comes first. The status
+		// word rides on each row here since the flat view has no status section
+		// to state it.
+		var order []string
+		groups := map[string][]SessionInfo{}
 		for _, s := range o.ordered() {
-			appendRow(s)
+			key := o.cwdLabel(s)
+			if _, seen := groups[key]; !seen {
+				order = append(order, key)
+			}
+			groups[key] = append(groups[key], s)
+		}
+		for i, key := range order {
+			if i > 0 {
+				lines = append(lines, "")
+			}
+			header(key)
+			for _, s := range groups[key] {
+				appendRow(s, true)
+			}
 		}
 		return lines, selLine
 	}
@@ -151,24 +173,36 @@ func (o Overview) rows(width int) (lines []string, selLine int) {
 			lines = append(lines, "")
 		}
 		first = false
-		lines = append(lines, truncate(o.theme.MutedStyle().Render(st.String()), width))
+		header(st.String())
 		for _, s := range group {
-			appendRow(s)
+			// The section header already states the status, so the row omits it.
+			appendRow(s, false)
 		}
 	}
 	return lines, selLine
 }
 
+// cwdLabel is the cwd group key/header text for a session: its own Cwd when
+// set, else the app-wide cwd from the header context (the common single-dir
+// case, and the fallback for disk-only rows with no journaled cwd).
+func (o Overview) cwdLabel(s SessionInfo) string {
+	if s.Cwd != "" {
+		return s.Cwd
+	}
+	return o.meta.Cwd
+}
+
 // row renders one session as a single line: selection caret, status glyph,
-// title, one-line summary, and a right-aligned cost·age metrics block.
-func (o Overview) row(s SessionInfo, width int) string {
+// title, a one-line summary (optionally prefixed with the status word when the
+// enclosing view has no status section to state it), and a right-aligned age.
+func (o Overview) row(s SessionInfo, width int, showStatus bool) string {
 	caret := " "
 	if s.ID == o.selectedID {
 		caret = "▸"
 	}
 	prefix := padTo(fmt.Sprintf("%s %s", caret, o.statusGlyph(s)), rowPrefixW)
 
-	right := o.metrics(s)
+	right := o.age(s)
 	bodyW := width - rowPrefixW - rowRightW
 	if bodyW < 1 {
 		// Too narrow for the full row; show just caret, glyph, and title.
@@ -184,8 +218,13 @@ func (o Overview) row(s SessionInfo, width int) string {
 	}
 	summaryW := bodyW - titleW - rowColGap
 
+	body := s.Summary
+	if showStatus {
+		body = effectiveStatus(s).String() + " · " + s.Summary
+	}
+
 	title := padTo(s.Title, titleW)
-	summary := o.theme.MutedStyle().Render(padTo(s.Summary, summaryW))
+	summary := o.theme.MutedStyle().Render(padTo(body, summaryW))
 	line := prefix + title + strings.Repeat(" ", rowColGap) + summary + padLeft(right, rowRightW)
 
 	if s.ID == o.selectedID {
@@ -216,14 +255,9 @@ func (o Overview) statusGlyph(s SessionInfo) string {
 	}
 }
 
-// metrics renders the right-aligned cost·age block for a row. Cost is omitted
-// until a turn has accrued any; age is always shown.
-func (o Overview) metrics(s SessionInfo) string {
-	age := humanAge(o.meta.Now.Sub(s.Updated))
-	if s.Cost.USD <= 0 {
-		return age
-	}
-	return fmt.Sprintf("$%.4f  %s", s.Cost.USD, age)
+// age renders the right-aligned compact relative age for a row.
+func (o Overview) age(s SessionInfo) string {
+	return humanAge(o.meta.Now.Sub(s.Updated))
 }
 
 // dispatch renders the bottom dispatch bar: a rule, the input line (a
@@ -255,6 +289,28 @@ func humanAge(d time.Duration) string {
 		return fmt.Sprintf("%dh", int(d.Hours()))
 	default:
 		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
+}
+
+// humanDuration renders a duration as a long-form string ("just now",
+// "2 minutes", "3 hours", "1 day") for the peek card's status line, pluralizing
+// the unit.
+func humanDuration(d time.Duration) string {
+	plural := func(n int, unit string) string {
+		if n == 1 {
+			return fmt.Sprintf("%d %s", n, unit)
+		}
+		return fmt.Sprintf("%d %ss", n, unit)
+	}
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return plural(int(d.Minutes()), "minute")
+	case d < 24*time.Hour:
+		return plural(int(d.Hours()), "hour")
+	default:
+		return plural(int(d.Hours()/24), "day")
 	}
 }
 

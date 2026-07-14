@@ -191,8 +191,66 @@ func TestNavEnterPeeksSelected(t *testing.T) {
 	m := newTestApp(t, newFakeSup(appTestRoster()))
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 
-	if got := content(m); !strings.Contains(got, "j/k switch") {
+	if got := content(m); !strings.Contains(got, "space to close") {
 		t.Fatalf("expected the peek screen after enter, got:\n%s", got)
+	}
+}
+
+// TestNavPeekSpaceClosesToOverview verifies space, with an empty reply
+// buffer, closes peek back to the overview.
+func TestNavPeekSpaceClosesToOverview(t *testing.T) {
+	m := newTestApp(t, newFakeSup(appTestRoster()))
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // enter peek
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeySpace}) // empty reply: close
+
+	if got := content(m); !strings.Contains(got, "enter peek") {
+		t.Fatalf("expected space with an empty reply to back out to the overview, got:\n%s", got)
+	}
+}
+
+// TestNavPeekEnterAttaches verifies enter, with an empty reply buffer,
+// attaches the peeked session.
+func TestNavPeekEnterAttaches(t *testing.T) {
+	m := newTestApp(t, newFakeSup(appTestRoster()))
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // enter peek
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // empty reply: attach
+
+	if got := content(m); !strings.Contains(got, "> ▏") {
+		t.Fatalf("expected enter with an empty reply to attach, got:\n%s", got)
+	}
+}
+
+// TestNavPeekReplySends verifies typing a reply on the peek card and
+// pressing enter sends it via Supervisor.Send and stays on peek.
+func TestNavPeekReplySends(t *testing.T) {
+	sup := newFakeSup(appTestRoster())
+	m := newTestApp(t, sup)
+
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // enter peek
+	m = type_(t, m, "status?")
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // send the reply
+
+	want := "0192a1b2-appt-7000-8000-000000000001:status?"
+	if len(sup.sent) != 1 || sup.sent[0] != want {
+		t.Fatalf("sup.sent = %v; want one entry %q", sup.sent, want)
+	}
+	if got := content(m); !strings.Contains(got, "space to close") {
+		t.Fatalf("expected to stay on the peek screen after sending a reply, got:\n%s", got)
+	}
+}
+
+// TestNavPeekKillsSelected verifies ctrl-x on the peek screen kills the
+// selected (non-finished) session.
+func TestNavPeekKillsSelected(t *testing.T) {
+	sup := newFakeSup(appTestRoster())
+	m := newTestApp(t, sup)
+
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // enter peek
+	press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl})
+
+	want := "kill:0192a1b2-appt-7000-8000-000000000001"
+	if len(sup.ops) != 1 || sup.ops[0] != want {
+		t.Fatalf("sup.ops = %v; want one entry %q", sup.ops, want)
 	}
 }
 

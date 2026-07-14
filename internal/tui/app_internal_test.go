@@ -132,29 +132,15 @@ func TestGoldenAppOverview(t *testing.T) {
 }
 
 // TestGoldenAppPeek reaches the peek screen by pressing enter on the
-// (recency-first) selected session, resolves the subscribe round trip, then
-// feeds a few session events directly to populate the tail before
-// rendering.
+// (recency-first) selected session. Peek no longer subscribes — this is a
+// pure Update/render round trip, unlike TestGoldenAppAttach below.
 func TestGoldenAppPeek(t *testing.T) {
 	a := newAppForGolden(t, newInternalFakeSup(appGoldenRoster()))
 
-	mdl, cmd := a.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	mdl, _ := a.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	a = mdl.(App)
 	if a.scr != screenPeek {
 		t.Fatalf("scr = %v; want screenPeek", a.scr)
-	}
-	if cmd == nil {
-		t.Fatal("expected a subscribe cmd after entering peek")
-	}
-	mdl, _ = a.Update(cmd())
-	a = mdl.(App)
-	if a.sub == nil {
-		t.Fatal("expected a.sub set after subReadyMsg")
-	}
-
-	for _, ev := range appTranscriptEvents(a.sessID) {
-		mdl, _ = a.Update(sessEventMsg{id: a.sessID, ev: ev})
-		a = mdl.(App)
 	}
 
 	testkit.AssertGolden(t, "app_peek", a.render())

@@ -1,13 +1,13 @@
-
 gofer v0.2.0
 fable-5 · ~/orchestration
-1 awaiting input · 1 working · 0 completed
+2 awaiting input · 1 working · 0 completed
 
 ~/orchestration
-▸ ◐  wire the app root             Working · overview <-> peek <-> attach …   2m
-  ○  review the supervisor contr…  Needs input · turn finished — awaiting …   5m
+▸ ✋2wire the websocket ACP list…  Needs input · blocked: approve Bash(kub…  now
+  ◐  explore three agent ecosyst…  Working · M2 launched; awaiting sketch …   2m
 
-
+~/scrim
+  ○  live-reload html canvas ser…  Needs input · phase 1 scoped; sketch re…   5m
 
 
 

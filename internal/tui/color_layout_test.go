@@ -108,64 +108,23 @@ func TestColorOverviewApprovalLayout(t *testing.T) {
 	}
 }
 
-// colorPeekTail builds a small, populated read-only transcript rendering
-// through th — a themed twin of peek_test.go's peekTail.
-func colorPeekTail(th theme.Theme) tui.Model {
-	m := tui.New(th)
-	for _, e := range []event.Event{
-		event.NewTurnStarted(sid),
-		event.NewMessageStarted(sid, event.MessageReasoning),
-		event.NewMessageFinished(sid, event.MessageReasoning, "Checking the ACP handshake path."),
-		event.NewToolCallStarted(sid, "call-1", "bash", json.RawMessage(`{"cmd":"go test ./acp"}`)),
-		event.NewToolCallFinished(sid, "call-1", json.RawMessage(`{"cmd":"go test ./acp"}`), "ok  acp  0.4s", false, nil),
-		event.NewMessageStarted(sid, event.MessageText),
-		event.NewMessageFinished(sid, event.MessageText, "Tests pass. The listener is wired."),
-		event.NewTurnFinished(sid, "end_turn", provider.Usage{InputTokens: 40, OutputTokens: 18}),
-	} {
-		m = m.Ingest(e)
-	}
-	return m
-}
-
-// colorPeek builds a Peek over colorOverviewFixture and colorPeekTail,
-// rendering through th.
+// colorPeek builds a Peek over colorOverviewFixture with a non-empty reply
+// buffer — exercising the ❯ input's width — rendering through th.
 func colorPeek(th theme.Theme) tui.Peek {
-	return tui.NewPeek(th, colorOverview(th), colorPeekTail(th))
+	return tui.NewPeek(th, colorOverview(th), "status?")
 }
 
-// TestColorPeekHorizontalDividerPlumb renders the peek screen's side-by-side
-// split (width 120, at layout.PeekHorizontalMinWidth) plain and colored, and
-// asserts — beyond the shared layout invariants — that the " │ " column
-// divider sits at the same display column on every row. This is the direct
-// reproduction of the "scattered │" defect: under rune-counting, a styled
-// left pane measured wider than its display width, so JoinColumns padded it
-// inconsistently row to row.
-func TestColorPeekHorizontalDividerPlumb(t *testing.T) {
-	const width = 120
-
-	plain := testkit.Render(colorPeek(theme.Test()), width, testkit.Height)
-	colored := testkit.Render(colorPeek(colorTheme()), width, testkit.Height)
-	assertColorLayout(t, plain, colored, width)
-
-	dividerCol := -1
-	found := false
-	for i, line := range strings.Split(colored, "\n") {
-		idx := strings.Index(line, " │ ")
-		if idx < 0 {
-			continue // the trailing hint line carries no divider
-		}
-		found = true
-		col := ansi.StringWidth(line[:idx])
-		if dividerCol == -1 {
-			dividerCol = col
-			continue
-		}
-		if col != dividerCol {
-			t.Errorf("line %d: divider at display column %d, want %d (established by an earlier row): %q", i, col, dividerCol, line)
-		}
-	}
-	if !found {
-		t.Fatal("no ` │ ` divider found in colored peek render; expected a horizontal split at width 120")
+// TestColorPeekCardLayout renders the peek summary card plain and colored at
+// two widths and asserts the shared layout invariants hold. The card has no
+// divider/split geometry to plumb any more — this is the peek half of the
+// #61 display-width lesson now that the card is a single-column layout.
+func TestColorPeekCardLayout(t *testing.T) {
+	for _, width := range []int{80, 120} {
+		t.Run(fmt.Sprintf("width=%d", width), func(t *testing.T) {
+			plain := testkit.Render(colorPeek(theme.Test()), width, testkit.Height)
+			colored := testkit.Render(colorPeek(colorTheme()), width, testkit.Height)
+			assertColorLayout(t, plain, colored, width)
+		})
 	}
 }
 
