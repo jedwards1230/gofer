@@ -1,5 +1,8 @@
 # M3 — guardrails (app half): tracking plan
 
+> **✅ Merged to main 2026-07-14 (#53).** All items below shipped; kept as the
+> milestone's build record.
+
 Living checklist for the M3 milestone in this repo. The spec is
 [`PRD.md`](PRD.md) (milestone table, auto-mode pipeline, constraints); this doc
 tracks progress and sequencing. Cross-repo plan of record lives in the umbrella

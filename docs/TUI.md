@@ -6,12 +6,13 @@ screen stack. Golden-file tests come first: the `testkit` harness pins fixed
 sizes, forces `termenv.Ascii`, and uses a test theme (see
 [`TESTING.md`](TESTING.md)).
 
-**Status**: `internal/tui` holds the M2 TUI — the attach `Model` (transcript +
+**Status**: `internal/tui` holds the M2+M3 TUI — the attach `Model` (transcript +
 input, driven by `Model.Ingest`), the `Overview` roster screen, the `Peek`
-split, collapsed tool-block rendering, and the `App` screen-stack root that
-composes them under the navigation contract (see [Roster &
-navigation](#roster--navigation-m2) below). Still ahead: the dialog stack and
-central keymap registry, then slash commands and plugin UI (M4+).
+split, collapsed tool-block rendering, the inline permission prompt (M3), and
+the `App` screen-stack root that composes them under the navigation contract
+(see [Roster & navigation](#roster--navigation-m2) below). Still ahead: a
+general reusable dialog abstraction and the central keymap registry, then slash
+commands and plugin UI (M4+).
 
 ## The three altitudes
 
