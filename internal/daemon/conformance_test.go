@@ -244,7 +244,11 @@ func TestSessionList(t *testing.T) {
 		}
 	})
 
-	t.Run("cwd filter", func(t *testing.T) {
+	t.Run("req.Cwd is ignored: listing is fleet-global", func(t *testing.T) {
+		// Listing is fleet-global (see handleSessionList): req.Cwd is accepted
+		// for wire compatibility but no longer hides sessions in other
+		// directories. A request naming cwdA still returns every session,
+		// including sidB in cwdB, each with its own Cwd intact.
 		resp := c.request(acp.MethodSessionList, acp.ListSessionsRequest{Cwd: cwdA})
 		if resp.Error != nil {
 			t.Fatalf("session/list error: %+v", resp.Error)
@@ -253,13 +257,17 @@ func TestSessionList(t *testing.T) {
 		if err := json.Unmarshal(resp.Result, &got); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
-		if len(got.Sessions) != 2 {
-			t.Fatalf("filtered sessions = %+v, want 2 entries for cwd %s", got.Sessions, cwdA)
-		}
+		ids := make(map[string]string, len(got.Sessions))
 		for _, s := range got.Sessions {
-			if s.Cwd != cwdA {
-				t.Errorf("filtered session %s cwd = %q, want %q", s.SessionID, s.Cwd, cwdA)
+			ids[s.SessionID] = s.Cwd
+		}
+		for _, sid := range []string{sidA1, sidA2, sidB} {
+			if _, ok := ids[sid]; !ok {
+				t.Errorf("session/list with req.Cwd=%s missing %s: %+v", cwdA, sid, got.Sessions)
 			}
+		}
+		if ids[sidB] != cwdB {
+			t.Errorf("sidB cwd = %q, want %q (its own cwd, not the filter)", ids[sidB], cwdB)
 		}
 	})
 

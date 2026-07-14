@@ -197,11 +197,14 @@ drain:
 				t.Fatalf("notification method = %q, want %q", n.Method, acp.MethodSessionUpdate)
 			}
 			gotUpdates++
-			if gotUpdates == 6 { // the prompt's user_message_chunk echo + faux.Default(): 2 reasoning + 3 text deltas
+			// This client is the originating peer, so the daemon suppresses its
+			// own user_message_chunk echo (see broadcastUpdate). Only
+			// faux.Default()'s assistant deltas arrive: 2 reasoning + 3 text.
+			if gotUpdates == 5 {
 				break drain
 			}
 		case <-timeout:
-			t.Fatalf("timed out after %d notifications, want 6", gotUpdates)
+			t.Fatalf("timed out after %d notifications, want 5", gotUpdates)
 		}
 	}
 

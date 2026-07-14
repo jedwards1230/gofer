@@ -155,92 +155,57 @@ func TestSessionNewCwdResolution(t *testing.T) {
 	})
 }
 
-// TestSessionListCwdFilterMatchesTildeAndResolvedForms is the regression test
-// for the session/list cwd filter bug: sessions are stored with an absolute,
-// tilde-expanded cwd (see resolveSessionCwd), but the filter used to compare
-// req.Cwd against it RAW, so a client filtering by the same "~/<sub>" form it
-// created the session with (the natural phone-client flow) could never match
-// — the list came back empty for a live session. Both the tilde form and the
-// already-resolved absolute form must match; a relative or nonexistent filter
-// must match nothing, without erroring.
-func TestSessionListCwdFilterMatchesTildeAndResolvedForms(t *testing.T) {
-	fakeHome := t.TempDir()
-	t.Setenv("HOME", fakeHome)
-
-	sub := filepath.Join(fakeHome, "myproject")
-	if err := os.Mkdir(sub, 0o755); err != nil {
-		t.Fatalf("Mkdir: %v", err)
-	}
-
+// TestSessionListFleetGlobalVisibility asserts session/list is fleet-global
+// (M3 fan-out): a shared daemon several clients attach to must surface EVERY
+// session regardless of its cwd, so a laptop's roster shows a session a phone
+// created in a different directory. It creates sessions across two distinct
+// cwds and asserts both are returned — with their own Cwd metadata intact —
+// whether the request carries no cwd, one session's cwd, or a cwd matching
+// none of them. req.Cwd is a label, never a hiding filter. (This replaces the
+// former cwd-filter regression test: the filter it guarded was removed because
+// it made a shared daemon's sessions invisible to a client in another
+// directory.)
+func TestSessionListFleetGlobalVisibility(t *testing.T) {
 	sup := newTestSupervisor(t, fauxProvider)
 	_, url := newTestDaemon(t, sup, "")
 	c := dial(t, context.Background(), url, nil)
 
-	sid := newSession(t, c, "~/myproject")
+	cwdA := t.TempDir()
+	cwdB := t.TempDir()
+	sidA := newSession(t, c, cwdA)
+	sidB := newSession(t, c, cwdB)
 
-	t.Run("tilde form matches", func(t *testing.T) {
-		got := listSessionIDs(t, c, "~/myproject")
-		if !containsID(got, sid) {
-			t.Errorf("session/list cwd=%q: got %v, want it to include %s", "~/myproject", got, sid)
-		}
-	})
-
-	t.Run("resolved absolute form matches", func(t *testing.T) {
-		got := listSessionIDs(t, c, sub)
-		if !containsID(got, sid) {
-			t.Errorf("session/list cwd=%q: got %v, want it to include %s", sub, got, sid)
-		}
-	})
-
-	t.Run("relative filter matches nothing, no error", func(t *testing.T) {
-		resp := c.request(acp.MethodSessionList, acp.ListSessionsRequest{Cwd: "myproject"})
+	// cwdByID lists sessions with the given req.Cwd and returns id->cwd for
+	// every returned session, so a caller can assert both presence and the
+	// per-session cwd metadata in one shot.
+	cwdByID := func(t *testing.T, reqCwd string) map[string]string {
+		t.Helper()
+		resp := c.request(acp.MethodSessionList, acp.ListSessionsRequest{Cwd: reqCwd})
 		if resp.Error != nil {
-			t.Fatalf("session/list with relative cwd filter: unexpected error %+v", resp.Error)
+			t.Fatalf("session/list req.Cwd=%q: unexpected error %+v", reqCwd, resp.Error)
 		}
-		got := listSessionIDs(t, c, "myproject")
-		if containsID(got, sid) {
-			t.Errorf("session/list cwd=%q: got %v, want it to NOT include %s", "myproject", got, sid)
+		var got acp.ListSessionsResponse
+		if err := json.Unmarshal(resp.Result, &got); err != nil {
+			t.Fatalf("unmarshal: %v", err)
 		}
-	})
+		out := make(map[string]string, len(got.Sessions))
+		for _, s := range got.Sessions {
+			out[s.SessionID] = s.Cwd
+		}
+		return out
+	}
 
-	t.Run("nonexistent filter matches nothing, no error", func(t *testing.T) {
-		resp := c.request(acp.MethodSessionList, acp.ListSessionsRequest{Cwd: filepath.Join(fakeHome, "does-not-exist")})
-		if resp.Error != nil {
-			t.Fatalf("session/list with nonexistent cwd filter: unexpected error %+v", resp.Error)
+	// Both sessions are returned regardless of req.Cwd, each carrying its own
+	// cwd — never the requested one.
+	for _, reqCwd := range []string{"", cwdA, filepath.Join(t.TempDir(), "unrelated")} {
+		got := cwdByID(t, reqCwd)
+		if got[sidA] != cwdA {
+			t.Errorf("req.Cwd=%q: sidA cwd = %q, want %q", reqCwd, got[sidA], cwdA)
 		}
-		got := listSessionIDs(t, c, filepath.Join(fakeHome, "does-not-exist"))
-		if containsID(got, sid) {
-			t.Errorf("session/list cwd=%q: got %v, want it to NOT include %s", "does-not-exist", got, sid)
-		}
-	})
-}
-
-// listSessionIDs issues session/list filtered by cwd and returns the ids of
-// every returned session.
-func listSessionIDs(t *testing.T, c *wsClient, cwd string) []string {
-	t.Helper()
-	resp := c.request(acp.MethodSessionList, acp.ListSessionsRequest{Cwd: cwd})
-	if resp.Error != nil {
-		t.Fatalf("session/list error: %+v", resp.Error)
-	}
-	var got acp.ListSessionsResponse
-	if err := json.Unmarshal(resp.Result, &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	ids := make([]string, 0, len(got.Sessions))
-	for _, s := range got.Sessions {
-		ids = append(ids, s.SessionID)
-	}
-	return ids
-}
-
-func containsID(ids []string, id string) bool {
-	for _, got := range ids {
-		if got == id {
-			return true
+		if got[sidB] != cwdB {
+			t.Errorf("req.Cwd=%q: sidB cwd = %q, want %q", reqCwd, got[sidB], cwdB)
 		}
 	}
-	return false
 }
 
 // TestSessionLoadCwdResolution asserts session/load rejects a bad cwd the

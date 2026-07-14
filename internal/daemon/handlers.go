@@ -109,24 +109,18 @@ func cwdErrRef(raw, resolved string) string {
 }
 
 // normalizeCwd is the ONE normalization rule every client-supplied cwd is put
-// through before it is either stored (session creation/load, via
-// [resolveSessionCwd]) or compared against a stored one (the session/list cwd
-// filter, see [handleSessionList]): a leading "~" or "~/" is expanded against
-// the daemon's own home, then the result is filepath.Clean'd. Unlike
-// resolveSessionCwd, it does NOT require the result to be absolute, does NOT
-// check that it exists, and does NOT apply the empty-cwd default — those are
-// resolveSessionCwd's job, layered on top for the create/load paths. That
-// asymmetry is deliberate: a session/list filter for a relative or
-// nonexistent path should simply match nothing, not fail the request, so
-// filtering can never require the extra validation session creation does.
+// through before it is stored (session creation/load, via [resolveSessionCwd]):
+// a leading "~" or "~/" is expanded against the daemon's own home, then the
+// result is filepath.Clean'd. It is the inner, validation-free step
+// resolveSessionCwd layers its absolute/exists/is-a-directory checks and
+// empty-cwd default on top of for the create/load paths.
 //
 // If the daemon's home directory can't be resolved (os.UserHomeDir failing —
 // vanishingly rare in practice, since it just reads $HOME/USERPROFILE), a
 // "~"-prefixed raw is left unexpanded rather than erroring: normalizeCwd has
 // no error return, so downstream callers just see it fail their own
-// validation (resolveSessionCwd's IsAbs check rejects it as a real problem)
-// or, for a filter, simply fail to match — both acceptable outcomes for a
-// condition this unlikely.
+// validation (resolveSessionCwd's IsAbs check rejects it as a real problem) —
+// an acceptable outcome for a condition this unlikely.
 func normalizeCwd(raw string) string {
 	cwd := raw
 	if raw == "~" || strings.HasPrefix(raw, "~/") {
@@ -255,6 +249,14 @@ func handleSessionLoad(d *Daemon, ctx context.Context, p *peer, params json.RawM
 	}
 	d.log.Info("session resumed", "session", op.SessionID)
 
+	// This peer is now attached to the session: register it in the fan-out
+	// registry so it receives live session/update notifications for any turn
+	// ANY peer drives, not just its own. Deregistered on connection close (see
+	// [Daemon.detachPeer]). Registering after Resume succeeds — a load that
+	// failed above never reaches here — means the registry only ever holds
+	// peers attached to a session the daemon actually resumed.
+	d.attachPeer(op.SessionID, p)
+
 	msgs, err := d.sup.History(ctx, op.SessionID)
 	if err != nil {
 		return nil, appError(err)
@@ -294,27 +296,26 @@ func handleSessionCancel(d *Daemon, ctx context.Context, _ *peer, params json.Ra
 const sessionListPageSize = 50
 
 // handleSessionList answers session/list: every on-disk session (live and
-// archived — see [supervisor.Supervisor.List]), optionally filtered by cwd,
-// newest-first, opaquely paginated at [sessionListPageSize] entries per page.
+// archived — see [supervisor.Supervisor.List]), newest-first, opaquely
+// paginated at [sessionListPageSize] entries per page.
+//
+// Listing is FLEET-GLOBAL: a session is returned regardless of its cwd, so a
+// client on any device discovers every session the daemon supervises — the
+// whole point of a shared daemon several clients attach to (a turn driven from
+// a phone must be visible to a laptop's roster). req.Cwd is accepted for wire
+// compatibility but IGNORED — it is a label on each returned session, not a
+// filter. (It was historically a hiding filter; that made a shared daemon's
+// sessions invisible to a client sitting in a different directory, so it was
+// dropped.) Every returned [acp.SessionInfo] still carries its Cwd so a client
+// can group or label sessions by directory itself.
 //
 // A disk-only (archived, or simply not yet resumed since the daemon last
-// started) [supervisor.SessionInfo] now carries its Cwd, Title, and Updated
-// read back from the journal — see [supervisor.Supervisor.List]'s doc — so a
-// cwd filter matches those sessions too, and they survive a daemon restart
-// with a real title instead of a bare id. The only entries still missing Cwd
-// are legacy journals written before the SDK started persisting it (no
-// session_meta entry); those fall back to the daemon's own working directory
-// below, and a cwd filter simply never matches them.
-//
-// The cwd filter is run through [normalizeCwd] before comparison, the same
-// normalization every stored session cwd went through at creation/load time
-// (via [resolveSessionCwd]) — a stored cwd is always absolute+cleaned, so a
-// raw string comparison against a client-supplied filter like "~/project"
-// would never match the resolved "/home/user/project" it was actually stored
-// as, making the list appear empty even for a live session (the bug this
-// guards). Unlike resolveSessionCwd, the filter is not required to be
-// absolute or to exist: a relative or nonexistent filter simply matches
-// nothing rather than erroring the whole request.
+// started) [supervisor.SessionInfo] carries its Cwd, Title, and Updated read
+// back from the journal — see [supervisor.Supervisor.List]'s doc — so those
+// sessions survive a daemon restart with a real title instead of a bare id.
+// The only entries still missing Cwd are legacy journals written before the
+// SDK started persisting it (no session_meta entry); those fall back to the
+// daemon's own working directory below.
 func handleSessionList(d *Daemon, ctx context.Context, _ *peer, params json.RawMessage) (any, *rpcError) {
 	var req acp.ListSessionsRequest
 	if len(params) > 0 {
@@ -331,17 +332,6 @@ func handleSessionList(d *Daemon, ctx context.Context, _ *peer, params json.RawM
 	infos, err := d.sup.List(ctx)
 	if err != nil {
 		return nil, appError(err)
-	}
-
-	if req.Cwd != "" {
-		filterCwd := normalizeCwd(req.Cwd)
-		filtered := infos[:0:0]
-		for _, info := range infos {
-			if info.Cwd == filterCwd {
-				filtered = append(filtered, info)
-			}
-		}
-		infos = filtered
 	}
 
 	sort.Slice(infos, func(i, j int) bool {
@@ -441,6 +431,12 @@ func handleSessionPrompt(d *Daemon, ctx context.Context, p *peer, params json.Ra
 	}
 	defer sub.Close()
 
+	// Attach the originator so it is part of this session's fan-out set for
+	// subsequent turns other peers drive too, even if it never called
+	// session/load (a one-shot `run` that only ever prompts). Deregistered on
+	// connection close.
+	d.attachPeer(op.SessionID, p)
+
 	if err := d.sup.Send(ctx, op.SessionID, op.Text); err != nil {
 		return nil, appError(err)
 	}
@@ -459,8 +455,19 @@ func handleSessionPrompt(d *Daemon, ctx context.Context, p *peer, params json.Ra
 			}
 
 			if notif, ok := acp.ToSessionUpdate(op.SessionID, e); ok {
-				if werr := p.notify(ctx, acp.MethodSessionUpdate, notif); werr != nil {
-					return nil, internalErr(fmt.Errorf("session/prompt %s: write session/update: %w", op.SessionID, werr))
+				// The user-message echo (a settled event.MessageUser projects
+				// to user_message_chunk) is suppressed to the ORIGINATOR — the
+				// peer that typed this prompt already knows what it sent, and a
+				// daemonbridge client renders its own prompt from a local
+				// injection instead (see internal/daemonbridge Send). Every
+				// OTHER attached peer still receives it, so a phone or second
+				// TUI sees what was typed on the driving client.
+				isUserEcho := false
+				if mf, isMF := e.(event.MessageFinished); isMF && mf.MessageKind == event.MessageUser {
+					isUserEcho = true
+				}
+				if rerr := d.broadcastUpdate(ctx, op.SessionID, p, notif, isUserEcho); rerr != nil {
+					return nil, rerr
 				}
 				updates++
 			}
@@ -486,6 +493,48 @@ func handleSessionPrompt(d *Daemon, ctx context.Context, p *peer, params json.Ra
 			return nil, appError(fmt.Errorf("session/prompt %s: %w", op.SessionID, ctx.Err()))
 		}
 	}
+}
+
+// broadcastUpdate fans one projected session/update out to every peer attached
+// to sessionID (see [Daemon.peersForSession]) — the union of the registered
+// set and origin, the peer driving this turn (origin is in the set: it was
+// attached at the top of handleSessionPrompt). The peer set is snapshotted
+// under the registry RLock and released before any notify (a socket write)
+// runs, so a wedged client never stalls the registry.
+//
+// Two delivery rules differ by peer and by update:
+//   - origin: the user-message echo (isUserEcho) is suppressed — origin already
+//     knows its own prompt. Every other update is delivered, and a write
+//     failure to origin is FATAL: the RPC's own response rides that same
+//     connection, so a broken origin connection aborts the turn (returned as
+//     an rpcError, matching the pre-fan-out single-peer behavior).
+//   - every other attached peer: receives every update including the echo. A
+//     write failure is NON-fatal — it is logged and skipped, and that peer's
+//     own connection-close defer (see [Daemon.detachPeer]) removes it from the
+//     registry. One disconnected observer must never abort a turn the origin
+//     is still driving.
+//
+// origin is matched by pointer identity and handled exactly once, so it is
+// never double-delivered even though it is also in the snapshot.
+func (d *Daemon) broadcastUpdate(ctx context.Context, sessionID string, origin *peer, notif any, isUserEcho bool) *rpcError {
+	for _, pr := range d.peersForSession(sessionID) {
+		if pr == origin {
+			continue // origin handled below with its distinct echo/error rules
+		}
+		if werr := pr.notify(ctx, acp.MethodSessionUpdate, notif); werr != nil {
+			// DEBUG, not WARN: a peer disconnecting mid-turn is routine, not a
+			// daemon fault. Session id only — never the notif (prompt/message
+			// content); see handleFrame's redaction rule.
+			d.log.Debug("session/update broadcast: peer notify failed", "session", sessionID, "err", werr)
+		}
+	}
+	if isUserEcho {
+		return nil // suppressed to the originator
+	}
+	if werr := origin.notify(ctx, acp.MethodSessionUpdate, notif); werr != nil {
+		return internalErr(fmt.Errorf("session/prompt %s: write session/update: %w", sessionID, werr))
+	}
+	return nil
 }
 
 // handleGoferRoster answers gofer/roster: the live roster, newest-first.
