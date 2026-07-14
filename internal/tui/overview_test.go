@@ -135,6 +135,24 @@ func TestOverviewPendingGlyphShowsCount(t *testing.T) {
 	}
 }
 
+// TestOverviewCountsPendingAwaitsInput verifies the header counts bucket a
+// permission-blocked session (Status still StatusWorking, Pending>0 — the
+// daemon's coarse status doesn't demote while the turn is technically in
+// flight) as "awaiting input", not "working" — the same reclassification
+// [Overview.statusGlyph] already applies to the ✋ glyph, so the header and
+// the roster rows agree.
+func TestOverviewCountsPendingAwaitsInput(t *testing.T) {
+	o := newOverview().WithSessions([]tui.SessionInfo{
+		{ID: "sess-1", Title: "blocked one", Status: tui.StatusWorking, Pending: 1, Updated: overviewNow},
+		{ID: "sess-2", Title: "blocked two", Status: tui.StatusWorking, Pending: 1, Updated: overviewNow},
+		{ID: "sess-3", Title: "done", Status: tui.StatusFinished, Updated: overviewNow},
+	})
+	got := testkit.Render(o, testkit.Width, testkit.Height)
+	if !strings.Contains(got, "2 awaiting input · 0 working") {
+		t.Errorf("rendered header does not contain %q:\n%s", "2 awaiting input · 0 working", got)
+	}
+}
+
 // TestOverviewSelectionByID verifies selection tracks a session across a view
 // toggle even when its row index changes.
 func TestOverviewSelectionByID(t *testing.T) {
