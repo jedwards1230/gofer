@@ -369,7 +369,13 @@ func (p *peer) deliverReply(id json.RawMessage, r peerReply) {
 	p.pendingMu.Unlock()
 	if ok {
 		ch <- r // buffered (cap 1); never blocks
+		return
 	}
+	// No waiter: the request already unregistered on ctx cancellation (resolved
+	// elsewhere) or this is a duplicate/stray answer — the first-answer-wins
+	// no-op. Logged at DEBUG (id only, never the result) so a client echoing a
+	// wrong id is at least diagnosable. See handleFrame's redaction rule.
+	p.daemon.log.Debug("dropped reply with no matching request", "id", string(id))
 }
 
 // closePending closes every outstanding daemon-initiated request's waiter on

@@ -201,6 +201,48 @@ func TestACPPermissionRememberMapping(t *testing.T) {
 	}
 }
 
+// TestGoferNativeClassificationOrdering pins the classification default: a peer
+// that has NOT yet invoked any gofer/* method or permission.reply when the first
+// permission fires is treated as ACP (the safe default), so it receives the
+// session/request_permission request — AND can still resolve the turn via a
+// permission.reply, which is exactly how a gofer client whose roster poll hasn't
+// landed yet behaves. Proves the default never strands such a peer.
+func TestGoferNativeClassificationOrdering(t *testing.T) {
+	h := newApprovalHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	cwd := t.TempDir()
+	// A single peer that drives the turn WITHOUT any prior gofer/* call, so at
+	// fan-out time it is still classified ACP.
+	c := dial(t, ctx, h.url, nil)
+	sid := newACPSession(t, c, cwd)
+
+	promptDone := make(chan rpcFrame, 1)
+	go func() {
+		promptDone <- c.request("session/prompt", map[string]any{"sessionId": sid, "text": "ls"})
+	}()
+
+	// Being ACP-classified, it receives the spec request...
+	reqID, pr := awaitPermissionRequest(t, c)
+	_ = reqID
+	// ...yet it answers via the gofer-native permission.reply, and the gate resolves.
+	c.notify("permission.reply", map[string]any{"id": pr.ToolCall.ToolCallID, "verdict": "allow"})
+
+	select {
+	case got := <-h.fake(sid).verdicts:
+		if got != event.VerdictAllow {
+			t.Fatalf("gate verdict = %q, want allow", got)
+		}
+	case <-time.After(defaultWait):
+		t.Fatal("gate did not unblock after permission.reply")
+	}
+	if resp := <-promptDone; resp.Error != nil {
+		t.Fatalf("session/prompt: %v", resp.Error)
+	}
+	waitOutstandingPermReqs(t, h, 0)
+}
+
 // TestACPPermissionClientRejectsRequest: a client that cannot answer
 // session/request_permission (it replies with a JSON-RPC error) must not wedge
 // the daemon — the error is a no-op, and a gofer-native answer still resolves
