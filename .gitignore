@@ -11,6 +11,10 @@ dist/
 .vscode/
 .DS_Store
 
+# VHS TUI capture artifacts (see vhs/, scripts/tui-vhs.sh)
+vhs/.bin/
+vhs/out/
+
 # local worktrees convention
 worktrees/
 
