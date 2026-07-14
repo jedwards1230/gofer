@@ -32,15 +32,25 @@ orchestration repo (`docs/projects/gofer-m3-plan-and-docs-refresh.md`).
        contained. Profile generation is a pure function of the workdir — no env
        secrets can leak into it (asserted in tests).
 4. [x] **Approvals relay + phone approval UX.** ✅ shipped. `permission.requested`
-       (a must-deliver SDK event) fans out to **every attached peer** via the
-       wave-① registry as a `gofer/permission_requested` notification; a
-       `permission.reply` op from ANY peer — routed by call id → the session's
-       reference `loop.Gate` — gates execution, then the loop proceeds or denies.
-       TUI approval dialog (allow / deny / toggle-remember) plus a roster ✋N
-       pending badge so a supervisor sees a waiting session without attaching.
-       Because the surface is spec-general, a phone approving a laptop-driven
-       session works with zero client-specific code. **Depended on an SDK seam**
-       (`runner.Options.Guard/Approver`) added in agent-sdk-go #41.
+       (a must-deliver SDK event) fans out to **every attached peer** over TWO
+       surfaces: a `gofer/permission_requested` notification for gofer clients
+       (the TUI/daemonbridge), AND the spec-ACP `session/request_permission`
+       REQUEST for pure ACP clients (a phone) — the daemon acts as a JSON-RPC
+       requester on those connections, projecting the answer back through the
+       SDK's `acp.ToRequestPermission`/`ToPermissionReply`. A `permission.reply`
+       op OR an ACP `session/request_permission` response from ANY peer — routed
+       by call id → the session's reference `loop.Gate` — gates execution;
+       first answer wins and the gate makes any later one a no-op. When the
+       permission resolves by any path, the daemon retracts the outstanding
+       requests at every other peer so no waiter dangles. TUI approval dialog
+       (allow / deny / toggle-remember) plus a roster ✋N pending badge so a
+       supervisor sees a waiting session without attaching. The surface stays
+       spec-general (zero client-specific code); the four ACP option kinds map
+       to allow/deny(+remember) with no wire extension. **Depended on SDK seams**
+       (`runner.Options.Guard/Approver`, agent-sdk-go #41; the `acp` permission
+       request/response surface). Known gap: ACP v1 has no agent-initiated
+       per-request cancel, so a losing peer's dialog is not force-dismissed by
+       the daemon — it clears when the client observes the tool call resolve.
 5. [x] **Headless exec** (`gofer exec`). ✅ shipped. In-process, one-shot —
        never daemon-routed, unlike run/resume/bare gofer. Streams the SDK's
        `exec.Run` JSONL event contract directly to stdout (no banner, no

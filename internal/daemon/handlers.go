@@ -490,6 +490,15 @@ func handleSessionPrompt(d *Daemon, ctx context.Context, p *peer, params json.Ra
 	}
 	defer sub.Close()
 
+	// handlerCtx scopes the spec-ACP session/request_permission fan-out (see
+	// requestPermissionFromPeers) to this turn: its cancellation — this handler
+	// returning, the origin disconnecting, or the daemon shutting down — cancels
+	// every permission request this turn still has outstanding at other peers, so
+	// none dangles past the turn. Per-request cancellation on the ordinary
+	// resolve path is layered on top, in the PermissionResolved branch below.
+	handlerCtx, handlerCancel := context.WithCancel(ctx)
+	defer handlerCancel()
+
 	// Attach the originator so it is part of this session's fan-out set for
 	// subsequent turns other peers drive too, even if it never called
 	// session/load (a one-shot `run` that only ever prompts). Deregistered on
@@ -499,6 +508,20 @@ func handleSessionPrompt(d *Daemon, ctx context.Context, p *peer, params json.Ra
 	if err := d.sup.Send(ctx, op.SessionID, op.Text); err != nil {
 		return nil, appError(err)
 	}
+
+	// pendingPermIDs collects every permission call id this turn fanned a
+	// session/request_permission out for, so the deferred sweep forgets any that
+	// never saw a matching permission.resolved (the rare interrupt path that
+	// emits no resolved event) — their ctxs are already cancelled by
+	// handlerCancel; this just keeps permReqCancels from lingering. Ids that DID
+	// resolve were already forgotten in the PermissionResolved branch, so
+	// re-cancelling them here is a no-op.
+	var pendingPermIDs []string
+	defer func() {
+		for _, id := range pendingPermIDs {
+			d.cancelPermRequest(id)
+		}
+	}()
 
 	var lastFatal string
 	var updates int
@@ -531,9 +554,21 @@ func handleSessionPrompt(d *Daemon, ctx context.Context, p *peer, params json.Ra
 					Spec:      pe.Spec,
 					Trace:     pe.Trace,
 				})
+				// ALSO ask every attached ACP peer via the spec-ACP
+				// session/request_permission REQUEST, so a pure ACP client (a
+				// phone) can answer — the gofer-native notification above only
+				// serves gofer clients (the TUI/daemonbridge). First answer from
+				// EITHER surface wins at the session's gate.
+				pendingPermIDs = append(pendingPermIDs, pe.ID)
+				d.requestPermissionFromPeers(handlerCtx, op.SessionID, pe)
 				continue
 			case event.PermissionResolved:
 				d.clearPermRoute(pe.ID)
+				// Cancel the outstanding session/request_permission requests at
+				// every other peer now that the gate is resolved (by whichever
+				// surface answered first), so no daemon-side waiter dangles —
+				// mirroring this gofer/permission_resolved fanout's timing.
+				d.cancelPermRequest(pe.ID)
 				d.broadcastPermission(ctx, op.SessionID, methodGoferPermissionResolved, permissionResolvedParams{
 					SessionID: op.SessionID,
 					ID:        pe.ID,
@@ -653,6 +688,104 @@ func (d *Daemon) broadcastPermission(ctx context.Context, sessionID, method stri
 			// see handleFrame's redaction rule.
 			d.log.Debug("permission broadcast: peer notify failed", "session", sessionID, "method", method, "err", werr)
 		}
+	}
+}
+
+// permissionOptions is the fixed option set every session/request_permission
+// request offers: the four ACP permission-option kinds. Their ids are the kind
+// strings, which is how askPeerPermission maps a client's chosen optionId back
+// to its kind (allow/deny + remember) via [acp.ToPermissionReply]. The
+// remember-verdict distinction the gofer-native surface expresses is expressible
+// here too: allow_always/reject_always carry Remember=true, allow_once/reject_once
+// do not — so ACP clients get the same allow/deny(+remember) granularity as the
+// TUI, with no wire extension.
+func permissionOptions() []acp.PermissionOption {
+	return []acp.PermissionOption{
+		{OptionID: string(acp.PermissionAllowOnce), Name: "Allow once", Kind: acp.PermissionAllowOnce},
+		{OptionID: string(acp.PermissionAllowAlways), Name: "Allow always", Kind: acp.PermissionAllowAlways},
+		{OptionID: string(acp.PermissionRejectOnce), Name: "Reject once", Kind: acp.PermissionRejectOnce},
+		{OptionID: string(acp.PermissionRejectAlways), Name: "Reject always", Kind: acp.PermissionRejectAlways},
+	}
+}
+
+// findPermissionOption returns the option in options whose OptionID matches id.
+func findPermissionOption(options []acp.PermissionOption, id string) (acp.PermissionOption, bool) {
+	for _, o := range options {
+		if o.OptionID == id {
+			return o, true
+		}
+	}
+	return acp.PermissionOption{}, false
+}
+
+// requestPermissionFromPeers fans the spec-ACP session/request_permission
+// REQUEST out to every attached ACP peer for the permission pe, alongside the
+// gofer-native gofer/permission_requested notification the caller already
+// broadcast. Each request runs on its own goroutine (a request BLOCKS awaiting
+// the client's answer, and the drain loop must keep processing events — chiefly
+// the eventual permission.resolved that cancels the losers), keyed off reqCtx so
+// [Daemon.cancelPermRequest] can retract them all at once when the gate resolves
+// by any path.
+//
+// gofer-native peers (the TUI/daemonbridge) are skipped: they do not answer a
+// session/request_permission request (they answer via the permission.reply
+// notification and consume gofer/permission_requested), so sending them one
+// would only ever time out. A peer not yet classified defaults to ACP, the safe
+// direction — see [peer.goferNative].
+func (d *Daemon) requestPermissionFromPeers(ctx context.Context, sessionID string, pe event.PermissionRequested) {
+	reqCtx, cancel := context.WithCancel(ctx)
+	d.registerPermCancel(pe.ID, cancel)
+
+	options := permissionOptions()
+	req := acp.ToRequestPermission(sessionID, pe.ID, pe.Tool, options)
+
+	for _, pr := range d.peersForSession(sessionID) {
+		if pr.goferNative.Load() {
+			continue
+		}
+		go d.askPeerPermission(reqCtx, pr, sessionID, pe.ID, req, options)
+	}
+}
+
+// askPeerPermission sends one session/request_permission request to pr and, on
+// a "selected" answer, routes it into the session's gate — the same call-id
+// routing the gofer-native permission.reply path uses (see handlePermissionReply),
+// so the first answer from EITHER surface wins and the gate makes any later one a
+// no-op. A "cancelled" outcome is a non-answer (the client declined to decide,
+// e.g. its own session/cancel raced) and is ignored rather than routed as a deny,
+// so one observer dismissing its dialog never denies a turn another peer is still
+// deciding. A transport error, a ctx cancellation (the permission resolved
+// elsewhere), or an unparseable/unknown answer are all likewise no-ops.
+func (d *Daemon) askPeerPermission(ctx context.Context, pr *peer, sessionID, callID string, req acp.RequestPermissionRequest, options []acp.PermissionOption) {
+	raw, err := pr.request(ctx, acp.MethodSessionRequestPermission, req)
+	if err != nil {
+		// Routine: resolved elsewhere (ctx cancelled), the client disconnected,
+		// or it cannot answer this request. Session id only — never the payload.
+		d.log.Debug("session/request_permission: no answer from peer", "session", sessionID, "err", err)
+		return
+	}
+	var resp acp.RequestPermissionResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		d.log.Debug("session/request_permission: decode response failed", "session", sessionID, "err", err)
+		return
+	}
+	sel, ok := resp.Outcome.(acp.PermissionOutcomeSelected)
+	if !ok {
+		return // a cancelled outcome is a non-answer — ignore it
+	}
+	chosen, ok := findPermissionOption(options, sel.OptionID)
+	if !ok {
+		d.log.Debug("session/request_permission: unknown optionId in answer", "session", sessionID)
+		return
+	}
+	// Skip an answer that lost the race — the gate already resolved and cleared
+	// the route. The gate is first-wins regardless, so this is only to avoid a
+	// pointless late Reply; it is not required for correctness.
+	if _, live := d.lookupPermRoute(callID); !live {
+		return
+	}
+	if err := d.sup.Reply(sessionID, acp.ToPermissionReply(callID, resp, chosen)); err != nil {
+		d.log.Debug("session/request_permission: routing answer to gate failed", "session", sessionID, "err", err)
 	}
 }
 

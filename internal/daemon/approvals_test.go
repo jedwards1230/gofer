@@ -35,6 +35,7 @@ type approvalSession struct {
 	callID   string
 
 	verdicts chan event.Verdict
+	replies  chan loop.Reply
 }
 
 func newApprovalSession(id, path, callID string) *approvalSession {
@@ -44,6 +45,7 @@ func newApprovalSession(id, path, callID string) *approvalSession {
 		broker:   event.NewBroker(event.WithReplay(64)),
 		callID:   callID,
 		verdicts: make(chan event.Verdict, 1),
+		replies:  make(chan loop.Reply, 1),
 	}
 }
 
@@ -69,10 +71,14 @@ func (f *approvalSession) Prompt(ctx context.Context, text string) error {
 	reply, err := f.approver.Await(ctx, f.callID)
 	if err != nil {
 		f.broker.Publish(event.NewPermissionResolved(f.id, f.callID, event.VerdictDeny, "cancelled"))
+		// A terminal cancelled turn.finished so the driving session/prompt
+		// returns instead of hanging (mirrors a real session on interrupt).
+		f.broker.Publish(event.NewTurnFinished(f.id, "cancelled", provider.Usage{}))
 		return err
 	}
 	f.broker.Publish(event.NewPermissionResolved(f.id, f.callID, reply.Verdict, "human"))
 	f.verdicts <- reply.Verdict
+	f.replies <- reply
 	// Terminal turn.finished so the driving session/prompt handler returns.
 	f.broker.Publish(event.NewTurnFinished(f.id, "end_turn", provider.Usage{}))
 	return nil
@@ -83,6 +89,7 @@ func (f *approvalSession) Prompt(ctx context.Context, text string) error {
 // the verdict a turn's gate delivered.
 type approvalHarness struct {
 	sup *supervisor.Supervisor
+	d   *daemon.Daemon
 	url string
 
 	mu     sync.Mutex
@@ -123,6 +130,7 @@ func newApprovalHarness(t *testing.T) *approvalHarness {
 	h.sup = sup
 
 	d := daemon.New(sup, daemon.Config{DefaultModel: "faux"})
+	h.d = d
 	srv := httptest.NewServer(d.Handler())
 	t.Cleanup(srv.Close)
 	h.url = "ws" + srv.URL[len("http"):]

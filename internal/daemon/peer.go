@@ -3,8 +3,11 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -53,14 +56,47 @@ type peer struct {
 	// peer makes deregister-on-close O(attached) rather than O(all sessions):
 	// [Daemon.detachPeer] walks exactly this set.
 	attached map[string]struct{}
+
+	// goferNative reports whether this peer speaks the gofer-native control
+	// surface (it has invoked a gofer/* method or permission.reply) rather than
+	// being a pure ACP client. It gates the daemon's spec-ACP
+	// session/request_permission fan-out: that request is a JSON-RPC REQUEST a
+	// client must answer, which a gofer-native client (internal/daemonbridge)
+	// does not — it answers via the permission.reply notification and consumes
+	// gofer/permission_requested instead. Default false (assume ACP) is the safe
+	// direction: an ACP client (which never calls a gofer/* method) is never
+	// mismarked and so is never skipped, while a gofer-native client that has not
+	// yet been marked merely receives a request it silently drops (harmless — it
+	// still answers via permission.reply). See [Daemon.requestPermissionFromPeers].
+	goferNative atomic.Bool
+
+	// outIDC generates ids for daemon-initiated requests (session/request_permission)
+	// this peer sends to its client. Separate id space from the client's own
+	// request ids — the two never collide because they key different maps
+	// (pendingOut here vs the client's own pending table).
+	outIDC atomic.Int64
+	// pendingMu guards pendingOut.
+	pendingMu sync.Mutex
+	// pendingOut maps a daemon-initiated request's marshaled id to the channel
+	// its response is delivered on (see [peer.request]/[peer.deliverReply]).
+	// Closed entries on connection teardown unblock any in-flight [peer.request].
+	pendingOut map[string]chan peerReply
+}
+
+// peerReply is the outcome of a daemon-initiated request: exactly one of Result
+// or Err is set, mirroring a JSON-RPC response.
+type peerReply struct {
+	Result json.RawMessage
+	Err    *rpcError
 }
 
 func newPeer(conn *websocket.Conn, d *Daemon) *peer {
 	return &peer{
-		conn:     conn,
-		daemon:   d,
-		inFlight: make(chan struct{}, maxInFlightPerPeer),
-		attached: make(map[string]struct{}),
+		conn:       conn,
+		daemon:     d,
+		inFlight:   make(chan struct{}, maxInFlightPerPeer),
+		attached:   make(map[string]struct{}),
+		pendingOut: make(map[string]chan peerReply),
 	}
 }
 
@@ -83,6 +119,7 @@ func (p *peer) run(ctx context.Context) {
 	// is harmless — its notify just errors on the closing connection and is
 	// logged and skipped (see handleSessionPrompt).
 	defer p.daemon.detachPeer(p)
+	defer p.closePending()
 	defer p.wg.Wait()
 	defer cancel()
 
@@ -142,12 +179,25 @@ func (p *peer) handleFrame(ctx context.Context, data []byte) {
 		p.reply(ctx, nil, nil, parseError(err))
 		return
 	}
+	// A response to a daemon-initiated request (session/request_permission): route
+	// it to the waiting [peer.request] and stop — it is NOT a method call.
+	if env.isResponse() {
+		p.deliverReply(env.ID, peerReply{Result: env.Result, Err: env.Error})
+		return
+	}
 	if env.Method == "" {
 		log.Warn("invalid request: missing method")
 		if !env.isNotification() {
 			p.reply(ctx, env.ID, nil, invalidRequest("missing method"))
 		}
 		return
+	}
+
+	// A peer that drives the gofer-native control surface (any gofer/* method or
+	// permission.reply) is not a pure ACP client — mark it so the spec-ACP
+	// session/request_permission fan-out skips it (see the goferNative field).
+	if isGoferNativeMethod(env.Method) {
+		p.goferNative.Store(true)
 	}
 
 	h, ok := methodTable[env.Method]
@@ -236,4 +286,107 @@ func (p *peer) writeJSON(ctx context.Context, v any) error {
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
 	return p.conn.Write(ctx, websocket.MessageText, data)
+}
+
+// isGoferNativeMethod reports whether method belongs to the gofer-native control
+// surface — any gofer/* method or the permission.reply op. A peer that invokes
+// one is a gofer client (internal/daemonbridge), not a pure ACP one, and is
+// excluded from the spec-ACP session/request_permission fan-out (see
+// [peer.goferNative]). ACP method names never carry the gofer/ prefix, so an
+// ACP client can never trip this.
+func isGoferNativeMethod(method string) bool {
+	return strings.HasPrefix(method, "gofer/") || method == methodPermissionReply
+}
+
+// request sends a daemon-initiated JSON-RPC request (session/request_permission)
+// to this peer's client and blocks for its matching response. It is the mirror
+// of [Client.Call], running in the agent->client direction: the daemon here is
+// the requester and the connected client answers. The response is routed back
+// by [peer.handleFrame] via [peer.deliverReply].
+//
+// ctx cancellation (the permission resolved by another path, the driving turn
+// ended, or the daemon shut down) unregisters the waiter and returns ctx.Err —
+// the client may still answer later, which [peer.deliverReply] then finds no
+// waiter for and drops. A connection teardown closes the waiter channel (see
+// [peer.closePending]) and returns a clear error.
+//
+// The request FRAME is written under the daemon's own context, NOT ctx:
+// coder/websocket's Write closes the connection if its context is cancelled
+// mid-write, and ctx here is cancelled on the ordinary resolve path (another
+// peer answered) — writing under it would tear an innocent peer's connection
+// down in the race between this write and that resolution. The daemon context
+// is cancelled only on shutdown, when closing is appropriate; a write to an
+// already-closed peer connection still fails fast on its own. ctx governs only
+// the RESPONSE wait below.
+func (p *peer) request(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	id := p.outIDC.Add(1)
+	idJSON, err := json.Marshal(id)
+	if err != nil {
+		return nil, fmt.Errorf("peer request %s: marshal id: %w", method, err)
+	}
+	key := string(idJSON)
+
+	ch := make(chan peerReply, 1)
+	p.pendingMu.Lock()
+	p.pendingOut[key] = ch
+	p.pendingMu.Unlock()
+	defer func() {
+		p.pendingMu.Lock()
+		delete(p.pendingOut, key)
+		p.pendingMu.Unlock()
+	}()
+
+	req := outboundRequest{JSONRPC: jsonrpcVersion, ID: idJSON, Method: method, Params: params}
+	if err := p.writeJSON(p.daemon.ctx, req); err != nil {
+		return nil, fmt.Errorf("peer request %s: write: %w", method, err)
+	}
+
+	select {
+	case r, ok := <-ch:
+		if !ok {
+			return nil, fmt.Errorf("peer request %s: connection closed before a response arrived", method)
+		}
+		if r.Err != nil {
+			return nil, fmt.Errorf("peer request %s: %s", method, r.Err.Message)
+		}
+		return r.Result, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// deliverReply routes a client's response to the [peer.request] that is waiting
+// on id, if any. A response with no registered waiter — the request already
+// unregistered on ctx cancellation (resolved elsewhere), or a duplicate — is
+// dropped, which is exactly the first-answer-wins no-op the approval relay
+// relies on.
+func (p *peer) deliverReply(id json.RawMessage, r peerReply) {
+	p.pendingMu.Lock()
+	ch, ok := p.pendingOut[string(id)]
+	if ok {
+		delete(p.pendingOut, string(id))
+	}
+	p.pendingMu.Unlock()
+	if ok {
+		ch <- r // buffered (cap 1); never blocks
+		return
+	}
+	// No waiter: the request already unregistered on ctx cancellation (resolved
+	// elsewhere) or this is a duplicate/stray answer — the first-answer-wins
+	// no-op. Logged at DEBUG (id only, never the result) so a client echoing a
+	// wrong id is at least diagnosable. See handleFrame's redaction rule.
+	p.daemon.log.Debug("dropped reply with no matching request", "id", string(id))
+}
+
+// closePending closes every outstanding daemon-initiated request's waiter on
+// connection teardown, so an in-flight [peer.request] blocked on this now-gone
+// client unblocks with a clear "connection closed" error rather than lingering
+// until its ctx happens to cancel. Run from [peer.run]'s deferred cleanup.
+func (p *peer) closePending() {
+	p.pendingMu.Lock()
+	for key, ch := range p.pendingOut {
+		close(ch)
+		delete(p.pendingOut, key)
+	}
+	p.pendingMu.Unlock()
 }
