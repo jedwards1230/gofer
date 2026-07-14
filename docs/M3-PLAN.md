@@ -7,7 +7,7 @@ orchestration repo (`docs/projects/gofer-m3-plan-and-docs-refresh.md`).
 
 ## Sequencing (order matters)
 
-1. [ ] **Daemon session→peers fan-out registry.** Peers register interest at
+1. [x] **Daemon session→peers fan-out registry.** ✅ shipped (#55). Peers register interest at
        `session/load`; every registered peer then receives every `session/update`
        for that session, regardless of which client drove the turn. Includes an
        **echo/dedup rule** — suppress the user-prompt echo to the originating peer
@@ -15,8 +15,8 @@ orchestration repo (`docs/projects/gofer-m3-plan-and-docs-refresh.md`).
        once all clients see all events. This is the one missing primitive behind
        the CLI⇄ACP live-sync gap, and it shares plumbing with the approvals relay
        (③). SDK broker already fans out to N subscribers — this is gofer-side.
-2. [ ] **Session-visibility model — DECIDED (2026-07-13): fleet-global, cwd as a
-       label.** `session/list` returns every session; the working dir is a
+2. [x] **Session-visibility model — DECIDED (2026-07-13): fleet-global, cwd as a
+       label.** ✅ shipped with #55 (session/list drops the cwd-hiding filter, keeps cwd as metadata). `session/list` returns every session; the working dir is a
        filterable tag, not a wall — so all clients see one roster and any client
        can sync any session. (cwd-scoped isolation may return later as opt-in
        config, but the default is global.)
