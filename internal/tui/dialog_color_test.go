@@ -1,13 +1,14 @@
 package tui
 
-// dialog_color_test.go locks down the approval-modal compositor under a real
+// dialog_color_test.go locks down the inline approval prompt under a real
 // color profile — the case theme.Test's forced termenv.Ascii can never
 // exercise, and therefore the case the checked-in *.golden files silently
-// miss. renderApprovalDialog styles the box (WarnStyle), so with color on its
-// lines carry ANSI escapes; overlayCenter must composite by display column,
-// never by rune offset, or those escape bytes splice into the underlying
-// frame as stray cells scattered across the screen (the "torn modal / orphan
-// │ fragments" defect).
+// miss (see PR #61's display-width lesson: an Ascii-only golden can pass
+// while a colored render overruns the frame). renderApprovalPrompt styles
+// every line (WarnStyle), so with color on those lines carry ANSI escapes;
+// Model.View/TailView must still lay the block out identically to the
+// colorless render, with every composited line staying within the frame
+// width.
 
 import (
 	"strings"
@@ -25,7 +26,7 @@ import (
 )
 
 // colorTestTheme is theme.Test with a real color profile forced on, so
-// lipgloss actually emits ANSI. The composited geometry must be identical to
+// lipgloss actually emits ANSI. The rendered geometry must be identical to
 // the colorless render — color changes styling, never layout.
 func colorTestTheme() theme.Theme {
 	th := theme.Test()
@@ -35,9 +36,8 @@ func colorTestTheme() theme.Theme {
 
 // newColorAppWithApproval builds an App through th, drives it into the attach
 // screen of the recency-first session, and feeds it a pending
-// PermissionRequested — the state that renders the approval modal over the
-// attach frame. It mirrors attachForDialogTest but lets the caller pick the
-// theme (attachForDialogTest hardcodes theme.Test via newAppForGolden).
+// PermissionRequested — the state that renders the inline approval prompt
+// above the attach screen's status/input lines.
 func newColorAppWithApproval(t *testing.T, th theme.Theme) App {
 	t.Helper()
 	sup := newInternalFakeSup(appGoldenRoster())
@@ -62,28 +62,24 @@ func newColorAppWithApproval(t *testing.T, th theme.Theme) App {
 			map[string]any{"cmd": "rm -rf /tmp/x"}, []string{"no rule"}),
 	})
 	a = mdl.(App)
-	if a.dialog == nil {
-		t.Fatal("expected a.dialog set after PermissionRequested")
+	if !a.sess.HasPendingApproval() {
+		t.Fatal("expected a pending approval after PermissionRequested")
 	}
 	return a
 }
 
-// TestColorApprovalDialogComposite is the direct reproduction of the
-// permission-dialog scatter defect. The same App state is rendered twice —
-// once colorless (theme.Test), once colored (colorTestTheme) — and the
-// composited colored frame, stripped of ANSI, must equal the colorless frame
-// exactly, with no line overrunning the terminal width. Under the pre-fix
-// rune-splicing overlayCenter the colored frame's box lands at the wrong
-// column with escape fragments strewn across the base, so the stripped frame
-// does not match.
+// TestColorApprovalDialogComposite is the inline prompt's version of the #61
+// display-width lesson: the same App state is rendered twice — once
+// colorless (theme.Test), once colored (colorTestTheme) — and the colored
+// frame, stripped of ANSI, must equal the colorless frame exactly, with no
+// line overrunning the terminal width.
 func TestColorApprovalDialogComposite(t *testing.T) {
 	plain := newColorAppWithApproval(t, theme.Test()).render()
 	colored := newColorAppWithApproval(t, colorTestTheme()).render()
 
 	if stripped := ansi.Strip(colored); stripped != plain {
-		t.Errorf("composited dialog frame, color-stripped, != colorless frame\n"+
-			"(overlayCenter changed geometry under color)\n--- stripped ---\n%s\n--- plain ---\n%s",
-			stripped, plain)
+		t.Errorf("colored approval-prompt frame, stripped of ANSI, != colorless frame\n"+
+			"--- stripped ---\n%s\n--- plain ---\n%s", stripped, plain)
 	}
 
 	for i, line := range strings.Split(colored, "\n") {
@@ -92,10 +88,18 @@ func TestColorApprovalDialogComposite(t *testing.T) {
 		}
 	}
 
-	// The border and title must survive compositing as intact, contiguous
-	// runs — not the scattered fragments the bug produced.
+	// The prompt must survive compositing intact — the tool+args line, the
+	// question, the action row, and the footer — not fragments scattered by a
+	// display-width bug.
 	stripped := ansi.Strip(colored)
-	if !strings.Contains(stripped, "┌──────────") || !strings.Contains(stripped, "Permission requested") {
-		t.Errorf("composited frame missing an intact dialog border/title:\n%s", stripped)
+	for _, want := range []string{
+		"bash · cmd=rm -rf /tmp/x",
+		"Allow this tool call?",
+		"[a] allow   [d] deny   [r] remember: off",
+		"esc cancel · session ",
+	} {
+		if !strings.Contains(stripped, want) {
+			t.Errorf("composited frame missing inline approval prompt content %q:\n%s", want, stripped)
+		}
 	}
 }

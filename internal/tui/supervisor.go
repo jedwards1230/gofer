@@ -122,11 +122,11 @@ type Supervisor interface {
 	// Reply answers a pending permission request identified by id: allow or
 	// deny it, and — when remember is true — persist the verdict as a
 	// standing grant for future matching calls (the SDK's
-	// loop.RuleGuard/Grant path). The approval dialog (see app.go/dialog.go)
-	// is the sole caller. sessionID scopes the reply to the session the
-	// dialog was raised for; a daemon-backed Supervisor need not put it on
-	// the wire itself (see internal/daemonbridge's contract: the daemon
-	// resolves a permission request by id alone), but an in-process one
-	// routes through it directly.
+	// loop.RuleGuard/Grant path). The inline approval prompt's key handling
+	// (see app.go/dialog.go) is the sole caller. sessionID scopes the reply
+	// to the session the prompt was raised for; a daemon-backed Supervisor
+	// need not put it on the wire itself (see internal/daemonbridge's
+	// contract: the daemon resolves a permission request by id alone), but
+	// an in-process one routes through it directly.
 	Reply(ctx context.Context, sessionID, id string, allow, remember bool) error
 }
