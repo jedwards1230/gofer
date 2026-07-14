@@ -17,6 +17,7 @@ jobs:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} # preferred (subscription)
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }} # fallback (metered API)
     with:
+      extra_plugins: go-quality@jedwards1230-plugins
       focus: |
         gofer is a daemon + TUI for running and supervising many coding agents,
         built on the agent-sdk-go framework and consuming it exclusively through
