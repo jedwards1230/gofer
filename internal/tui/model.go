@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/x/ansi"
+
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
@@ -479,15 +481,18 @@ func (m Model) FullTranscript(width int) string {
 	return strings.Join(lines, "\n")
 }
 
-// truncate clips s to at most w runes, marking a clipped line with a
-// trailing ellipsis.
+// truncate clips s to at most w terminal cells (display width, not rune
+// count — so ANSI styling and wide runes like the ✋ approval glyph are
+// measured correctly), marking a clipped line with a trailing ellipsis.
 func truncate(s string, w int) string {
-	r := []rune(s)
-	if len(r) <= w {
+	if w < 0 {
+		w = 0
+	}
+	if ansi.StringWidth(s) <= w {
 		return s
 	}
 	if w <= 1 {
-		return string(r[:w])
+		return ansi.Truncate(s, w, "")
 	}
-	return string(r[:w-1]) + "…"
+	return ansi.Truncate(s, w, "…")
 }

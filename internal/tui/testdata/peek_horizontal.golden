@@ -1,12 +1,12 @@
 gofer v0.2.0                                                    │                                        
 fable-5 · ~/orchestration                                       │                                        
-1 awaiting input · 2 working · 2 completed                      │                                        
+2 awaiting input · 1 working · 2 completed                      │                                        
                                                                 │                                        
-▸ ✋2 wire the websocket ACP list…  blocked: ap…    $0.0912  now │                                        
-  ◐ explore three agent ecosyst…  M2 launched…     $0.3821  2m  │                                        
-  ○ keycloak path-b groundwork    turn finish…     $0.1204  5m  │                                        
-  ✓ authentik token exchange rf…  Keycloak Pa…     $1.4230  1h  │                                        
-  ✓ openclaw dev setup            Heartbeat r…     $0.0311  1d  │                                        
+▸ ✋2wire the websocket ACP list…  blocked: ap…    $0.0912  now │                                        
+  ◐  explore three agent ecosyst…  M2 launched…     $0.3821  2m │                                        
+  ○  keycloak path-b groundwork    turn finish…     $0.1204  5m │                                        
+  ✓  authentik token exchange rf…  Keycloak Pa…     $1.4230  1h │                                        
+  ✓  openclaw dev setup            Heartbeat r…     $0.0311  1d │                                        
                                                                 │                                        
                                                                 │                                        
                                                                 │                                        

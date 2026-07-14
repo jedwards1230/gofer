@@ -18,6 +18,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/charmbracelet/x/ansi"
+
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
 
@@ -101,11 +103,16 @@ func specSummary(spec map[string]any) string {
 // cover keep base's own content, so the result reads as the box sitting atop
 // the screen rather than replacing it outright. It is an opaque compositor —
 // no transparency within box's own rectangle, which is exactly what a
-// bordered dialog wants — and, like the rest of this package's render path
-// (e.g. app.go's footer truncation), measures rune width on the
-// already-styled block: correct under [theme.Test]'s forced
-// [termenv.Ascii] (every golden test), the same simplification the rest of
-// this package makes for a live color profile.
+// bordered dialog wants.
+//
+// Placement and splicing are done in DISPLAY COLUMNS (terminal cells), never
+// rune offsets. renderApprovalDialog styles the box (WarnStyle) and the
+// underlying frame is styled too, so a box line holds ANSI escape bytes and
+// possibly wide runes; indexing it by rune would treat each escape byte as a
+// column and scatter escape fragments across the base frame (the torn-modal
+// defect). Each covered base row is instead rebuilt as
+// base[:left) + boxLine + base[left+boxWidth:) with ANSI-aware slicing that
+// preserves the styling on every retained segment.
 func overlayCenter(base, box string, width, height int) string {
 	baseLines := fitLines(base, width, height)
 	boxLines := strings.Split(box, "\n")
@@ -120,28 +127,39 @@ func overlayCenter(base, box string, width, height int) string {
 		left = 0
 	}
 
-	for i, l := range boxLines {
+	for i, boxLine := range boxLines {
 		row := top + i
 		if row < 0 || row >= len(baseLines) {
 			continue
 		}
-		baseRunes := []rune(baseLines[row])
-		boxRunes := []rune(padTo(l, bw))
-		for j, r := range boxRunes {
-			col := left + j
-			if col < 0 || col >= len(baseRunes) {
-				continue
-			}
-			baseRunes[col] = r
-		}
-		baseLines[row] = string(baseRunes)
+		baseLines[row] = spliceLine(baseLines[row], boxLine, left, width)
 	}
 	return strings.Join(baseLines, "\n")
 }
 
+// spliceLine overwrites the display-column span starting at left of baseLine
+// (which fitLines has sized to exactly frameWidth cells) with boxLine,
+// clamping boxLine to the columns actually available so a box wider than the
+// frame truncates rather than overflowing. The retained left and right base
+// segments and boxLine keep their ANSI styling; the result is re-fit to
+// exactly frameWidth cells so a wide rune straddling a cut boundary can never
+// shift the frame width.
+func spliceLine(baseLine, boxLine string, left, frameWidth int) string {
+	avail := frameWidth - left
+	if avail <= 0 {
+		return baseLine
+	}
+	boxLine = ansi.Truncate(boxLine, avail, "")
+	bw := ansi.StringWidth(boxLine)
+	leftPart := padTo(ansi.Truncate(baseLine, left, ""), left)
+	rightPart := ansi.TruncateLeft(baseLine, left+bw, "")
+	return padTo(leftPart+boxLine+rightPart, frameWidth)
+}
+
 // fitLines splits base into exactly height lines, each padded/truncated to
-// exactly width runes, so overlayCenter can index into it by row and column
-// without bounds surprises.
+// exactly width display cells (terminal columns, not runes — padTo/truncate
+// measure ANSI-styled and wide-rune content correctly), so overlayCenter can
+// address it by row and display column without bounds surprises.
 func fitLines(base string, width, height int) []string {
 	lines := strings.Split(base, "\n")
 	out := make([]string, height)
@@ -155,11 +173,12 @@ func fitLines(base string, width, height int) []string {
 	return out
 }
 
-// lineWidth returns the widest line (in runes) across lines.
+// lineWidth returns the widest line, in terminal cells (display width, so the
+// box's ANSI styling and any wide runes are measured correctly), across lines.
 func lineWidth(lines []string) int {
 	w := 0
 	for _, l := range lines {
-		if n := len([]rune(l)); n > w {
+		if n := ansi.StringWidth(l); n > w {
 			w = n
 		}
 	}
