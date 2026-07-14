@@ -169,7 +169,9 @@ Commands:
   resume    Reopen a session by id: continue it, or print its transcript
   attach    Open the roster TUI against a running daemon (requires one)
   agents    Alias for "attach" with no <session>: open the roster overview
-  daemon    Run the supervisor behind an ACP-over-WebSocket listener (alias: serve)
+  daemon    Run the supervisor behind an ACP-over-WebSocket listener (alias: serve);
+            "daemon install|uninstall|status" manage a launchd/systemd unit so it
+            starts on login
   ps        List sessions on a running daemon's roster (--all: include archived)
   kill      Interrupt and drop a live session from the roster (journal kept)
   archive   Drop a finished session from the roster (journal kept)

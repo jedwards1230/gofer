@@ -29,6 +29,12 @@ import (
 // path) is a valid, fully usable starting state either way: the dispatch bar
 // creates the first session once the operator types a prompt.
 func runTUI(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer) error {
+	// First-use moment: on a fully interactive terminal with no daemon service
+	// installed and none reachable, offer to install one so the daemon starts on
+	// login. A complete no-op otherwise (piped stdin, non-tty stdout, CI, or an
+	// already-present service/daemon) — see maybePromptDaemonServiceInstall.
+	maybePromptDaemonServiceInstall(ctx, stdin, stdout, stderr)
+
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("getwd: %w", err)

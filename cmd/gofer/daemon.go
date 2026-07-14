@@ -21,6 +21,22 @@ import (
 // foreground until interrupted (SIGINT) or ctx is otherwise cancelled, then
 // shuts both down.
 func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	// Peel a lifecycle sub-verb before treating the remaining args as
+	// foreground-serve flags: `gofer daemon install|uninstall|status` manage the
+	// launchd/systemd unit, while a bare `gofer daemon` (or any other leading
+	// token, e.g. `--listen`) falls through to today's foreground serve.
+	// Mirrors runAuth peeling its lone positional.
+	if len(args) > 0 {
+		switch args[0] {
+		case "install":
+			return runDaemonInstall(ctx, args[1:], stdout, stderr)
+		case "uninstall":
+			return runDaemonUninstall(ctx, args[1:], stdout, stderr)
+		case "status":
+			return runDaemonStatus(ctx, args[1:], stdout, stderr)
+		}
+	}
+
 	fs := flag.NewFlagSet("daemon", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	listen := fs.String("listen", daemon.DefaultListenAddr, "address to bind the ACP WebSocket listener")
@@ -46,6 +62,17 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	bearerToken := *token
 	if bearerToken == "" {
 		bearerToken = os.Getenv("GOFER_TOKEN")
+	}
+	// Final fallback for a service-managed daemon: when a non-loopback install
+	// delivered the token via the 0600 <root>/daemon.env file (never the unit
+	// file or argv — see cmd/gofer/service.go writeDaemonEnvToken), read it here
+	// so the launchd/systemd unit stays token-free. Best-effort and silent: a
+	// read error or missing file just leaves the token empty (ValidateListen
+	// then decides), and the token is never logged.
+	if bearerToken == "" {
+		if t, err := readDaemonEnvToken(*root); err == nil {
+			bearerToken = t
+		}
 	}
 
 	levelStr := *logLevel
