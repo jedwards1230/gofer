@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jedwards1230/agent-sdk-go/event"
+	"github.com/jedwards1230/agent-sdk-go/loop"
 	"github.com/jedwards1230/agent-sdk-go/provider"
 	"github.com/jedwards1230/agent-sdk-go/provider/faux"
 	"github.com/jedwards1230/agent-sdk-go/runner"
@@ -82,6 +83,50 @@ func newTestSupervisorGuarded(t *testing.T, newProvider func() provider.Provider
 			opts.Model = "faux"
 			opts.Provider = newProvider()
 			return runner.Resume(ctx, id, strip(opts))
+		},
+	}
+	sup, err := supervisor.New(cfg)
+	if err != nil {
+		t.Fatalf("supervisor.New: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Close() })
+	return sup
+}
+
+// newTestSupervisorWithTools is [newTestSupervisor] with a caller-supplied
+// tool registry threaded into runner.Options.Tools instead of the stripped
+// nil newTestSupervisor leaves it at — the seam TestFidelityToolCallDeltaAndSpill
+// (fidelity_test.go) uses to exercise a hand-rolled loop.Tool that returns
+// Diagnostics + enough output to spill, neither of which the builtin tool
+// registry (or an unregistered-tool error path) ever populates. Guard/
+// Approver are still stripped (nil), same as newTestSupervisor: this test
+// exercises the WIRE projection, not the sandbox/permission pipeline.
+func newTestSupervisorWithTools(t *testing.T, newProvider func() provider.Provider, tools loop.ToolRegistry) *supervisor.Supervisor {
+	t.Helper()
+	root := t.TempDir()
+	store, err := session.NewFileStore(session.WithRoot(root))
+	if err != nil {
+		t.Fatalf("session.NewFileStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	build := func(opts runner.Options) runner.Options {
+		opts.Store = store
+		opts.Model = "faux"
+		opts.Guard, opts.Approver = nil, nil
+		opts.Tools = tools
+		return opts
+	}
+	cfg := supervisor.Config{
+		Root:  root,
+		Store: store,
+		NewSession: func(ctx context.Context, opts runner.Options) (supervisor.Session, error) {
+			opts.Provider = newProvider()
+			return runner.New(ctx, build(opts))
+		},
+		ResumeSession: func(ctx context.Context, id string, opts runner.Options) (supervisor.Session, error) {
+			opts.Provider = newProvider()
+			return runner.Resume(ctx, id, build(opts))
 		},
 	}
 	sup, err := supervisor.New(cfg)
@@ -180,9 +225,13 @@ func TestRosterReflectsCreatedSession(t *testing.T) {
 }
 
 // TestSendReconstructsTranscript drives Create→Send against the faux
-// provider's default script and asserts the exact reconstructed event
-// sequence: TurnStarted, the user's own prompt echo (started/finished, no
-// deltas — see event.MessageUser's doc), the reasoning message
+// provider's default script and asserts the exact replayed event sequence:
+// the user's own prompt (started/finished, no deltas — see
+// event.MessageUser's doc), THEN TurnStarted (the SDK's runner.Prompt
+// publishes the user message before driving the loop, which is what emits
+// TurnStarted — see runner.Runner.Prompt's doc; this is the source order,
+// which lossless attach now replays verbatim instead of the M2 bridge's old
+// synthesized TurnStarted-then-user-pair order), the reasoning message
 // (started/2 deltas/finished), the text message (started/3 deltas/finished),
 // then TurnFinished with the scripted stop reason — TurnFinished strictly
 // after every delta.
@@ -206,15 +255,15 @@ func TestSendReconstructsTranscript(t *testing.T) {
 		t.Fatalf("Send: %v", err)
 	}
 
-	// turn.started, message.started(user), message.finished(user),
+	// message.started(user), message.finished(user), turn.started,
 	// message.started(reasoning), 2x message.delta, message.finished(reasoning),
 	// message.started(text), 3x message.delta, message.finished(text),
 	// turn.finished = 13 events.
 	events := drainEvents(t, sub, 13)
 
 	wantKinds := []string{
-		"turn.started",
 		"message.started", "message.finished",
+		"turn.started",
 		"message.started", "message.delta", "message.delta", "message.finished",
 		"message.started", "message.delta", "message.delta", "message.delta", "message.finished",
 		"turn.finished",
@@ -225,12 +274,12 @@ func TestSendReconstructsTranscript(t *testing.T) {
 		}
 	}
 
-	userStart, ok := events[1].(event.MessageStarted)
+	userStart, ok := events[0].(event.MessageStarted)
 	if !ok || userStart.MessageKind != event.MessageUser {
-		t.Errorf("event 1 = %+v, want MessageStarted(user)", events[1])
+		t.Errorf("event 0 = %+v, want MessageStarted(user)", events[0])
 	}
-	if fin, ok := events[2].(event.MessageFinished); !ok || fin.MessageKind != event.MessageUser || fin.Content != "hi" {
-		t.Errorf("event 2 (user finished) = %+v, want MessageFinished(user, content=hi)", events[2])
+	if fin, ok := events[1].(event.MessageFinished); !ok || fin.MessageKind != event.MessageUser || fin.Content != "hi" {
+		t.Errorf("event 1 (user finished) = %+v, want MessageFinished(user, content=hi)", events[1])
 	}
 
 	reasoning, ok := events[3].(event.MessageStarted)
@@ -347,12 +396,14 @@ func TestAttachReplaysHistory(t *testing.T) {
 	}
 	defer sub2.Close()
 
-	// History replay: the prior turn's user prompt echo (started/finished, no
+	// History replay: the prior turn's user prompt (started/finished, no
 	// deltas — event.MessageUser is never streamed), then its reasoning
-	// message, then its text message, each started/deltad/finished — 8
-	// events. No TurnStarted/TurnFinished (a history replay carries no
-	// turn-lifecycle boundary of its own — see loadHistory's doc).
-	history := drainEvents(t, sub2, 8)
+	// message, then its text message — with verbatim gofer/event replay
+	// (internal/daemon's historyEvents), each is JUST its settled
+	// started/finished pair, no synthesized deltas — 6 events. No
+	// TurnStarted/TurnFinished (a history replay carries no turn-lifecycle
+	// boundary of its own — see loadHistory's doc).
+	history := drainEvents(t, sub2, 6)
 	next := wantMessage(t, "history", history, 0, event.MessageUser, "hi")
 	next = wantMessage(t, "history", history, next, event.MessageReasoning, "The user said hello. I'll greet them back.")
 	next = wantMessage(t, "history", history, next, event.MessageText, "Hello! How can I help you today?")
@@ -361,16 +412,20 @@ func TestAttachReplaysHistory(t *testing.T) {
 	}
 
 	// A live turn sent on the reattached bridge lands strictly after the
-	// history above: drainEvents already consumed exactly those 8 events, in
+	// history above: drainEvents already consumed exactly those 6 events, in
 	// that order, before Send is even issued below.
 	if err := b2.Send(context.Background(), info.ID, "again"); err != nil {
 		t.Fatalf("Send (b2): %v", err)
 	}
+	// message.started(user)/message.finished(user), THEN turn.started (source
+	// order — see TestSendReconstructsTranscript's doc), then the reasoning
+	// and text messages, then the terminal turn.finished.
 	live := drainEvents(t, sub2, 13)
-	if _, ok := live[0].(event.TurnStarted); !ok {
-		t.Errorf("live event 0 = %+v, want TurnStarted", live[0])
+	next = wantMessage(t, "live", live, 0, event.MessageUser, "again")
+	if _, ok := live[next].(event.TurnStarted); !ok {
+		t.Errorf("live event %d = %+v, want TurnStarted", next, live[next])
 	}
-	next = wantMessage(t, "live", live, 1, event.MessageUser, "again")
+	next++
 	next = wantMessage(t, "live", live, next, event.MessageReasoning, "The user said hello. I'll greet them back.")
 	next = wantMessage(t, "live", live, next, event.MessageText, "Hello! How can I help you today?")
 	if next != len(live)-1 {
@@ -384,7 +439,7 @@ func TestAttachReplaysHistory(t *testing.T) {
 		t.Errorf("live TurnFinished.StopReason = %q, want end_turn", tf.StopReason)
 	}
 
-	// No stray or duplicate event beyond the 8 history + 13 live: history
+	// No stray or duplicate event beyond the 6 history + 13 live: history
 	// isn't replayed twice, and the live turn's own events don't repeat.
 	select {
 	case e, ok := <-sub2.C:
@@ -402,9 +457,10 @@ func TestAttachReplaysHistory(t *testing.T) {
 // session/load replay), then feeds the reconstructed history straight into
 // a real [tui.Model] — the same Ingest an attached App uses — and asserts
 // the rendered transcript shows the user's prompt above the agent's reply.
-// This is the end-to-end proof for handleUserMessage's reconstruction (see
-// reconstruct.go): a real daemon round trip, over the real ACP wire, replayed
-// through the real render path, not just an event-kind assertion.
+// This is the end-to-end proof for the gofer/event history replay (see
+// internal/daemon's historyEvents and reconstruct.go's handleGoferEvent): a
+// real daemon round trip, over the real wire, replayed through the real
+// render path, not just an event-kind assertion.
 func TestGoldenAttachHistoryReplayRendersUserTurn(t *testing.T) {
 	sup := newTestSupervisor(t, fauxProvider)
 	url := newTestDaemon(t, sup)
@@ -434,7 +490,7 @@ func TestGoldenAttachHistoryReplayRendersUserTurn(t *testing.T) {
 	}
 	defer sub2.Close()
 
-	history := drainEvents(t, sub2, 8) // see TestAttachReplaysHistory
+	history := drainEvents(t, sub2, 6) // see TestAttachReplaysHistory
 
 	m := tui.New(theme.Test())
 	for _, e := range history {
@@ -470,8 +526,22 @@ func TestCreateSkipsHistoryLoad(t *testing.T) {
 	}
 
 	events := drainEvents(t, sub, 13)
-	if _, ok := events[0].(event.TurnStarted); !ok {
-		t.Fatalf("event 0 = %+v, want TurnStarted (a session/load replay would have inserted events ahead of it)", events[0])
+	// The live turn's own first events (message.started(user)/message.finished
+	// (user, "hi"), then turn.started — see TestSendReconstructsTranscript's
+	// doc for why the user pair leads) must be immediately adjacent, with
+	// nothing else in front of them: a spurious session/load replay would
+	// insert its own message.started/finished pairs (with no turn.started
+	// between them — a history replay carries no turn-lifecycle boundary, see
+	// loadHistory's doc) ahead of this shape.
+	userStart, ok := events[0].(event.MessageStarted)
+	if !ok || userStart.MessageKind != event.MessageUser {
+		t.Fatalf("event 0 = %+v, want MessageStarted(user) (a session/load replay would have inserted events ahead of it)", events[0])
+	}
+	if fin, ok := events[1].(event.MessageFinished); !ok || fin.MessageKind != event.MessageUser || fin.Content != "hi" {
+		t.Fatalf("event 1 = %+v, want MessageFinished(user, content=hi)", events[1])
+	}
+	if _, ok := events[2].(event.TurnStarted); !ok {
+		t.Fatalf("event 2 = %+v, want TurnStarted (a session/load replay would have inserted events between the user pair and it)", events[2])
 	}
 
 	select {
@@ -529,10 +599,16 @@ func (s *toolTurnStream) Next() (provider.StreamEvent, error) {
 
 func (s *toolTurnStream) Close() error { return nil }
 
-// TestToolCallReconstruction asserts a tool_call/tool_call_update pair
-// reconstructs to ToolCallStarted/ToolCallFinished, sandwiched between the
-// turn's TurnStarted and its terminal TurnFinished — two model calls in one
-// Send, since the first turn's stop reason is tool_use.
+// TestToolCallReconstruction asserts a tool call replays to
+// ToolCallStarted/ToolCallFinished, with the source's TRUE turn boundaries
+// around it: the SDK's loop publishes a round's turn.finished(tool_use) as
+// soon as the MODEL CALL settles (loop.callModel), and only THEN executes
+// the requested tool (loop.runOneTool, called from Run after callModel
+// returns) — so ToolCallFinished lands AFTER that round's turn.finished, and
+// a fresh turn.started opens the next round. ACP's session/update has no
+// turn.started/turn.finished projection at all, so the M2 reconstruction
+// never surfaced this true ordering; lossless attach now replays it
+// verbatim.
 func TestToolCallReconstruction(t *testing.T) {
 	sup := newTestSupervisor(t, func() provider.Provider { return &toolTurnProvider{} })
 	url := newTestDaemon(t, sup)
@@ -552,16 +628,17 @@ func TestToolCallReconstruction(t *testing.T) {
 		t.Fatalf("Send: %v", err)
 	}
 
-	// turn.started, message.started(user), message.finished(user),
-	// tool.call.started, tool.call.finished, message.started(text),
-	// message.delta, message.finished(text), turn.finished = 9 events.
-	events := drainEvents(t, sub, 9)
+	// message.started(user), message.finished(user), turn.started,
+	// tool.call.started, turn.finished(tool_use), tool.call.finished,
+	// turn.started, message.started(text), message.delta,
+	// message.finished(text), turn.finished(end_turn) = 11 events.
+	events := drainEvents(t, sub, 11)
 
-	if _, ok := events[0].(event.TurnStarted); !ok {
-		t.Errorf("event 0 = %+v, want TurnStarted", events[0])
+	if fin, ok := events[1].(event.MessageFinished); !ok || fin.MessageKind != event.MessageUser || fin.Content != "read a.txt" {
+		t.Errorf("event 1 (user finished) = %+v, want MessageFinished(user, content=read a.txt)", events[1])
 	}
-	if fin, ok := events[2].(event.MessageFinished); !ok || fin.MessageKind != event.MessageUser || fin.Content != "read a.txt" {
-		t.Errorf("event 2 (user finished) = %+v, want MessageFinished(user, content=read a.txt)", events[2])
+	if _, ok := events[2].(event.TurnStarted); !ok {
+		t.Errorf("event 2 = %+v, want TurnStarted", events[2])
 	}
 	started, ok := events[3].(event.ToolCallStarted)
 	if !ok {
@@ -570,23 +647,29 @@ func TestToolCallReconstruction(t *testing.T) {
 	if started.ID != "tc-1" || started.Name != "read_file" {
 		t.Errorf("ToolCallStarted = %+v, want ID=tc-1 Name=read_file", started)
 	}
-	finished, ok := events[4].(event.ToolCallFinished)
+	if tf, ok := events[4].(event.TurnFinished); !ok || tf.StopReason != "tool_use" {
+		t.Fatalf("event 4 = %+v, want TurnFinished(stop_reason=tool_use)", events[4])
+	}
+	finished, ok := events[5].(event.ToolCallFinished)
 	if !ok {
-		t.Fatalf("event 4 = %+v, want ToolCallFinished", events[4])
+		t.Fatalf("event 5 = %+v, want ToolCallFinished", events[5])
 	}
 	if finished.ID != "tc-1" || !finished.IsError {
 		t.Errorf("ToolCallFinished = %+v, want ID=tc-1 IsError=true (no tool registry configured)", finished)
 	}
+	if _, ok := events[6].(event.TurnStarted); !ok {
+		t.Errorf("event 6 = %+v, want TurnStarted (the second model-call round)", events[6])
+	}
 
-	if _, ok := events[5].(event.MessageStarted); !ok {
-		t.Errorf("event 5 = %+v, want MessageStarted", events[5])
+	if _, ok := events[7].(event.MessageStarted); !ok {
+		t.Errorf("event 7 = %+v, want MessageStarted", events[7])
 	}
-	if fin, ok := events[7].(event.MessageFinished); !ok || fin.Content != "done" {
-		t.Errorf("event 7 = %+v, want MessageFinished(content=done)", events[7])
+	if fin, ok := events[9].(event.MessageFinished); !ok || fin.Content != "done" {
+		t.Errorf("event 9 = %+v, want MessageFinished(content=done)", events[9])
 	}
-	tf, ok := events[8].(event.TurnFinished)
+	tf, ok := events[10].(event.TurnFinished)
 	if !ok {
-		t.Fatalf("event 8 = %+v, want TurnFinished", events[8])
+		t.Fatalf("event 10 = %+v, want TurnFinished", events[10])
 	}
 	if tf.StopReason != "end_turn" {
 		t.Errorf("TurnFinished.StopReason = %q, want end_turn", tf.StopReason)
@@ -625,16 +708,25 @@ func TestPermissionRelayEndToEnd(t *testing.T) {
 	}
 
 	// The turn blocks server-side once the guard asks — see runOneTool's
-	// gate() — so only these 5 events arrive until this test replies: turn.started,
-	// message.started(user), message.finished(user), tool.call.started,
-	// permission.requested.
-	before := drainEvents(t, sub, 5)
+	// gate(), called only AFTER the requesting round's own turn.finished(
+	// tool_use) has already been published (loop.callModel publishes it
+	// before loop.Run ever calls runOneTool — see TestToolCallReconstruction's
+	// doc) — so these 6 events arrive until this test replies:
+	// message.started(user), message.finished(user), turn.started,
+	// tool.call.started, turn.finished(tool_use), permission.requested.
+	before := drainEvents(t, sub, 6)
+	if _, ok := before[2].(event.TurnStarted); !ok {
+		t.Fatalf("event 2 = %+v, want TurnStarted", before[2])
+	}
 	if _, ok := before[3].(event.ToolCallStarted); !ok {
 		t.Fatalf("event 3 = %+v, want ToolCallStarted", before[3])
 	}
-	pr, ok := before[4].(event.PermissionRequested)
+	if tf, ok := before[4].(event.TurnFinished); !ok || tf.StopReason != "tool_use" {
+		t.Fatalf("event 4 = %+v, want TurnFinished(stop_reason=tool_use)", before[4])
+	}
+	pr, ok := before[5].(event.PermissionRequested)
 	if !ok {
-		t.Fatalf("event 4 = %+v, want PermissionRequested", before[4])
+		t.Fatalf("event 5 = %+v, want PermissionRequested", before[5])
 	}
 	if pr.Tool != "read_file" {
 		t.Errorf("PermissionRequested.Tool = %q, want %q", pr.Tool, "read_file")
@@ -647,9 +739,10 @@ func TestPermissionRelayEndToEnd(t *testing.T) {
 		t.Fatalf("Reply: %v", err)
 	}
 
-	// permission.resolved, tool.call.finished, message.started(text),
-	// message.delta, message.finished(text), turn.finished = 6 events.
-	after := drainEvents(t, sub, 6)
+	// permission.resolved, tool.call.finished, turn.started (the second
+	// model-call round), message.started(text), message.delta,
+	// message.finished(text), turn.finished(end_turn) = 7 events.
+	after := drainEvents(t, sub, 7)
 	resolved, ok := after[0].(event.PermissionResolved)
 	if !ok {
 		t.Fatalf("event 0 (post-reply) = %+v, want PermissionResolved", after[0])
@@ -664,12 +757,15 @@ func TestPermissionRelayEndToEnd(t *testing.T) {
 	if finished.ID != "tc-1" || !finished.IsError {
 		t.Errorf("ToolCallFinished = %+v, want ID=tc-1 IsError=true (read_file is deliberately unregistered)", finished)
 	}
-	if fin, ok := after[4].(event.MessageFinished); !ok || fin.Content != "done" {
-		t.Errorf("event 4 (post-reply) = %+v, want MessageFinished(content=done)", after[4])
+	if _, ok := after[2].(event.TurnStarted); !ok {
+		t.Errorf("event 2 (post-reply) = %+v, want TurnStarted", after[2])
 	}
-	tf, ok := after[5].(event.TurnFinished)
+	if fin, ok := after[5].(event.MessageFinished); !ok || fin.Content != "done" {
+		t.Errorf("event 5 (post-reply) = %+v, want MessageFinished(content=done)", after[5])
+	}
+	tf, ok := after[6].(event.TurnFinished)
 	if !ok {
-		t.Fatalf("event 5 (post-reply) = %+v, want TurnFinished", after[5])
+		t.Fatalf("event 6 (post-reply) = %+v, want TurnFinished", after[6])
 	}
 	if tf.StopReason != "end_turn" {
 		t.Errorf("TurnFinished.StopReason = %q, want end_turn", tf.StopReason)
@@ -748,23 +844,29 @@ func TestInterrupt(t *testing.T) {
 	// blockingStream unblocks on cancellation by returning one ordinary text
 	// delta (see its doc — mirroring internal/daemon's own blockingProvider),
 	// so the loop's own pre-Next ctx check catches the cancellation on its
-	// NEXT iteration, not this one: turn.started, message.started(user),
-	// message.finished(user), message.started(text), message.delta,
-	// message.finished(text) [flushed by the cancellation check],
-	// turn.finished(cancelled) = 7 events.
-	events := drainEvents(t, sub, 7)
-	if _, ok := events[0].(event.TurnStarted); !ok {
-		t.Errorf("event 0 = %+v, want TurnStarted", events[0])
+	// NEXT iteration, not this one: message.started(user), message.finished
+	// (user), turn.started (source order — see TestSendReconstructsTranscript's
+	// doc), message.started(text), message.delta, message.finished(text)
+	// [flushed by the cancellation check], session.error(fatal) [the loop's
+	// own emitError on the cancelled path — a kind ACP's session/update has
+	// no projection for at all, so this is only visible via gofer/event],
+	// turn.finished(cancelled) = 8 events.
+	events := drainEvents(t, sub, 8)
+	if fin, ok := events[1].(event.MessageFinished); !ok || fin.MessageKind != event.MessageUser || fin.Content != "hi" {
+		t.Errorf("event 1 (user finished) = %+v, want MessageFinished(user, content=hi)", events[1])
 	}
-	if fin, ok := events[2].(event.MessageFinished); !ok || fin.MessageKind != event.MessageUser || fin.Content != "hi" {
-		t.Errorf("event 2 (user finished) = %+v, want MessageFinished(user, content=hi)", events[2])
+	if _, ok := events[2].(event.TurnStarted); !ok {
+		t.Errorf("event 2 = %+v, want TurnStarted", events[2])
 	}
 	if fin, ok := events[5].(event.MessageFinished); !ok || fin.Content != "hello" {
 		t.Errorf("event 5 = %+v, want MessageFinished(content=hello)", events[5])
 	}
-	tf, ok := events[6].(event.TurnFinished)
+	if se, ok := events[6].(event.SessionError); !ok || !se.Fatal {
+		t.Errorf("event 6 = %+v, want a fatal SessionError", events[6])
+	}
+	tf, ok := events[7].(event.TurnFinished)
 	if !ok {
-		t.Fatalf("event 6 = %+v, want TurnFinished", events[6])
+		t.Fatalf("event 7 = %+v, want TurnFinished", events[7])
 	}
 	if tf.StopReason != "cancelled" {
 		t.Errorf("TurnFinished.StopReason = %q, want cancelled", tf.StopReason)
