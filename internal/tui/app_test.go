@@ -99,6 +99,12 @@ func (f *fakeSup) Archive(_ context.Context, id string) error {
 	return nil
 }
 
+// Reply is a no-op here: the dialog it answers needs the unexported
+// sessEventMsg to trigger (see app_internal_test.go, package tui, for the
+// behavioral Reply-emission tests), which this package (tui_test) has no
+// access to.
+func (f *fakeSup) Reply(_ context.Context, _, _ string, _, _ bool) error { return nil }
+
 var appTestNow = time.Date(2026, 7, 12, 18, 0, 0, 0, time.UTC)
 
 func appTestMeta() tui.OverviewMeta {

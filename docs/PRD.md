@@ -130,7 +130,7 @@ tool call
   │                 allow rule ─▶ ✓ run
   ▼ no match
   ② sandbox ────── sandboxable ─▶ ✓ run contained (seatbelt / bwrap+seccomp)
-  ▼ not sandboxable                (denial text → model retries)
+  ▼ not sandboxable                (before ③ exists: escalate to ✋ human)
   ③ LLM reviewer   out-of-band call · strict JSON {decision, risk, rationale}
   │                30s timeout · 360-tok cap · fail-closed · injection-framed
   ├─ low-risk ∧ high-confidence ─▶ ✓ run (audit-logged)
@@ -138,7 +138,12 @@ tool call
 ```
 
 Entering auto mode drops broad grants — `Bash(*)` can never bypass ③. Stages
-①+② ship before ③ exists; each is independently useful. The reviewer is one
+①+② ship before ③ exists; each is independently useful. **①+② + the human
+fallback shipped in M3** (`internal/sandbox` + the `RuleGuard`/`Gate` relay): an
+allow-matched call runs contained when the host can contain it, and a call the
+host cannot contain (no sandbox runtime, or a non-containable tool) escalates to
+a human approval that reaches every attached client — never silently blocked,
+never run uncontained (decided 2026-07-13). The ③ LLM reviewer is M4/M5. The reviewer is one
 more SDK loop invocation with a different system prompt. Stage ① is a
 format-agnostic rule engine over typed rules; vendor rule formats (Claude Code
 `settings.json`, native YAML) are import adapters that land with the

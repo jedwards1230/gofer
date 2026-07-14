@@ -352,10 +352,11 @@ func (s *Supervisor) finishLoad(rec *sessionState) {
 }
 
 // handleNotification decodes one inbound notification and applies it to its
-// session's reconstruction state. Only session/update notifications carry
-// reconstructable state (the M2 daemon never sends any other notification
-// method — see internal/daemon's package doc); anything else, or anything
-// that fails to decode (a protocol drift, not a reason to crash the
+// session's reconstruction state. Session/update notifications carry the
+// M2 reconstruction; as of the M3 approvals-relay work, the daemon also fans
+// [event.PermissionRequested]/[event.PermissionResolved] out directly as
+// their own gofer-native notifications (see below) — anything else, or
+// anything that fails to decode (a protocol drift, not a reason to crash the
 // reconstruction), is dropped.
 //
 // Its s.session(w.SessionID) call below will, in practice, always find an
@@ -374,6 +375,14 @@ func (s *Supervisor) finishLoad(rec *sessionState) {
 // unloaded broker" rather than a nil dereference, not because this path is
 // expected to fire in normal operation.
 func (s *Supervisor) handleNotification(n daemon.Notification) {
+	switch n.Method {
+	case methodGoferPermissionRequested:
+		s.handlePermissionRequested(n.Params)
+		return
+	case methodGoferPermissionResolved:
+		s.handlePermissionResolved(n.Params)
+		return
+	}
 	if n.Method != acp.MethodSessionUpdate {
 		return
 	}
@@ -407,6 +416,70 @@ func (s *Supervisor) handleNotification(n daemon.Notification) {
 		// accepted and ignored, mirroring tui.Model.Ingest's own tolerance of
 		// event kinds it doesn't render.
 	}
+}
+
+// handlePermissionRequested reconstructs a gofer/permission_requested
+// notification into an [event.PermissionRequested], published straight to
+// its session's broker. Unlike session/update, this is not an ACP
+// projection: acp.SessionUpdate has no permission variant (ACP-native
+// clients like Agmente instead see the standard session/request_permission
+// RPC — see docs/PRD.md's Approvals section, and does not fit a must-deliver
+// fan-out to N attached peers besides), so the daemon fans this event out to
+// every attached peer under its own gofer-native notification (see
+// internal/daemon/handlers.go's methodGoferPermissionRequested doc), with
+// params a lossless projection of the event plus the routing session id. A
+// decode failure is a protocol drift, not a reason to crash reconstruction,
+// so it is dropped like any other malformed notification (see
+// handleNotification's doc).
+func (s *Supervisor) handlePermissionRequested(raw json.RawMessage) {
+	var w permissionRequestedWire
+	if err := json.Unmarshal(raw, &w); err != nil || w.SessionID == "" {
+		return
+	}
+	rec := s.session(w.SessionID)
+	if rec == nil {
+		return // supervisor closing: drop the update
+	}
+	rec.broker.Publish(event.NewPermissionRequested(w.SessionID, w.ID, w.Tool, w.Spec, w.Trace))
+}
+
+// handlePermissionResolved reconstructs a gofer/permission_resolved
+// notification into an [event.PermissionResolved] — see
+// handlePermissionRequested's doc for the shared design.
+func (s *Supervisor) handlePermissionResolved(raw json.RawMessage) {
+	var w permissionResolvedWire
+	if err := json.Unmarshal(raw, &w); err != nil || w.SessionID == "" {
+		return
+	}
+	rec := s.session(w.SessionID)
+	if rec == nil {
+		return // supervisor closing: drop the update
+	}
+	rec.broker.Publish(event.NewPermissionResolved(w.SessionID, w.ID, event.Verdict(w.Verdict), w.Rule))
+}
+
+// permissionRequestedWire decodes a gofer/permission_requested notification's
+// params — internal/daemon/wire.go's permissionRequestedParams:
+// {"sessionId","id","tool","spec","trace"}.
+type permissionRequestedWire struct {
+	SessionID string         `json:"sessionId"`
+	ID        string         `json:"id"`
+	Tool      string         `json:"tool"`
+	Spec      map[string]any `json:"spec"`
+	Trace     []string       `json:"trace"`
+}
+
+// permissionResolvedWire decodes a gofer/permission_resolved notification's
+// params — internal/daemon/wire.go's permissionResolvedParams:
+// {"sessionId","id","verdict","rule"}. Verdict decodes as a plain string
+// (the daemon's own wire type, matching event.Verdict's underlying type)
+// rather than [event.Verdict] directly, so this stays decodable even if that
+// SDK type ever grows unmarshal-side validation.
+type permissionResolvedWire struct {
+	SessionID string `json:"sessionId"`
+	ID        string `json:"id"`
+	Verdict   string `json:"verdict"`
+	Rule      string `json:"rule"`
 }
 
 // handleUserMessage reconstructs a user_message_chunk notification into a

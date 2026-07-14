@@ -25,7 +25,24 @@ const (
 	methodGoferRoster  = "gofer/roster"
 	methodGoferKill    = "gofer/kill"
 	methodGoferArchive = "gofer/archive"
+
+	// methodGoferPermissionRequested / methodGoferPermissionResolved are the
+	// gofer-native notifications the daemon fans a session's permission events
+	// out to every attached peer with — mirroring
+	// internal/daemon/handlers.go's own methodGoferPermissionRequested/
+	// methodGoferPermissionResolved constants (unexported there; redeclared
+	// here for the same reason as methodGoferRoster et al. above). See
+	// reconstruct.go's handlePermissionRequested/handlePermissionResolved.
+	methodGoferPermissionRequested = "gofer/permission_requested"
+	methodGoferPermissionResolved  = "gofer/permission_resolved"
 )
+
+// methodPermissionReply is the JSON-RPC method literal the daemon exposes to
+// answer a pending permission request — contract #1 of the M3 approvals-relay
+// work: it is a bare notification (no id, no response), decoded daemon-side
+// into an [event.PermissionReply] and routed to the session's
+// loop.Gate.Reply. See [Supervisor.Reply].
+const methodPermissionReply = "permission.reply"
 
 // subBuffer and replayDepth size each session's reconstructed [event.Broker]
 // the same way the SDK's own session package sizes its live broker
@@ -239,6 +256,13 @@ type sessionInfoDTO struct {
 	// session/load's required cwd (see loadHistory), not currently surfaced
 	// through [toTUISessionInfo]/[tui.SessionInfo].
 	Cwd string `json:"cwd"`
+	// Pending is the session's live outstanding-permission-request count —
+	// contract #2 of the M3 approvals-relay work: the daemon side
+	// (internal/daemon/wire.go) encodes [supervisor.SessionInfo.Pending] as
+	// "pending,omitempty". Additive field: an older daemon simply never sends
+	// it, and this decodes to the zero value (no badge), matching M2's
+	// always-0 behavior.
+	Pending int `json:"pending,omitempty"`
 }
 
 // statusFromWire maps the daemon's roster Status string — literally
@@ -264,9 +288,9 @@ func statusFromWire(s string) tui.SessionStatus {
 }
 
 // toTUISessionInfo maps one wire roster row to the TUI's row type.
-// Summary/Pending/Artifacts have no wire representation in M2 (see
-// sessionInfoDTO's doc and internal/daemon/wire.go) and are left at their
-// zero values.
+// Summary/Artifacts have no wire representation yet (see sessionInfoDTO's
+// doc and internal/daemon/wire.go) and are left at their zero values; Pending
+// is live as of the M3 approvals-relay work (contract #2).
 func toTUISessionInfo(d sessionInfoDTO) tui.SessionInfo {
 	return tui.SessionInfo{
 		ID:      d.ID,
@@ -275,6 +299,7 @@ func toTUISessionInfo(d sessionInfoDTO) tui.SessionInfo {
 		Model:   d.Model,
 		Cost:    d.Cost,
 		Usage:   d.Usage,
+		Pending: d.Pending,
 		Created: d.Created,
 		Updated: d.Updated,
 	}
@@ -408,6 +433,29 @@ func (s *Supervisor) Archive(ctx context.Context, sessionID string) error {
 func (s *Supervisor) Interrupt(ctx context.Context, sessionID string) error {
 	if err := s.client.Notify(ctx, acp.MethodSessionCancel, acp.CancelNotification{SessionID: sessionID}); err != nil {
 		return fmt.Errorf("daemonbridge: interrupt %s: %w", sessionID, err)
+	}
+	return nil
+}
+
+// Reply answers a pending permission request by sending [methodPermissionReply]
+// — a bare notification, matching the "permission.reply" op's own
+// fire-and-forget contract (see event.PermissionReply's doc: it carries no
+// response). sessionID is not part of the wire payload: the daemon resolves
+// a request by id alone (see [Supervisor.session]'s reconstruction — the
+// same id [event.PermissionRequested]/[event.PermissionResolved] already
+// carry), matching [tui.Supervisor.Reply]'s doc.
+func (s *Supervisor) Reply(ctx context.Context, sessionID, id string, allow, remember bool) error {
+	verdict := event.VerdictDeny
+	if allow {
+		verdict = event.VerdictAllow
+	}
+	params := struct {
+		ID       string        `json:"id"`
+		Verdict  event.Verdict `json:"verdict"`
+		Remember bool          `json:"remember,omitempty"`
+	}{ID: id, Verdict: verdict, Remember: remember}
+	if err := s.client.Notify(ctx, methodPermissionReply, params); err != nil {
+		return fmt.Errorf("daemonbridge: reply %s (session %s): %w", id, sessionID, err)
 	}
 	return nil
 }

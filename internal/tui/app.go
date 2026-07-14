@@ -51,6 +51,14 @@ type App struct {
 	sessID string // id `sess` is subscribed to ("" = none)
 	sub    *event.Subscription
 
+	// dialog is the interactive approval modal for a pending permission
+	// request on the currently attached/peeked session, if any — see
+	// dialog.go. Non-nil only between an [event.PermissionRequested] this
+	// bridge hasn't yet answered/dismissed and its resolution (a reply this
+	// App sent, a matching [event.PermissionResolved] from elsewhere, or a
+	// navigation away from the session it belongs to).
+	dialog *approval
+
 	scr    screen
 	width  int
 	height int
@@ -217,6 +225,7 @@ func (a *App) switchSession(id string) tea.Cmd {
 	a.sessID = id
 	a.sess = New(a.theme)
 	a.sub = nil
+	a.dialog = nil // the outgoing session's dialog, if any, belongs to it alone
 	return a.subscribe(id)
 }
 
@@ -269,6 +278,23 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil // stale: from a session we've since left, drop it
 		}
 		a.sess = a.sess.Ingest(msg.ev)
+		switch ev := msg.ev.(type) {
+		case event.PermissionRequested:
+			// A second request arriving while one is already showing (a
+			// different tool call on the same session) replaces it — last
+			// one shown wins; the superseded request is still pending
+			// server-side and its own PermissionResolved, when it arrives,
+			// simply finds a.dialog already pointed elsewhere and is a
+			// no-op below.
+			a.dialog = &approval{sessionID: msg.id, id: ev.ID, tool: ev.Tool, spec: ev.Spec}
+		case event.PermissionResolved:
+			// Another attached client (or this one, via resolveDialog)
+			// already answered it — dismiss so this client doesn't prompt
+			// for a decision that's already been made.
+			if a.dialog != nil && a.dialog.id == ev.ID {
+				a.dialog = nil
+			}
+		}
 		return a, waitForEvent(msg.id, msg.sub)
 
 	case sessClosedMsg:
@@ -293,6 +319,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyPressMsg:
 		a.status = ""
+		if a.dialog != nil {
+			return a.handleDialogKey(msg)
+		}
 		return a.handleKey(msg)
 	}
 	return a, nil
@@ -496,7 +525,18 @@ func (a App) render() string {
 	if footer != "" {
 		body += "\n" + footer
 	}
-	return strings.Repeat("\n", layout.TopPadding) + body
+	content := strings.Repeat("\n", layout.TopPadding) + body
+
+	// The approval modal only overlays the attach/peek screens — the
+	// session it belongs to is the one currently peeked/attached (see
+	// sessEventMsg's handling above); the overview shows only the roster's
+	// ✋ badge (see overview_render.go's statusGlyph), never the dialog
+	// itself, even though a.dialog can stay set while backed out to it (so
+	// re-entering the same session's peek/attach redisplays it).
+	if a.dialog != nil && a.scr != screenOverview {
+		content = overlayCenter(content, renderApprovalDialog(a.theme, *a.dialog), a.width, a.height)
+	}
+	return content
 }
 
 // View satisfies tea.Model, rendering the current screen at the last known

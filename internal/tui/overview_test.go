@@ -1,6 +1,7 @@
 package tui_test
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -116,6 +117,22 @@ func TestGoldenOverviewSelectionMoves(t *testing.T) {
 func TestGoldenOverviewEmpty(t *testing.T) {
 	o := newOverview()
 	testkit.AssertGolden(t, "overview_empty", testkit.Render(o, testkit.Width, testkit.Height))
+}
+
+// TestOverviewPendingGlyphShowsCount verifies a session with a positive
+// Pending count renders the approval glyph WITH the live count (e.g. "✋2"),
+// not the bare glyph — the roster's half of the M3 approvals-relay contract:
+// [tui.SessionInfo.Pending] plumbed all the way from the wire (see
+// internal/daemonbridge's toTUISessionInfo) into the row a client actually
+// sees.
+func TestOverviewPendingGlyphShowsCount(t *testing.T) {
+	o := newOverview().WithSessions([]tui.SessionInfo{
+		{ID: "sess-1", Title: "blocked on approval", Status: tui.StatusWorking, Pending: 2, Updated: overviewNow},
+	})
+	got := testkit.Render(o, testkit.Width, testkit.Height)
+	if !strings.Contains(got, "✋2") {
+		t.Errorf("rendered roster does not contain %q:\n%s", "✋2", got)
+	}
 }
 
 // TestOverviewSelectionByID verifies selection tracks a session across a view

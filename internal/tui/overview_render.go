@@ -9,7 +9,7 @@ import (
 // Row layout column budgets. The row is prefix + body(title,summary) + a
 // right-aligned metrics block (cost + age). Body flexes with terminal width.
 const (
-	rowPrefixW  = 4  // selection caret, space, status glyph, space
+	rowPrefixW  = 5  // selection caret, space, status glyph(+pending digit), space
 	rowRightW   = 16 // right-aligned "$cost  age" block
 	rowTitleW   = 28 // title column before the summary
 	rowColGap   = 2  // gap between title and summary
@@ -193,10 +193,16 @@ func (o Overview) row(s SessionInfo, width int) string {
 }
 
 // statusGlyph maps a session's status to its roster glyph, promoting to the
-// approval glyph when a permission request is pending.
+// approval glyph — with the live pending count, e.g. "✋2" — when a
+// permission request is pending. The count clamps to a single digit ("✋9+")
+// so the glyph never grows past two columns and skews row alignment
+// (rowPrefixW budgets exactly one extra column for it).
 func (o Overview) statusGlyph(s SessionInfo) string {
 	if s.Pending > 0 {
-		return o.theme.GlyphApproval
+		if s.Pending > 9 {
+			return o.theme.GlyphApproval + "+"
+		}
+		return fmt.Sprintf("%s%d", o.theme.GlyphApproval, s.Pending)
 	}
 	switch s.Status {
 	case StatusWorking:

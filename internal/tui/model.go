@@ -9,8 +9,9 @@
 // [Model.Ingest] (the bubbletea [Program] adapter in adapter.go does this
 // for a real terminal, wrapping each event as an [EventMsg]). This is the
 // seed of the full screen-stack design in docs/TUI.md (overview ⇄ peek ⇄
-// attach); the overview⇄peek⇄attach navigation shipped in M2, while the
-// dialog and keymap systems land later.
+// attach); the overview⇄peek⇄attach navigation shipped in M2, a first
+// interactive dialog (the approval modal — see dialog.go) landed in M3, and
+// the fuller dialog/keymap system lands later.
 package tui
 
 import (
@@ -44,6 +45,7 @@ const (
 	itemTool
 	itemError
 	itemApproval
+	itemApprovalResolved
 )
 
 // item is one entry in the transcript. Tool-only fields are zero on every
@@ -56,6 +58,12 @@ type item struct {
 	toolName   string
 	toolInput  string
 	toolResult string
+
+	// approvalVerdict/approvalRule are itemApprovalResolved-only: the
+	// resolved event.Verdict ("allow"/"deny") and the rule name that
+	// decided it, if any (event.PermissionResolved.Rule).
+	approvalVerdict string
+	approvalRule    string
 }
 
 // Model is gofer's minimal attach surface. It is immutable from the
@@ -185,10 +193,21 @@ func (m Model) Ingest(e event.Event) Model {
 	case event.PermissionRequested:
 		m.items = append(m.items, item{kind: itemApproval, text: ev.Tool, done: true})
 
+	case event.PermissionResolved:
+		// The interactive decision itself happens in the App-level modal
+		// (see dialog.go); this is just the transcript's log line so the
+		// request/resolution pair reads coherently once the dialog is gone.
+		m.items = append(m.items, item{
+			kind:            itemApprovalResolved,
+			approvalVerdict: string(ev.Verdict),
+			approvalRule:    ev.Rule,
+			done:            true,
+		})
+
 		// event.SessionCreated, event.SessionResumed, event.SessionForked,
-		// event.SessionCompacted, event.SessionKilled, event.SessionArchived,
-		// and event.PermissionResolved carry no transcript-visible state in
-		// the minimal attach surface; they fall through untouched.
+		// event.SessionCompacted, event.SessionKilled, and
+		// event.SessionArchived carry no transcript-visible state in the
+		// minimal attach surface; they fall through untouched.
 	}
 
 	return m
@@ -328,6 +347,17 @@ func (m Model) renderItemLines(it item) []string {
 
 	case itemApproval:
 		return []string{m.theme.WarnStyle().Render(m.theme.GlyphApproval + " " + it.text)}
+
+	case itemApprovalResolved:
+		glyph, style := m.theme.GlyphOK, m.theme.OKStyle()
+		if it.approvalVerdict == string(event.VerdictDeny) {
+			glyph, style = m.theme.GlyphErr, m.theme.DangerStyle()
+		}
+		line := "permission " + it.approvalVerdict
+		if it.approvalRule != "" {
+			line += " (" + it.approvalRule + ")"
+		}
+		return []string{style.Render(glyph + " " + line)}
 
 	default: // itemAssistantText
 		return []string{it.text}

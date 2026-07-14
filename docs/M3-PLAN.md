@@ -20,15 +20,27 @@ orchestration repo (`docs/projects/gofer-m3-plan-and-docs-refresh.md`).
        filterable tag, not a wall — so all clients see one roster and any client
        can sync any session. (cwd-scoped isolation may return later as opt-in
        config, but the default is global.)
-3. [ ] **Sandbox (stage ②).** seatbelt (macOS) / bwrap+seccomp (Linux) containment
-       for tool execution. Binary policy: contain if possible; if a call **can't
-       be contained on this host** (no sandbox available, or an inherently
-       un-sandboxable tool), **fall back to a human approval** — never silently
-       block, never silently run uncontained (decided 2026-07-13).
-4. [ ] **Approvals relay + phone approval UX.** Route `permission.requested` to
-       every attached client (built on ①); `permission.reply` gates execution;
-       TUI approval dialog. Agmente already ships the `session/request_permission`
-       UI, so a spec-general ACP surface lights it up with zero client work.
+3. [x] **Sandbox (stage ②).** ✅ shipped. seatbelt (macOS `sandbox-exec` + a
+       generated deny-by-default SBPL profile) / bwrap+seccomp (Linux, network
+       unshared) containment, in `internal/sandbox` — the SDK owns only the
+       `loop.Container` interface, backends live here. Runtime-detected with a
+       no-op fallback (`CanContain=false`) so an uncontainable call **falls back
+       to a human approval**, never silently blocked or run uncontained (decided
+       2026-07-13). The RuleGuard's Container gates the decision (contain-or-ask);
+       a sandbox-wrapping tool registry (bash wrapped in the generated profile,
+       injected via `runner.Options.Tools`) runs an allowed+containable call
+       contained. Profile generation is a pure function of the workdir — no env
+       secrets can leak into it (asserted in tests).
+4. [x] **Approvals relay + phone approval UX.** ✅ shipped. `permission.requested`
+       (a must-deliver SDK event) fans out to **every attached peer** via the
+       wave-① registry as a `gofer/permission_requested` notification; a
+       `permission.reply` op from ANY peer — routed by call id → the session's
+       reference `loop.Gate` — gates execution, then the loop proceeds or denies.
+       TUI approval dialog (allow / deny / toggle-remember) plus a roster ✋N
+       pending badge so a supervisor sees a waiting session without attaching.
+       Because the surface is spec-general, a phone approving a laptop-driven
+       session works with zero client-specific code. **Depended on an SDK seam**
+       (`runner.Options.Guard/Approver`) added in agent-sdk-go #41.
 5. [ ] **Headless exec** (`gofer exec`).
 6. [x] **Daemon-as-a-service** ([#42](https://github.com/jedwards1230/gofer/issues/42)):
        launchd/systemd install + first-use install prompt. ✅ shipped (#42).

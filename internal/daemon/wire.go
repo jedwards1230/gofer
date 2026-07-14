@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
 	"github.com/jedwards1230/gofer/internal/supervisor"
@@ -18,16 +19,21 @@ import (
 // JournalPath is an on-disk implementation detail, so none of the three cross
 // the wire.
 type sessionInfoDTO struct {
-	ID      string         `json:"id"`
-	Title   string         `json:"title,omitempty"`
-	Status  string         `json:"status"`
-	Model   string         `json:"model,omitempty"`
-	Cost    provider.Cost  `json:"cost"`
-	Usage   provider.Usage `json:"usage"`
-	Queued  int            `json:"queued"`
-	Created time.Time      `json:"created"`
-	Updated time.Time      `json:"updated"`
-	Project string         `json:"project,omitempty"`
+	ID     string         `json:"id"`
+	Title  string         `json:"title,omitempty"`
+	Status string         `json:"status"`
+	Model  string         `json:"model,omitempty"`
+	Cost   provider.Cost  `json:"cost"`
+	Usage  provider.Usage `json:"usage"`
+	Queued int            `json:"queued"`
+	// Pending is the live count of outstanding permission requests for the
+	// session (see [supervisor.SessionInfo.Pending]). Omitted when zero — an
+	// older client that never reads it is unaffected, and a client that does
+	// renders the ✋N approval glyph from it.
+	Pending int       `json:"pending,omitempty"`
+	Created time.Time `json:"created"`
+	Updated time.Time `json:"updated"`
+	Project string    `json:"project,omitempty"`
 	// Live is false for a disk-only (archived/offline) entry from gofer/ps;
 	// always true from gofer/roster, which only ever returns live sessions.
 	Live bool `json:"live"`
@@ -49,6 +55,7 @@ func toSessionInfoDTO(info supervisor.SessionInfo) sessionInfoDTO {
 		Cost:    info.Cost,
 		Usage:   info.Usage,
 		Queued:  info.Queued,
+		Pending: info.Pending,
 		Created: info.Created,
 		Updated: info.Updated,
 		Project: info.Project,
@@ -63,6 +70,37 @@ func toSessionInfoDTOs(infos []supervisor.SessionInfo) []sessionInfoDTO {
 		out[i] = toSessionInfoDTO(info)
 	}
 	return out
+}
+
+// permissionRequestedParams is the wire shape of a gofer/permission_requested
+// notification: a lossless projection of [event.PermissionRequested] plus the
+// session id a client needs to attribute it. A client reconstructs the event
+// directly from these fields.
+type permissionRequestedParams struct {
+	SessionID string         `json:"sessionId"`
+	ID        string         `json:"id"`
+	Tool      string         `json:"tool"`
+	Spec      map[string]any `json:"spec,omitempty"`
+	Trace     []string       `json:"trace,omitempty"`
+}
+
+// permissionResolvedParams is the wire shape of a gofer/permission_resolved
+// notification: a lossless projection of [event.PermissionResolved] plus the
+// session id.
+type permissionResolvedParams struct {
+	SessionID string `json:"sessionId"`
+	ID        string `json:"id"`
+	Verdict   string `json:"verdict"`
+	Rule      string `json:"rule,omitempty"`
+}
+
+// permissionReplyParams is the inbound params shape of the "permission.reply"
+// op (contract #1): {id, verdict, remember?}. It carries no session id — the
+// daemon resolves the session from the call id (see handlePermissionReply).
+type permissionReplyParams struct {
+	ID       string        `json:"id"`
+	Verdict  event.Verdict `json:"verdict"`
+	Remember bool          `json:"remember,omitempty"`
 }
 
 // sessionIDParams is the params shape shared by gofer/kill and gofer/archive.
