@@ -42,10 +42,22 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # Empty `path` = install-only: pulls vhs + its ttyd/ffmpeg deps + fonts
-      # and exports CI=''/COLORTERM=truecolor (needed for true-color frames),
-      # without rendering — we drive rendering through scripts/tui-vhs.sh below.
-      - uses: charmbracelet/vhs-action@59641cdc7fadf3978db65eb8c6937ea2752f4ec3 # v2.1.0
+      # Install the VHS toolchain directly rather than via charmbracelet/vhs-action:
+      # the action's dependency install is unconditional and its bundled ffmpeg
+      # installer is currently broken (dead download URL), so it fails install-only
+      # too. apt carries ttyd/ffmpeg/the font; vhs is pinned by release tag. Unset
+      # CI and force truecolor so termenv emits real ANSI colors in the frames.
+      - name: Install VHS and render deps
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg ttyd fonts-jetbrains-mono
+          go install github.com/charmbracelet/vhs@v0.11.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          {
+            echo "CI="
+            echo "COLORTERM=truecolor"
+          } >> "$GITHUB_ENV"
 
       # Glob the tapes (no hardcoded list) and reuse the repo's own renderer,
       # which prebuilds vhs/.bin/harness then renders each tape to vhs/out/.
