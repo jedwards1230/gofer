@@ -49,7 +49,7 @@ Resolution is deliberately quiet. A routine **allow** adds *no* transcript
 line — the `✋` badge already recorded that the call was gated, and a
 `✓ permission allow (config)` line on every approved call (printed *after* the
 result, reading as if config auto-allowed it) was pure noise. A **deny** keeps
-a `✗ permission denied` line, because a blocked call changed what happened. The
+a `✗ permission deny` line, because a blocked call changed what happened. The
 old rule-source parenthetical is dropped either way.
 
 The fuller pipeline trace (which rail matched, what the sandbox said, what the
