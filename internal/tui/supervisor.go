@@ -61,6 +61,7 @@ type SessionInfo struct {
 	Summary string        // one-line latest-activity summary
 	Status  SessionStatus // coarse grouping / status count bucket
 	Model   string        // model id driving the session
+	Cwd     string        // session working directory — the roster's cwd group key
 
 	Cost  provider.Cost  // accumulated cost, from the SDK's usage accounting
 	Usage provider.Usage // accumulated token usage

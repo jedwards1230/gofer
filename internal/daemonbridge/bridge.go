@@ -264,8 +264,8 @@ type sessionInfoDTO struct {
 	Live    bool           `json:"live"`
 	// Cwd, like the rest of this DTO, mirrors internal/daemon/wire.go's field
 	// of the same name — used internally by [Supervisor.sessionCwd] to drive
-	// session/load's required cwd (see loadHistory), not currently surfaced
-	// through [toTUISessionInfo]/[tui.SessionInfo].
+	// session/load's required cwd (see loadHistory), and surfaced through
+	// [toTUISessionInfo] as [tui.SessionInfo.Cwd], the roster's cwd group key.
 	Cwd string `json:"cwd"`
 	// Pending is the session's live outstanding-permission-request count —
 	// contract #2 of the M3 approvals-relay work: the daemon side
@@ -308,6 +308,7 @@ func toTUISessionInfo(d sessionInfoDTO) tui.SessionInfo {
 		Title:   d.Title,
 		Status:  statusFromWire(d.Status),
 		Model:   d.Model,
+		Cwd:     d.Cwd,
 		Cost:    d.Cost,
 		Usage:   d.Usage,
 		Pending: d.Pending,
@@ -408,6 +409,7 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts tui.CreateO
 	info := tui.SessionInfo{
 		ID:      resp.SessionID,
 		Model:   opts.Model,
+		Cwd:     opts.Cwd,
 		Status:  tui.StatusNeedsInput,
 		Created: now,
 		Updated: now,
