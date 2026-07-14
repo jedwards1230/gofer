@@ -67,8 +67,9 @@ gofer                       # TUI: health-probe daemon → auto-spawn if absent 
 gofer attach [<session>]    # daemon roster TUI; with <session>, attach straight into it
 gofer agents [<session>]    # alias for `gofer attach` (M2)
 gofer demo                  # M0: offline faux-provider stream
-gofer exec [-p prompt] [--agent name] [--json] [--output-schema file]
-                            # headless one-shot: JSONL events on stdout (M3)
+gofer exec [-p prompt] [--agent name] [--json] [--output-schema file] [-m model] [--root dir]
+                            # headless one-shot, in-process (not daemon-routed): JSONL events
+                            #   on stdout (M3)
 gofer serve [--host unix://…|tcp://…]   # run the daemon in the foreground
 gofer daemon install|uninstall|status   # launchd/systemd unit for the daemon (M3)
                             #   install [--listen addr] [--root dir] [--token tok]

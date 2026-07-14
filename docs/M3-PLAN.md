@@ -41,7 +41,13 @@ orchestration repo (`docs/projects/gofer-m3-plan-and-docs-refresh.md`).
        Because the surface is spec-general, a phone approving a laptop-driven
        session works with zero client-specific code. **Depended on an SDK seam**
        (`runner.Options.Guard/Approver`) added in agent-sdk-go #41.
-5. [ ] **Headless exec** (`gofer exec`).
+5. [x] **Headless exec** (`gofer exec`). ✅ shipped. In-process, one-shot —
+       never daemon-routed, unlike run/resume/bare gofer. Streams the SDK's
+       `exec.Run` JSONL event contract directly to stdout (no banner, no
+       summary — the only thing on stdout is the event stream); `--agent`
+       fails clean until an agent-manifest registry exists;
+       `--output-schema` validates the final result, reporting a
+       `*exec.SchemaError` as a normal command error.
 6. [x] **Daemon-as-a-service** ([#42](https://github.com/jedwards1230/gofer/issues/42)):
        launchd/systemd install + first-use install prompt. ✅ shipped (#42).
        `gofer daemon install|uninstall|status` writes a launchd user agent /
