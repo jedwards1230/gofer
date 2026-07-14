@@ -13,10 +13,11 @@ the `App` screen-stack root that composes them under the navigation contract
 (see [Roster & navigation](#roster--navigation-m2) below). M4 step 1 added the
 slash dispatcher + command panel host (`command.go`, `panel.go`); M4 step 2
 added the `CommandEnv` data seam (`env.go`) and the real `/status` view
-(`status.go`) — see [Slash commands](#slash-commands) below. `/config` and
-`/model` still render as placeholder tabs until their own steps land. Still ahead: a
-general reusable dialog abstraction, the central keymap registry, and plugin
-UI.
+(`status.go`); M4 step 3 added `config.Save`, the settings registry
+(`settings.go`), and the real `/config` view (`config_view.go`) — see [Slash
+commands](#slash-commands) below. `/model` still renders as a placeholder tab
+until its own step lands. Still ahead: a general reusable dialog abstraction,
+the central keymap registry, and plugin UI.
 
 ## The three altitudes
 
@@ -212,12 +213,15 @@ needed, only the parent→child link and the indent.
 
 ## Responsive layout
 
-The root layout picks **compact stack** (< ~90 cols: one screen at a time)
-or **split** (≥ ~90: persistent roster rail + detail pane) by breakpoint,
-config-pinnable via `tui.layout: auto|compact|split`. Components only
-implement `View(w, h)` and reflow — they never know which layout they're in.
-In split mode, rail selection drives the detail pane (read along without
-attaching); `f` promotes the pane to fullscreen; focus moves between panes.
+Not yet built — design intent only. Once it lands, the root layout picks
+**compact stack** (< ~90 cols: one screen at a time) or **split** (≥ ~90:
+persistent roster rail + detail pane) by breakpoint, config-pinnable via a
+future `tui.layout: auto|compact|split` setting (deliberately **not** in the
+M4 step 3 settings registry — no layout modes exist yet, so the knob would be
+a no-op; see `settings.go`). Components only implement `View(w, h)` and
+reflow — they never know which layout they're in. In split mode, rail
+selection drives the detail pane (read along without attaching); `f` promotes
+the pane to fullscreen; focus moves between panes.
 
 ## Package layout & contracts
 
@@ -348,10 +352,10 @@ routed with the same precedence as the approval overlay — `panel > approval >
 active screen > global` — and closed by Esc, sized to whatever the active
 tab's body actually renders (`commandPanel.Height`) rather than always a
 worst-case max. Three builtins (`/status`, `/config`, `/model`) register now
-and open the panel on their tab; `/config` and `/model` still render a
-placeholder ("`<Tab> — coming soon.`") until their own steps land. `@` and
-`!` are not implemented — the intercept only switches on a leading `/` so
-they can slot in later.
+and open the panel on their tab; `/model` still renders a placeholder
+("`Model — coming soon.`") until its own step lands. `@` and `!` are not
+implemented — the intercept only switches on a leading `/` so they can slot
+in later.
 
 **Built (M4 step 2)**: `env.go` adds `CommandEnv` — the panel's read-only
 data seam: `Version`/`Cwd`/`Root` plus `Auth`/`Config` closures wrapping the
@@ -368,6 +372,22 @@ multi-provider; "not signed in" when none), the resolved model, and which
 config layers exist on disk — omitting any row it can't answer honestly
 rather than blank-filling it. Opens cleanly with zero providers
 authenticated and never resolves a credential (auth-independence).
+
+**Built (M4 step 3)**: `internal/config` adds `Session`/`TUI` config sections
+(`session.model`, `session.permission_mode`, `tui.roster_view`, alongside the
+existing `telemetry.*`) and `Save(path, Config)` — indented JSON, mode 0600,
+atomic (temp file + rename). `settings.go` adds the setting registry: a
+`[]Setting{Key, Label, Kind, Options, Get(Config), Set(Config, val) Config}`
+table parallel to the command registry, namespaced (`session.*`, `tui.*`,
+`telemetry.*`, and — once plugin loading lands in M5 — `plugin.<name>.*`
+without a schema change) so adding a setting is one row; `Kind` picks the edit
+affordance (bool/enum/string). `config_view.go` is the real `/config` body: a
+search list (`Search settings…` filter box, `Label … value` rows) where ↓/Enter
+select a row and edit it in place by kind — a bool toggles, an enum cycles, a
+string opens an inline edit line — and a commit calls `env.SaveConfig`
+immediately, no separate save step. Esc is two-stage: it cancels an
+in-progress edit or clears the filter before a second Esc closes the panel.
+Pure local: reads/writes `config.json` only, no auth path at all.
 
 - **P0**: user markdown commands (`~/.gofer/commands` + project
   `.gofer/commands`, with `$1`, `$ARGUMENTS`, `${1:-def}`, `${@:N}`

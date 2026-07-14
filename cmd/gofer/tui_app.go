@@ -155,11 +155,11 @@ func selectTUIBackend(ctx context.Context, df *daemonFlags, cwd, root string) (t
 	}, nil
 }
 
-// buildCommandEnv builds the command panel's read-only data source (see
+// buildCommandEnv builds the command panel's data source (see
 // [tui.CommandEnv]'s doc): version/cwd/root identity plus lazy wrappers
-// around the SDK auth store and gofer's own config loader, both rooted at
-// root. Auth reuses newAuthStore (the same store `gofer auth`/`gofer
-// login` drive) rather than opening auth.json a second way.
+// around the SDK auth store and gofer's own config loader/writer, both
+// rooted at root. Auth reuses newAuthStore (the same store `gofer
+// auth`/`gofer login` drive) rather than opening auth.json a second way.
 func buildCommandEnv(root, cwd string) tui.CommandEnv {
 	return tui.CommandEnv{
 		Version: version,
@@ -187,6 +187,9 @@ func buildCommandEnv(root, cwd string) tui.CommandEnv {
 		},
 		Config: func() (config.Config, error) {
 			return config.Load(config.DefaultPath(root))
+		},
+		SaveConfig: func(c config.Config) error {
+			return config.Save(config.DefaultPath(root), c)
 		},
 	}
 }

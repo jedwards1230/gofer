@@ -21,11 +21,10 @@ import (
 // on-disk state. Both are non-fatal to call: a missing/malformed file is a
 // normal state a view renders around ("not signed in", defaults) rather than
 // an error that blocks the panel from opening — every view must open cleanly
-// with zero providers authenticated. The zero CommandEnv (nil Auth/Config) is
-// valid and answers "nothing configured" for both.
-//
-// SaveConfig is deliberately not here yet — it lands with /config (M4 step
-// 3), once there is a settings registry that needs to write through it.
+// with zero providers authenticated. The zero CommandEnv (nil
+// Auth/Config/SaveConfig) is valid and answers "nothing configured" for
+// Auth/Config; SaveConfig nil is a no-op an edit-committing view must guard
+// before calling.
 type CommandEnv struct {
 	Version string
 	Cwd     string
@@ -36,6 +35,12 @@ type CommandEnv struct {
 
 	// Config loads the store root's config.json, wrapping config.Load.
 	Config func() (config.Config, error)
+
+	// SaveConfig persists a full config.Config to the store root's
+	// config.json, wrapping config.Save. /config (config_view.go) calls this
+	// on every committed edit — bool toggle, enum cycle, or a string edit's
+	// Enter — immediately, with no separate save step.
+	SaveConfig func(config.Config) error
 }
 
 // AuthKind is a credential's kind, mirroring the SDK auth package's CredKind

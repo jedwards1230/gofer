@@ -6,8 +6,9 @@ package tui
 // overlay's exactly (see dialog.go) — one field on [App], checked ahead of
 // the per-screen key handlers in App.Update, and one insertion point in
 // App.render(). M4 step 1 proved this seam with a one-line placeholder per
-// tab; M4 step 2 lands the real /status body (see status.go) — Config and
-// Model stay placeholders until their own steps.
+// tab; M4 step 2 landed the real /status body (status.go); M4 step 3 lands
+// the real /config body (config_view.go) — Model stays a placeholder until
+// its own step.
 
 import (
 	"strings"
@@ -61,25 +62,44 @@ type commandPanel struct {
 	active commandPanelTab
 
 	// env, sess, and defaultModel are the data the Status tab's [statusView]
-	// reads (see status.go); the Config/Model placeholders ignore them until
-	// their own steps land.
+	// reads (see status.go); the Model placeholder ignores them until its own
+	// step lands.
 	env          CommandEnv
 	sess         *SessionInfo
 	defaultModel string
+
+	// cfg is the Config tab's state (config_view.go), built from env at open
+	// time the same way sess/defaultModel are — regardless of which tab the
+	// panel opens on, so switching to Config mid-session shows a
+	// consistent, once-loaded working copy rather than reloading on every
+	// tab switch.
+	cfg configView
 }
 
 // newCommandPanel returns a panel open on tab, rendering through th, with env
 // and the current session snapshot (nil on the overview) captured at open
-// time for the Status tab to read.
+// time for the Status tab to read, and the Config tab's working copy loaded
+// from env.Config().
 func newCommandPanel(th theme.Theme, tab commandPanelTab, env CommandEnv, sess *SessionInfo, defaultModel string) commandPanel {
-	return commandPanel{theme: th, active: tab, env: env, sess: sess, defaultModel: defaultModel}
+	return commandPanel{
+		theme:        th,
+		active:       tab,
+		env:          env,
+		sess:         sess,
+		defaultModel: defaultModel,
+		cfg:          newConfigView(th, env),
+	}
 }
 
-// handleKey applies one key press to the panel. ←/→ move the active tab;
-// every other key is swallowed — while the panel is open it commandeers all
-// input. Esc is handled by the caller ([App.handlePanelKey]) instead of
-// here, since closing the panel mutates App state (a.panel = nil) that this
-// pure value doesn't hold.
+// handleKey applies one key press to the panel. ←/→ always move the active
+// tab, regardless of what the active tab's own state is (an in-progress
+// Config-tab edit is simply left as-is on tab-away, same as any other
+// unsaved buffer). Every other key routes to the active tab's own handler —
+// only the Config tab has one today ([configView.handleKey]); Status and the
+// Model placeholder swallow the rest, matching M4 step 1/2's read-only
+// behavior. Esc is handled by the caller ([App.handlePanelKey]) via
+// [commandPanel.handleEscape] instead of here, since closing the panel
+// mutates App state (a.panel = nil) that this pure value doesn't hold.
 func (p commandPanel) handleKey(msg tea.KeyPressMsg) commandPanel {
 	switch msg.Key().Code {
 	case tea.KeyRight:
@@ -87,7 +107,26 @@ func (p commandPanel) handleKey(msg tea.KeyPressMsg) commandPanel {
 	case tea.KeyLeft:
 		return p.moveTab(-1)
 	}
+	if p.active == panelConfig {
+		p.cfg = p.cfg.handleKey(msg)
+	}
 	return p
+}
+
+// handleEscape applies one Esc press to the panel, reporting whether it was
+// consumed by the active tab's own state (ok=false, the panel stays open —
+// e.g. the Config tab clearing a filter or canceling an in-progress edit,
+// [configView.handleEscape]) or should close the panel (ok=true, every other
+// tab, and the Config tab once it has no more state of its own to clear).
+func (p commandPanel) handleEscape() (commandPanel, bool) {
+	if p.active == panelConfig {
+		cfg, consumed := p.cfg.handleEscape()
+		if consumed {
+			p.cfg = cfg
+			return p, false
+		}
+	}
+	return p, true
 }
 
 // moveTab shifts the active tab by delta, wrapping around panelTabs.
@@ -127,7 +166,7 @@ func (p commandPanel) View(width, height int) string {
 
 	rule := strings.Repeat("─", width)
 	tabBar := truncate(p.tabBar(), width)
-	footer := truncate(p.theme.MutedStyle().Render("←/→ to switch tabs · esc to close"), width)
+	footer := truncate(p.theme.MutedStyle().Render(p.footerText()), width)
 
 	bodyRows := h - panelFixedRows
 	if bodyRows < 0 {
@@ -177,6 +216,16 @@ func (p commandPanel) Height(width int) int {
 	return h
 }
 
+// footerText returns the active tab's footer hint. The Config tab's search
+// list has its own key contract (filter/select/edit), so it overrides the
+// default "switch tabs / close" hint every other tab shows.
+func (p commandPanel) footerText() string {
+	if p.active == panelConfig {
+		return "Type to filter · Enter/↓ to select · ↑ to tabs · Esc to clear"
+	}
+	return "←/→ to switch tabs · esc to close"
+}
+
 // tabBar renders the tab labels, bracketing the active one.
 func (p commandPanel) tabBar() string {
 	parts := make([]string, len(panelTabs))
@@ -191,12 +240,15 @@ func (p commandPanel) tabBar() string {
 }
 
 // body renders the active tab's content at the given width/bodyRows budget.
-// The Status tab renders the real [statusView]; Config and Model still
-// render their step-1 placeholder until their own steps land.
+// Status and Config render their real views; Model still renders its step-1
+// placeholder until its own step lands.
 func (p commandPanel) body(width, bodyRows int) string {
-	if p.active == panelStatus {
+	switch p.active {
+	case panelStatus:
 		v := statusView{theme: p.theme, env: p.env, sess: p.sess, defaultModel: p.defaultModel}
 		return v.View(width, bodyRows)
+	case panelConfig:
+		return p.cfg.View(width, bodyRows)
 	}
 	for _, t := range panelTabs {
 		if t.tab == p.active {
@@ -209,14 +261,22 @@ func (p commandPanel) body(width, bodyRows int) string {
 // handlePanelKey routes a key press to the open command panel. [App.Update]
 // calls this before the approval overlay and per-screen handlers whenever
 // a.panel != nil, matching the dispatch precedence panel > approval > active
-// screen > global.
+// screen > global. Esc goes through [commandPanel.handleEscape] rather than
+// closing unconditionally, since the Config tab consumes a first Esc to
+// clear its own state (an in-progress edit, then a filter) before a
+// subsequent Esc actually closes the panel.
 func (a App) handlePanelKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.Key()
 	switch {
 	case key.Mod.Contains(tea.ModCtrl) && key.Code == 'c':
 		return a, tea.Quit
 	case key.Code == tea.KeyEscape:
-		a.panel = nil
+		p, closePanel := a.panel.handleEscape()
+		if closePanel {
+			a.panel = nil
+			return a, nil
+		}
+		a.panel = &p
 		return a, nil
 	}
 	p := a.panel.handleKey(msg)
