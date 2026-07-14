@@ -180,16 +180,24 @@ phone-home.
   methods at WARN (the smoking gun for client-compat work). **Hard redaction
   rule**: never logs params, prompt text, message content, tool inputs/outputs,
   or the bearer token — identifiers, codes, and durations only.
-- **M3 (committed): full OpenTelemetry.** gofer takes the otel dependency + OTLP
-  exporters; the SDK does not.
-  - **Traces**: a span per turn, with child spans for provider calls and tool
-    executions. The SDK's typed Event/Op stream is the natural span source —
+- **M3 ✅ shipped: full OpenTelemetry**, entirely in a new `internal/telemetry/`
+  package — the SDK still takes no otel dependency.
+  - **Traces**: a span per turn, with a child span per provider-call proxy and
+    per tool execution. The SDK's typed Event/Op stream is the span source —
     `*.started`/`*.finished` events open and close spans without the SDK
     knowing tracing exists.
-  - **Metrics**: sessions (live/archived), turns, tokens and cost, error rates.
-  - **OTLP export**: traces + metrics to a generic OTLP endpoint.
+  - **Metrics**: sessions (live), turns, tokens and cost, error rates.
+  - **OTLP export**: traces + metrics to a generic OTLP endpoint, off by
+    default (`telemetry.Config{}`) — no exporter, no network, no global otel
+    state touched until a deployment opts in.
   - **Log correlation**: trace and span ids stamped into slog records so logs
-    and traces join.
+    and traces join, for log calls whose ctx carries an active span.
+  - **Two flagged gaps**, not worked around: (1) turn/tool events carry no
+    turn id — span correlation relies on the supervisor's serial per-session
+    pump (one turn in flight at a time), not an explicit identifier; (2)
+    there is no dedicated provider-call event — the `message.*` pair is the
+    closest proxy, and per-provider-call token usage isn't available
+    (`provider.Usage` is a turn-aggregate on `turn.finished` only).
 
 ## Milestones
 

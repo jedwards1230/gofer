@@ -54,6 +54,12 @@ type managed struct {
 	// stop joins it alongside the pump — leaving no subscription goroutine
 	// behind on shutdown.
 	permDone chan struct{}
+	// teardown is the func returned by Config.OnRegister (nil if unset or if
+	// OnRegister itself returned nil), joined by stop after the pump and
+	// permission watcher have both exited. Set once, in newManaged, before m
+	// is published into the roster — never mutated afterward, so no lock is
+	// needed to read it in stop.
+	teardown func()
 	// submitCh wakes an idle pump when Send enqueues a prompt. Buffered
 	// size 1 and sent to non-blockingly: multiple submits while the pump is
 	// busy coalesce into one wakeup, which is fine — the pump drains the
@@ -98,10 +104,15 @@ type managed struct {
 }
 
 // newManaged builds a managed session ready to register: idle, empty queue,
-// its own cancellable base context.
-func newManaged(sess Session, model string, now time.Time, clock func() time.Time, notify func(), cwd string, gate *loop.Gate) *managed {
+// its own cancellable base context. If onRegister is non-nil, it is invoked
+// here — with the session, before m is returned to register for roster
+// publish — and its returned teardown (if any) is stashed on m for stop to
+// join later. Calling it here, rather than after publish, closes the race
+// where a concurrent Kill/Archive could otherwise observe a live session
+// with no teardown stashed yet (see Config.OnRegister's doc).
+func newManaged(sess Session, model string, now time.Time, clock func() time.Time, notify func(), cwd string, gate *loop.Gate, onRegister func(sess Session) (stop func())) *managed {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &managed{
+	m := &managed{
 		sess:       sess,
 		id:         sess.ID(),
 		project:    filepath.Base(filepath.Dir(sess.JournalPath())),
@@ -119,6 +130,10 @@ func newManaged(sess Session, model string, now time.Time, clock func() time.Tim
 		submitCh:   make(chan struct{}, 1),
 		state:      stateIdle,
 	}
+	if onRegister != nil {
+		m.teardown = onRegister(sess)
+	}
+	return m
 }
 
 // info snapshots m under its own lock into a live [SessionInfo], deriving
@@ -276,8 +291,10 @@ func (m *managed) adjustPending(delta int) {
 }
 
 // stop marks m closing, cancels its base context (interrupting any in-flight
-// turn, waking an idle pump, and waking watchPermissions), and waits for both
-// its pump and permission-watcher goroutines to exit.
+// turn, waking an idle pump, and waking watchPermissions), waits for both its
+// pump and permission-watcher goroutines to exit, and finally joins the
+// OnRegister teardown (if any) — mirroring the permDone discipline above, so
+// no observer goroutine outlives the session.
 func (m *managed) stop() {
 	m.mu.Lock()
 	m.closing = true
@@ -285,6 +302,9 @@ func (m *managed) stop() {
 	m.baseCancel()
 	<-m.done
 	<-m.permDone
+	if m.teardown != nil {
+		m.teardown()
+	}
 }
 
 // snippet renders a one-line, bounded title from a prompt: leading/trailing

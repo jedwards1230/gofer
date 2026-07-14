@@ -18,6 +18,8 @@ import (
 
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/permission"
+
+	"github.com/jedwards1230/gofer/internal/telemetry"
 )
 
 // ConfigFileName is the base name of gofer's config file under the store root.
@@ -29,6 +31,38 @@ type Config struct {
 	// deny>ask>allow precedence on top of gofer's default contain-or-ask
 	// catch-all (see [Config.Engine]).
 	Permissions []Rule `json:"permissions,omitempty"`
+	// Telemetry is gofer's OpenTelemetry configuration block. The zero value
+	// is disabled — see [Telemetry.ToTelemetry].
+	Telemetry Telemetry `json:"telemetry,omitempty"`
+}
+
+// Telemetry is gofer's native OpenTelemetry configuration block, mirroring
+// [telemetry.Config]'s fields for JSON persistence. The zero value is fully
+// valid and disabled (see [Telemetry.ToTelemetry]) — an unconfigured gofer
+// exports no traces or metrics.
+type Telemetry struct {
+	Enabled     bool              `json:"enabled,omitempty"`
+	Endpoint    string            `json:"endpoint,omitempty"`
+	Protocol    string            `json:"protocol,omitempty"`
+	ServiceName string            `json:"service_name,omitempty"`
+	Insecure    bool              `json:"insecure,omitempty"`
+	Headers     map[string]string `json:"headers,omitempty"`
+}
+
+// ToTelemetry converts the config block into a [telemetry.Config]. Follows
+// the same "zero value yields a sane (here: disabled) default" pattern as
+// [Config.Engine] — a config file with no telemetry block, or no config file
+// at all, compiles to telemetry.Config{}, which [telemetry.Setup] treats as
+// off.
+func (t Telemetry) ToTelemetry() telemetry.Config {
+	return telemetry.Config{
+		Enabled:     t.Enabled,
+		Endpoint:    t.Endpoint,
+		Protocol:    t.Protocol,
+		ServiceName: t.ServiceName,
+		Insecure:    t.Insecure,
+		Headers:     t.Headers,
+	}
 }
 
 // Rule is one native permission rule: a Verdict (allow|ask|deny) applied to a
