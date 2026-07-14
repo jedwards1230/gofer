@@ -52,6 +52,17 @@ type Config struct {
 	// session (which calls [runner.Resume] with the shared store injected).
 	// Test seam.
 	ResumeSession func(ctx context.Context, id string, opts runner.Options) (Session, error)
+
+	// OnRegister, if set, is invoked once per session at registration —
+	// before the session becomes reachable via the roster and before its
+	// first turn can run — with the live session. It returns an optional
+	// teardown func, joined (if non-nil) when the session stops; a nil
+	// return means no teardown is needed. This is the supervisor's only hook
+	// for attaching a per-session observer (e.g. telemetry) to a session's
+	// event stream — the supervisor itself stays agnostic to what the
+	// observer does with it. Nil is fine: the supervisor is fully
+	// buildable/testable without one.
+	OnRegister func(sess Session) (stop func())
 }
 
 // Supervisor is a concurrency-safe registry of live sessions over one shared
@@ -64,6 +75,9 @@ type Supervisor struct {
 
 	newSession    func(ctx context.Context, opts runner.Options) (Session, error)
 	resumeSession func(ctx context.Context, id string, opts runner.Options) (Session, error)
+
+	// onRegister mirrors Config.OnRegister; nil is fine (see its doc).
+	onRegister func(sess Session) (stop func())
 
 	// newEngine builds a fresh permission ruleset for each session's per-session
 	// RuleGuard, so a remember-grant stays scoped to the approving session
@@ -156,6 +170,7 @@ func New(cfg Config) (*Supervisor, error) {
 		clock:         clock,
 		newSession:    newSession,
 		resumeSession: resumeSession,
+		onRegister:    cfg.OnRegister,
 		newEngine:     newEngine,
 		roster:        make(map[string]*managed),
 		watchers:      make(map[*watcher]struct{}),
@@ -299,14 +314,18 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 // the roster insert — if the supervisor has been closed, so a Create/Resume
 // racing Close can never insert a session (and leak its pump) into a roster
 // Close has already drained. The managed value (and its context) is built
-// only once the insert is committed, so a rejected registration leaks nothing.
+// only once the insert is committed, so a rejected registration leaks
+// nothing. newManaged invokes onRegister (if set) while building m, before m
+// is published into the roster below — so a concurrent Kill can never
+// observe a session whose teardown hasn't been stashed yet (see
+// Config.OnRegister's doc).
 func (s *Supervisor) register(sess Session, model, cwd string, gate *loop.Gate) (*managed, error) {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		return nil, ErrClosed
 	}
-	m := newManaged(sess, model, s.clock(), s.clock, s.notify, cwd, gate)
+	m := newManaged(sess, model, s.clock(), s.clock, s.notify, cwd, gate, s.onRegister)
 	s.roster[m.id] = m
 	s.mu.Unlock()
 

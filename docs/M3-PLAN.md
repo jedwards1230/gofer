@@ -57,9 +57,11 @@ orchestration repo (`docs/projects/gofer-m3-plan-and-docs-refresh.md`).
        terminal (pure `shouldPromptInstall` gate), a complete no-op otherwise.
 7. [ ] **Lossless attach.** Promote the daemonbridge's client-side reconstruction
        to a lossless/byte-exact path.
-8. [ ] **OTel.** Spans per turn / provider call / tool execution off the Event/Op
-       stream; session/turn/token/cost/error metrics; OTLP export; trace-ids
-       stamped into slog records. gofer owns the otel dependency + exporters.
+8. [x] **OTel.** ✅ shipped, in a new `internal/telemetry/` package: spans per
+       turn / provider-call proxy / tool execution off the Event/Op stream;
+       session/turn/token/cost/error metrics; OTLP export, off by default;
+       trace-ids stamped into slog records. gofer owns the otel dependency +
+       exporters.
 
 ## Constraints
 

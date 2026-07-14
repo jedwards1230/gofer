@@ -15,6 +15,7 @@ import (
 	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/daemon"
 	"github.com/jedwards1230/gofer/internal/supervisor"
+	"github.com/jedwards1230/gofer/internal/telemetry"
 )
 
 // runDaemon implements `gofer daemon` (alias `serve`): it builds a supervisor,
@@ -136,7 +137,46 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		return err
 	}
 
-	sup, err := supervisor.New(supervisor.Config{Root: rootDir, Permissions: cfg.Engine})
+	// Build the telemetry provider from the loaded config (disabled unless
+	// cfg.Telemetry.Enabled — see telemetry.Setup's off-by-default
+	// guarantee) and re-wrap the logger with trace-correlation BEFORE it's
+	// handed to daemon.New, so every downstream log call already carries the
+	// correlating handler.
+	tel, wrappedLogger, err := telemetry.New(ctx, cfg.Telemetry.ToTelemetry(), logger.Handler())
+	if err != nil {
+		return fmt.Errorf("build telemetry: %w", err)
+	}
+	defer func() {
+		if err := tel.Shutdown(context.Background()); err != nil {
+			wrappedLogger.Warn("telemetry shutdown", "err", err)
+		}
+	}()
+	logger = wrappedLogger
+
+	sup, err := supervisor.New(supervisor.Config{
+		Root:        rootDir,
+		Permissions: cfg.Engine,
+		// Attach a per-session telemetry observer at registration, before the
+		// session's first turn — subscribing here (rather than after a turn
+		// has already started) means Events' replay backlog is still empty,
+		// so Instrument never sees a phantom span for history that predates
+		// it. Mirrors watchPermissions' own subscribe-at-registration
+		// precedent. When telemetry is disabled, tel.Instrument runs over a
+		// noop tracer/meter: the hook still runs but produces zero spans and
+		// zero exports, only cheap channel drains.
+		OnRegister: func(sess supervisor.Session) func() {
+			sub := sess.Events()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				tel.Instrument(ctx, sess.ID(), sub.C)
+			}()
+			return func() {
+				sub.Close()
+				<-done
+			}
+		},
+	})
 	if err != nil {
 		return fmt.Errorf("build supervisor: %w", err)
 	}
