@@ -1,6 +1,7 @@
 # binaries / build
 /bin/
 /gofer
+*.exe
 *.test
 *.out
 dist/

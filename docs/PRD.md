@@ -70,6 +70,8 @@ gofer demo                  # M0: offline faux-provider stream
 gofer exec [-p prompt] [--agent name] [--json] [--output-schema file]
                             # headless one-shot: JSONL events on stdout (M3)
 gofer serve [--host unix://…|tcp://…]   # run the daemon in the foreground
+gofer daemon install|uninstall|status   # launchd/systemd unit for the daemon (M3)
+                            #   install [--listen addr] [--root dir] [--token tok]
 gofer acp serve             # ACP over stdio (editors, stdio→ws bridges)
 gofer ps [--all]            # roster (--all includes archived; later: fleet)
 gofer kill|archive <id>     # stop running / clear finished (journal kept)
@@ -95,6 +97,16 @@ the SAME `--root` discover each other automatically; `ps`/`kill`/`archive`/
 `attach`/`agents`/bare `gofer` take no `--root` of their own and always use
 the default `~/.gofer` — a daemon started with a different `--root` needs an
 explicit `--daemon`/`$GOFER_DAEMON` on those clients.
+
+Daemon-as-a-service: `gofer daemon install` writes a launchd user agent
+(macOS) or systemd `--user` unit (Linux) so the daemon starts on login;
+`uninstall`/`status` manage it. The unit defaults to the loopback bind
+(`127.0.0.1:7333`, no token); a non-loopback `--listen` requires a token,
+delivered out of band through a 0600 `<root>/daemon.env` file — never
+templated into the (world-readable) unit or the daemon's argv. On a fresh,
+fully interactive `gofer` (stdin+stdout TTYs, not CI, no service installed and
+no daemon reachable) a one-line first-use prompt offers to install it; it is a
+complete no-op in every other case.
 
 Daemon lifecycle: the client auto-spawns the daemon on launch (health probe →
 detached spawn); a version/build mismatch triggers graceful shutdown →

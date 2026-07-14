@@ -30,8 +30,13 @@ orchestration repo (`docs/projects/gofer-m3-plan-and-docs-refresh.md`).
        TUI approval dialog. Agmente already ships the `session/request_permission`
        UI, so a spec-general ACP surface lights it up with zero client work.
 5. [ ] **Headless exec** (`gofer exec`).
-6. [ ] **Daemon-as-a-service** ([#42](https://github.com/jedwards1230/gofer/issues/42)):
-       launchd/systemd install + first-use install prompt.
+6. [x] **Daemon-as-a-service** ([#42](https://github.com/jedwards1230/gofer/issues/42)):
+       launchd/systemd install + first-use install prompt. ✅ shipped (#42).
+       `gofer daemon install|uninstall|status` writes a launchd user agent /
+       systemd `--user` unit; loopback default is token-free, a non-loopback
+       bind carries its token only via a 0600 `<root>/daemon.env` file (never
+       the unit or argv). First-use prompt fires only on a fully interactive
+       terminal (pure `shouldPromptInstall` gate), a complete no-op otherwise.
 7. [ ] **Lossless attach.** Promote the daemonbridge's client-side reconstruction
        to a lossless/byte-exact path.
 8. [ ] **OTel.** Spans per turn / provider call / tool execution off the Event/Op
