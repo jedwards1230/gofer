@@ -1,4 +1,4 @@
-✓ bash({"cmd":"seq 1 6"})
+✓ bash(seq 1 6)
    └ 1
      2
      3

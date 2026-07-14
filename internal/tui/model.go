@@ -61,12 +61,11 @@ type item struct {
 	toolName   string
 	toolInput  string
 	toolResult string
+	toolErr    bool
 
-	// approvalVerdict/approvalRule are itemApprovalResolved-only: the
-	// resolved event.Verdict ("allow"/"deny") and the rule name that
-	// decided it, if any (event.PermissionResolved.Rule).
+	// approvalVerdict is itemApprovalResolved-only: the resolved
+	// event.Verdict ("allow"/"deny").
 	approvalVerdict string
-	approvalRule    string
 }
 
 // Model is gofer's minimal attach surface. It is immutable from the
@@ -189,13 +188,20 @@ func (m Model) Ingest(e event.Event) Model {
 		m.toolIndex[ev.ID] = idx
 
 	case event.ToolCallDelta:
-		if idx, ok := m.toolIndex[ev.ID]; ok {
-			m.items[idx].toolResult += ev.Delta
-		}
+		// ToolCallDelta carries a fragment of the streaming INPUT (partial
+		// JSON arguments as the provider assembles them), not the result —
+		// see event.ToolCallDelta's doc. The authoritative input and result
+		// both arrive together on ToolCallFinished (below), so this is
+		// deliberately a no-op; the toolIndex bookkeeping above still
+		// applies to it.
 
 	case event.ToolCallFinished:
 		if idx, ok := m.toolIndex[ev.ID]; ok {
+			if len(ev.Input) > 0 {
+				m.items[idx].toolInput = compactJSON(ev.Input)
+			}
 			m.items[idx].toolResult = ev.Result
+			m.items[idx].toolErr = ev.IsError
 			m.items[idx].done = true
 		}
 		delete(m.toolIndex, ev.ID)
@@ -213,16 +219,19 @@ func (m Model) Ingest(e event.Event) Model {
 		m.pending = &pendingApproval{id: ev.ID, tool: ev.Tool, spec: ev.Spec, session: ev.SessionID()}
 
 	case event.PermissionResolved:
-		// The transcript log line so the request/resolution pair reads
-		// coherently, plus clearing the interactive prompt if it was still
-		// showing this request (this client answered via resolveApproval, or
-		// another attached client answered first).
-		m.items = append(m.items, item{
-			kind:            itemApprovalResolved,
-			approvalVerdict: string(ev.Verdict),
-			approvalRule:    ev.Rule,
-			done:            true,
-		})
+		// A routine allow is the expected outcome, and its transcript line is
+		// noise — the ✋ badge already recorded the request. Deny/ask stay
+		// visible because they change what happened. Either way, clear the
+		// interactive prompt if it was still showing this request (this
+		// client answered via resolveApproval, or another attached client
+		// answered first).
+		if ev.Verdict != event.VerdictAllow {
+			m.items = append(m.items, item{
+				kind:            itemApprovalResolved,
+				approvalVerdict: string(ev.Verdict),
+				done:            true,
+			})
+		}
 		if m.pending != nil && m.pending.id == ev.ID {
 			m.pending = nil
 		}
@@ -309,6 +318,27 @@ func compactJSON(raw json.RawMessage) string {
 	return buf.String()
 }
 
+// summarizeToolInput renders a tool call's compact-JSON input as a readable
+// one-line header summary: a shell command's own text for a command-shaped
+// input, else the compact JSON as-is. Empty or "{}" (the start-of-call seed a
+// provider streams before the arguments arrive) yields "", so the header shows
+// the bare tool name until the real input lands on ToolCallFinished.
+func summarizeToolInput(compact string) string {
+	if compact == "" || compact == "{}" {
+		return ""
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(compact), &obj); err != nil {
+		return compact
+	}
+	for _, key := range []string{"command", "cmd"} {
+		if v, ok := obj[key].(string); ok && v != "" {
+			return v
+		}
+	}
+	return compact
+}
+
 // TypeRune appends r to the input buffer.
 func (m Model) TypeRune(r rune) Model {
 	m.input += string(r)
@@ -359,6 +389,30 @@ func (m *Model) TakeSubmitted() (string, bool) {
 	return text, true
 }
 
+// transcriptGap is the number of blank lines rendered between consecutive
+// transcript blocks (items), for visual breathing room.
+const transcriptGap = 1
+
+// transcriptLines renders every item's lines, truncated to width, with
+// transcriptGap blank line(s) between consecutive items — no leading gap
+// before the first item, no trailing gap after the last. Shared by View,
+// TailView, and FullTranscript so the three surfaces render the transcript
+// body identically.
+func (m Model) transcriptLines(width int) []string {
+	lines := make([]string, 0, len(m.items)+2)
+	for i, it := range m.items {
+		if i > 0 {
+			for range transcriptGap {
+				lines = append(lines, "")
+			}
+		}
+		for _, line := range m.renderItemLines(it) {
+			lines = append(lines, truncate(line, width))
+		}
+	}
+	return lines
+}
+
 // View renders the transcript, status line, and input line at the given
 // size. Width wraps nothing (M1's virtualized transcript and stable-prefix
 // markdown cache from docs/TUI.md land later); a line longer than width is
@@ -372,12 +426,7 @@ func (m Model) View(width, height int) string {
 		height = 1
 	}
 
-	lines := make([]string, 0, len(m.items)+2)
-	for _, it := range m.items {
-		for _, line := range m.renderItemLines(it) {
-			lines = append(lines, truncate(line, width))
-		}
-	}
+	lines := m.transcriptLines(width)
 
 	// The bottom UI is the status line plus either the input line or — while a
 	// permission request is pending — the approval prompt, which commandeers
@@ -440,11 +489,7 @@ func (m Model) renderItemLines(it item) []string {
 		if it.approvalVerdict == string(event.VerdictDeny) {
 			glyph, style = m.theme.GlyphErr, m.theme.DangerStyle()
 		}
-		line := "permission " + it.approvalVerdict
-		if it.approvalRule != "" {
-			line += " (" + it.approvalRule + ")"
-		}
-		return []string{style.Render(glyph + " " + line)}
+		return []string{style.Render(glyph + " permission " + it.approvalVerdict)}
 
 	default: // itemAssistantText
 		return []string{it.text}
@@ -456,32 +501,55 @@ func (m Model) renderItemLines(it item) []string {
 // three tree-indented result lines, collapsing any remainder into a single
 // "… +N lines" line.
 func (m Model) renderToolLines(it item) []string {
-	// TODO: style the header glyph for a failed call. The SDK now carries
-	// IsError on ToolCallFinished, but this Model doesn't yet track it, so
-	// every finished call renders with GlyphOK regardless of outcome.
 	glyph := m.theme.GlyphStreaming
+	failed := false
 	if it.done {
 		glyph = m.theme.GlyphOK
+		if it.toolErr {
+			// An internal/transient tool error (the call ran but reported a
+			// problem) reads as a caution, not a session crash — WarnStyle's
+			// amber is deliberately softer than the DangerStyle reserved for a
+			// fatal SessionError, and the muted body de-emphasizes the error
+			// text so it doesn't look like prominent real output.
+			glyph = m.theme.GlyphErr
+			failed = true
+		}
 	}
-	lines := []string{fmt.Sprintf("%s %s(%s)", glyph, it.toolName, it.toolInput)}
+
+	header := it.toolName
+	if summary := summarizeToolInput(it.toolInput); summary != "" {
+		header = fmt.Sprintf("%s(%s)", it.toolName, summary)
+	}
+	headerLine := glyph + " " + header
+	if failed {
+		headerLine = m.theme.WarnStyle().Render(headerLine)
+	}
+	lines := []string{headerLine}
 
 	if !it.done || it.toolResult == "" {
 		return lines
 	}
 
+	styleBody := func(s string) string {
+		if failed {
+			return m.theme.MutedStyle().Render(s)
+		}
+		return s
+	}
+
 	resultLines := strings.Split(it.toolResult, "\n")
-	lines = append(lines, "   └ "+resultLines[0])
+	lines = append(lines, styleBody("   └ "+resultLines[0]))
 	const maxExtra = 2
 	shown := 1
 	for _, l := range resultLines[1:] {
 		if shown >= 1+maxExtra {
 			break
 		}
-		lines = append(lines, "     "+l)
+		lines = append(lines, styleBody("     "+l))
 		shown++
 	}
 	if extra := len(resultLines) - shown; extra > 0 {
-		lines = append(lines, fmt.Sprintf("     … +%d lines", extra))
+		lines = append(lines, styleBody(fmt.Sprintf("     … +%d lines", extra)))
 	}
 	return lines
 }
@@ -520,12 +588,7 @@ func (m Model) TailView(width, height int) string {
 		height = 1
 	}
 
-	lines := make([]string, 0, len(m.items))
-	for _, it := range m.items {
-		for _, line := range m.renderItemLines(it) {
-			lines = append(lines, truncate(line, width))
-		}
-	}
+	lines := m.transcriptLines(width)
 
 	prompt := m.promptLines(width)
 	avail := height - 1 - len(prompt) // status line + approval prompt (input-replacing)
@@ -558,12 +621,7 @@ func (m Model) FullTranscript(width int) string {
 		return "" // nothing streamed; nothing to flush
 	}
 
-	lines := make([]string, 0, len(m.items)+1)
-	for _, it := range m.items {
-		for _, line := range m.renderItemLines(it) {
-			lines = append(lines, truncate(line, width))
-		}
-	}
+	lines := m.transcriptLines(width)
 	lines = append(lines, truncate(m.statusLine(), width))
 	return strings.Join(lines, "\n")
 }

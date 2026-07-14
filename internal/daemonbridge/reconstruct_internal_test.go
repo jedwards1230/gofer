@@ -169,7 +169,7 @@ func TestHandleNotificationReplaysGoferEventKinds(t *testing.T) {
 		event.NewToolCallDelta(sid, "tc-1", `{"comm`),
 		// tool.call.finished with Diagnostics + all three Spill* fields —
 		// also entirely dropped by the ACP projection.
-		event.NewToolCallFinishedSpill(sid, "tc-1", "bounded excerpt of the output",
+		event.NewToolCallFinishedSpill(sid, "tc-1", json.RawMessage(`{"command":"ls -la"}`), "bounded excerpt of the output",
 			true, []string{"lint: unused variable x", "vet: possible nil deref"},
 			"sessions/proj/sess-1/calls/tc-1.log", 123456, "deadbeefcafef00d"),
 	}

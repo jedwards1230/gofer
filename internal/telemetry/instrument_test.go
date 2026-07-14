@@ -113,7 +113,7 @@ func TestInstrument_SpanOpenClosePairing(t *testing.T) {
 		events <- event.NewTurnStarted("sess-1")
 		events <- event.NewMessageStarted("sess-1", event.MessageText)
 		events <- event.NewToolCallStarted("sess-1", "call-A", "bash", json.RawMessage(`{}`))
-		events <- event.NewToolCallFinished("sess-1", "call-A", "ok", false, nil)
+		events <- event.NewToolCallFinished("sess-1", "call-A", json.RawMessage(`{}`), "ok", false, nil)
 		events <- event.NewMessageFinished("sess-1", event.MessageText, "hello")
 		events <- event.NewTurnFinished("sess-1", string(provider.StopEndTurn), provider.Usage{InputTokens: 1, OutputTokens: 2})
 	})
@@ -218,7 +218,7 @@ func TestInstrument_Redaction(t *testing.T) {
 		events <- event.NewPermissionRequested("sess-1", "call-A", "bash",
 			map[string]any{"command": marker + "-SPEC"}, []string{marker + "-TRACE"})
 		events <- event.NewPermissionResolved("sess-1", "call-A", event.VerdictAllow, marker+"-RULE")
-		events <- event.NewToolCallFinished("sess-1", "call-A", marker+"-RESULT", true, []string{marker + "-DIAG"})
+		events <- event.NewToolCallFinished("sess-1", "call-A", json.RawMessage(`{"cmd":"`+marker+`-FIN"}`), marker+"-RESULT", true, []string{marker + "-DIAG"})
 		events <- event.NewMessageFinished("sess-1", event.MessageText, marker+"-CONTENT")
 		events <- event.NewSessionError("sess-1", marker+"-ERR", false)
 		events <- event.NewTurnFinished("sess-1", string(provider.StopEndTurn), provider.Usage{InputTokens: 1, OutputTokens: 1})

@@ -456,7 +456,7 @@ func (s *Supervisor) handleGoferEvent(raw json.RawMessage) {
 	case event.KindToolCallDelta:
 		ev = event.NewToolCallDelta(w.SessionID, w.ID, w.Delta)
 	case event.KindToolCallFinished:
-		ev = event.NewToolCallFinishedSpill(w.SessionID, w.ID, w.Result, w.IsError, w.Diagnostics, w.SpillPath, w.SpillBytes, w.SpillSHA256)
+		ev = event.NewToolCallFinishedSpill(w.SessionID, w.ID, w.Input, w.Result, w.IsError, w.Diagnostics, w.SpillPath, w.SpillBytes, w.SpillSHA256)
 	default:
 		// permission.* (excluded from gofer/event by contract — see
 		// methodGoferEvent's doc) or an unknown/future kind: protocol-drift

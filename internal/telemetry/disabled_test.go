@@ -50,7 +50,7 @@ func TestSetup_DisabledByDefault(t *testing.T) {
 	events <- event.NewTurnStarted("sess-1")
 	events <- event.NewMessageStarted("sess-1", event.MessageText)
 	events <- event.NewToolCallStarted("sess-1", "call-A", "bash", json.RawMessage(`{}`))
-	events <- event.NewToolCallFinished("sess-1", "call-A", "ok", false, nil)
+	events <- event.NewToolCallFinished("sess-1", "call-A", json.RawMessage(`{}`), "ok", false, nil)
 	events <- event.NewMessageFinished("sess-1", event.MessageText, "hello")
 	events <- event.NewTurnFinished("sess-1", string(provider.StopEndTurn), provider.Usage{InputTokens: 1, OutputTokens: 1})
 	close(events)
