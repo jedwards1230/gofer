@@ -4,7 +4,11 @@
 // terminal.
 package layout
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/charmbracelet/x/ansi"
+)
 
 // PeekHorizontalMinWidth is the terminal width at or above which the peek
 // screen splits side-by-side (roster left, tail right) instead of stacked
@@ -100,18 +104,19 @@ func JoinColumns(left, right string) string {
 		if i > 0 {
 			b.WriteByte('\n')
 		}
-		b.WriteString(padRunes(lineAt(l, i), lw))
+		b.WriteString(padDisplay(lineAt(l, i), lw))
 		b.WriteString(columnDivider)
-		b.WriteString(padRunes(lineAt(r, i), rw))
+		b.WriteString(padDisplay(lineAt(r, i), rw))
 	}
 	return b.String()
 }
 
-// blockWidth returns the widest line (in runes) across lines.
+// blockWidth returns the widest line, in terminal cells (display width, so
+// ANSI styling and wide runes are measured correctly), across lines.
 func blockWidth(lines []string) int {
 	w := 0
 	for _, ln := range lines {
-		if n := len([]rune(ln)); n > w {
+		if n := ansi.StringWidth(ln); n > w {
 			w = n
 		}
 	}
@@ -126,10 +131,10 @@ func lineAt(lines []string, i int) string {
 	return ""
 }
 
-// padRunes pads s with trailing spaces to exactly w runes. It never truncates:
-// callers size blocks so lines fit.
-func padRunes(s string, w int) string {
-	n := len([]rune(s))
+// padDisplay pads s with trailing spaces to exactly w terminal cells (display
+// width). It never truncates: callers size blocks so lines fit.
+func padDisplay(s string, w int) string {
+	n := ansi.StringWidth(s)
 	if n >= w {
 		return s
 	}

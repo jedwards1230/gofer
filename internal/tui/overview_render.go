@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/charmbracelet/x/ansi"
 )
 
 // Row layout column budgets. The row is prefix + body(title,summary) + a
@@ -164,7 +166,7 @@ func (o Overview) row(s SessionInfo, width int) string {
 	if s.ID == o.selectedID {
 		caret = "▸"
 	}
-	prefix := fmt.Sprintf("%s %s ", caret, o.statusGlyph(s))
+	prefix := padTo(fmt.Sprintf("%s %s", caret, o.statusGlyph(s)), rowPrefixW)
 
 	right := o.metrics(s)
 	bodyW := width - rowPrefixW - rowRightW
@@ -281,25 +283,25 @@ func window(lines []string, sel, n int) []string {
 	return lines[start : start+n]
 }
 
-// padTo returns s padded with trailing spaces to exactly w runes, truncating
-// with an ellipsis when longer.
+// padTo returns s padded with trailing spaces to exactly w terminal cells
+// (display width), truncating with an ellipsis when wider.
 func padTo(s string, w int) string {
-	r := []rune(s)
-	if len(r) == w {
+	sw := ansi.StringWidth(s)
+	if sw == w {
 		return s
 	}
-	if len(r) > w {
+	if sw > w {
 		return truncate(s, w)
 	}
-	return s + strings.Repeat(" ", w-len(r))
+	return s + strings.Repeat(" ", w-sw)
 }
 
-// padLeft returns s padded with leading spaces to exactly w runes, truncating
-// with an ellipsis when longer.
+// padLeft returns s padded with leading spaces to exactly w terminal cells
+// (display width), truncating with an ellipsis when wider.
 func padLeft(s string, w int) string {
-	r := []rune(s)
-	if len(r) > w {
+	sw := ansi.StringWidth(s)
+	if sw > w {
 		return truncate(s, w)
 	}
-	return strings.Repeat(" ", w-len(r)) + s
+	return strings.Repeat(" ", w-sw) + s
 }
