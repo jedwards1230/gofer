@@ -108,6 +108,11 @@ jobs:
           n=0
           until [ "$n" -ge 5 ]; do
             work="$(mktemp -d)"
+            # Guarantee cleanup on ANY exit path (a git failure under set -e
+            # would otherwise leak the temp dir); re-armed each iteration to
+            # point at the current dir. The explicit rm -rf below still runs on
+            # the normal retry/success paths.
+            trap 'rm -rf "$work"' EXIT
             git -C "$work" init -q
             git -C "$work" remote add origin \
               "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
