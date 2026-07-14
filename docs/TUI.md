@@ -22,10 +22,11 @@ subagent tree. `space` peek · `enter` attach · `a` approve · `n` new ·
 `ctrl-x` kill (running; confirm; subtree interrupted) or archive (finished).
 Journals are never deleted — `gofer ps --all` lists archived sessions.
 
-**Peek** — read-only tail of one session without stealing input. For a
-fan-out it defaults to the child most needing attention (a waiting
-approval); `J/K` cycles agents within the session, `j/k` cycles sessions.
-Approvals are actionable without attaching.
+**Peek** — a summary card for one session: its title, a one-line
+waiting/status line, and a `❯ reply` input. `up`/`down` move the roster
+selection (the card follows); `enter` opens (attaches) or, with reply text,
+sends the reply; `space` closes back to the overview; `ctrl+x` deletes. Peek
+carries no transcript tail — it is a roster-only projection.
 
 **Attach** — full transcript + input; `esc` detaches back to overview.
 
@@ -74,33 +75,38 @@ Layout, top to bottom:
   `N awaiting input · M working · K completed`. The counts are the roster
   tallied by status; the wording mirrors the group labels.
 - **Roster body** — one line per session:
-  `‹caret› ‹status glyph› ‹title› ‹one-line summary› ‹cost · age›`. The caret
-  (`▸`) marks selection so it reads without color (golden tests force
+  `‹caret› ‹status glyph› ‹title› ‹status word · one-line summary› ‹age›`. The
+  caret (`▸`) marks selection so it reads without color (golden tests force
   `termenv.Ascii`). The status glyph promotes to `✋` when approvals are
-  pending. Cost comes from the SDK's usage accounting (PRD: cost in every
-  roster row); age is a compact relative string (`now`/`5m`/`3h`/`2d`) computed
-  against an injected reference time so tests stay deterministic. The body
-  windows to keep the selected row visible.
+  pending. The summary is prefixed with the status word (`Working ·` /
+  `Needs input ·` / `Finished ·`) in the flat view, where no status section
+  states it; the grouped view omits it (the section header already does).
+  Age is a compact relative string (`now`/`5m`/`3h`/`2d`) computed against an
+  injected reference time so tests stay deterministic, right-aligned as the
+  sole right-column metadata. The body windows to keep the selected row
+  visible.
 - **Dispatch bar** — a rule, an input line (a placeholder until the user
   types), and a one-line shortcut hint. Typing anywhere in the roster edits the
   bar; `enter` on a non-empty bar creates a new session from that text and
   attaches into it (`Supervisor.Create`).
 
 **Two roster views**, toggled by `tab`: flat (every session, most-recently-active
-first) and grouped (Working / Needs input / Finished sections, each
-recency-sorted). Selection is tracked by session id, not row index, so it
-survives the reorder a toggle causes. (`tab` rather than a letter key so the
-dispatch bar stays freely typeable — a plain `v` is text, not a shortcut.)
+first, grouped under a **cwd header** per working directory) and grouped
+(Working / Needs input / Finished sections, each recency-sorted). The cwd
+header makes the fleet-global working directory visible — one header per
+distinct cwd, sessions beneath. Selection is tracked by session id, not row
+index, so it survives the reorder a toggle causes. (`tab` rather than a letter
+key so the dispatch bar stays freely typeable — a plain `v` is text, not a
+shortcut.)
 
-**Peek** is the read-only split: the roster rail (the overview's header + body,
-no dispatch bar) alongside a live tail of the selected session's transcript. It
-steals no input — `j`/`k` move the rail selection and the app root swaps the
-tail to the newly selected session. The panes stack vertically (roster above
-tail) by default and split side-by-side once the terminal reaches
-`layout.PeekHorizontalMinWidth` (120 cols) — below that a horizontal split
-leaves each pane too narrow for a roster row. The `layout` package owns the
-geometry (orientation, pane-size division, column zipping) as pure int/string
-math so both arrangements stay golden-testable.
+**Peek** is the roster rail (the overview's header + body, no dispatch bar)
+above a **summary card** for the selected session: a rule, the session title, a
+`‹verb› ‹duration›` waiting line (`waiting`/`working`/`finished` since last
+activity), a `❯ reply` input, and a footer hint. Peek subscribes to no event
+stream — the card is a pure projection of the roster snapshot plus the reply
+buffer, so moving the selection never re-subscribes. (This replaces the earlier
+read-along transcript tail and its side-by-side split; the `layout` package now
+holds only frame padding.)
 
 **Navigation contract** — enforced by the app root (`App` in `app.go`, the
 bubbletea root that composes overview/peek/attach): `enter` peeks the selected
@@ -108,8 +114,9 @@ session (with dispatch-bar text, it instead creates a session from that text
 and attaches into it); `→` attaches the selected session; `esc`
 interrupts/acts on the *active* session (never "go back"); `←` in an **empty**
 input backs out to the overview (with text, it edits); `ctrl-x` kills a running
-session or archives a finished one; `ctrl-c` quits. In peek, `j`/`k` switch the
-peeked session and `←` returns to the overview.
+session or archives a finished one; `ctrl-c` quits. In peek, `up`/`down` move
+the selection, `enter` opens the session (or sends the reply when the `❯` input
+has text), `space` closes to the overview, and `ctrl+x` deletes.
 
 The app root is a **client** like any other (repo invariant): it reads the
 roster by polling `Supervisor.Roster` on a timer (the supervisor's roster is
@@ -124,7 +131,7 @@ tool-block rendering — a status-count header, grouped sections, a one-line
 session row, and a bottom dispatch bar with a hint line — reimplemented here
 for gofer's Event/Op model.
 
-**Tool blocks** in the attach/peek transcript render as a collapsed tree: a
+**Tool blocks** in the attach transcript render as a collapsed tree: a
 header line `‹glyph› tool(command)`, then the result tree-indented beneath — the
 first line on a `└`, up to two more indented, and any remainder collapsed to
 `… +N lines`. The header command is the **authoritative** input from
