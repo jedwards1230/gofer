@@ -55,10 +55,11 @@ func runExec(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	}
 
 	// Read any schema file and resolve the prompt (both may block on I/O)
-	// before installing the interrupt handler — mirrors run.go's ordering:
-	// interruptCtx wraps the run only AFTER a blocking, non-ctx-aware read,
-	// so Ctrl-C during that read keeps Go's default terminate-on-SIGINT
-	// behavior instead of being captured and swallowed.
+	// before installing the interrupt handler: exec's stdin read is a plain,
+	// non-cancellable io.ReadAll (unlike run.go's ctx-aware resolvePromptCtx),
+	// so installing interruptCtx only after it keeps Go's default
+	// terminate-on-SIGINT behavior during the read instead of capturing and
+	// swallowing the signal.
 	var schema []byte
 	if *outputSchema != "" {
 		schema, err = os.ReadFile(*outputSchema)
@@ -111,13 +112,15 @@ func runExec(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	return errors.Join(runErr, r.Close())
 }
 
-// resolveExecPrompt returns the exec prompt: flagPrompt (from -p) if given,
-// else ALL of stdin, trimmed. This is deliberately NOT resolvePrompt's
-// one-line interactive read — exec is a headless, piped contract, so it reads
-// stdin to EOF. Empty (after trim) with no -p is a usage error.
+// resolveExecPrompt returns the exec prompt: flagPrompt (from -p) if
+// non-empty after trimming, else ALL of stdin, trimmed. This is deliberately
+// NOT resolvePrompt's one-line interactive read — exec is a headless, piped
+// contract, so it reads stdin to EOF. Both sources trim identically, so a
+// whitespace-only -p falls through to stdin exactly like an absent one;
+// empty everywhere is a usage error.
 func resolveExecPrompt(flagPrompt string, stdin io.Reader) (string, error) {
-	if flagPrompt != "" {
-		return flagPrompt, nil
+	if p := strings.TrimSpace(flagPrompt); p != "" {
+		return p, nil
 	}
 	data, err := io.ReadAll(stdin)
 	if err != nil {

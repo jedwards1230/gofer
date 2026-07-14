@@ -251,6 +251,78 @@ func TestRunExec_PromptSources(t *testing.T) {
 	}
 }
 
+// TestRunExec_EmptyPromptIsUsageError locks the empty-prompt contract: no -p
+// (or a whitespace-only one) and nothing but whitespace on stdin is a usage
+// error (exit 2) — the run never starts, so stdout stays empty.
+func TestRunExec_EmptyPromptIsUsageError(t *testing.T) {
+	cases := []struct {
+		name  string
+		args  []string
+		stdin string
+	}{
+		{"empty stdin, no -p", nil, ""},
+		{"whitespace stdin, no -p", nil, "  \n\t\n"},
+		{"whitespace -p, empty stdin", []string{"-p", "   "}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string{"exec"}, tc.args...)
+			var out, errBuf bytes.Buffer
+			got := run(args, strings.NewReader(tc.stdin), &out, &errBuf)
+			if got != 2 {
+				t.Fatalf("run() = %d, want 2\nstderr: %s", got, errBuf.String())
+			}
+			if !strings.Contains(errBuf.String(), "no prompt") {
+				t.Errorf("stderr = %q, want it to mention the missing prompt", errBuf.String())
+			}
+			if out.Len() != 0 {
+				t.Errorf("stdout = %q, want empty (run must not start)", out.String())
+			}
+		})
+	}
+}
+
+// TestRunExec_MalformedSchemaIsCleanError locks the compile-error half of the
+// --output-schema contract (distinct from a validation mismatch): a schema
+// document that fails to compile is a clean command error (exit 1) surfaced
+// BEFORE the prompt is driven — stdout stays empty, and nothing panics.
+func TestRunExec_MalformedSchemaIsCleanError(t *testing.T) {
+	cases := []struct {
+		name      string
+		schemaDoc string
+	}{
+		{"invalid JSON", `{`},
+		{"unsupported type", `{"type":"quaternion"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			prov := oneTextTurn("never reached")
+			withScriptedExec(t, prov)
+
+			schemaPath := filepath.Join(t.TempDir(), "schema.json")
+			if err := os.WriteFile(schemaPath, []byte(tc.schemaDoc), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			var out, errBuf bytes.Buffer
+			got := run([]string{"exec", "-m", execTestModel, "--root", root, "--output-schema", schemaPath, "-p", "go"}, strings.NewReader(""), &out, &errBuf)
+			if got != 1 {
+				t.Fatalf("run() = %d, want 1\nstderr: %s", got, errBuf.String())
+			}
+			if !strings.Contains(errBuf.String(), "schema") {
+				t.Errorf("stderr = %q, want it to mention the schema", errBuf.String())
+			}
+			if out.Len() != 0 {
+				t.Errorf("stdout = %q, want empty (compile fails before the stream starts)", out.String())
+			}
+			if prov.calls != 0 {
+				t.Errorf("provider was called %d times, want 0 (compile error precedes Prompt)", prov.calls)
+			}
+		})
+	}
+}
+
 // TestRunExec_JSONFalseIsUsageError locks design decision #2: exec output is
 // always JSONL, so an explicit --json=false is a usage error (exit 2), not a
 // silent mode switch.
