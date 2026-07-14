@@ -104,6 +104,7 @@ func toTUI(s supervisor.SessionInfo) tui.SessionInfo {
 		Summary:   s.Summary,
 		Status:    tui.SessionStatus(s.Status),
 		Model:     s.Model,
+		Cwd:       s.Cwd,
 		Cost:      s.Cost,
 		Usage:     s.Usage,
 		Pending:   s.Pending,

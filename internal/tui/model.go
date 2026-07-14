@@ -11,7 +11,7 @@
 // seed of the full screen-stack design in docs/TUI.md (overview ⇄ peek ⇄
 // attach); the overview⇄peek⇄attach navigation shipped in M2, a first
 // interactive prompt — the inline permission-approval block rendered by
-// View/TailView (see approval.go, and dialog.go for the key handling)
+// View (see approval.go, and dialog.go for the key handling)
 // landed in M3, and the fuller dialog/keymap system lands later.
 package tui
 
@@ -92,7 +92,7 @@ type Model struct {
 	// pending is the session's current unresolved permission request, if any
 	// (nil = none) — the backing state for the interactive inline approval
 	// prompt. It is transient client-side state (like input), NOT a transcript
-	// item: while set, it commandeers the bottom input line (see View/TailView),
+	// item: while set, it commandeers the bottom input line (see View),
 	// and disappears on resolve or dismiss (the input returns), while the
 	// itemApproval badge and itemApprovalResolved line stay as the permanent
 	// record. Following Model's copy-on-write discipline the pointer is never
@@ -395,9 +395,8 @@ const transcriptGap = 1
 
 // transcriptLines renders every item's lines, truncated to width, with
 // transcriptGap blank line(s) between consecutive items — no leading gap
-// before the first item, no trailing gap after the last. Shared by View,
-// TailView, and FullTranscript so the three surfaces render the transcript
-// body identically.
+// before the first item, no trailing gap after the last. Shared by View and
+// FullTranscript so both surfaces render the transcript body identically.
 func (m Model) transcriptLines(width int) []string {
 	lines := make([]string, 0, len(m.items)+2)
 	for i, it := range m.items {
@@ -450,8 +449,7 @@ func (m Model) View(width, height int) string {
 
 // promptLines renders the pending approval as the bottom-anchored, input-
 // replacing prompt's lines, each truncated to width. Empty when nothing is
-// pending. Shared by View and TailView so the attach and peek surfaces render
-// the prompt identically.
+// pending. Used by View to anchor the inline approval prompt to the bottom.
 func (m Model) promptLines(width int) []string {
 	if m.pending == nil {
 		return nil
@@ -574,37 +572,6 @@ func (m Model) statusLine() string {
 // inputLine renders the input buffer with a trailing cursor marker.
 func (m Model) inputLine() string {
 	return "> " + m.input + "▏"
-}
-
-// TailView renders a read-only tail of the transcript for the peek pane: the
-// most recent transcript items above the status line, bottom-aligned like a
-// live terminal, with no input line — peek steals no input. Output is exactly
-// height rows.
-func (m Model) TailView(width, height int) string {
-	if width < 1 {
-		width = 1
-	}
-	if height < 1 {
-		height = 1
-	}
-
-	lines := m.transcriptLines(width)
-
-	prompt := m.promptLines(width)
-	avail := height - 1 - len(prompt) // status line + approval prompt (input-replacing)
-	if avail < 0 {
-		avail = 0
-	}
-	if len(lines) > avail {
-		lines = lines[len(lines)-avail:]
-	}
-	// Top-pad so the transcript sits just above the status/prompt footer.
-	if n := avail - len(lines); n > 0 {
-		lines = append(make([]string, n), lines...)
-	}
-	lines = append(lines, truncate(m.statusLine(), width))
-	lines = append(lines, prompt...) // pending approval anchors to the bottom, matching attach
-	return strings.Join(lines, "\n")
 }
 
 // FullTranscript renders every transcript item unclipped by height, followed

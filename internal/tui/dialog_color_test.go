@@ -6,7 +6,7 @@ package tui
 // miss (see PR #61's display-width lesson: an Ascii-only golden can pass
 // while a colored render overruns the frame). renderApprovalPrompt styles
 // every line (WarnStyle), so with color on those lines carry ANSI escapes;
-// Model.View/TailView must still lay the block out identically to the
+// Model.View must still lay the block out identically to the
 // colorless render, with every composited line staying within the frame
 // width.
 

@@ -51,6 +51,11 @@ type App struct {
 	sessID string // id `sess` is subscribed to ("" = none)
 	sub    *event.Subscription
 
+	// peekReply is the peek card's reply-input buffer. Peek carries no
+	// transcript to own it, so the app root holds it and clears it on entering
+	// peek, sending a reply, or leaving.
+	peekReply string
+
 	scr    screen
 	width  int
 	height int
@@ -296,11 +301,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyPressMsg:
 		a.status = ""
-		// Approval keys apply on attach/peek only — the session with the
-		// pending approval is whichever one is currently peeked/attached
-		// (see sessEventMsg above); the overview never routes here even if
-		// a.sess still carries a pending approval from before backing out.
-		if a.scr != screenOverview && a.sess.HasPendingApproval() {
+		// Approval keys apply on the attach screen only — that is the sole
+		// screen backed by a live session transcript (a.sess). Peek renders a
+		// roster-only card with its own reply input and never subscribes, so a
+		// stale a.sess approval from a prior attach must not hijack its keys.
+		if a.scr == screenAttach && a.sess.HasPendingApproval() {
 			return a.handleApprovalKey(msg)
 		}
 		return a.handleKey(msg)
@@ -356,9 +361,11 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if id == "" {
 				return a, nil
 			}
+			// Peek renders a roster-only card — it does not subscribe. The
+			// subscription is established only if the user attaches from peek.
 			a.scr = screenPeek
-			cmd := a.enter(id)
-			return a, cmd
+			a.peekReply = ""
+			return a, nil
 		}
 		a.over = a.over.Submit()
 		var cmd tea.Cmd
@@ -395,39 +402,67 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
-// handlePeekKey handles key presses on the read-only peek screen: j/k move
-// the roster selection (re-subscribing the tail), →/enter attach the peeked
-// session, ← backs out to the overview, and esc interrupts a running peeked
-// session. Peek steals no other input.
+// handlePeekKey handles key presses on the peek card screen. up/down move the
+// roster selection (the card follows; no subscription). The ❯ reply input owns
+// text: enter with an empty reply opens/attaches the selected session, enter
+// with text sends it as a reply (via the same Send path attach uses) and stays;
+// space with an empty reply closes peek back to the overview, space with text
+// types a space; ctrl+x deletes (kills a running session, archives a finished
+// one); backspace edits the reply.
 func (a App) handlePeekKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.Key()
 	switch {
 	case key.Mod.Contains(tea.ModCtrl) && key.Code == 'c':
 		return a, tea.Quit
 
-	case key.Text == "j":
-		a.over = a.over.MoveDown()
-		cmd := a.enter(a.over.SelectedID())
-		return a, cmd
-
-	case key.Text == "k":
+	case key.Code == tea.KeyUp:
 		a.over = a.over.MoveUp()
-		cmd := a.enter(a.over.SelectedID())
-		return a, cmd
-
-	case key.Code == tea.KeyRight || key.Code == tea.KeyEnter:
-		// The peeked session is already subscribed; attach reuses it as-is.
-		a.scr = screenAttach
 		return a, nil
 
-	case key.Code == tea.KeyLeft:
-		a.scr = screenOverview
+	case key.Code == tea.KeyDown:
+		a.over = a.over.MoveDown()
 		return a, nil
 
-	case key.Code == tea.KeyEscape:
-		if s, ok := a.over.Selected(); ok && s.Status == StatusWorking {
-			return a, a.doInterrupt(s.ID)
+	case key.Code == tea.KeyEnter:
+		if a.peekReply == "" {
+			// Open: attach the peeked session, subscribing now (peek did not).
+			a.scr = screenAttach
+			return a, a.enter(a.over.SelectedID())
 		}
+		id := a.over.SelectedID()
+		text := a.peekReply
+		a.peekReply = ""
+		if id == "" {
+			return a, nil
+		}
+		return a, a.doSend(id, text)
+
+	case key.Code == tea.KeySpace || key.Text == " ":
+		if a.peekReply == "" {
+			a.scr = screenOverview
+			return a, nil
+		}
+		a.peekReply += " "
+		return a, nil
+
+	case key.Mod.Contains(tea.ModCtrl) && key.Code == 'x':
+		if s, ok := a.over.Selected(); ok {
+			if s.Status == StatusFinished {
+				return a, a.doArchive(s.ID)
+			}
+			return a, a.doKill(s.ID)
+		}
+		return a, nil
+
+	case key.Code == tea.KeyBackspace:
+		if a.peekReply != "" {
+			r := []rune(a.peekReply)
+			a.peekReply = string(r[:len(r)-1])
+		}
+		return a, nil
+
+	case key.Text != "":
+		a.peekReply += key.Text
 		return a, nil
 	}
 	return a, nil
@@ -496,7 +531,7 @@ func (a App) render() string {
 	var body string
 	switch a.scr {
 	case screenPeek:
-		body = NewPeek(a.theme, a.over, a.sess).View(a.width, h)
+		body = NewPeek(a.theme, a.over, a.peekReply).View(a.width, h)
 	case screenAttach:
 		body = a.sess.View(a.width, h)
 	default:

@@ -7,7 +7,7 @@ package tui
 // It replaces gofer's first interactive TUI dialog — a centered overlay box
 // (docs/M3-PLAN.md's "approvals relay + phone approval UX" item) — with key
 // handling for the inline prompt now rendered in-flow by
-// [Model.View]/[Model.TailView].
+// [Model.View].
 
 import (
 	"context"
