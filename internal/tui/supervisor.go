@@ -61,6 +61,7 @@ type SessionInfo struct {
 	Summary string        // one-line latest-activity summary
 	Status  SessionStatus // coarse grouping / status count bucket
 	Model   string        // model id driving the session
+	Cwd     string        // session working directory — the roster's cwd group key
 
 	Cost  provider.Cost  // accumulated cost, from the SDK's usage accounting
 	Usage provider.Usage // accumulated token usage
@@ -118,4 +119,15 @@ type Supervisor interface {
 
 	// Archive drops a finished session from the roster. The journal is kept.
 	Archive(ctx context.Context, sessionID string) error
+
+	// Reply answers a pending permission request identified by id: allow or
+	// deny it, and — when remember is true — persist the verdict as a
+	// standing grant for future matching calls (the SDK's
+	// loop.RuleGuard/Grant path). The inline approval prompt's key handling
+	// (see app.go/dialog.go) is the sole caller. sessionID scopes the reply
+	// to the session the prompt was raised for; a daemon-backed Supervisor
+	// need not put it on the wire itself (see internal/daemonbridge's
+	// contract: the daemon resolves a permission request by id alone), but
+	// an in-process one routes through it directly.
+	Reply(ctx context.Context, sessionID, id string, allow, remember bool) error
 }

@@ -1,5 +1,7 @@
 » Plan: greet, then run a check.
+
 Hello! Running a quick check.
-✓ bash({"cmd":"echo hi"})
+
+✓ bash(echo hi)
    └ hi
 ○ idle  stop=end_turn  usage=12in/9out

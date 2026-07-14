@@ -44,10 +44,12 @@ func newSession(t *testing.T, c *wsClient, cwd string) string {
 
 // TestSessionNewPromptStream drives the full happy path: session/new, then
 // session/prompt, asserting every scripted delta arrives as a session/update
-// notification (in order) before the terminal PromptResponse. The prompt's
-// own text arrives first, as a settled user_message_chunk (a user turn has
-// no deltas — see event.MessageUser's doc) — checked separately below, ahead
-// of the scripted agent deltas.
+// notification (in order) before the terminal PromptResponse. c is the
+// ORIGINATING peer, so it does NOT receive its own user_message_chunk echo —
+// the daemon suppresses that back to the driving peer (see broadcastUpdate;
+// the fan-out to a second, merely-attached peer that DOES see the echo is
+// covered by TestPromptFanOutToAttachedPeers). The first notification here is
+// therefore the turn's first assistant chunk.
 func TestSessionNewPromptStream(t *testing.T) {
 	sup := newTestSupervisor(t, fauxProvider)
 	_, url := newTestDaemon(t, sup, "")
@@ -62,18 +64,6 @@ func TestSessionNewPromptStream(t *testing.T) {
 			Prompt:    []acp.ContentBlock{acp.TextBlock("hi")},
 		})
 	}()
-
-	userNotif := c.waitNotification()
-	if userNotif.Method != acp.MethodSessionUpdate {
-		t.Fatalf("user echo: method = %q, want %q", userNotif.Method, acp.MethodSessionUpdate)
-	}
-	var userUp sessionUpdateParams
-	if err := json.Unmarshal(userNotif.Params, &userUp); err != nil {
-		t.Fatalf("user echo: unmarshal params: %v", err)
-	}
-	if userUp.Update.SessionUpdate != "user_message_chunk" || userUp.Update.Content.Text != "hi" {
-		t.Fatalf("user echo = %+v, want user_message_chunk(text=hi)", userUp.Update)
-	}
 
 	// faux.Default() scripts 2 reasoning chunks + 3 text chunks = 5 deltas,
 	// each projecting to exactly one session/update notification, in order.

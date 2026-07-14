@@ -16,16 +16,30 @@
 // method router that dispatches an inbound request either to an ACP
 // projection or to a gofer-native handler.
 //
-// # One session subscription per session/prompt
+// # One session subscription per session/prompt, fanned out to attached peers
 //
-// [Daemon]'s session/prompt handler subscribes to the target session's event
-// stream, sends the prompt, and streams every projectable event back as a
-// session/update notification until the next terminal turn.finished, which it
-// answers with the JSON-RPC response. M2's contract is one outstanding prompt
-// per session: a client must wait for a session/prompt response before
-// sending another for the same session id, since a concurrent second
-// subscription would race the first for the same terminal event. See
+// [Daemon]'s session/prompt handler subscribes ONCE to the target session's
+// event stream, sends the prompt, and streams every projectable event back as
+// a session/update notification until the next terminal turn.finished, which it
+// answers with the JSON-RPC response. The contract is one outstanding prompt
+// per session: a client must wait for a session/prompt response before sending
+// another for the same session id, since a concurrent second subscription
+// would race the first for the same terminal event. See
 // [Daemon.handleSessionPrompt].
+//
+// Delivery is NOT originator-scoped. The daemon keeps a session->peers fan-out
+// registry ([Daemon.sessionPeers]): a peer attaches to a session on
+// session/load or by driving a session/prompt, and each projected
+// session/update is broadcast to every attached peer — so a turn one client
+// drives is seen live by every other client attached to the same session (a
+// TUI observes a turn a phone drove). The peer set is snapshotted under a
+// dedicated RWMutex and released before any socket write, so no client's write
+// stalls the registry; a non-originating peer's write failure is logged and
+// skipped, while only the originator's failure aborts its own RPC. One
+// exception to the broadcast: the user-message echo (a settled user prompt) is
+// suppressed to the originator, which already knows what it typed, and
+// delivered to every other attached peer. Peers are deregistered on connection
+// close (see [Daemon.detachPeer]). See [Daemon.broadcastUpdate].
 //
 // # Auth
 //

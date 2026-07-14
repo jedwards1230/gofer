@@ -33,3 +33,26 @@ func TestStatusFromWireMapping(t *testing.T) {
 		})
 	}
 }
+
+// TestToTUISessionInfoMapsPending locks the wire DTO's "pending" field
+// (contract #2 of the M3 approvals-relay work) into tui.SessionInfo.Pending —
+// the count [tui.Overview]'s statusGlyph renders as the roster's ✋N badge.
+// An unset (zero-value/omitted) field maps to 0, matching M2's always-0
+// behavior for a daemon that hasn't yet started sending it.
+func TestToTUISessionInfoMapsPending(t *testing.T) {
+	cases := []struct {
+		name string
+		dto  sessionInfoDTO
+		want int
+	}{
+		{"zero value", sessionInfoDTO{}, 0},
+		{"positive count", sessionInfoDTO{Pending: 2}, 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := toTUISessionInfo(tc.dto).Pending; got != tc.want {
+				t.Errorf("toTUISessionInfo(%+v).Pending = %d, want %d", tc.dto, got, tc.want)
+			}
+		})
+	}
+}

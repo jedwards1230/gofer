@@ -194,14 +194,22 @@ drain:
 				t.Fatal("notifications channel closed before PromptResponse arrived")
 			}
 			if n.Method != acp.MethodSessionUpdate {
-				t.Fatalf("notification method = %q, want %q", n.Method, acp.MethodSessionUpdate)
+				// The M3 lossless-attach fanout also sends this turn's full
+				// event stream as gofer/event on the SAME connection (see
+				// internal/daemon/handlers.go's broadcastGoferEvent) — this
+				// test is only about the ACP session/update projection, so
+				// skip it rather than fail.
+				continue
 			}
 			gotUpdates++
-			if gotUpdates == 6 { // the prompt's user_message_chunk echo + faux.Default(): 2 reasoning + 3 text deltas
+			// This client is the originating peer, so the daemon suppresses its
+			// own user_message_chunk echo (see broadcastUpdate). Only
+			// faux.Default()'s assistant deltas arrive: 2 reasoning + 3 text.
+			if gotUpdates == 5 {
 				break drain
 			}
 		case <-timeout:
-			t.Fatalf("timed out after %d notifications, want 6", gotUpdates)
+			t.Fatalf("timed out after %d notifications, want 5", gotUpdates)
 		}
 	}
 

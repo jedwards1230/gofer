@@ -12,8 +12,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/daemon"
 	"github.com/jedwards1230/gofer/internal/supervisor"
+	"github.com/jedwards1230/gofer/internal/telemetry"
 )
 
 // runDaemon implements `gofer daemon` (alias `serve`): it builds a supervisor,
@@ -21,6 +23,22 @@ import (
 // foreground until interrupted (SIGINT) or ctx is otherwise cancelled, then
 // shuts both down.
 func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	// Peel a lifecycle sub-verb before treating the remaining args as
+	// foreground-serve flags: `gofer daemon install|uninstall|status` manage the
+	// launchd/systemd unit, while a bare `gofer daemon` (or any other leading
+	// token, e.g. `--listen`) falls through to today's foreground serve.
+	// Mirrors runAuth peeling its lone positional.
+	if len(args) > 0 {
+		switch args[0] {
+		case "install":
+			return runDaemonInstall(ctx, args[1:], stdout, stderr)
+		case "uninstall":
+			return runDaemonUninstall(ctx, args[1:], stdout, stderr)
+		case "status":
+			return runDaemonStatus(ctx, args[1:], stdout, stderr)
+		}
+	}
+
 	fs := flag.NewFlagSet("daemon", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	listen := fs.String("listen", daemon.DefaultListenAddr, "address to bind the ACP WebSocket listener")
@@ -46,6 +64,17 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	bearerToken := *token
 	if bearerToken == "" {
 		bearerToken = os.Getenv("GOFER_TOKEN")
+	}
+	// Final fallback for a service-managed daemon: when a non-loopback install
+	// delivered the token via the 0600 <root>/daemon.env file (never the unit
+	// file or argv — see cmd/gofer/service.go writeDaemonEnvToken), read it here
+	// so the launchd/systemd unit stays token-free. Best-effort and silent: a
+	// read error or missing file just leaves the token empty (ValidateListen
+	// then decides), and the token is never logged.
+	if bearerToken == "" {
+		if t, err := readDaemonEnvToken(*root); err == nil {
+			bearerToken = t
+		}
 	}
 
 	levelStr := *logLevel
@@ -99,7 +128,55 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		}
 	}
 
-	sup, err := supervisor.New(supervisor.Config{Root: rootDir})
+	// Load gofer's native config (permissions ruleset) from <root>/config.json.
+	// A missing file is not an error — it compiles to the default
+	// contain-or-ask policy (see config.Config.Engine); a malformed or invalid
+	// file fails fast here, before the daemon starts accepting tool calls.
+	cfg, err := config.Load(config.DefaultPath(rootDir))
+	if err != nil {
+		return err
+	}
+
+	// Build the telemetry provider from the loaded config (disabled unless
+	// cfg.Telemetry.Enabled — see telemetry.Setup's off-by-default
+	// guarantee) and re-wrap the logger with trace-correlation BEFORE it's
+	// handed to daemon.New, so every downstream log call already carries the
+	// correlating handler.
+	tel, wrappedLogger, err := telemetry.New(ctx, cfg.Telemetry.ToTelemetry(), logger.Handler())
+	if err != nil {
+		return fmt.Errorf("build telemetry: %w", err)
+	}
+	defer func() {
+		if err := tel.Shutdown(context.Background()); err != nil {
+			wrappedLogger.Warn("telemetry shutdown", "err", err)
+		}
+	}()
+	logger = wrappedLogger
+
+	sup, err := supervisor.New(supervisor.Config{
+		Root:        rootDir,
+		Permissions: cfg.Engine,
+		// Attach a per-session telemetry observer at registration, before the
+		// session's first turn — subscribing here (rather than after a turn
+		// has already started) means Events' replay backlog is still empty,
+		// so Instrument never sees a phantom span for history that predates
+		// it. Mirrors watchPermissions' own subscribe-at-registration
+		// precedent. When telemetry is disabled, tel.Instrument runs over a
+		// noop tracer/meter: the hook still runs but produces zero spans and
+		// zero exports, only cheap channel drains.
+		OnRegister: func(sess supervisor.Session) func() {
+			sub := sess.Events()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				tel.Instrument(ctx, sess.ID(), sub.C)
+			}()
+			return func() {
+				sub.Close()
+				<-done
+			}
+		},
+	})
 	if err != nil {
 		return fmt.Errorf("build supervisor: %w", err)
 	}

@@ -67,9 +67,12 @@ gofer                       # TUI: health-probe daemon → auto-spawn if absent 
 gofer attach [<session>]    # daemon roster TUI; with <session>, attach straight into it
 gofer agents [<session>]    # alias for `gofer attach` (M2)
 gofer demo                  # M0: offline faux-provider stream
-gofer exec [-p prompt] [--agent name] [--json] [--output-schema file]
-                            # headless one-shot: JSONL events on stdout (M3)
+gofer exec [-p prompt] [--agent name] [--json] [--output-schema file] [-m model] [--root dir]
+                            # headless one-shot, in-process (not daemon-routed): JSONL events
+                            #   on stdout (M3)
 gofer serve [--host unix://…|tcp://…]   # run the daemon in the foreground
+gofer daemon install|uninstall|status   # launchd/systemd unit for the daemon (M3)
+                            #   install [--listen addr] [--root dir] [--token tok]
 gofer acp serve             # ACP over stdio (editors, stdio→ws bridges)
 gofer ps [--all]            # roster (--all includes archived; later: fleet)
 gofer kill|archive <id>     # stop running / clear finished (journal kept)
@@ -96,6 +99,16 @@ the SAME `--root` discover each other automatically; `ps`/`kill`/`archive`/
 the default `~/.gofer` — a daemon started with a different `--root` needs an
 explicit `--daemon`/`$GOFER_DAEMON` on those clients.
 
+Daemon-as-a-service: `gofer daemon install` writes a launchd user agent
+(macOS) or systemd `--user` unit (Linux) so the daemon starts on login;
+`uninstall`/`status` manage it. The unit defaults to the loopback bind
+(`127.0.0.1:7333`, no token); a non-loopback `--listen` requires a token,
+delivered out of band through a 0600 `<root>/daemon.env` file — never
+templated into the (world-readable) unit or the daemon's argv. On a fresh,
+fully interactive `gofer` (stdin+stdout TTYs, not CI, no service installed and
+no daemon reachable) a one-line first-use prompt offers to install it; it is a
+complete no-op in every other case.
+
 Daemon lifecycle: the client auto-spawns the daemon on launch (health probe →
 detached spawn); a version/build mismatch triggers graceful shutdown →
 respawn, so upgrades "just work". Prompts sent to a busy session **queue**
@@ -118,7 +131,7 @@ tool call
   │                 allow rule ─▶ ✓ run
   ▼ no match
   ② sandbox ────── sandboxable ─▶ ✓ run contained (seatbelt / bwrap+seccomp)
-  ▼ not sandboxable                (denial text → model retries)
+  ▼ not sandboxable                (before ③ exists: escalate to ✋ human)
   ③ LLM reviewer   out-of-band call · strict JSON {decision, risk, rationale}
   │                30s timeout · 360-tok cap · fail-closed · injection-framed
   ├─ low-risk ∧ high-confidence ─▶ ✓ run (audit-logged)
@@ -126,7 +139,12 @@ tool call
 ```
 
 Entering auto mode drops broad grants — `Bash(*)` can never bypass ③. Stages
-①+② ship before ③ exists; each is independently useful. The reviewer is one
+①+② ship before ③ exists; each is independently useful. **①+② + the human
+fallback shipped in M3** (`internal/sandbox` + the `RuleGuard`/`Gate` relay): an
+allow-matched call runs contained when the host can contain it, and a call the
+host cannot contain (no sandbox runtime, or a non-containable tool) escalates to
+a human approval that reaches every attached client — never silently blocked,
+never run uncontained (decided 2026-07-13). The ③ LLM reviewer is M4/M5. The reviewer is one
 more SDK loop invocation with a different system prompt. Stage ① is a
 format-agnostic rule engine over typed rules; vendor rule formats (Claude Code
 `settings.json`, native YAML) are import adapters that land with the
@@ -162,16 +180,24 @@ phone-home.
   methods at WARN (the smoking gun for client-compat work). **Hard redaction
   rule**: never logs params, prompt text, message content, tool inputs/outputs,
   or the bearer token — identifiers, codes, and durations only.
-- **M3 (committed): full OpenTelemetry.** gofer takes the otel dependency + OTLP
-  exporters; the SDK does not.
-  - **Traces**: a span per turn, with child spans for provider calls and tool
-    executions. The SDK's typed Event/Op stream is the natural span source —
+- **M3 ✅ shipped: full OpenTelemetry**, entirely in a new `internal/telemetry/`
+  package — the SDK still takes no otel dependency.
+  - **Traces**: a span per turn, with a child span per provider-call proxy and
+    per tool execution. The SDK's typed Event/Op stream is the span source —
     `*.started`/`*.finished` events open and close spans without the SDK
     knowing tracing exists.
-  - **Metrics**: sessions (live/archived), turns, tokens and cost, error rates.
-  - **OTLP export**: traces + metrics to a generic OTLP endpoint.
+  - **Metrics**: sessions (live), turns, tokens and cost, error rates.
+  - **OTLP export**: traces + metrics to a generic OTLP endpoint, off by
+    default (`telemetry.Config{}`) — no exporter, no network, no global otel
+    state touched until a deployment opts in.
   - **Log correlation**: trace and span ids stamped into slog records so logs
-    and traces join.
+    and traces join, for log calls whose ctx carries an active span.
+  - **Two flagged gaps**, not worked around: (1) turn/tool events carry no
+    turn id — span correlation relies on the supervisor's serial per-session
+    pump (one turn in flight at a time), not an explicit identifier; (2)
+    there is no dedicated provider-call event — the `message.*` pair is the
+    closest proxy, and per-provider-call token usage isn't available
+    (`provider.Usage` is a turn-aggregate on `turn.finished` only).
 
 ## Milestones
 

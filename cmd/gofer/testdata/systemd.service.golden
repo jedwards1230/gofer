@@ -1,0 +1,10 @@
+[Unit]
+Description=gofer agent supervisor daemon
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/gofer daemon --listen 127.0.0.1:7333 --root /home/u/.gofer
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

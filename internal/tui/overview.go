@@ -53,7 +53,8 @@ type OverviewMeta struct {
 type rosterView int
 
 const (
-	// viewFlat lists every session in one list, most-recently-active first.
+	// viewFlat lists every session most-recently-active first, grouped under a
+	// cwd header per working directory.
 	viewFlat rosterView = iota
 	// viewGrouped splits the list into Working / Needs input / Finished
 	// sections, each most-recently-active first.
@@ -207,11 +208,11 @@ func (o Overview) ordered() []SessionInfo {
 	return byRecency(append([]SessionInfo(nil), o.sessions...))
 }
 
-// filter returns the sessions in status st.
+// filter returns the sessions in effective status st.
 func (o Overview) filter(st SessionStatus) []SessionInfo {
 	var out []SessionInfo
 	for _, s := range o.sessions {
-		if s.Status == st {
+		if effectiveStatus(s) == st {
 			out = append(out, s)
 		}
 	}
@@ -230,10 +231,25 @@ func byRecency(s []SessionInfo) []SessionInfo {
 	return s
 }
 
-// counts tallies the roster by status for the header line.
+// effectiveStatus is the roster bucket a session actually belongs in. A
+// pending permission request keeps the daemon's coarse Status at
+// StatusWorking (the turn is technically in flight), but from the roster's
+// point of view the session is blocked awaiting the user — the same
+// condition statusGlyph promotes to the ✋ glyph on. Finished always wins.
+func effectiveStatus(s SessionInfo) SessionStatus {
+	if s.Status == StatusFinished {
+		return StatusFinished
+	}
+	if s.Pending > 0 {
+		return StatusNeedsInput
+	}
+	return s.Status
+}
+
+// counts tallies the roster by effective status for the header line.
 func (o Overview) counts() (working, needsInput, finished int) {
 	for _, s := range o.sessions {
-		switch s.Status {
+		switch effectiveStatus(s) {
 		case StatusWorking:
 			working++
 		case StatusNeedsInput:

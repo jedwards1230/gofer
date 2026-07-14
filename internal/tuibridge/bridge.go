@@ -80,6 +80,20 @@ func (a Adapter) Archive(ctx context.Context, sessionID string) error {
 	return a.sup.Archive(ctx, sessionID)
 }
 
+// Reply answers a pending permission request by routing straight to the
+// supervisor's own Reply, which resolves the session's loop.Gate — see
+// internal/supervisor's Reply doc. ctx is accepted to satisfy
+// [tui.Supervisor] (every other method here takes one), though the
+// supervisor's own Reply is synchronous and never blocks on I/O (routing to
+// an in-memory Gate), so there is nothing for it to cancel.
+func (a Adapter) Reply(_ context.Context, sessionID, id string, allow, remember bool) error {
+	verdict := event.VerdictDeny
+	if allow {
+		verdict = event.VerdictAllow
+	}
+	return a.sup.Reply(sessionID, event.PermissionReply{ID: id, Verdict: verdict, Remember: remember})
+}
+
 // toTUI copies the fields the TUI renders from a supervisor snapshot. The
 // status cast relies on the two SessionStatus enums sharing ordinals — a
 // property the mapping test pins so a future drift fails loudly.
@@ -90,6 +104,7 @@ func toTUI(s supervisor.SessionInfo) tui.SessionInfo {
 		Summary:   s.Summary,
 		Status:    tui.SessionStatus(s.Status),
 		Model:     s.Model,
+		Cwd:       s.Cwd,
 		Cost:      s.Cost,
 		Usage:     s.Usage,
 		Pending:   s.Pending,

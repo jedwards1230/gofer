@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jedwards1230/agent-sdk-go/event"
+	"github.com/jedwards1230/agent-sdk-go/loop"
 	"github.com/jedwards1230/agent-sdk-go/provider"
 	"github.com/jedwards1230/agent-sdk-go/runner"
 	"github.com/jedwards1230/agent-sdk-go/session"
@@ -27,10 +28,19 @@ type fakeSession struct {
 
 	broker *event.Broker
 
+	// approver is the per-session gate the supervisor injects via
+	// runner.Options.Approver, captured by the harness's New/Resume seam. A
+	// permission-driving Prompt (permReq set) blocks on it.
+	approver loop.Approver
+
 	mu     sync.Mutex
 	calls  []string
 	closed bool
 	fold   []provider.Message
+	// permReq, when non-empty, makes Prompt emit a permission.requested with
+	// this call id and block on approver.Await instead of the generic advance
+	// channel — the seam the approval tests use to exercise the real gate.
+	permReq string
 
 	// started delivers the prompt text each time Prompt is entered — one
 	// receive per dispatched turn. Buffered generously; a test only ever
@@ -105,15 +115,39 @@ func (f *fakeSession) Close() error {
 func (f *fakeSession) Prompt(ctx context.Context, text string) error {
 	f.mu.Lock()
 	f.calls = append(f.calls, text)
+	permReq := f.permReq
 	f.mu.Unlock()
 
 	f.started <- text
+
+	if permReq != "" {
+		// Emit a real permission.requested onto the broker (so watchPermissions
+		// counts it), then block on the injected approver exactly as the SDK
+		// loop's guard would. On reply, emit the matching permission.resolved.
+		f.broker.Publish(event.NewPermissionRequested(f.id, permReq, "bash", map[string]any{"command": text}, []string{"rule: ask"}))
+		reply, err := f.approver.Await(ctx, permReq)
+		if err != nil {
+			f.broker.Publish(event.NewPermissionResolved(f.id, permReq, event.VerdictDeny, "cancelled"))
+			return err
+		}
+		f.broker.Publish(event.NewPermissionResolved(f.id, permReq, reply.Verdict, "human"))
+		return nil
+	}
+
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	case err := <-f.advance:
 		return err
 	}
+}
+
+// setPermReq arms this fake to drive a permission request with call id on its
+// next Prompt (see Prompt).
+func (f *fakeSession) setPermReq(id string) {
+	f.mu.Lock()
+	f.permReq = id
+	f.mu.Unlock()
 }
 
 // finish releases the currently-blocked Prompt call, letting it return err.
@@ -175,11 +209,15 @@ func newHarness(t *testing.T) *harness {
 		NewSession: func(_ context.Context, opts runner.Options) (supervisor.Session, error) {
 			h.newN.Add(1)
 			id := fmt.Sprintf("sess-%d", atomic.AddInt64(&h.nextID, 1))
-			return h.register(id, opts.Cwd), nil
+			fs := h.register(id, opts.Cwd)
+			fs.approver = opts.Approver
+			return fs, nil
 		},
 		ResumeSession: func(_ context.Context, id string, opts runner.Options) (supervisor.Session, error) {
 			h.resN.Add(1)
-			return h.register(id, opts.Cwd), nil
+			fs := h.register(id, opts.Cwd)
+			fs.approver = opts.Approver
+			return fs, nil
 		},
 	}
 

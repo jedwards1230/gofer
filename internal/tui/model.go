@@ -9,8 +9,10 @@
 // [Model.Ingest] (the bubbletea [Program] adapter in adapter.go does this
 // for a real terminal, wrapping each event as an [EventMsg]). This is the
 // seed of the full screen-stack design in docs/TUI.md (overview ⇄ peek ⇄
-// attach); the overview⇄peek⇄attach navigation shipped in M2, while the
-// dialog and keymap systems land later.
+// attach); the overview⇄peek⇄attach navigation shipped in M2, a first
+// interactive prompt — the inline permission-approval block rendered by
+// View (see approval.go, and dialog.go for the key handling)
+// landed in M3, and the fuller dialog/keymap system lands later.
 package tui
 
 import (
@@ -18,6 +20,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/provider"
@@ -44,6 +48,7 @@ const (
 	itemTool
 	itemError
 	itemApproval
+	itemApprovalResolved
 )
 
 // item is one entry in the transcript. Tool-only fields are zero on every
@@ -56,6 +61,11 @@ type item struct {
 	toolName   string
 	toolInput  string
 	toolResult string
+	toolErr    bool
+
+	// approvalVerdict is itemApprovalResolved-only: the resolved
+	// event.Verdict ("allow"/"deny").
+	approvalVerdict string
 }
 
 // Model is gofer's minimal attach surface. It is immutable from the
@@ -78,6 +88,16 @@ type Model struct {
 
 	// toolIndex maps an in-flight tool call's ID to its item index.
 	toolIndex map[string]int
+
+	// pending is the session's current unresolved permission request, if any
+	// (nil = none) — the backing state for the interactive inline approval
+	// prompt. It is transient client-side state (like input), NOT a transcript
+	// item: while set, it commandeers the bottom input line (see View),
+	// and disappears on resolve or dismiss (the input returns), while the
+	// itemApproval badge and itemApprovalResolved line stay as the permanent
+	// record. Following Model's copy-on-write discipline the pointer is never
+	// mutated in place — every mutator reallocates and repoints.
+	pending *pendingApproval
 
 	turn       turnState
 	stopReason string
@@ -168,13 +188,20 @@ func (m Model) Ingest(e event.Event) Model {
 		m.toolIndex[ev.ID] = idx
 
 	case event.ToolCallDelta:
-		if idx, ok := m.toolIndex[ev.ID]; ok {
-			m.items[idx].toolResult += ev.Delta
-		}
+		// ToolCallDelta carries a fragment of the streaming INPUT (partial
+		// JSON arguments as the provider assembles them), not the result —
+		// see event.ToolCallDelta's doc. The authoritative input and result
+		// both arrive together on ToolCallFinished (below), so this is
+		// deliberately a no-op; the toolIndex bookkeeping above still
+		// applies to it.
 
 	case event.ToolCallFinished:
 		if idx, ok := m.toolIndex[ev.ID]; ok {
+			if len(ev.Input) > 0 {
+				m.items[idx].toolInput = compactJSON(ev.Input)
+			}
 			m.items[idx].toolResult = ev.Result
+			m.items[idx].toolErr = ev.IsError
 			m.items[idx].done = true
 		}
 		delete(m.toolIndex, ev.ID)
@@ -183,12 +210,36 @@ func (m Model) Ingest(e event.Event) Model {
 		m.items = append(m.items, item{kind: itemError, text: ev.Err, done: true})
 
 	case event.PermissionRequested:
+		// The inline badge is the permanent transcript record; m.pending is
+		// the transient interactive prompt state rendered beneath it (see
+		// View). A second request supersedes the first — last one shown wins;
+		// the superseded request stays pending server-side and its own
+		// PermissionResolved simply finds m.pending pointed elsewhere below.
 		m.items = append(m.items, item{kind: itemApproval, text: ev.Tool, done: true})
+		m.pending = &pendingApproval{id: ev.ID, tool: ev.Tool, spec: ev.Spec, session: ev.SessionID()}
+
+	case event.PermissionResolved:
+		// A routine allow is the expected outcome, and its transcript line is
+		// noise — the ✋ badge already recorded the request. Deny/ask stay
+		// visible because they change what happened. Either way, clear the
+		// interactive prompt if it was still showing this request (this
+		// client answered via resolveApproval, or another attached client
+		// answered first).
+		if ev.Verdict != event.VerdictAllow {
+			m.items = append(m.items, item{
+				kind:            itemApprovalResolved,
+				approvalVerdict: string(ev.Verdict),
+				done:            true,
+			})
+		}
+		if m.pending != nil && m.pending.id == ev.ID {
+			m.pending = nil
+		}
 
 		// event.SessionCreated, event.SessionResumed, event.SessionForked,
-		// event.SessionCompacted, event.SessionKilled, event.SessionArchived,
-		// and event.PermissionResolved carry no transcript-visible state in
-		// the minimal attach surface; they fall through untouched.
+		// event.SessionCompacted, event.SessionKilled, and
+		// event.SessionArchived carry no transcript-visible state in the
+		// minimal attach surface; they fall through untouched.
 	}
 
 	return m
@@ -216,6 +267,43 @@ func (m *Model) setOpen(kind event.MessageKind, idx int) {
 	}
 }
 
+// HasPendingApproval reports whether an unresolved permission request is
+// awaiting a decision on this session — the app root consults it to route the
+// a/d/r keys to the approval prompt (see App.Update).
+func (m Model) HasPendingApproval() bool { return m.pending != nil }
+
+// PendingApproval returns the id and remember-toggle state of the pending
+// permission request, for the app root to build the Supervisor.Reply. ok is
+// false when nothing is pending.
+func (m Model) PendingApproval() (id string, remember bool, ok bool) {
+	if m.pending == nil {
+		return "", false, false
+	}
+	return m.pending.id, m.pending.remember, true
+}
+
+// ToggleApprovalRemember flips the pending request's remember toggle,
+// reallocating rather than mutating in place (Model's copy-on-write
+// discipline). A no-op when nothing is pending.
+func (m Model) ToggleApprovalRemember() Model {
+	if m.pending == nil {
+		return m
+	}
+	p := *m.pending
+	p.remember = !p.remember
+	m.pending = &p
+	return m
+}
+
+// DismissApproval clears the pending request without resolving it — the esc
+// dismiss and the optimistic local clear after a reply. The underlying request
+// stays pending server-side; a re-attach replays PermissionRequested and
+// re-surfaces it.
+func (m Model) DismissApproval() Model {
+	m.pending = nil
+	return m
+}
+
 // compactJSON renders raw JSON as a single-line, whitespace-collapsed
 // string for compact tool-block display. Invalid or empty input renders as
 // an empty string rather than failing.
@@ -228,6 +316,27 @@ func compactJSON(raw json.RawMessage) string {
 		return strings.Join(strings.Fields(string(raw)), " ")
 	}
 	return buf.String()
+}
+
+// summarizeToolInput renders a tool call's compact-JSON input as a readable
+// one-line header summary: a shell command's own text for a command-shaped
+// input, else the compact JSON as-is. Empty or "{}" (the start-of-call seed a
+// provider streams before the arguments arrive) yields "", so the header shows
+// the bare tool name until the real input lands on ToolCallFinished.
+func summarizeToolInput(compact string) string {
+	if compact == "" || compact == "{}" {
+		return ""
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(compact), &obj); err != nil {
+		return compact
+	}
+	for _, key := range []string{"command", "cmd"} {
+		if v, ok := obj[key].(string); ok && v != "" {
+			return v
+		}
+	}
+	return compact
 }
 
 // TypeRune appends r to the input buffer.
@@ -280,6 +389,29 @@ func (m *Model) TakeSubmitted() (string, bool) {
 	return text, true
 }
 
+// transcriptGap is the number of blank lines rendered between consecutive
+// transcript blocks (items), for visual breathing room.
+const transcriptGap = 1
+
+// transcriptLines renders every item's lines, truncated to width, with
+// transcriptGap blank line(s) between consecutive items — no leading gap
+// before the first item, no trailing gap after the last. Shared by View and
+// FullTranscript so both surfaces render the transcript body identically.
+func (m Model) transcriptLines(width int) []string {
+	lines := make([]string, 0, len(m.items)+2)
+	for i, it := range m.items {
+		if i > 0 {
+			for range transcriptGap {
+				lines = append(lines, "")
+			}
+		}
+		for _, line := range m.renderItemLines(it) {
+			lines = append(lines, truncate(line, width))
+		}
+	}
+	return lines
+}
+
 // View renders the transcript, status line, and input line at the given
 // size. Width wraps nothing (M1's virtualized transcript and stable-prefix
 // markdown cache from docs/TUI.md land later); a line longer than width is
@@ -293,20 +425,41 @@ func (m Model) View(width, height int) string {
 		height = 1
 	}
 
-	lines := make([]string, 0, len(m.items)+2)
-	for _, it := range m.items {
-		for _, line := range m.renderItemLines(it) {
-			lines = append(lines, truncate(line, width))
-		}
+	lines := m.transcriptLines(width)
+
+	// The bottom UI is the status line plus either the input line or — while a
+	// permission request is pending — the approval prompt, which commandeers
+	// the input's spot (the input is suppressed until the request is answered,
+	// then returns). Whichever footer shows, the transcript above tails to fit
+	// so the footer stays anchored to the bottom however long the conversation
+	// grows.
+	footer := []string{truncate(m.statusLine(), width)}
+	if prompt := m.promptLines(width); prompt != nil {
+		footer = append(footer, prompt...)
+	} else {
+		footer = append(footer, truncate(m.inputLine(), width))
 	}
 
-	const reserved = 2 // status line + input line
-	if avail := height - reserved; avail >= 0 && len(lines) > avail {
+	if avail := height - len(footer); avail >= 0 && len(lines) > avail {
 		lines = lines[len(lines)-avail:]
 	}
-
-	lines = append(lines, truncate(m.statusLine(), width), truncate(m.inputLine(), width))
+	lines = append(lines, footer...)
 	return strings.Join(lines, "\n")
+}
+
+// promptLines renders the pending approval as the bottom-anchored, input-
+// replacing prompt's lines, each truncated to width. Empty when nothing is
+// pending. Used by View to anchor the inline approval prompt to the bottom.
+func (m Model) promptLines(width int) []string {
+	if m.pending == nil {
+		return nil
+	}
+	raw := renderApprovalPrompt(m.theme, *m.pending)
+	out := make([]string, len(raw))
+	for i, l := range raw {
+		out[i] = truncate(l, width)
+	}
+	return out
 }
 
 // renderItemLines renders a single transcript item to its display lines. A
@@ -329,6 +482,13 @@ func (m Model) renderItemLines(it item) []string {
 	case itemApproval:
 		return []string{m.theme.WarnStyle().Render(m.theme.GlyphApproval + " " + it.text)}
 
+	case itemApprovalResolved:
+		glyph, style := m.theme.GlyphOK, m.theme.OKStyle()
+		if it.approvalVerdict == string(event.VerdictDeny) {
+			glyph, style = m.theme.GlyphErr, m.theme.DangerStyle()
+		}
+		return []string{style.Render(glyph + " permission " + it.approvalVerdict)}
+
 	default: // itemAssistantText
 		return []string{it.text}
 	}
@@ -339,32 +499,55 @@ func (m Model) renderItemLines(it item) []string {
 // three tree-indented result lines, collapsing any remainder into a single
 // "… +N lines" line.
 func (m Model) renderToolLines(it item) []string {
-	// TODO: style the header glyph for a failed call. The SDK now carries
-	// IsError on ToolCallFinished, but this Model doesn't yet track it, so
-	// every finished call renders with GlyphOK regardless of outcome.
 	glyph := m.theme.GlyphStreaming
+	failed := false
 	if it.done {
 		glyph = m.theme.GlyphOK
+		if it.toolErr {
+			// An internal/transient tool error (the call ran but reported a
+			// problem) reads as a caution, not a session crash — WarnStyle's
+			// amber is deliberately softer than the DangerStyle reserved for a
+			// fatal SessionError, and the muted body de-emphasizes the error
+			// text so it doesn't look like prominent real output.
+			glyph = m.theme.GlyphErr
+			failed = true
+		}
 	}
-	lines := []string{fmt.Sprintf("%s %s(%s)", glyph, it.toolName, it.toolInput)}
+
+	header := it.toolName
+	if summary := summarizeToolInput(it.toolInput); summary != "" {
+		header = fmt.Sprintf("%s(%s)", it.toolName, summary)
+	}
+	headerLine := glyph + " " + header
+	if failed {
+		headerLine = m.theme.WarnStyle().Render(headerLine)
+	}
+	lines := []string{headerLine}
 
 	if !it.done || it.toolResult == "" {
 		return lines
 	}
 
+	styleBody := func(s string) string {
+		if failed {
+			return m.theme.MutedStyle().Render(s)
+		}
+		return s
+	}
+
 	resultLines := strings.Split(it.toolResult, "\n")
-	lines = append(lines, "   └ "+resultLines[0])
+	lines = append(lines, styleBody("   └ "+resultLines[0]))
 	const maxExtra = 2
 	shown := 1
 	for _, l := range resultLines[1:] {
 		if shown >= 1+maxExtra {
 			break
 		}
-		lines = append(lines, "     "+l)
+		lines = append(lines, styleBody("     "+l))
 		shown++
 	}
 	if extra := len(resultLines) - shown; extra > 0 {
-		lines = append(lines, fmt.Sprintf("     … +%d lines", extra))
+		lines = append(lines, styleBody(fmt.Sprintf("     … +%d lines", extra)))
 	}
 	return lines
 }
@@ -391,40 +574,6 @@ func (m Model) inputLine() string {
 	return "> " + m.input + "▏"
 }
 
-// TailView renders a read-only tail of the transcript for the peek pane: the
-// most recent transcript items above the status line, bottom-aligned like a
-// live terminal, with no input line — peek steals no input. Output is exactly
-// height rows.
-func (m Model) TailView(width, height int) string {
-	if width < 1 {
-		width = 1
-	}
-	if height < 1 {
-		height = 1
-	}
-
-	lines := make([]string, 0, len(m.items))
-	for _, it := range m.items {
-		for _, line := range m.renderItemLines(it) {
-			lines = append(lines, truncate(line, width))
-		}
-	}
-
-	avail := height - 1 // status line
-	if avail < 0 {
-		avail = 0
-	}
-	if len(lines) > avail {
-		lines = lines[len(lines)-avail:]
-	}
-	// Top-pad so the transcript sits just above the status line.
-	if n := avail - len(lines); n > 0 {
-		lines = append(make([]string, n), lines...)
-	}
-	lines = append(lines, truncate(m.statusLine(), width))
-	return strings.Join(lines, "\n")
-}
-
 // FullTranscript renders every transcript item unclipped by height, followed
 // by the final status line. It is what the attach TUI flushes to the terminal
 // on exit, so the scrollback holds the whole conversation — not the
@@ -439,25 +588,23 @@ func (m Model) FullTranscript(width int) string {
 		return "" // nothing streamed; nothing to flush
 	}
 
-	lines := make([]string, 0, len(m.items)+1)
-	for _, it := range m.items {
-		for _, line := range m.renderItemLines(it) {
-			lines = append(lines, truncate(line, width))
-		}
-	}
+	lines := m.transcriptLines(width)
 	lines = append(lines, truncate(m.statusLine(), width))
 	return strings.Join(lines, "\n")
 }
 
-// truncate clips s to at most w runes, marking a clipped line with a
-// trailing ellipsis.
+// truncate clips s to at most w terminal cells (display width, not rune
+// count — so ANSI styling and wide runes like the ✋ approval glyph are
+// measured correctly), marking a clipped line with a trailing ellipsis.
 func truncate(s string, w int) string {
-	r := []rune(s)
-	if len(r) <= w {
+	if w < 0 {
+		w = 0
+	}
+	if ansi.StringWidth(s) <= w {
 		return s
 	}
 	if w <= 1 {
-		return string(r[:w])
+		return ansi.Truncate(s, w, "")
 	}
-	return string(r[:w-1]) + "…"
+	return ansi.Truncate(s, w, "…")
 }

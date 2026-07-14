@@ -22,22 +22,42 @@ subagent tree. `space` peek · `enter` attach · `a` approve · `n` new ·
 `ctrl-x` kill (running; confirm; subtree interrupted) or archive (finished).
 Journals are never deleted — `gofer ps --all` lists archived sessions.
 
-**Peek** — read-only tail of one session without stealing input. For a
-fan-out it defaults to the child most needing attention (a waiting
-approval); `J/K` cycles agents within the session, `j/k` cycles sessions.
-Approvals are actionable without attaching.
+**Peek** — a summary card for one session: its title, a one-line
+waiting/status line, and a `❯ reply` input. `up`/`down` move the roster
+selection (the card follows); `enter` opens (attaches) or, with reply text,
+sends the reply; `space` closes back to the overview; `ctrl+x` deletes. Peek
+carries no transcript tail — it is a roster-only projection.
 
 **Attach** — full transcript + input; `esc` detaches back to overview.
-An approval block shows the full pipeline trace (which rail matched, what
-the sandbox said, what the reviewer decided):
+
+A pending permission request is **not** a centered modal — it renders inline in
+the conversation's bottom UI. The transcript keeps a permanent `✋ <tool>` badge
+in the flow, while the live prompt **commandeers the input line**: it takes the spot the text
+input normally occupies and stays anchored there until answered, then the input
+returns. It reads as a confirm prompt — the tool + args, the question, the
+action row, and a dim footer — keyed `a`/`d`/`r` (`r` toggles remember), `esc`
+dismisses without answering (the request stays pending; a re-attach re-surfaces
+it):
 
 ```
- ✋ approval ─ Bash(kubectl delete replica pvc-9f21-r-x7ab -n longhorn-system)
-    rails: no rule → sandbox: n/a (cluster write) → reviewer: RISKY (irreversible)
-    [y] once  [r] remember rule…  [e] edit cmd  [n] deny  [tab] why?
+ ✋ bash · cmd=rm -rf /tmp/session-fixtures
+ Allow this tool call?
+   [a] allow   [d] deny   [r] remember: off
+ esc cancel · session 0192a1b2-…
 ```
 
-**Remember-as-rule** — a grant never widens silently: the dialog offers
+Resolution is deliberately quiet. A routine **allow** adds *no* transcript
+line — the `✋` badge already recorded that the call was gated, and a
+`✓ permission allow (config)` line on every approved call (printed *after* the
+result, reading as if config auto-allowed it) was pure noise. A **deny** keeps
+a `✗ permission deny` line, because a blocked call changed what happened. The
+old rule-source parenthetical is dropped either way.
+
+The fuller pipeline trace (which rail matched, what the sandbox said, what the
+reviewer decided) and the richer action set (`edit cmd`, `why?`) land later; M3
+ships the inline allow/deny/remember prompt above.
+
+**Remember-as-rule** — a grant never widens silently: the prompt offers
 exact / prefix / broad patterns, but dangerous commands are force-downgraded
 to exact-match regardless, scoped (agent/global) and TTL'd.
 
@@ -55,33 +75,38 @@ Layout, top to bottom:
   `N awaiting input · M working · K completed`. The counts are the roster
   tallied by status; the wording mirrors the group labels.
 - **Roster body** — one line per session:
-  `‹caret› ‹status glyph› ‹title› ‹one-line summary› ‹cost · age›`. The caret
-  (`▸`) marks selection so it reads without color (golden tests force
+  `‹caret› ‹status glyph› ‹title› ‹status word · one-line summary› ‹age›`. The
+  caret (`▸`) marks selection so it reads without color (golden tests force
   `termenv.Ascii`). The status glyph promotes to `✋` when approvals are
-  pending. Cost comes from the SDK's usage accounting (PRD: cost in every
-  roster row); age is a compact relative string (`now`/`5m`/`3h`/`2d`) computed
-  against an injected reference time so tests stay deterministic. The body
-  windows to keep the selected row visible.
+  pending. The summary is prefixed with the status word (`Working ·` /
+  `Needs input ·` / `Finished ·`) in the flat view, where no status section
+  states it; the grouped view omits it (the section header already does).
+  Age is a compact relative string (`now`/`5m`/`3h`/`2d`) computed against an
+  injected reference time so tests stay deterministic, right-aligned as the
+  sole right-column metadata. The body windows to keep the selected row
+  visible.
 - **Dispatch bar** — a rule, an input line (a placeholder until the user
   types), and a one-line shortcut hint. Typing anywhere in the roster edits the
   bar; `enter` on a non-empty bar creates a new session from that text and
   attaches into it (`Supervisor.Create`).
 
 **Two roster views**, toggled by `tab`: flat (every session, most-recently-active
-first) and grouped (Working / Needs input / Finished sections, each
-recency-sorted). Selection is tracked by session id, not row index, so it
-survives the reorder a toggle causes. (`tab` rather than a letter key so the
-dispatch bar stays freely typeable — a plain `v` is text, not a shortcut.)
+first, grouped under a **cwd header** per working directory) and grouped
+(Working / Needs input / Finished sections, each recency-sorted). The cwd
+header makes the fleet-global working directory visible — one header per
+distinct cwd, sessions beneath. Selection is tracked by session id, not row
+index, so it survives the reorder a toggle causes. (`tab` rather than a letter
+key so the dispatch bar stays freely typeable — a plain `v` is text, not a
+shortcut.)
 
-**Peek** is the read-only split: the roster rail (the overview's header + body,
-no dispatch bar) alongside a live tail of the selected session's transcript. It
-steals no input — `j`/`k` move the rail selection and the app root swaps the
-tail to the newly selected session. The panes stack vertically (roster above
-tail) by default and split side-by-side once the terminal reaches
-`layout.PeekHorizontalMinWidth` (120 cols) — below that a horizontal split
-leaves each pane too narrow for a roster row. The `layout` package owns the
-geometry (orientation, pane-size division, column zipping) as pure int/string
-math so both arrangements stay golden-testable.
+**Peek** is the roster rail (the overview's header + body, no dispatch bar)
+above a **summary card** for the selected session: a rule, the session title, a
+`‹verb› ‹duration›` waiting line (`waiting`/`working`/`finished` since last
+activity), a `❯ reply` input, and a footer hint. Peek subscribes to no event
+stream — the card is a pure projection of the roster snapshot plus the reply
+buffer, so moving the selection never re-subscribes. (This replaces the earlier
+read-along transcript tail and its side-by-side split; the `layout` package now
+holds only frame padding.)
 
 **Navigation contract** — enforced by the app root (`App` in `app.go`, the
 bubbletea root that composes overview/peek/attach): `enter` peeks the selected
@@ -89,8 +114,9 @@ session (with dispatch-bar text, it instead creates a session from that text
 and attaches into it); `→` attaches the selected session; `esc`
 interrupts/acts on the *active* session (never "go back"); `←` in an **empty**
 input backs out to the overview (with text, it edits); `ctrl-x` kills a running
-session or archives a finished one; `ctrl-c` quits. In peek, `j`/`k` switch the
-peeked session and `←` returns to the overview.
+session or archives a finished one; `ctrl-c` quits. In peek, `up`/`down` move
+the selection, `enter` opens the session (or sends the reply when the `❯` input
+has text), `space` closes to the overview, and `ctrl+x` deletes.
 
 The app root is a **client** like any other (repo invariant): it reads the
 roster by polling `Supervisor.Roster` on a timer (the supervisor's roster is
@@ -105,14 +131,33 @@ tool-block rendering — a status-count header, grouped sections, a one-line
 session row, and a bottom dispatch bar with a hint line — reimplemented here
 for gofer's Event/Op model.
 
-**Tool blocks** in the attach/peek transcript render as a collapsed tree: a
-header line `‹glyph› tool(args)` (streaming glyph while the call runs, ok glyph
-once done), then the result tree-indented beneath — the first line on a `└`,
-up to two more indented, and any remainder collapsed to `… +N lines`. A failed
-call reuses the ok glyph: the SDK now carries `IsError` on `ToolCallFinished`,
-but the transcript renderer doesn't yet style the failure glyph. Because a
-tool item now spans several lines, the transcript renderers flatten every
-item to its lines before width-truncating and height-windowing.
+**Tool blocks** in the attach transcript render as a collapsed tree: a
+header line `‹glyph› tool(command)`, then the result tree-indented beneath — the
+first line on a `└`, up to two more indented, and any remainder collapsed to
+`… +N lines`. The header command is the **authoritative** input from
+`ToolCallFinished.Input`, not `ToolCallStarted.Input` (which is only the
+start-of-block seed — an empty `{}` when a provider streams the arguments as
+`input_json_delta` fragments, so building the header from it rendered every call
+as `bash({})`). A command-shaped input is summarized to its own text
+(`bash(find . -type f | wc -l)` rather than `bash({"command":"…"})`); unknown
+tool shapes fall back to compact JSON. While a call is still running its input is
+usually just the empty seed, so the header shows the **bare tool name** (`◐ bash`)
+until the real command lands on finish. `ToolCallDelta` is ignored — it carries
+input fragments, not result text (it used to be mis-appended to the result).
+
+A **failed** call (`ToolCallFinished.IsError`) is styled distinctly: the ✗ glyph
+and header render in the warn accent — deliberately softer than the red a fatal
+`SessionError` uses — and the result body is dimmed, so an internal/transient
+error (e.g. `sandbox: … command is required`) reads as a de-emphasized
+diagnostic rather than prominent, genuine-looking output. A clean call keeps the
+ok glyph and an unstyled body.
+
+Transcript blocks are separated by a blank line (`transcriptGap`) for vertical
+rhythm — user turn, assistant reply, and tool blocks each get breathing room.
+Because a tool item spans several lines and the gaps are ordinary lines, the
+three transcript renderers (`View`, `TailView`, `FullTranscript`) share one
+`transcriptLines` helper that flattens every item to its lines — with the gaps
+between — before width-truncating and height-windowing.
 
 ## Two trees, one renderer
 
@@ -121,6 +166,34 @@ The **fan-out tree** (subagents within a session — who is working) and the
 compaction entries, HEAD) share a single row renderer. Fork/branch/compact
 are first-class: the session is an append-only tree and context is
 fold(root→head), so a "what if" fork costs nothing.
+
+## Subagent sessions (M4)
+
+A subagent is **not a black box within a turn** — it is a real child session
+with its own journal, cost, and transcript, linked to its parent
+(`session.spawned` event + `parent_id`; depth ≤ 5). The overview renders the
+parent with its children indented beneath it, each child row carrying its own
+description, run duration, and cumulative token/cost tally — the same
+one-line-per-session shape as a top-level row:
+
+```
+● main
+  ○ tui-inline-perm-owner   Own the M3 TUI change…      5m 9s · ↓ 214.7k tokens
+  ○ sandbox-shell-fix-owner Own the M3 sandbox fix…      5m 30s · ↓ 185.3k tokens
+  ○ go-developer            Editing model.go doc comment 6m 47s · ↓ 128.0k tokens
+  ↑/↓ to select · enter to view
+```
+
+`↑`/`↓` selects a child; `enter` navigates *into* that child's full session —
+its complete transcript, tool blocks, and approvals — exactly as if it were a
+top-level session (`esc`/`←` returns to the parent). So a supervisor watching
+one task drills into any subagent's whole history without losing the parent
+context, and an approval waiting deep in the tree still surfaces as `✋ N` on
+the ancestor row. This is the fan-out tree above made navigable: the tree shows
+*who is working*; entering a node shows *what they did*. It reuses the shared
+row renderer and the id-tracked selection/windowing the M2 roster already
+established — a child session is just a session, so no new navigation model is
+needed, only the parent→child link and the indent.
 
 ## Responsive layout
 
@@ -178,6 +251,57 @@ tui/
   ≥ 140 cols, else unified).
 - Deferred: mouse, animations beyond one shared spinner, a second theme,
   raw-ANSI subprocess remapping.
+
+## How the TUI is tested
+
+Three layers, each catching what the one below can't:
+
+1. **Ascii goldens = structure.** `testkit` renders a `Model` at a fixed size
+   through `theme.Test()` (forced `termenv.Ascii`, so lipgloss emits no color
+   codes) and diffs byte-for-byte against a checked-in `testdata/*.golden`.
+   This locks the *layout* — line breaks, glyphs, spacing, truncation — free of
+   any per-machine color nondeterminism. Regenerate:
+   `go test ./internal/tui/... -run TestGolden -update`, then **review the
+   diff** (a golden is a committed assertion, not a cache). A transcript golden
+   also lives in `internal/daemonbridge` (history-replay render) — regenerate
+   it the same way with its own `-update`.
+2. **`ansi.Strip(colored) == plain` = ANSI-width.** An Ascii golden can't see a
+   color code, so it can't catch a styling bug that changes *display width*
+   (the #61 color-scatter: a styled pane measured wider than its cells and tore
+   the layout). The color tests (`color_layout_test.go`, `dialog_color_test.go`)
+   render the same component twice — once plain, once through a real color
+   profile (`colorTheme()`) — and assert that stripping ANSI from the colored
+   render reproduces the plain one exactly, and that no line exceeds its width.
+   Every render change here ships with both a golden and a colored width test.
+3. **VHS = visual/pixel.** Goldens and width tests both run on plain text; they
+   can't tell you whether the amber actually reads as caution or the spacing
+   looks right. VHS renders real frames to GIF/PNG for a human eye (below).
+
+The pyramid: goldens catch structure regressions cheaply on every run; the
+colored tests catch the ANSI-width class the goldens are blind to; VHS is the
+on-demand visual check for the pixels neither can assert.
+
+## Visual capture with VHS
+
+The Ascii golden tests are the authoritative assertion, but they render
+`termenv.Ascii` — they can't show color, and by construction miss ANSI-width
+bugs (the #61 color-scatter regression shipped past green goldens). For a
+human-eye check of real rendered frames, `vhs/` holds on-demand
+[charmbracelet VHS](https://github.com/charmbracelet/vhs) tooling:
+
+- `vhs/harness/` — a tiny `main` that drives the **real** `internal/tui` render
+  path (`theme.Default`, live `tui.Program`, `Program.Send`) through a fixed,
+  scripted event stream, exactly as `cmd/gofer`'s `driveTUI` forwards a
+  session. Pick a scene with `-scenario tool-call | approval`.
+- `vhs/tool-call.tape` — a clean turn with a bash tool call (real command in the
+  header, block rhythm). `vhs/approval.tape` — a turn ending in the inline
+  permission prompt, with a failed call's softened error styling above it.
+
+Run `scripts/tui-vhs.sh [tool-call|approval]` (no arg = all). It prebuilds
+`vhs/.bin/harness`, then renders each tape to `vhs/out/` (GIF of the whole turn
++ PNG of the key frame); both are gitignored. If VHS isn't installed the script
+prints an install hint and exits. This is **not** a CI gate — VHS complements,
+never replaces, the golden tests.
 
 ## Slash commands
 

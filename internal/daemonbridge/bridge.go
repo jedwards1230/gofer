@@ -25,7 +25,31 @@ const (
 	methodGoferRoster  = "gofer/roster"
 	methodGoferKill    = "gofer/kill"
 	methodGoferArchive = "gofer/archive"
+
+	// methodGoferPermissionRequested / methodGoferPermissionResolved are the
+	// gofer-native notifications the daemon fans a session's permission events
+	// out to every attached peer with — mirroring
+	// internal/daemon/handlers.go's own methodGoferPermissionRequested/
+	// methodGoferPermissionResolved constants (unexported there; redeclared
+	// here for the same reason as methodGoferRoster et al. above). See
+	// reconstruct.go's handlePermissionRequested/handlePermissionResolved.
+	methodGoferPermissionRequested = "gofer/permission_requested"
+	methodGoferPermissionResolved  = "gofer/permission_resolved"
+
+	// methodGoferEvent is the M3 lossless-attach notification carrying a
+	// source [event.Event]'s own MarshalJSON envelope, verbatim — mirroring
+	// internal/daemon/handlers.go's own methodGoferEvent constant (unexported
+	// there; redeclared here for the same reason as the others above). See
+	// reconstruct.go's handleGoferEvent.
+	methodGoferEvent = "gofer/event"
 )
+
+// methodPermissionReply is the JSON-RPC method literal the daemon exposes to
+// answer a pending permission request — contract #1 of the M3 approvals-relay
+// work: it is a bare notification (no id, no response), decoded daemon-side
+// into an [event.PermissionReply] and routed to the session's
+// loop.Gate.Reply. See [Supervisor.Reply].
+const methodPermissionReply = "permission.reply"
 
 // subBuffer and replayDepth size each session's reconstructed [event.Broker]
 // the same way the SDK's own session package sizes its live broker
@@ -114,19 +138,23 @@ func (s *Supervisor) Close() error {
 	return s.closeErr
 }
 
-// sessionState is one session's reconstruction state plus its
-// reconstructed event broker. The broker is safe for concurrent use on its
-// own (see [event.Broker]); the open-message fields (hasOpen/openKind/text)
-// are mutated ONLY by the demuxer goroutine (see reconstruct.go) — no
-// additional locking is needed for them, since that goroutine is the sole
-// writer.
+// sessionState is one session's replay state plus its reconstructed event
+// broker. The broker is safe for concurrent use on its own (see
+// [event.Broker]); turnTerminated is mutated ONLY by the demuxer goroutine
+// (see reconstruct.go's handleGoferEvent/handleTurnEnd) — no additional
+// locking is needed for it, since that goroutine is the sole writer and
+// reader.
 type sessionState struct {
 	id     string
 	broker *event.Broker
 
-	hasOpen  bool
-	openKind event.MessageKind
-	text     string
+	// turnTerminated reports whether a terminal gofer/event turn.finished
+	// (stop reason != "tool_use") has already been replayed for the
+	// currently-open turn — see handleGoferEvent. handleTurnEnd reads it to
+	// decide whether Send's Call outcome still needs a FALLBACK terminal
+	// event published (the ordinary case does not: the real one already
+	// arrived via gofer/event).
+	turnTerminated bool
 
 	// loadDone gates history-before-live ordering: it is closed either
 	// immediately (registerFresh, for a session THIS bridge just created via
@@ -236,9 +264,16 @@ type sessionInfoDTO struct {
 	Live    bool           `json:"live"`
 	// Cwd, like the rest of this DTO, mirrors internal/daemon/wire.go's field
 	// of the same name — used internally by [Supervisor.sessionCwd] to drive
-	// session/load's required cwd (see loadHistory), not currently surfaced
-	// through [toTUISessionInfo]/[tui.SessionInfo].
+	// session/load's required cwd (see loadHistory), and surfaced through
+	// [toTUISessionInfo] as [tui.SessionInfo.Cwd], the roster's cwd group key.
 	Cwd string `json:"cwd"`
+	// Pending is the session's live outstanding-permission-request count —
+	// contract #2 of the M3 approvals-relay work: the daemon side
+	// (internal/daemon/wire.go) encodes [supervisor.SessionInfo.Pending] as
+	// "pending,omitempty". Additive field: an older daemon simply never sends
+	// it, and this decodes to the zero value (no badge), matching M2's
+	// always-0 behavior.
+	Pending int `json:"pending,omitempty"`
 }
 
 // statusFromWire maps the daemon's roster Status string — literally
@@ -264,17 +299,19 @@ func statusFromWire(s string) tui.SessionStatus {
 }
 
 // toTUISessionInfo maps one wire roster row to the TUI's row type.
-// Summary/Pending/Artifacts have no wire representation in M2 (see
-// sessionInfoDTO's doc and internal/daemon/wire.go) and are left at their
-// zero values.
+// Summary/Artifacts have no wire representation yet (see sessionInfoDTO's
+// doc and internal/daemon/wire.go) and are left at their zero values; Pending
+// is live as of the M3 approvals-relay work (contract #2).
 func toTUISessionInfo(d sessionInfoDTO) tui.SessionInfo {
 	return tui.SessionInfo{
 		ID:      d.ID,
 		Title:   d.Title,
 		Status:  statusFromWire(d.Status),
 		Model:   d.Model,
+		Cwd:     d.Cwd,
 		Cost:    d.Cost,
 		Usage:   d.Usage,
+		Pending: d.Pending,
 		Created: d.Created,
 		Updated: d.Updated,
 	}
@@ -372,6 +409,7 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts tui.CreateO
 	info := tui.SessionInfo{
 		ID:      resp.SessionID,
 		Model:   opts.Model,
+		Cwd:     opts.Cwd,
 		Status:  tui.StatusNeedsInput,
 		Created: now,
 		Updated: now,
@@ -408,6 +446,29 @@ func (s *Supervisor) Archive(ctx context.Context, sessionID string) error {
 func (s *Supervisor) Interrupt(ctx context.Context, sessionID string) error {
 	if err := s.client.Notify(ctx, acp.MethodSessionCancel, acp.CancelNotification{SessionID: sessionID}); err != nil {
 		return fmt.Errorf("daemonbridge: interrupt %s: %w", sessionID, err)
+	}
+	return nil
+}
+
+// Reply answers a pending permission request by sending [methodPermissionReply]
+// — a bare notification, matching the "permission.reply" op's own
+// fire-and-forget contract (see event.PermissionReply's doc: it carries no
+// response). sessionID is not part of the wire payload: the daemon resolves
+// a request by id alone (see [Supervisor.session]'s reconstruction — the
+// same id [event.PermissionRequested]/[event.PermissionResolved] already
+// carry), matching [tui.Supervisor.Reply]'s doc.
+func (s *Supervisor) Reply(ctx context.Context, sessionID, id string, allow, remember bool) error {
+	verdict := event.VerdictDeny
+	if allow {
+		verdict = event.VerdictAllow
+	}
+	params := struct {
+		ID       string        `json:"id"`
+		Verdict  event.Verdict `json:"verdict"`
+		Remember bool          `json:"remember,omitempty"`
+	}{ID: id, Verdict: verdict, Remember: remember}
+	if err := s.client.Notify(ctx, methodPermissionReply, params); err != nil {
+		return fmt.Errorf("daemonbridge: reply %s (session %s): %w", id, sessionID, err)
 	}
 	return nil
 }

@@ -3,22 +3,22 @@ gofer v0.2.0
 fable-5 · ~/orchestration
 1 awaiting input · 1 working · 0 completed
 
-▸ ◐ wire the app root             overview <-> peek <-> attach …     $0.1120  2m
-  ○ review the supervisor contr…  turn finished — awaiting the …     $0.0450  5m
+~/orchestration
+▸ ◐  wire the app root             Working · overview <-> peek <-> attach …   2m
+  ○  review the supervisor contr…  Needs input · turn finished — awaiting …   5m
+
+
+
+
+
 
 
 
 
 
 ────────────────────────────────────────────────────────────────────────────────
-
-
-
-
-
-
-
-you › Wire the app root.
-Wired the app root; nav contract is in.
-○ idle  stop=end_turn  usage=20in/11out
-j/k switch · →/enter attach · ← back · ctrl-c quit
+wire the app root
+  working 2 minutes
+❯ reply
+────────────────────────────────────────────────────────────────────────────────
+enter to open · space to close · ctrl+x to delete

@@ -1,61 +1,49 @@
 package tui_test
 
 import (
-	"encoding/json"
 	"testing"
-
-	"github.com/jedwards1230/agent-sdk-go/event"
-	"github.com/jedwards1230/agent-sdk-go/provider"
 
 	"github.com/jedwards1230/gofer/internal/tui"
 	"github.com/jedwards1230/gofer/internal/tui/testkit"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
 
-// peekTail builds a read-only transcript for the peeked session: a reasoning
-// note, a settled tool call, final text, and a finished turn with usage.
-func peekTail() tui.Model {
-	m := tui.New(theme.Test())
-	for _, e := range []event.Event{
-		event.NewTurnStarted(sid),
-		event.NewMessageStarted(sid, event.MessageReasoning),
-		event.NewMessageFinished(sid, event.MessageReasoning, "Checking the ACP handshake path."),
-		event.NewToolCallStarted(sid, "call-1", "bash", json.RawMessage(`{"cmd":"go test ./acp"}`)),
-		event.NewToolCallFinished(sid, "call-1", "ok  acp  0.4s", false, nil),
-		event.NewMessageStarted(sid, event.MessageText),
-		event.NewMessageFinished(sid, event.MessageText, "Tests pass. The listener is wired."),
-		event.NewTurnFinished(sid, "end_turn", provider.Usage{InputTokens: 40, OutputTokens: 18}),
-	} {
-		m = m.Ingest(e)
-	}
-	return m
-}
-
+// newPeek builds a peek over the shared roster fixture with an empty reply
+// buffer — the roster rail plus the selected session's summary card.
 func newPeek() tui.Peek {
 	over := newOverview().WithSessions(rosterFixture())
-	return tui.NewPeek(theme.Test(), over, peekTail())
+	return tui.NewPeek(theme.Test(), over, "")
 }
 
-// TestGoldenPeekVertical renders the default stacked split (roster above the
-// tail) at the standard 80-column width, below the horizontal breakpoint.
-func TestGoldenPeekVertical(t *testing.T) {
-	testkit.AssertGolden(t, "peek_vertical", testkit.Render(newPeek(), testkit.Width, testkit.Height))
+// TestGoldenPeekNarrow renders the peek card at the standard 80-column width:
+// the roster rail above the selected session's summary card (title, waiting
+// line, ❯ reply input, footer).
+func TestGoldenPeekNarrow(t *testing.T) {
+	testkit.AssertGolden(t, "peek_narrow", testkit.Render(newPeek(), testkit.Width, testkit.Height))
 }
 
-// TestGoldenPeekHorizontal renders the side-by-side split (roster left, tail
-// right) at 130 columns, at or above the horizontal breakpoint.
-func TestGoldenPeekHorizontal(t *testing.T) {
-	testkit.AssertGolden(t, "peek_horizontal", testkit.Render(newPeek(), 130, testkit.Height))
+// TestGoldenPeekWide renders the same peek card at 130 columns — peek no longer
+// splits into panes, so a wide terminal just gives the rail and card more room.
+func TestGoldenPeekWide(t *testing.T) {
+	testkit.AssertGolden(t, "peek_wide", testkit.Render(newPeek(), 130, testkit.Height))
 }
 
-// TestGoldenPeekNextSession renders the peek after j moves the roster
-// selection to the next session.
+// TestGoldenPeekNextSession renders the peek after moving the selection to the
+// next session, so the card reflects the newly selected (needs-input) session.
 func TestGoldenPeekNextSession(t *testing.T) {
 	testkit.AssertGolden(t, "peek_next_session", testkit.Render(newPeek().NextSession(), testkit.Width, testkit.Height))
 }
 
-// TestPeekSessionSwitch verifies j/k move the peeked session and clamp at the
-// roster ends.
+// TestGoldenPeekReply renders the peek card with a typed reply, locking the
+// ❯ input's populated render.
+func TestGoldenPeekReply(t *testing.T) {
+	over := newOverview().WithSessions(rosterFixture())
+	p := tui.NewPeek(theme.Test(), over, "status?")
+	testkit.AssertGolden(t, "peek_reply", testkit.Render(p, testkit.Width, testkit.Height))
+}
+
+// TestPeekSessionSwitch verifies NextSession/PrevSession move the peeked
+// session and clamp at the roster ends.
 func TestPeekSessionSwitch(t *testing.T) {
 	p := newPeek()
 	first := p.SelectedID()

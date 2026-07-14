@@ -144,18 +144,33 @@ func TestSessionLoadReplaysHistoryBeforeResponse(t *testing.T) {
 	}
 
 	var gotNotifs []rawFrame
+	var gotGoferEvents []rawFrame
 	var resp rawFrame
 	for {
 		f := readRawFrame(t, ctx, loadConn)
-		if f.Method == acp.MethodSessionUpdate {
+		switch f.Method {
+		case acp.MethodSessionUpdate:
 			gotNotifs = append(gotNotifs, f)
 			continue
+		case "gofer/event":
+			// The M3 lossless-attach replay (internal/daemon/handlers.go's
+			// historyEvents) ALSO fans this session's history as gofer/event
+			// frames alongside the ACP session/update replay this test's
+			// oracle checks — this test cares about the ACP projection only,
+			// so these are counted (proving they still precede the response)
+			// but not otherwise asserted; see fanout_test.go for the
+			// dedicated gofer/event history-replay proof.
+			gotGoferEvents = append(gotGoferEvents, f)
+			continue
 		}
-		// The first non-notification frame is the session/load response —
-		// per the ordering contract, it must be the LAST frame on the wire,
-		// so we stop reading here.
+		// The first frame with no method is the session/load response — per
+		// the ordering contract, it must be the LAST frame on the wire, so we
+		// stop reading here.
 		resp = f
 		break
+	}
+	if len(gotGoferEvents) == 0 {
+		t.Error("got 0 gofer/event replay frames, want at least one (historyEvents mirrors ReplayNotifications)")
 	}
 
 	if resp.Error != nil {
@@ -244,7 +259,11 @@ func TestSessionList(t *testing.T) {
 		}
 	})
 
-	t.Run("cwd filter", func(t *testing.T) {
+	t.Run("req.Cwd is ignored: listing is fleet-global", func(t *testing.T) {
+		// Listing is fleet-global (see handleSessionList): req.Cwd is accepted
+		// for wire compatibility but no longer hides sessions in other
+		// directories. A request naming cwdA still returns every session,
+		// including sidB in cwdB, each with its own Cwd intact.
 		resp := c.request(acp.MethodSessionList, acp.ListSessionsRequest{Cwd: cwdA})
 		if resp.Error != nil {
 			t.Fatalf("session/list error: %+v", resp.Error)
@@ -253,13 +272,17 @@ func TestSessionList(t *testing.T) {
 		if err := json.Unmarshal(resp.Result, &got); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
-		if len(got.Sessions) != 2 {
-			t.Fatalf("filtered sessions = %+v, want 2 entries for cwd %s", got.Sessions, cwdA)
-		}
+		ids := make(map[string]string, len(got.Sessions))
 		for _, s := range got.Sessions {
-			if s.Cwd != cwdA {
-				t.Errorf("filtered session %s cwd = %q, want %q", s.SessionID, s.Cwd, cwdA)
+			ids[s.SessionID] = s.Cwd
+		}
+		for _, sid := range []string{sidA1, sidA2, sidB} {
+			if _, ok := ids[sid]; !ok {
+				t.Errorf("session/list with req.Cwd=%s missing %s: %+v", cwdA, sid, got.Sessions)
 			}
+		}
+		if ids[sidB] != cwdB {
+			t.Errorf("sidB cwd = %q, want %q (its own cwd, not the filter)", ids[sidB], cwdB)
 		}
 	})
 

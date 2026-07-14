@@ -65,6 +65,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return reportCmdErr("resume", err, stderr)
 		}
 		return 0
+	case "exec":
+		if err := runExec(ctx, rest, stdin, stdout, stderr); err != nil {
+			return reportCmdErr("exec", err, stderr)
+		}
+		return 0
 	case "attach", "agents":
 		// "agents" is an alias for "attach": same runAttach, same daemon
 		// discovery, same code path — see runAttach's doc for why calling it
@@ -167,9 +172,12 @@ Usage:
 Commands:
   run       Start a session and drive one prompt through a real provider
   resume    Reopen a session by id: continue it, or print its transcript
+  exec      Headless one-shot: stream JSONL events for one prompt (-p, --agent, --output-schema)
   attach    Open the roster TUI against a running daemon (requires one)
   agents    Alias for "attach" with no <session>: open the roster overview
-  daemon    Run the supervisor behind an ACP-over-WebSocket listener (alias: serve)
+  daemon    Run the supervisor behind an ACP-over-WebSocket listener (alias: serve);
+            "daemon install|uninstall|status" manage a launchd/systemd unit so it
+            starts on login
   ps        List sessions on a running daemon's roster (--all: include archived)
   kill      Interrupt and drop a live session from the roster (journal kept)
   archive   Drop a finished session from the roster (journal kept)

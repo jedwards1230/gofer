@@ -1,6 +1,7 @@
 package tui_test
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -116,6 +117,82 @@ func TestGoldenOverviewSelectionMoves(t *testing.T) {
 func TestGoldenOverviewEmpty(t *testing.T) {
 	o := newOverview()
 	testkit.AssertGolden(t, "overview_empty", testkit.Render(o, testkit.Width, testkit.Height))
+}
+
+// TestOverviewPendingGlyphShowsCount verifies a session with a positive
+// Pending count renders the approval glyph WITH the live count (e.g. "✋2"),
+// not the bare glyph — the roster's half of the M3 approvals-relay contract:
+// [tui.SessionInfo.Pending] plumbed all the way from the wire (see
+// internal/daemonbridge's toTUISessionInfo) into the row a client actually
+// sees.
+func TestOverviewPendingGlyphShowsCount(t *testing.T) {
+	o := newOverview().WithSessions([]tui.SessionInfo{
+		{ID: "sess-1", Title: "blocked on approval", Status: tui.StatusWorking, Pending: 2, Updated: overviewNow},
+	})
+	got := testkit.Render(o, testkit.Width, testkit.Height)
+	if !strings.Contains(got, "✋2") {
+		t.Errorf("rendered roster does not contain %q:\n%s", "✋2", got)
+	}
+}
+
+// TestOverviewCountsPendingAwaitsInput verifies the header counts bucket a
+// permission-blocked session (Status still StatusWorking, Pending>0 — the
+// daemon's coarse status doesn't demote while the turn is technically in
+// flight) as "awaiting input", not "working" — the same reclassification
+// [Overview.statusGlyph] already applies to the ✋ glyph, so the header and
+// the roster rows agree.
+func TestOverviewCountsPendingAwaitsInput(t *testing.T) {
+	o := newOverview().WithSessions([]tui.SessionInfo{
+		{ID: "sess-1", Title: "blocked one", Status: tui.StatusWorking, Pending: 1, Updated: overviewNow},
+		{ID: "sess-2", Title: "blocked two", Status: tui.StatusWorking, Pending: 1, Updated: overviewNow},
+		{ID: "sess-3", Title: "done", Status: tui.StatusFinished, Updated: overviewNow},
+	})
+	got := testkit.Render(o, testkit.Width, testkit.Height)
+	if !strings.Contains(got, "2 awaiting input · 0 working") {
+		t.Errorf("rendered header does not contain %q:\n%s", "2 awaiting input · 0 working", got)
+	}
+}
+
+// multiCwdFixture builds a small roster spanning two distinct working
+// directories, so the flat view's cwd grouping has more than one group to
+// render.
+func multiCwdFixture() []tui.SessionInfo {
+	return []tui.SessionInfo{
+		{
+			ID:      "0192a1b2-cwd0-7000-8000-000000000001",
+			Title:   "explore three agent ecosystems",
+			Summary: "M2 launched; awaiting sketch review + 4 decisions",
+			Status:  tui.StatusWorking,
+			Cwd:     "~/orchestration",
+			Updated: overviewNow.Add(-2 * time.Minute),
+		},
+		{
+			ID:      "0192a1b2-cwd0-7000-8000-000000000002",
+			Title:   "wire the websocket ACP listener",
+			Summary: "blocked: approve Bash(kubectl delete pod)",
+			Status:  tui.StatusWorking,
+			Cwd:     "~/orchestration",
+			Pending: 2,
+			Updated: overviewNow.Add(-30 * time.Second),
+		},
+		{
+			ID:      "0192a1b2-cwd1-7000-8000-000000000003",
+			Title:   "live-reload html canvas server",
+			Summary: "phase 1 scoped; sketch review pending",
+			Status:  tui.StatusNeedsInput,
+			Cwd:     "~/scrim",
+			Updated: overviewNow.Add(-5 * time.Minute),
+		},
+	}
+}
+
+// TestGoldenOverviewMultiCwd renders the flat view over a roster spanning two
+// working directories, locking TWO cwd group headers — the most-recently-
+// active cwd's group (~/orchestration, holding the -30s and -2m sessions)
+// first, then ~/scrim.
+func TestGoldenOverviewMultiCwd(t *testing.T) {
+	o := newOverview().WithSessions(multiCwdFixture())
+	testkit.AssertGolden(t, "overview_multi_cwd", testkit.Render(o, testkit.Width, testkit.Height))
 }
 
 // TestOverviewSelectionByID verifies selection tracks a session across a view

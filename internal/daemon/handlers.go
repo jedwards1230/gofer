@@ -26,6 +26,40 @@ const (
 	methodGoferPS      = "gofer/ps"
 	methodGoferKill    = "gofer/kill"
 	methodGoferArchive = "gofer/archive"
+
+	// methodGoferPermissionRequested / methodGoferPermissionResolved are the
+	// gofer-native notifications the daemon fans a session's permission events
+	// out to every attached peer with. ACP deliberately keeps permission.*
+	// outside its session/update surface (see acp.ToSessionUpdate) and models a
+	// request as a client-answered REQUEST, which does not fit a must-deliver
+	// fan-out to N peers — so gofer emits its own notifications instead. Their
+	// params are a lossless projection of event.PermissionRequested /
+	// event.PermissionResolved (plus the session id for routing), so a client
+	// reconstructs the events directly (see internal/daemonbridge).
+	methodGoferPermissionRequested = "gofer/permission_requested"
+	methodGoferPermissionResolved  = "gofer/permission_resolved"
+
+	// methodGoferEvent is the gofer-native, full-fidelity notification the M3
+	// lossless-attach work fans a session's ENTIRE non-permission event stream
+	// out through: its params are the source [event.Event]'s own MarshalJSON
+	// envelope, verbatim, sent UNIFORMLY to every attached peer alongside (not
+	// instead of) the lossy acp.ToSessionUpdate projection on session/update —
+	// see broadcastGoferEvent and handleSessionPrompt. An ACP-only client
+	// ignores this unknown notification (per JSON-RPC 2.0); a gofer client
+	// (internal/daemonbridge) ignores session/update instead and reconstructs
+	// its Event stream from this one, byte-exactly, via the SDK's exported
+	// event.New* constructors. Mirrors the gofer/permission_* precedent, just
+	// for every OTHER event kind too, so nothing the daemon observes is lost
+	// to a gofer client the way it is to an ACP one (turn.started, session.error,
+	// message.started, tool.call.delta, and ToolCallFinished's
+	// Diagnostics/Spill* fields all have no session/update projection at all —
+	// see acp.ToSessionUpdate).
+	methodGoferEvent = "gofer/event"
+
+	// methodPermissionReply is the inbound op a client sends to answer a
+	// permission request (contract: JSON-RPC method "permission.reply", params
+	// {id, verdict, remember?}). It is a notification — no result.
+	methodPermissionReply = "permission.reply"
 )
 
 // methodHandler answers one JSON-RPC method call. params is the raw request
@@ -49,6 +83,8 @@ var methodTable = map[string]methodHandler{
 	methodGoferPS:      handleGoferPS,
 	methodGoferKill:    handleGoferKill,
 	methodGoferArchive: handleGoferArchive,
+
+	methodPermissionReply: handlePermissionReply,
 }
 
 // decodeOp decodes method's params via acp.DecodeOp and asserts the result to
@@ -109,24 +145,18 @@ func cwdErrRef(raw, resolved string) string {
 }
 
 // normalizeCwd is the ONE normalization rule every client-supplied cwd is put
-// through before it is either stored (session creation/load, via
-// [resolveSessionCwd]) or compared against a stored one (the session/list cwd
-// filter, see [handleSessionList]): a leading "~" or "~/" is expanded against
-// the daemon's own home, then the result is filepath.Clean'd. Unlike
-// resolveSessionCwd, it does NOT require the result to be absolute, does NOT
-// check that it exists, and does NOT apply the empty-cwd default — those are
-// resolveSessionCwd's job, layered on top for the create/load paths. That
-// asymmetry is deliberate: a session/list filter for a relative or
-// nonexistent path should simply match nothing, not fail the request, so
-// filtering can never require the extra validation session creation does.
+// through before it is stored (session creation/load, via [resolveSessionCwd]):
+// a leading "~" or "~/" is expanded against the daemon's own home, then the
+// result is filepath.Clean'd. It is the inner, validation-free step
+// resolveSessionCwd layers its absolute/exists/is-a-directory checks and
+// empty-cwd default on top of for the create/load paths.
 //
 // If the daemon's home directory can't be resolved (os.UserHomeDir failing —
 // vanishingly rare in practice, since it just reads $HOME/USERPROFILE), a
 // "~"-prefixed raw is left unexpanded rather than erroring: normalizeCwd has
 // no error return, so downstream callers just see it fail their own
-// validation (resolveSessionCwd's IsAbs check rejects it as a real problem)
-// or, for a filter, simply fail to match — both acceptable outcomes for a
-// condition this unlikely.
+// validation (resolveSessionCwd's IsAbs check rejects it as a real problem) —
+// an acceptable outcome for a condition this unlikely.
 func normalizeCwd(raw string) string {
 	cwd := raw
 	if raw == "~" || strings.HasPrefix(raw, "~/") {
@@ -203,7 +233,12 @@ func handleSessionNew(d *Daemon, ctx context.Context, _ *peer, params json.RawMe
 // conversation history as session/update notifications before returning the
 // session/load response, per ACP v1's "the Agent MUST replay the entire
 // conversation to the Client in the form of session/update notifications"
-// requirement.
+// requirement. As of the M3 lossless-attach work, it ALSO replays the same
+// folded history as gofer/event notifications (see historyEvents and
+// methodGoferEvent's doc) — the ACP replay serves an ACP client, the
+// gofer/event replay serves a gofer client (internal/daemonbridge), which
+// ignores session/update entirely; both go out to this peer before the
+// response, per the SAME ordering contract.
 //
 // Ordering contract (spec-critical): every replay notification is written
 // strictly before this handler's response reaches the wire. This holds
@@ -255,6 +290,14 @@ func handleSessionLoad(d *Daemon, ctx context.Context, p *peer, params json.RawM
 	}
 	d.log.Info("session resumed", "session", op.SessionID)
 
+	// This peer is now attached to the session: register it in the fan-out
+	// registry so it receives live session/update notifications for any turn
+	// ANY peer drives, not just its own. Deregistered on connection close (see
+	// [Daemon.detachPeer]). Registering after Resume succeeds — a load that
+	// failed above never reaches here — means the registry only ever holds
+	// peers attached to a session the daemon actually resumed.
+	d.attachPeer(op.SessionID, p)
+
 	msgs, err := d.sup.History(ctx, op.SessionID)
 	if err != nil {
 		return nil, appError(err)
@@ -271,6 +314,24 @@ func handleSessionLoad(d *Daemon, ctx context.Context, p *peer, params json.RawM
 	for _, n := range notifs {
 		if werr := p.notify(ctx, acp.MethodSessionUpdate, n); werr != nil {
 			return nil, internalErr(fmt.Errorf("session/load %s: write replay session/update: %w", op.SessionID, werr))
+		}
+	}
+
+	// ALSO replay the same folded history as gofer/event frames (see
+	// historyEvents and methodGoferEvent's doc), so a gofer client — which
+	// ignores session/update entirely — still gets a full history replay on
+	// attach, not just an ACP one. Both replays go out to THIS peer before
+	// this handler returns its response, preserving the same
+	// notifications-before-response wire-order guarantee documented above.
+	events := historyEvents(op.SessionID, msgs)
+	d.log.Debug("session load gofer/event replay", "session", op.SessionID, "events", len(events))
+	for _, ev := range events {
+		raw, merr := json.Marshal(ev)
+		if merr != nil {
+			return nil, internalErr(fmt.Errorf("session/load %s: marshal replay gofer/event: %w", op.SessionID, merr))
+		}
+		if werr := p.notify(ctx, methodGoferEvent, json.RawMessage(raw)); werr != nil {
+			return nil, internalErr(fmt.Errorf("session/load %s: write replay gofer/event: %w", op.SessionID, werr))
 		}
 	}
 	return acp.LoadSessionResponse{}, nil
@@ -294,27 +355,26 @@ func handleSessionCancel(d *Daemon, ctx context.Context, _ *peer, params json.Ra
 const sessionListPageSize = 50
 
 // handleSessionList answers session/list: every on-disk session (live and
-// archived — see [supervisor.Supervisor.List]), optionally filtered by cwd,
-// newest-first, opaquely paginated at [sessionListPageSize] entries per page.
+// archived — see [supervisor.Supervisor.List]), newest-first, opaquely
+// paginated at [sessionListPageSize] entries per page.
+//
+// Listing is FLEET-GLOBAL: a session is returned regardless of its cwd, so a
+// client on any device discovers every session the daemon supervises — the
+// whole point of a shared daemon several clients attach to (a turn driven from
+// a phone must be visible to a laptop's roster). req.Cwd is accepted for wire
+// compatibility but IGNORED — it is a label on each returned session, not a
+// filter. (It was historically a hiding filter; that made a shared daemon's
+// sessions invisible to a client sitting in a different directory, so it was
+// dropped.) Every returned [acp.SessionInfo] still carries its Cwd so a client
+// can group or label sessions by directory itself.
 //
 // A disk-only (archived, or simply not yet resumed since the daemon last
-// started) [supervisor.SessionInfo] now carries its Cwd, Title, and Updated
-// read back from the journal — see [supervisor.Supervisor.List]'s doc — so a
-// cwd filter matches those sessions too, and they survive a daemon restart
-// with a real title instead of a bare id. The only entries still missing Cwd
-// are legacy journals written before the SDK started persisting it (no
-// session_meta entry); those fall back to the daemon's own working directory
-// below, and a cwd filter simply never matches them.
-//
-// The cwd filter is run through [normalizeCwd] before comparison, the same
-// normalization every stored session cwd went through at creation/load time
-// (via [resolveSessionCwd]) — a stored cwd is always absolute+cleaned, so a
-// raw string comparison against a client-supplied filter like "~/project"
-// would never match the resolved "/home/user/project" it was actually stored
-// as, making the list appear empty even for a live session (the bug this
-// guards). Unlike resolveSessionCwd, the filter is not required to be
-// absolute or to exist: a relative or nonexistent filter simply matches
-// nothing rather than erroring the whole request.
+// started) [supervisor.SessionInfo] carries its Cwd, Title, and Updated read
+// back from the journal — see [supervisor.Supervisor.List]'s doc — so those
+// sessions survive a daemon restart with a real title instead of a bare id.
+// The only entries still missing Cwd are legacy journals written before the
+// SDK started persisting it (no session_meta entry); those fall back to the
+// daemon's own working directory below.
 func handleSessionList(d *Daemon, ctx context.Context, _ *peer, params json.RawMessage) (any, *rpcError) {
 	var req acp.ListSessionsRequest
 	if len(params) > 0 {
@@ -331,17 +391,6 @@ func handleSessionList(d *Daemon, ctx context.Context, _ *peer, params json.RawM
 	infos, err := d.sup.List(ctx)
 	if err != nil {
 		return nil, appError(err)
-	}
-
-	if req.Cwd != "" {
-		filterCwd := normalizeCwd(req.Cwd)
-		filtered := infos[:0:0]
-		for _, info := range infos {
-			if info.Cwd == filterCwd {
-				filtered = append(filtered, info)
-			}
-		}
-		infos = filtered
 	}
 
 	sort.Slice(infos, func(i, j int) bool {
@@ -441,9 +490,38 @@ func handleSessionPrompt(d *Daemon, ctx context.Context, p *peer, params json.Ra
 	}
 	defer sub.Close()
 
+	// handlerCtx scopes the spec-ACP session/request_permission fan-out (see
+	// requestPermissionFromPeers) to this turn: its cancellation — this handler
+	// returning, the origin disconnecting, or the daemon shutting down — cancels
+	// every permission request this turn still has outstanding at other peers, so
+	// none dangles past the turn. Per-request cancellation on the ordinary
+	// resolve path is layered on top, in the PermissionResolved branch below.
+	handlerCtx, handlerCancel := context.WithCancel(ctx)
+	defer handlerCancel()
+
+	// Attach the originator so it is part of this session's fan-out set for
+	// subsequent turns other peers drive too, even if it never called
+	// session/load (a one-shot `run` that only ever prompts). Deregistered on
+	// connection close.
+	d.attachPeer(op.SessionID, p)
+
 	if err := d.sup.Send(ctx, op.SessionID, op.Text); err != nil {
 		return nil, appError(err)
 	}
+
+	// pendingPermIDs collects every permission call id this turn fanned a
+	// session/request_permission out for, so the deferred sweep forgets any that
+	// never saw a matching permission.resolved (the rare interrupt path that
+	// emits no resolved event) — their ctxs are already cancelled by
+	// handlerCancel; this just keeps permReqCancels from lingering. Ids that DID
+	// resolve were already forgotten in the PermissionResolved branch, so
+	// re-cancelling them here is a no-op.
+	var pendingPermIDs []string
+	defer func() {
+		for _, id := range pendingPermIDs {
+			d.cancelPermRequest(id)
+		}
+	}()
 
 	var lastFatal string
 	var updates int
@@ -458,9 +536,73 @@ func handleSessionPrompt(d *Daemon, ctx context.Context, p *peer, params json.Ra
 				lastFatal = se.Err
 			}
 
+			// Permission events are outside ACP's session/update surface
+			// (acp.ToSessionUpdate returns ok=false for them), so they would be
+			// silently dropped by the projection below. Fan them out explicitly
+			// as gofer-native notifications — a must-deliver path reaching EVERY
+			// attached peer, so a phone can approve a turn a laptop drives (and
+			// vice versa). Recording the call->session route here (where the
+			// session is known) is what lets a later permission.reply, which
+			// carries only the call id, find this session's gate.
+			switch pe := e.(type) {
+			case event.PermissionRequested:
+				d.recordPermRoute(pe.ID, op.SessionID)
+				d.broadcastPermission(ctx, op.SessionID, methodGoferPermissionRequested, permissionRequestedParams{
+					SessionID: op.SessionID,
+					ID:        pe.ID,
+					Tool:      pe.Tool,
+					Spec:      pe.Spec,
+					Trace:     pe.Trace,
+				})
+				// ALSO ask every attached ACP peer via the spec-ACP
+				// session/request_permission REQUEST, so a pure ACP client (a
+				// phone) can answer — the gofer-native notification above only
+				// serves gofer clients (the TUI/daemonbridge). First answer from
+				// EITHER surface wins at the session's gate.
+				pendingPermIDs = append(pendingPermIDs, pe.ID)
+				d.requestPermissionFromPeers(handlerCtx, op.SessionID, pe)
+				continue
+			case event.PermissionResolved:
+				d.clearPermRoute(pe.ID)
+				// Cancel the outstanding session/request_permission requests at
+				// every other peer now that the gate is resolved (by whichever
+				// surface answered first), so no daemon-side waiter dangles —
+				// mirroring this gofer/permission_resolved fanout's timing.
+				d.cancelPermRequest(pe.ID)
+				d.broadcastPermission(ctx, op.SessionID, methodGoferPermissionResolved, permissionResolvedParams{
+					SessionID: op.SessionID,
+					ID:        pe.ID,
+					Verdict:   string(pe.Verdict),
+					Rule:      pe.Rule,
+				})
+				continue
+			}
+
+			// Every non-permission event reaches a gofer client's reconstruction
+			// verbatim via gofer/event — see methodGoferEvent's doc — BEFORE the
+			// lossy acp.ToSessionUpdate projectability check below, so a kind
+			// ToSessionUpdate drops entirely (turn.started, session.error,
+			// message.started, tool.call.delta, turn.finished, ...) still
+			// crosses the wire for this path. This runs for turn.finished too
+			// (see below): every event that reaches this point is fanned,
+			// unconditionally, before any of this loop's return/continue
+			// branches.
+			d.broadcastGoferEvent(ctx, op.SessionID, e)
+
 			if notif, ok := acp.ToSessionUpdate(op.SessionID, e); ok {
-				if werr := p.notify(ctx, acp.MethodSessionUpdate, notif); werr != nil {
-					return nil, internalErr(fmt.Errorf("session/prompt %s: write session/update: %w", op.SessionID, werr))
+				// The user-message echo (a settled event.MessageUser projects
+				// to user_message_chunk) is suppressed to the ORIGINATOR — the
+				// peer that typed this prompt already knows what it sent, and a
+				// daemonbridge client renders its own prompt from a local
+				// injection instead (see internal/daemonbridge Send). Every
+				// OTHER attached peer still receives it, so a phone or second
+				// TUI sees what was typed on the driving client.
+				isUserEcho := false
+				if mf, isMF := e.(event.MessageFinished); isMF && mf.MessageKind == event.MessageUser {
+					isUserEcho = true
+				}
+				if rerr := d.broadcastUpdate(ctx, op.SessionID, p, notif, isUserEcho); rerr != nil {
+					return nil, rerr
 				}
 				updates++
 			}
@@ -486,6 +628,226 @@ func handleSessionPrompt(d *Daemon, ctx context.Context, p *peer, params json.Ra
 			return nil, appError(fmt.Errorf("session/prompt %s: %w", op.SessionID, ctx.Err()))
 		}
 	}
+}
+
+// broadcastUpdate fans one projected session/update out to every peer attached
+// to sessionID (see [Daemon.peersForSession]) — the union of the registered
+// set and origin, the peer driving this turn (origin is in the set: it was
+// attached at the top of handleSessionPrompt). The peer set is snapshotted
+// under the registry RLock and released before any notify (a socket write)
+// runs, so a wedged client never stalls the registry.
+//
+// Two delivery rules differ by peer and by update:
+//   - origin: the user-message echo (isUserEcho) is suppressed — origin already
+//     knows its own prompt. Every other update is delivered, and a write
+//     failure to origin is FATAL: the RPC's own response rides that same
+//     connection, so a broken origin connection aborts the turn (returned as
+//     an rpcError, matching the pre-fan-out single-peer behavior).
+//   - every other attached peer: receives every update including the echo. A
+//     write failure is NON-fatal — it is logged and skipped, and that peer's
+//     own connection-close defer (see [Daemon.detachPeer]) removes it from the
+//     registry. One disconnected observer must never abort a turn the origin
+//     is still driving.
+//
+// origin is matched by pointer identity and handled exactly once, so it is
+// never double-delivered even though it is also in the snapshot.
+func (d *Daemon) broadcastUpdate(ctx context.Context, sessionID string, origin *peer, notif any, isUserEcho bool) *rpcError {
+	for _, pr := range d.peersForSession(sessionID) {
+		if pr == origin {
+			continue // origin handled below with its distinct echo/error rules
+		}
+		if werr := pr.notify(ctx, acp.MethodSessionUpdate, notif); werr != nil {
+			// DEBUG, not WARN: a peer disconnecting mid-turn is routine, not a
+			// daemon fault. Session id only — never the notif (prompt/message
+			// content); see handleFrame's redaction rule.
+			d.log.Debug("session/update broadcast: peer notify failed", "session", sessionID, "err", werr)
+		}
+	}
+	if isUserEcho {
+		return nil // suppressed to the originator
+	}
+	if werr := origin.notify(ctx, acp.MethodSessionUpdate, notif); werr != nil {
+		return internalErr(fmt.Errorf("session/prompt %s: write session/update: %w", sessionID, werr))
+	}
+	return nil
+}
+
+// broadcastPermission fans a permission notification out to EVERY peer attached
+// to sessionID — including the origin peer driving the turn (a permission
+// prompt is not an echo the origin already knows; it must see it to answer, and
+// so must every other attached device). Unlike broadcastUpdate, a write failure
+// to any single peer (origin included) is non-fatal and only logged: the turn
+// is blocked in the loop awaiting the gate regardless of any one peer's socket,
+// and a wedged observer must never abort a turn nor stop delivery to the other
+// peers. The peer set is snapshotted under the registry RLock and released
+// before any notify runs (see peersForSession).
+func (d *Daemon) broadcastPermission(ctx context.Context, sessionID, method string, params any) {
+	for _, pr := range d.peersForSession(sessionID) {
+		if werr := pr.notify(ctx, method, params); werr != nil {
+			// Session id + method only — never the params (tool input/spec);
+			// see handleFrame's redaction rule.
+			d.log.Debug("permission broadcast: peer notify failed", "session", sessionID, "method", method, "err", werr)
+		}
+	}
+}
+
+// permissionOptions is the fixed option set every session/request_permission
+// request offers: the four ACP permission-option kinds. Their ids are the kind
+// strings, which is how askPeerPermission maps a client's chosen optionId back
+// to its kind (allow/deny + remember) via [acp.ToPermissionReply]. The
+// remember-verdict distinction the gofer-native surface expresses is expressible
+// here too: allow_always/reject_always carry Remember=true, allow_once/reject_once
+// do not — so ACP clients get the same allow/deny(+remember) granularity as the
+// TUI, with no wire extension.
+func permissionOptions() []acp.PermissionOption {
+	return []acp.PermissionOption{
+		{OptionID: string(acp.PermissionAllowOnce), Name: "Allow once", Kind: acp.PermissionAllowOnce},
+		{OptionID: string(acp.PermissionAllowAlways), Name: "Allow always", Kind: acp.PermissionAllowAlways},
+		{OptionID: string(acp.PermissionRejectOnce), Name: "Reject once", Kind: acp.PermissionRejectOnce},
+		{OptionID: string(acp.PermissionRejectAlways), Name: "Reject always", Kind: acp.PermissionRejectAlways},
+	}
+}
+
+// findPermissionOption returns the option in options whose OptionID matches id.
+func findPermissionOption(options []acp.PermissionOption, id string) (acp.PermissionOption, bool) {
+	for _, o := range options {
+		if o.OptionID == id {
+			return o, true
+		}
+	}
+	return acp.PermissionOption{}, false
+}
+
+// requestPermissionFromPeers fans the spec-ACP session/request_permission
+// REQUEST out to every attached ACP peer for the permission pe, alongside the
+// gofer-native gofer/permission_requested notification the caller already
+// broadcast. Each request runs on its own goroutine (a request BLOCKS awaiting
+// the client's answer, and the drain loop must keep processing events — chiefly
+// the eventual permission.resolved that cancels the losers), keyed off reqCtx so
+// [Daemon.cancelPermRequest] can retract them all at once when the gate resolves
+// by any path.
+//
+// gofer-native peers (the TUI/daemonbridge) are skipped: they do not answer a
+// session/request_permission request (they answer via the permission.reply
+// notification and consume gofer/permission_requested), so sending them one
+// would only ever time out. A peer not yet classified defaults to ACP, the safe
+// direction — see [peer.goferNative].
+func (d *Daemon) requestPermissionFromPeers(ctx context.Context, sessionID string, pe event.PermissionRequested) {
+	reqCtx, cancel := context.WithCancel(ctx)
+	d.registerPermCancel(pe.ID, cancel)
+
+	options := permissionOptions()
+	req := acp.ToRequestPermission(sessionID, pe.ID, pe.Tool, options)
+
+	for _, pr := range d.peersForSession(sessionID) {
+		if pr.goferNative.Load() {
+			continue
+		}
+		go d.askPeerPermission(reqCtx, pr, sessionID, pe.ID, req, options)
+	}
+}
+
+// askPeerPermission sends one session/request_permission request to pr and, on
+// a "selected" answer, routes it into the session's gate — the same call-id
+// routing the gofer-native permission.reply path uses (see handlePermissionReply),
+// so the first answer from EITHER surface wins and the gate makes any later one a
+// no-op. A "cancelled" outcome is a non-answer (the client declined to decide,
+// e.g. its own session/cancel raced) and is ignored rather than routed as a deny,
+// so one observer dismissing its dialog never denies a turn another peer is still
+// deciding. A transport error, a ctx cancellation (the permission resolved
+// elsewhere), or an unparseable/unknown answer are all likewise no-ops.
+func (d *Daemon) askPeerPermission(ctx context.Context, pr *peer, sessionID, callID string, req acp.RequestPermissionRequest, options []acp.PermissionOption) {
+	raw, err := pr.request(ctx, acp.MethodSessionRequestPermission, req)
+	if err != nil {
+		// Routine: resolved elsewhere (ctx cancelled), the client disconnected,
+		// or it cannot answer this request. Session id only — never the payload.
+		d.log.Debug("session/request_permission: no answer from peer", "session", sessionID, "err", err)
+		return
+	}
+	var resp acp.RequestPermissionResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		d.log.Debug("session/request_permission: decode response failed", "session", sessionID, "err", err)
+		return
+	}
+	sel, ok := resp.Outcome.(acp.PermissionOutcomeSelected)
+	if !ok {
+		return // a cancelled outcome is a non-answer — ignore it
+	}
+	chosen, ok := findPermissionOption(options, sel.OptionID)
+	if !ok {
+		d.log.Debug("session/request_permission: unknown optionId in answer", "session", sessionID)
+		return
+	}
+	// Skip an answer that lost the race — the gate already resolved and cleared
+	// the route. The gate is first-wins regardless, so this is only to avoid a
+	// pointless late Reply; it is not required for correctness.
+	if _, live := d.lookupPermRoute(callID); !live {
+		return
+	}
+	if err := d.sup.Reply(sessionID, acp.ToPermissionReply(callID, resp, chosen)); err != nil {
+		d.log.Debug("session/request_permission: routing answer to gate failed", "session", sessionID, "err", err)
+	}
+}
+
+// broadcastGoferEvent fans e out to EVERY peer attached to sessionID as a
+// gofer/event notification (see methodGoferEvent's doc) — e's own MarshalJSON
+// envelope, verbatim, marshaled ONCE and reused for every peer. Modeled on
+// broadcastPermission, not broadcastUpdate: there is no user-echo suppression
+// or origin special-casing (the daemon ACP surface stays spec-general — every
+// peer, including the one driving the turn, gets the identical frame, same as
+// a permission broadcast), and a write failure to any single peer — origin
+// included — is non-fatal and only logged, never aborting the turn a
+// possibly-unrelated peer's wedged socket has nothing to do with. A marshal
+// failure (e's own MarshalJSON erroring) is likewise non-fatal: the frame is
+// simply skipped rather than aborting the turn over a client-visibility
+// concern. The peer set is snapshotted under the registry RLock and released
+// before any notify runs (see peersForSession).
+func (d *Daemon) broadcastGoferEvent(ctx context.Context, sessionID string, e event.Event) {
+	raw, err := json.Marshal(e)
+	if err != nil {
+		d.log.Debug("gofer/event broadcast: marshal failed", "session", sessionID, "kind", e.Kind(), "err", err)
+		return
+	}
+	for _, pr := range d.peersForSession(sessionID) {
+		if werr := pr.notify(ctx, methodGoferEvent, json.RawMessage(raw)); werr != nil {
+			// Session id + kind only — never the marshaled event (may carry
+			// prompt/message content); see handleFrame's redaction rule.
+			d.log.Debug("gofer/event broadcast: peer notify failed", "session", sessionID, "kind", e.Kind(), "err", werr)
+		}
+	}
+}
+
+// handlePermissionReply answers a client's "permission.reply" op: it routes the
+// verdict to the awaiting session's gate. The op carries only the call id (no
+// session id — see event.PermissionReply), so the session is resolved from the
+// call->session route the daemon recorded when it broadcast the request (see
+// [Daemon.recordPermRoute]). It is a notification (no result); an unknown id or
+// an already-resolved/gone session surfaces as an error the router logs but
+// sends nowhere.
+func handlePermissionReply(d *Daemon, _ context.Context, _ *peer, params json.RawMessage) (any, *rpcError) {
+	var req permissionReplyParams
+	if err := json.Unmarshal(params, &req); err != nil {
+		return nil, invalidParams(err)
+	}
+	if req.ID == "" {
+		return nil, invalidParamsMsg(methodPermissionReply + ": id is required")
+	}
+	sessionID, ok := d.lookupPermRoute(req.ID)
+	if !ok {
+		return nil, invalidParamsMsg(fmt.Sprintf("%s: no outstanding permission request with id %q", methodPermissionReply, req.ID))
+	}
+	if err := d.sup.Reply(sessionID, event.PermissionReply{ID: req.ID, Verdict: req.Verdict, Remember: req.Remember}); err != nil {
+		return nil, appError(err)
+	}
+	// Clean up eagerly, mirroring the PermissionResolved event-stream path
+	// (the resolved case above): drop the call->session route and cancel any
+	// outstanding ACP session/request_permission requests at other peers. Both
+	// are idempotent, so the PermissionResolved this reply triggers no-ops when
+	// it repeats them — this just closes the one-hop window before it arrives.
+	d.clearPermRoute(req.ID)
+	d.cancelPermRequest(req.ID)
+	d.log.Debug("permission reply routed", "session", sessionID, "verdict", string(req.Verdict))
+	return struct{}{}, nil
 }
 
 // handleGoferRoster answers gofer/roster: the live roster, newest-first.

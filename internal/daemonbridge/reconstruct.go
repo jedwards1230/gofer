@@ -11,16 +11,27 @@ import (
 	"github.com/jedwards1230/gofer/internal/daemon"
 )
 
-// This file reconstructs each session's typed [event.Event] stream from the
-// daemon's ACP session/update notifications, and drives the turn lifecycle
-// (TurnStarted/TurnFinished) that only [Supervisor.Send] — the goroutine
-// holding the blocking session/prompt Call and its PromptResponse — knows
-// the outcome of. There is no reverse ACP→event.Event projection in the SDK's
-// acp package (it is written for gofer to play the agent/server role, not
-// the client role); this is gofer's own client-side projection.
+// This file REPLAYS each session's typed [event.Event] stream from the
+// daemon's gofer/event notifications — the M3 lossless-attach wire contract
+// (internal/daemon/handlers.go's methodGoferEvent): each notification's
+// params ARE one source event's own MarshalJSON envelope, verbatim, so
+// reconstruction here is pure decode-and-republish — decode the envelope's
+// "type" discriminator, rebuild the exact concrete [event.Event] via the
+// SDK's exported event.New* constructors (see handleGoferEvent's dispatch
+// table), and Publish it to this session's local broker. There is no lossy
+// projection step and no open-message bookkeeping: every field the source
+// event carried (incl. tool.call.delta's streaming input fragments and
+// tool.call.finished's Diagnostics/Spill* fields, both entirely absent from
+// ACP's session/update) survives the round trip. session/update itself is
+// IGNORED on this path — it still goes out (serving an ACP client, on the
+// same connection), this bridge just never reads it (see
+// handleNotification). It also drives the turn lifecycle's one FALLBACK case
+// [Supervisor.Send] — the goroutine holding the blocking session/prompt Call
+// and its PromptResponse — cannot observe any other way: a Call failure with
+// no matching terminal gofer/event already replayed (see handleTurnEnd).
 //
 // It also, via [Supervisor.loadHistory]/[Supervisor.finishLoad], replays a
-// session's settled history through this SAME reconstruction path the first
+// session's settled history through this SAME gofer/event path the first
 // time this bridge ever references it — see loadHistory's doc below for the
 // full design (why it must run off the demuxer goroutine, and how it
 // guarantees history is applied before any live event for the same session).
@@ -36,10 +47,10 @@ import (
 // daemon's session/prompt Call resolves; and the sole reader of loadCh, the
 // analogous channel [Supervisor.loadHistory] posts to once the daemon's
 // session/load Call resolves. Because it is the only goroutine that ever
-// mutates a sessionState's open-message fields or publishes to a session's
-// broker for the reconstruction path, event ordering within one session's
-// stream is entirely determined by this goroutine's own sequential
-// execution — no lock is needed for that state (see sessionState's doc).
+// mutates a sessionState's turnTerminated field or publishes to a session's
+// broker for the replay path, event ordering within one session's stream is
+// entirely determined by this goroutine's own sequential execution — no lock
+// is needed for that state (see sessionState's doc).
 //
 // One shared demuxer across all sessions has a bounded head-of-line
 // characteristic worth naming: it publishes must-deliver events into per-session
@@ -55,14 +66,15 @@ import (
 // on Kill/Archive — bounded by the process lifetime of one TUI session, also
 // accepted for M2.
 //
-// # The TurnFinished-vs-last-delta ordering guarantee
+// # The TurnFinished-vs-last-event ordering guarantee
 //
 // The daemon's handleSessionPrompt (internal/daemon/handlers.go) writes every
-// session/update notification for a turn to the wire, synchronously, BEFORE
-// it writes the terminating session/prompt JSON-RPC response (it literally
-// cannot do otherwise: the response is only sent once the handler observes
-// the turn's terminal event, and every event up to and including that one is
-// first pushed out as a notification). [daemon.Client]'s single read loop
+// notification for a turn — session/update AND gofer/event alike — to the
+// wire, synchronously, BEFORE it writes the terminating session/prompt
+// JSON-RPC response (it literally cannot do otherwise: the response is only
+// sent once the handler observes the turn's terminal event, and every event
+// up to and including that one is first pushed out as a gofer/event
+// notification — see broadcastGoferEvent). [daemon.Client]'s single read loop
 // reads frames strictly in wire order and, for a notification frame, SENDS it
 // on the (buffered, capacity 64) Notifications channel BEFORE it advances to
 // read the next frame. So the send of the turn's last notification onto that
@@ -71,30 +83,31 @@ import (
 // [Supervisor.Send]'s Call and lets it post to turnEndCh.
 //
 // That establishes: by the time turnEndCh's send for a turn occurs, the
-// turn's last notification has ALREADY been sent onto Notifications — it is
-// either (a) already popped and forwarded into this session's reconstruction
-// by an earlier iteration of this goroutine (ordering trivially holds), or
-// (b) still sitting in the Notifications channel's buffer, not yet popped.
-// handleTurnEnd's first action is [Supervisor.drainNotifications]: a
-// non-blocking, exhaustive drain of Notifications run BY THIS SAME
-// goroutine, synchronously, before it does anything else for the turn-end.
-// Since this goroutine is Notifications' only consumer, a value already sent
-// onto it cannot be lost or reordered out from under a later non-blocking
-// receive attempt by that same sole consumer — case (b)'s pending
-// notification is therefore guaranteed to be drained (and its delta/tool
-// event published) before handleTurnEnd flushes the open message and
-// publishes TurnFinished. There is no residual race: this holds for every
-// interleaving of the two producer goroutines (the daemon.Client read loop,
-// and Send's goroutine), because it rests only on ordinary Go channel
-// semantics (a sent value persists until some receive takes it; a single
-// consumer cannot miss what it hasn't yet received) plus the wire-order
-// invariant above — not on scheduling luck.
+// turn's last notification (its terminal gofer/event turn.finished) has
+// ALREADY been sent onto Notifications — it is either (a) already popped and
+// replayed onto this session's broker by an earlier iteration of this
+// goroutine (ordering trivially holds), or (b) still sitting in the
+// Notifications channel's buffer, not yet popped. handleTurnEnd's first
+// action is [Supervisor.drainNotifications]: a non-blocking, exhaustive drain
+// of Notifications run BY THIS SAME goroutine, synchronously, before it does
+// anything else for the turn-end. Since this goroutine is Notifications' only
+// consumer, a value already sent onto it cannot be lost or reordered out from
+// under a later non-blocking receive attempt by that same sole consumer —
+// case (b)'s pending notification is therefore guaranteed to be drained (and
+// republished, updating rec.turnTerminated — see handleGoferEvent) before
+// handleTurnEnd decides whether its fallback terminal event is even needed.
+// There is no residual race: this holds for every interleaving of the two
+// producer goroutines (the daemon.Client read loop, and Send's goroutine),
+// because it rests only on ordinary Go channel semantics (a sent value
+// persists until some receive takes it; a single consumer cannot miss what it
+// hasn't yet received) plus the wire-order invariant above — not on
+// scheduling luck.
 //
 // The identical argument, substituting handleSessionLoad for
 // handleSessionPrompt and loadCh/finishLoad for turnEndCh/handleTurnEnd,
 // establishes that every notification a session/load replayed is drained
-// (and applied) before [Supervisor.finishLoad] flushes the replay's last
-// open message and closes rec.loadDone — see [Supervisor.loadHistory]'s doc.
+// (and applied) before [Supervisor.finishLoad] closes rec.loadDone — see
+// [Supervisor.loadHistory]'s doc.
 func (s *Supervisor) demux() {
 	defer s.wg.Done()
 	defer s.closeAllBrokers()
@@ -156,16 +169,23 @@ type turnEnd struct {
 
 // Send submits prompt as sessionID's next turn. It is fire-and-forget by
 // contract (the TUI's App calls it as a non-blocking Op — see
-// internal/tui/app.go's doSend): it publishes a synthesized TurnStarted
-// immediately, launches the actual session/prompt Call on its own goroutine,
-// and returns. The Call blocks server-side for the whole turn — the daemon
-// streams every event as a session/update notification the demuxer
-// reconstructs — and resolves once the turn reaches a terminal stop reason.
-// When it does, the goroutine posts the outcome to turnEndCh; the demuxer
-// flushes any open message and publishes the terminal
-// SessionError/TurnFinished pair (see handleTurnEnd).
+// internal/tui/app.go's doSend): it launches the actual session/prompt Call
+// on its own goroutine and returns immediately, publishing nothing itself.
+// The Call blocks server-side for the whole turn — the daemon streams every
+// event as a gofer/event notification the demuxer replays verbatim (see
+// handleGoferEvent), INCLUDING this turn's own TurnStarted and its
+// MessageStarted/MessageFinished{MessageUser} pair carrying prompt: unlike
+// the ACP session/update path, the daemon does NOT suppress the user-message
+// echo to the driving peer on gofer/event (methodGoferEvent's doc: no
+// origin special-casing), so there is nothing for Send to inject locally
+// anymore — the real events arrive over the wire like any other peer's. The
+// Call resolves once the turn reaches a terminal stop reason; when it does,
+// the goroutine posts the outcome to turnEndCh, and the demuxer decides
+// whether a fallback terminal event is even needed (see handleTurnEnd — on
+// the ordinary path it is not, since the real turn.finished already arrived
+// via gofer/event).
 //
-// Before publishing anything, Send waits on rec.loadDone: for a session
+// Before firing the Call, Send waits on rec.loadDone: for a session
 // this bridge is referencing for the first time (rec.loadDone was just
 // opened by session's call to loadHistory), this blocks until that
 // session's history replay has been fully applied — see loadHistory's doc
@@ -181,11 +201,11 @@ type turnEnd struct {
 // itself — see doSend — since Send is meant to keep running after the TUI
 // event loop has moved on to render other state).
 //
-// One-outstanding-turn-per-session is CALLER-enforced: Send publishes
-// TurnStarted and fires the Call unconditionally — the bridge keeps no prompt
-// queue of its own. The invariant holds because the TUI App only sends to a
-// session it sees as idle (see internal/tui's doSend); a caller that pipelined
-// two Sends on one session would interleave two turns' reconstruction.
+// One-outstanding-turn-per-session is CALLER-enforced: Send fires the Call
+// unconditionally — the bridge keeps no prompt queue of its own. The
+// invariant holds because the TUI App only sends to a session it sees as
+// idle (see internal/tui's doSend); a caller that pipelined two Sends on one
+// session would interleave two turns' replayed events.
 func (s *Supervisor) Send(_ context.Context, sessionID, prompt string) error {
 	rec := s.session(sessionID)
 	if rec == nil {
@@ -196,7 +216,6 @@ func (s *Supervisor) Send(_ context.Context, sessionID, prompt string) error {
 	case <-s.closed:
 		return nil
 	}
-	rec.broker.Publish(event.NewTurnStarted(sessionID))
 
 	go func() {
 		raw, err := s.client.Call(context.Background(), acp.MethodSessionPrompt, acp.PromptRequest{
@@ -223,25 +242,31 @@ func (s *Supervisor) Send(_ context.Context, sessionID, prompt string) error {
 	return nil
 }
 
-// handleTurnEnd flushes any still-open message and publishes the terminal
-// event(s) for one turn: SessionError+TurnFinished(stop="error") on any Call
-// failure, or TurnFinished(stop=te.stopReason) on success. Usage is always
-// the zero value — ACP's PromptResponse carries no token/cost accounting;
-// the roster's gofer/roster row is the daemon's authoritative source for
-// cost/usage (see Roster), refreshed by the App's 1s poll.
+// handleTurnEnd is the FALLBACK path for a turn's terminal event: on the
+// ordinary path the daemon's own real turn.finished (and, on a fatal path,
+// its preceding session.error) already arrived and was replayed onto rec's
+// broker via handleGoferEvent — publishing another here would double-deliver
+// it. This only publishes a synthesized SessionError+TurnFinished("error")
+// pair when te.err is set AND no terminal gofer/event turn.finished was
+// already replayed for this turn (!rec.turnTerminated) — i.e. the
+// session/prompt Call itself failed (a dropped connection, a decode error)
+// with nothing terminal ever having reached the wire, or the documented
+// "fatal session.error with no turn.finished" case (see
+// internal/daemon/handlers.go's handleSessionPrompt doc). rec.turnTerminated
+// is demuxer-only (set in handleGoferEvent, read here — both run only on the
+// demuxer goroutine — see the package doc), so no locking is needed, and
+// [Supervisor.drainNotifications] (see demux) has already forwarded every
+// notification this turn produced, incl. its terminal one if any, before
+// this runs — so the read below is never stale.
 func (s *Supervisor) handleTurnEnd(te turnEnd) {
 	rec := s.session(te.sessionID)
 	if rec == nil {
 		return // supervisor closing: drop the terminal event
 	}
-	s.flushOpenMessage(rec)
-
-	if te.err != "" {
+	if te.err != "" && !rec.turnTerminated {
 		rec.broker.Publish(event.NewSessionError(te.sessionID, te.err, true))
 		rec.broker.Publish(event.NewTurnFinished(te.sessionID, "error", provider.Usage{}))
-		return
 	}
-	rec.broker.Publish(event.NewTurnFinished(te.sessionID, te.stopReason, provider.Usage{}))
 }
 
 // loadHistory issues session/load for rec.id — the reconstruction's answer
@@ -274,26 +299,38 @@ func (s *Supervisor) handleTurnEnd(te turnEnd) {
 //
 // # Ordering: history before any live event for the same session
 //
-// loadHistory itself never touches rec's broker or open-message state — that
-// stays demuxer-only (see sessionState's doc) — it only issues the RPCs and
-// hands rec off to the demuxer via loadCh once the Call resolves, success or
-// failure alike (a failed load — e.g. an id the daemon doesn't recognize —
+// loadHistory itself never touches rec's broker or turnTerminated state —
+// that stays demuxer-only (see sessionState's doc) — it only issues the RPCs
+// and hands rec off to the demuxer via loadCh once the Call resolves, success
+// or failure alike (a failed load — e.g. an id the daemon doesn't recognize —
 // just leaves the session starting from whatever live events arrive next,
 // the pre-existing M1 behavior, rather than failing attach outright). The
 // demuxer's loadCh case (see demux) drains every notification still
 // buffered before calling [Supervisor.finishLoad] — by the identical
 // wire-order argument demux's doc makes for turnEndCh/handleTurnEnd, that
-// drain is guaranteed to forward every notification this load replayed —
-// and finishLoad flushes any message the replay left open before closing
-// rec.loadDone. [Supervisor.Send] waits on rec.loadDone before publishing or
-// dispatching anything for a session (see its doc), so a live turn this
-// bridge itself starts can never race a still-settling history replay onto
-// the broker ahead of it. A session/prompt from a DIFFERENT peer's
-// connection cannot race it at all: the daemon only ever pushes
-// session/update notifications to the peer whose own call produced them
-// (see handleSessionPrompt's and handleSessionLoad's *peer-scoped p.notify
-// calls) — this bridge's connection only ever sees replay/live notifications
-// it itself asked for.
+// drain is guaranteed to forward every gofer/event this load replayed — and
+// finishLoad closes rec.loadDone only once that drain has run. [Supervisor.Send]
+// waits on rec.loadDone before dispatching anything for a session (see its
+// doc), so a live turn this bridge itself starts can never race a
+// still-settling history replay onto the broker ahead of it.
+//
+// A live turn a DIFFERENT peer drives now CAN interleave with this bridge's
+// history load: the daemon fans each turn's gofer/event out to every peer
+// attached to the session — including one that just issued session/load — not
+// only to the peer whose own call produced them (see internal/daemon's
+// broadcastGoferEvent; this bridge attaches by issuing the session/load Call
+// loadHistory makes). Replay stays correct because the SAME demuxer goroutine
+// applies both streams: the session/load response can only be read once every
+// replay notification has been enqueued onto Notifications ahead of it
+// (handleSessionLoad writes them to the wire first), and the demuxer's loadCh
+// case drains all of those before finishLoad closes rec.loadDone — so a
+// concurrent peer's live gofer/event, arriving as an ordinary notification, is
+// applied either fully before the load settles or after it, never torn across
+// it. What is NOT guaranteed once a second peer drives a turn during this load
+// is the relative ORDER of that live turn's events against the tail of the
+// replayed history — but the daemon does not order events across independent
+// turns from different clients, and Model.Ingest reconstructs each item by its
+// own started/finished boundary, so the transcript stays coherent regardless.
 func (s *Supervisor) loadHistory(rec *sessionState) {
 	ctx := context.Background()
 	cwd := s.sessionCwd(ctx, rec.id)
@@ -307,218 +344,228 @@ func (s *Supervisor) loadHistory(rec *sessionState) {
 // finishLoad settles rec's history load. Called from the demuxer only after
 // drainNotifications has exhaustively forwarded every notification currently
 // buffered (see demux's loadCh case and loadHistory's doc), so every
-// session/update this load replayed has already been applied via
-// handleNotification by the time this runs. It flushes any message left open
-// by that replay — [acp.ReplayNotifications] has no turn.finished-equivalent
-// boundary of its own; an ordinary delta only closes on a kind change, a
-// tool_call, or a live turn ending (see flushOpenMessage/handleTurnEnd), none
-// of which a history replay ever produces — before closing rec.loadDone,
-// unblocking any [Supervisor.Send] waiting on it. Without this flush, a live
-// turn starting with the same message kind the replay ended on would
-// silently keep appending onto that stale historical item instead of
-// starting a fresh one.
+// gofer/event this load replayed has already been applied via
+// handleGoferEvent by the time this runs. With verbatim replay there is no
+// open-message state left to flush (each replayed message arrived as its own
+// complete MessageStarted/MessageFinished pair — see historyEvents in
+// internal/daemon), so this simply unblocks any [Supervisor.Send] waiting on
+// rec.loadDone.
 func (s *Supervisor) finishLoad(rec *sessionState) {
-	s.flushOpenMessage(rec)
 	close(rec.loadDone)
 }
 
 // handleNotification decodes one inbound notification and applies it to its
-// session's reconstruction state. Only session/update notifications carry
-// reconstructable state (the M2 daemon never sends any other notification
-// method — see internal/daemon's package doc); anything else, or anything
-// that fails to decode (a protocol drift, not a reason to crash the
-// reconstruction), is dropped.
-//
-// Its s.session(w.SessionID) call below will, in practice, always find an
-// already-mapped entry rather than create one: this connection only ever
-// receives a notification for a session because THIS bridge's own Send or
-// loadHistory issued the Call that produced it (see loadHistory's doc on
-// per-peer notification scoping), and both of those already reference the
-// session — creating its entry and, for loadHistory, starting the load — via
-// session() before dispatching their Call. The lookup-or-create fallback
-// here exists only so a genuinely unexpected notification (a protocol drift)
-// degrades to "reconstruct into a fresh, unloaded broker" rather than a nil
-// dereference, not because this path is expected to fire in normal
-// operation.
+// session's replay state. gofer/event carries the M3 lossless-attach replay
+// (see handleGoferEvent); gofer/permission_requested / gofer/permission_resolved
+// carry the M3 approvals-relay events (see handlePermissionRequested/
+// handlePermissionResolved) — permission.* deliberately never arrives via
+// gofer/event (methodGoferEvent's doc), so there is no double-delivery risk
+// between the two. session/update — still sent by the daemon, serving an ACP
+// client on the same connection — is IGNORED here: this bridge gets the
+// identical events, losslessly, via gofer/event instead, so there is nothing
+// for it to reconstruct from the lossy ACP projection anymore. Anything else,
+// or anything that fails to decode, is a protocol drift, not a reason to
+// crash replay, and is silently dropped.
 func (s *Supervisor) handleNotification(n daemon.Notification) {
-	if n.Method != acp.MethodSessionUpdate {
+	switch n.Method {
+	case methodGoferPermissionRequested:
+		s.handlePermissionRequested(n.Params)
+	case methodGoferPermissionResolved:
+		s.handlePermissionResolved(n.Params)
+	case methodGoferEvent:
+		s.handleGoferEvent(n.Params)
+	}
+}
+
+// handleGoferEvent decodes one gofer/event notification's params — the
+// source [event.Event]'s own MarshalJSON envelope, verbatim (methodGoferEvent's
+// doc) — and republishes the exact same concrete event onto its session's
+// broker, via the SDK's exported event.New* constructors: a pure
+// decode-dispatch-publish, no open-message bookkeeping. seq/time are NOT
+// restored (event.New* always builds seq=0/time=zero); rec.broker reassigns
+// them at Publish, same as it already does for every other event this bridge
+// publishes — "lossless" here means every event kind, every payload field,
+// and ordering, not source seq/time (see the package doc for why that's by
+// design, not a gap).
+//
+// It also maintains rec.turnTerminated, the demuxer-only signal
+// [Supervisor.handleTurnEnd] reads to decide whether its fallback terminal
+// event is needed: set false on replaying turn.started (a new turn is now
+// open), true on replaying a turn.finished whose stop reason is not
+// "tool_use" (the loop's mid-turn marker — see [event.TurnFinished]'s doc).
+// Both this method and handleTurnEnd run only on the demuxer goroutine (see
+// the package doc), so no lock guards turnTerminated.
+//
+// s.session(w.SessionID) below will, in practice, always find an
+// already-mapped entry rather than create one: this connection only receives
+// a notification for a session it has ATTACHED to, and it attaches only by
+// issuing session/load (loadHistory) or session/prompt (Send) for that
+// session — both of which reference the session via session() (creating its
+// entry, and for loadHistory starting the load) before dispatching their
+// Call. Crucially, the notification may now be for a turn a DIFFERENT peer
+// drove — the daemon fans each turn out to every attached peer, not just the
+// caller whose Call produced it (see internal/daemon's broadcastGoferEvent) —
+// but this bridge still only ever attaches through its own session()-backed
+// Call, so the entry exists regardless of which peer's turn the notification
+// carries. The lookup-or-create fallback here exists only so a genuinely
+// unexpected notification (a protocol drift) degrades to "replay into a
+// fresh, unloaded broker" rather than a nil dereference, not because this
+// path is expected to fire in normal operation.
+func (s *Supervisor) handleGoferEvent(raw json.RawMessage) {
+	var w goferEventWire
+	if err := json.Unmarshal(raw, &w); err != nil || w.SessionID == "" {
 		return
 	}
-	var w notificationWire
-	if err := json.Unmarshal(n.Params, &w); err != nil || w.SessionID == "" {
-		return
-	}
-	var disc updateDisc
-	if err := json.Unmarshal(w.Update, &disc); err != nil {
-		return
+	rec := s.session(w.SessionID)
+	if rec == nil {
+		return // supervisor closing: drop the event
 	}
 
+	var ev event.Event
+	switch w.Type {
+	case event.KindSessionCreated:
+		ev = event.NewSessionCreated(w.SessionID)
+	case event.KindSessionResumed:
+		ev = event.NewSessionResumed(w.SessionID)
+	case event.KindSessionForked:
+		ev = event.NewSessionForked(w.SessionID)
+	case event.KindSessionCompacted:
+		ev = event.NewSessionCompacted(w.SessionID)
+	case event.KindSessionKilled:
+		ev = event.NewSessionKilled(w.SessionID)
+	case event.KindSessionArchived:
+		ev = event.NewSessionArchived(w.SessionID)
+	case event.KindSessionError:
+		ev = event.NewSessionError(w.SessionID, w.Err, w.Fatal)
+	case event.KindTurnStarted:
+		rec.turnTerminated = false
+		ev = event.NewTurnStarted(w.SessionID)
+	case event.KindTurnFinished:
+		if w.StopReason != "tool_use" {
+			rec.turnTerminated = true
+		}
+		ev = event.NewTurnFinishedCost(w.SessionID, w.StopReason, w.Usage, w.Cost)
+	case event.KindMessageStarted:
+		ev = event.NewMessageStarted(w.SessionID, w.Kind)
+	case event.KindMessageDelta:
+		ev = event.NewMessageDelta(w.SessionID, w.Kind, w.Text)
+	case event.KindMessageFinished:
+		ev = event.NewMessageFinishedMeta(w.SessionID, w.Kind, w.Content, w.Meta)
+	case event.KindToolCallStarted:
+		ev = event.NewToolCallStarted(w.SessionID, w.ID, w.Name, w.Input)
+	case event.KindToolCallDelta:
+		ev = event.NewToolCallDelta(w.SessionID, w.ID, w.Delta)
+	case event.KindToolCallFinished:
+		ev = event.NewToolCallFinishedSpill(w.SessionID, w.ID, w.Input, w.Result, w.IsError, w.Diagnostics, w.SpillPath, w.SpillBytes, w.SpillSHA256)
+	default:
+		// permission.* (excluded from gofer/event by contract — see
+		// methodGoferEvent's doc) or an unknown/future kind: protocol-drift
+		// tolerance, not a reason to crash replay.
+		return
+	}
+	rec.broker.Publish(ev)
+}
+
+// goferEventWire decodes a gofer/event notification's params: the union of
+// every [event.Event] concrete type's MarshalJSON payload fields this bridge
+// needs to rebuild one via the matching event.New* constructor (see
+// handleGoferEvent's dispatch table). One struct covers every kind because
+// encoding/json ignores JSON fields absent from a given kind's envelope and
+// leaves the corresponding Go fields at their zero value — exactly what an
+// unpopulated kind's fields should decode to anyway. Field names/tags mirror
+// each type's MarshalJSON in the SDK's event/event.go exactly.
+type goferEventWire struct {
+	Type      string `json:"type"`
+	SessionID string `json:"session_id"`
+
+	// session.error
+	Err   string `json:"error"`
+	Fatal bool   `json:"fatal"`
+
+	// turn.finished
+	StopReason string         `json:"stop_reason"`
+	Usage      provider.Usage `json:"usage"`
+	Cost       *provider.Cost `json:"cost"`
+
+	// message.started / message.delta / message.finished
+	Kind    event.MessageKind `json:"kind"`
+	Text    string            `json:"text"`
+	Content string            `json:"content"`
+	Meta    map[string]string `json:"meta"`
+
+	// tool.call.started / tool.call.delta / tool.call.finished
+	ID          string          `json:"id"`
+	Name        string          `json:"name"`
+	Input       json.RawMessage `json:"input"`
+	Delta       string          `json:"delta"`
+	Result      string          `json:"result"`
+	IsError     bool            `json:"is_error"`
+	Diagnostics []string        `json:"diagnostics"`
+	SpillPath   string          `json:"spill_path"`
+	SpillBytes  int64           `json:"spill_bytes"`
+	SpillSHA256 string          `json:"spill_sha256"`
+}
+
+// handlePermissionRequested reconstructs a gofer/permission_requested
+// notification into an [event.PermissionRequested], published straight to
+// its session's broker. Unlike session/update, this is not an ACP
+// projection: acp.SessionUpdate has no permission variant (ACP-native
+// clients like Agmente instead see the standard session/request_permission
+// RPC — see docs/PRD.md's Approvals section, and does not fit a must-deliver
+// fan-out to N attached peers besides), so the daemon fans this event out to
+// every attached peer under its own gofer-native notification (see
+// internal/daemon/handlers.go's methodGoferPermissionRequested doc), with
+// params a lossless projection of the event plus the routing session id. A
+// decode failure is a protocol drift, not a reason to crash reconstruction,
+// so it is dropped like any other malformed notification (see
+// handleNotification's doc).
+func (s *Supervisor) handlePermissionRequested(raw json.RawMessage) {
+	var w permissionRequestedWire
+	if err := json.Unmarshal(raw, &w); err != nil || w.SessionID == "" {
+		return
+	}
 	rec := s.session(w.SessionID)
 	if rec == nil {
 		return // supervisor closing: drop the update
 	}
-	switch disc.SessionUpdate {
-	case "user_message_chunk":
-		s.handleUserMessage(rec, w.Update)
-	case "agent_message_chunk":
-		s.appendDelta(rec, event.MessageText, w.Update)
-	case "agent_thought_chunk":
-		s.appendDelta(rec, event.MessageReasoning, w.Update)
-	case "tool_call":
-		s.handleToolCall(rec, w.Update)
-	case "tool_call_update":
-		s.handleToolCallUpdate(rec, w.Update)
-	default:
-		// Unrecognized/future session/update variant: no event.Event
-		// projection exists for it in the minimal attach surface, so it is
-		// accepted and ignored, mirroring tui.Model.Ingest's own tolerance of
-		// event kinds it doesn't render.
-	}
+	rec.broker.Publish(event.NewPermissionRequested(w.SessionID, w.ID, w.Tool, w.Spec, w.Trace))
 }
 
-// handleUserMessage reconstructs a user_message_chunk notification into a
-// MessageStarted{MessageUser}/MessageFinished{MessageUser} pair — the shape
-// tui.Model.Ingest expects to render one user transcript item (see its doc).
-// Unlike agent_message_chunk/agent_thought_chunk, a user_message_chunk
-// carries the WHOLE prompt text in one shot rather than incremental deltas
-// (event.MessageUser is never streamed — see its doc), so this synthesizes
-// the settled pair directly instead of going through appendDelta's
-// open-message bookkeeping. Both [acp.ToSessionUpdate] (the LIVE projection,
-// once per session/prompt call) and [acp.ReplayNotifications] (the HISTORY
-// projection, once per persisted user turn) emit this variant, so it is
-// reconstructed the same way regardless of which path triggered it. Any
-// still-open assistant message is flushed first for defense in depth, though
-// in practice none should be open here: a user_message_chunk always precedes
-// that turn's own assistant content on both the live and replay paths.
-func (s *Supervisor) handleUserMessage(rec *sessionState, raw json.RawMessage) {
-	s.flushOpenMessage(rec)
-	var c contentChunkWire
-	_ = json.Unmarshal(raw, &c) // best-effort: a decode failure just yields empty text
-	rec.broker.Publish(event.NewMessageStarted(rec.id, event.MessageUser))
-	rec.broker.Publish(event.NewMessageFinished(rec.id, event.MessageUser, c.Content.Text))
-}
-
-// appendDelta opens a message of kind (flushing a different-kind or
-// already-open one first — see flushOpenMessage) if none is open, then
-// applies one delta. Model.Ingest requires a MessageStarted before it will
-// apply a MessageDelta to any item (see its openIndex/setOpen bookkeeping),
-// so a MessageStarted is synthesized here whenever a chunk arrives with none
-// already open for its kind.
-func (s *Supervisor) appendDelta(rec *sessionState, kind event.MessageKind, raw json.RawMessage) {
-	var c contentChunkWire
-	_ = json.Unmarshal(raw, &c) // best-effort: a decode failure just yields an empty delta
-
-	if !rec.hasOpen || rec.openKind != kind {
-		s.flushOpenMessage(rec)
-		rec.broker.Publish(event.NewMessageStarted(rec.id, kind))
-		rec.hasOpen = true
-		rec.openKind = kind
-		rec.text = ""
-	}
-	rec.text += c.Content.Text
-	rec.broker.Publish(event.NewMessageDelta(rec.id, kind, c.Content.Text))
-}
-
-// flushOpenMessage closes the currently open message, if any, with the text
-// accumulated from its deltas — mirroring Model.Ingest's MessageFinished
-// handling, which replaces the streamed text with the finished event's
-// authoritative Content. Called before a kind change, a tool_call (a tool
-// call always interrupts any in-progress text/reasoning stream), and a turn
-// end.
-func (s *Supervisor) flushOpenMessage(rec *sessionState) {
-	if !rec.hasOpen {
+// handlePermissionResolved reconstructs a gofer/permission_resolved
+// notification into an [event.PermissionResolved] — see
+// handlePermissionRequested's doc for the shared design.
+func (s *Supervisor) handlePermissionResolved(raw json.RawMessage) {
+	var w permissionResolvedWire
+	if err := json.Unmarshal(raw, &w); err != nil || w.SessionID == "" {
 		return
 	}
-	rec.broker.Publish(event.NewMessageFinished(rec.id, rec.openKind, rec.text))
-	rec.hasOpen = false
-	rec.text = ""
-}
-
-// handleToolCall flushes any open message (a tool call always ends the
-// in-progress text/reasoning stream, per ToSessionUpdate's emission order)
-// and publishes the reconstructed ToolCallStarted.
-func (s *Supervisor) handleToolCall(rec *sessionState, raw json.RawMessage) {
-	s.flushOpenMessage(rec)
-	var tc toolCallWire
-	_ = json.Unmarshal(raw, &tc)
-	rec.broker.Publish(event.NewToolCallStarted(rec.id, tc.ToolCallID, tc.Title, tc.RawInput))
-}
-
-// handleToolCallUpdate publishes a reconstructed ToolCallFinished for a
-// terminal (completed/failed) tool_call_update; a non-terminal status
-// (pending/in_progress) has no event.Event projection in the minimal attach
-// surface and is ignored.
-func (s *Supervisor) handleToolCallUpdate(rec *sessionState, raw json.RawMessage) {
-	var tc toolCallUpdateWire
-	_ = json.Unmarshal(raw, &tc)
-	if tc.Status != "completed" && tc.Status != "failed" {
-		return
+	rec := s.session(w.SessionID)
+	if rec == nil {
+		return // supervisor closing: drop the update
 	}
-	rec.broker.Publish(event.NewToolCallFinished(rec.id, tc.ToolCallID, tc.resultText(), tc.Status == "failed", nil))
+	rec.broker.Publish(event.NewPermissionResolved(w.SessionID, w.ID, event.Verdict(w.Verdict), w.Rule))
 }
 
-// notificationWire is the wire shape of a session/update notification's
-// params, decoded loosely (mirroring internal/daemon/prompt_test.go's
-// sessionUpdateParams and cmd/gofer/acprender.go's acpUpdateWire, both of
-// which take the same approach for the same reason: acp has no client-side
-// decoder for the ACP messages gofer sends AS a client, only the ones it
-// receives playing the agent/server role).
-type notificationWire struct {
-	SessionID string          `json:"sessionId"`
-	Update    json.RawMessage `json:"update"`
+// permissionRequestedWire decodes a gofer/permission_requested notification's
+// params — internal/daemon/wire.go's permissionRequestedParams:
+// {"sessionId","id","tool","spec","trace"}.
+type permissionRequestedWire struct {
+	SessionID string         `json:"sessionId"`
+	ID        string         `json:"id"`
+	Tool      string         `json:"tool"`
+	Spec      map[string]any `json:"spec"`
+	Trace     []string       `json:"trace"`
 }
 
-// updateDisc decodes just the "sessionUpdate" discriminator shared by every
-// session/update variant.
-type updateDisc struct {
-	SessionUpdate string `json:"sessionUpdate"`
-}
-
-// contentChunkWire decodes the agent_message_chunk / agent_thought_chunk
-// shape: {"content":{"type":"text","text":...}}. Decoded independently of
-// toolCallWire/toolCallUpdateWire against the same raw update bytes, since
-// "content" means a different JSON shape (a single object here, an array of
-// tagged variants there) depending on the variant.
-type contentChunkWire struct {
-	Content struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	} `json:"content"`
-}
-
-// toolCallWire decodes the tool_call fields the reconstruction needs:
-// {"toolCallId":...,"title":...,"rawInput":...}.
-type toolCallWire struct {
-	ToolCallID string          `json:"toolCallId"`
-	Title      string          `json:"title"`
-	RawInput   json.RawMessage `json:"rawInput"`
-}
-
-// toolCallUpdateWire decodes the tool_call_update fields the reconstruction
-// needs: {"toolCallId":...,"status":...,"content":[{"type":"content",
-// "content":{"type":"text","text":...}}]} — see acp.ToolCallContentBlock's
-// wire shape.
-type toolCallUpdateWire struct {
-	ToolCallID string `json:"toolCallId"`
-	Status     string `json:"status"`
-	Content    []struct {
-		Type    string `json:"type"`
-		Content struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
-	} `json:"content"`
-}
-
-// resultText extracts the first text content block's text from a
-// tool_call_update's content array, or "" if it carries none (e.g. a failed
-// call with no output) — the shape [acp.ToSessionUpdate] emits for
-// [event.ToolCallFinished].
-func (w toolCallUpdateWire) resultText() string {
-	for _, c := range w.Content {
-		if c.Type == "content" && c.Content.Type == "text" {
-			return c.Content.Text
-		}
-	}
-	return ""
+// permissionResolvedWire decodes a gofer/permission_resolved notification's
+// params — internal/daemon/wire.go's permissionResolvedParams:
+// {"sessionId","id","verdict","rule"}. Verdict decodes as a plain string
+// (the daemon's own wire type, matching event.Verdict's underlying type)
+// rather than [event.Verdict] directly, so this stays decodable even if that
+// SDK type ever grows unmarshal-side validation.
+type permissionResolvedWire struct {
+	SessionID string `json:"sessionId"`
+	ID        string `json:"id"`
+	Verdict   string `json:"verdict"`
+	Rule      string `json:"rule"`
 }

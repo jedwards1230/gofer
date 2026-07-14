@@ -1,4 +1,4 @@
-✓ bash({"cmd":"echo hi"})
+✓ bash(echo hi)
    └ hi
 ○ idle
 > ▏
