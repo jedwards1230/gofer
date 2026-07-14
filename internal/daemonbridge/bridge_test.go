@@ -32,7 +32,28 @@ const defaultWait = 5 * time.Second
 // fully deterministic. It mirrors internal/daemon's own harness_test.go,
 // rebuilt here against exported API only (that harness's package is
 // daemon_test, unexported to this package).
+//
+// It clears the Guard/Approver/Tools the supervisor now always injects (see
+// internal/supervisor's sessionGuard, wired in as of the M3 approvals-relay
+// work): this package's reconstruction tests exercise the WIRE projection
+// (session/update, and now gofer/permission_requested/resolved — see
+// TestPermissionRelayEndToEnd below for that one, deliberately left wired),
+// not the SDK's own permission/sandbox decisions, which are internal/
+// supervisor's and internal/sandbox's own test suites' job. Without this, a
+// hand-scripted provider's tool call the sandbox can't prove contained (e.g.
+// TestToolCallReconstruction's deliberately-unregistered "read_file") would
+// hang the whole suite awaiting an approval no test here answers.
 func newTestSupervisor(t *testing.T, newProvider func() provider.Provider) *supervisor.Supervisor {
+	t.Helper()
+	return newTestSupervisorGuarded(t, newProvider, false)
+}
+
+// newTestSupervisorGuarded is [newTestSupervisor] with the choice of whether
+// to leave the supervisor's default Guard/Approver/Tools wiring intact —
+// guarded=true for TestPermissionRelayEndToEnd, which needs the real
+// permission pipeline; guarded=false (newTestSupervisor) strips it for every
+// other test in this file, per newTestSupervisor's doc.
+func newTestSupervisorGuarded(t *testing.T, newProvider func() provider.Provider, guarded bool) *supervisor.Supervisor {
 	t.Helper()
 	root := t.TempDir()
 	store, err := session.NewFileStore(session.WithRoot(root))
@@ -41,6 +62,12 @@ func newTestSupervisor(t *testing.T, newProvider func() provider.Provider) *supe
 	}
 	t.Cleanup(func() { _ = store.Close() })
 
+	strip := func(opts runner.Options) runner.Options {
+		if !guarded {
+			opts.Guard, opts.Approver, opts.Tools = nil, nil, nil
+		}
+		return opts
+	}
 	cfg := supervisor.Config{
 		Root:  root,
 		Store: store,
@@ -48,13 +75,13 @@ func newTestSupervisor(t *testing.T, newProvider func() provider.Provider) *supe
 			opts.Store = store
 			opts.Model = "faux"
 			opts.Provider = newProvider()
-			return runner.New(ctx, opts)
+			return runner.New(ctx, strip(opts))
 		},
 		ResumeSession: func(ctx context.Context, id string, opts runner.Options) (supervisor.Session, error) {
 			opts.Store = store
 			opts.Model = "faux"
 			opts.Provider = newProvider()
-			return runner.Resume(ctx, id, opts)
+			return runner.Resume(ctx, id, strip(opts))
 		},
 	}
 	sup, err := supervisor.New(cfg)
@@ -560,6 +587,89 @@ func TestToolCallReconstruction(t *testing.T) {
 	tf, ok := events[8].(event.TurnFinished)
 	if !ok {
 		t.Fatalf("event 8 = %+v, want TurnFinished", events[8])
+	}
+	if tf.StopReason != "end_turn" {
+		t.Errorf("TurnFinished.StopReason = %q, want end_turn", tf.StopReason)
+	}
+}
+
+// TestPermissionRelayEndToEnd is this package's live proof of the M3
+// approvals-relay pipeline in full: a real supervisor (guarded — unlike
+// every other test in this file, see newTestSupervisor's doc) evaluates
+// toolTurnProvider's unregistered "read_file" call, can't prove it contained
+// (see internal/sandbox's containableTool), and asks — the daemon fans that
+// event.PermissionRequested out as a gofer/permission_requested notification
+// (internal/daemon/handlers.go), this bridge reconstructs it (reconstruct.go's
+// handlePermissionRequested), the test answers it through the SAME bridge
+// method the TUI's approval dialog calls (Supervisor.Reply → contract #1's
+// "permission.reply" op), and the resulting event.PermissionResolved +
+// ToolCallFinished (still IsError=true: "read_file" is deliberately not a
+// registered tool — see toolTurnProvider's doc) reconstruct right behind it.
+func TestPermissionRelayEndToEnd(t *testing.T) {
+	sup := newTestSupervisorGuarded(t, func() provider.Provider { return &toolTurnProvider{} }, true)
+	url := newTestDaemon(t, sup)
+	b := newBridge(t, url)
+
+	info, err := b.Create(context.Background(), "", tui.CreateOptions{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sub, err := b.Subscribe(context.Background(), info.ID)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer sub.Close()
+
+	if err := b.Send(context.Background(), info.ID, "read a.txt"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	// The turn blocks server-side once the guard asks — see runOneTool's
+	// gate() — so only these 5 events arrive until this test replies: turn.started,
+	// message.started(user), message.finished(user), tool.call.started,
+	// permission.requested.
+	before := drainEvents(t, sub, 5)
+	if _, ok := before[3].(event.ToolCallStarted); !ok {
+		t.Fatalf("event 3 = %+v, want ToolCallStarted", before[3])
+	}
+	pr, ok := before[4].(event.PermissionRequested)
+	if !ok {
+		t.Fatalf("event 4 = %+v, want PermissionRequested", before[4])
+	}
+	if pr.Tool != "read_file" {
+		t.Errorf("PermissionRequested.Tool = %q, want %q", pr.Tool, "read_file")
+	}
+
+	// Reply through the exact bridge method the TUI's approval dialog calls
+	// (see internal/tui/dialog.go's doReply) — the client-side half of
+	// contract #1, not a supervisor-internal shortcut.
+	if err := b.Reply(context.Background(), info.ID, pr.ID, true, false); err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+
+	// permission.resolved, tool.call.finished, message.started(text),
+	// message.delta, message.finished(text), turn.finished = 6 events.
+	after := drainEvents(t, sub, 6)
+	resolved, ok := after[0].(event.PermissionResolved)
+	if !ok {
+		t.Fatalf("event 0 (post-reply) = %+v, want PermissionResolved", after[0])
+	}
+	if resolved.ID != pr.ID || resolved.Verdict != event.VerdictAllow {
+		t.Errorf("PermissionResolved = %+v, want ID=%q Verdict=allow", resolved, pr.ID)
+	}
+	finished, ok := after[1].(event.ToolCallFinished)
+	if !ok {
+		t.Fatalf("event 1 (post-reply) = %+v, want ToolCallFinished", after[1])
+	}
+	if finished.ID != "tc-1" || !finished.IsError {
+		t.Errorf("ToolCallFinished = %+v, want ID=tc-1 IsError=true (read_file is deliberately unregistered)", finished)
+	}
+	if fin, ok := after[4].(event.MessageFinished); !ok || fin.Content != "done" {
+		t.Errorf("event 4 (post-reply) = %+v, want MessageFinished(content=done)", after[4])
+	}
+	tf, ok := after[5].(event.TurnFinished)
+	if !ok {
+		t.Fatalf("event 5 (post-reply) = %+v, want TurnFinished", after[5])
 	}
 	if tf.StopReason != "end_turn" {
 		t.Errorf("TurnFinished.StopReason = %q, want end_turn", tf.StopReason)

@@ -11,9 +11,13 @@ import (
 	"time"
 
 	"github.com/jedwards1230/agent-sdk-go/event"
+	"github.com/jedwards1230/agent-sdk-go/loop"
+	"github.com/jedwards1230/agent-sdk-go/permission"
 	"github.com/jedwards1230/agent-sdk-go/provider"
 	"github.com/jedwards1230/agent-sdk-go/runner"
 	"github.com/jedwards1230/agent-sdk-go/session"
+
+	"github.com/jedwards1230/gofer/internal/sandbox"
 )
 
 // Config configures a [Supervisor].
@@ -25,6 +29,16 @@ type Config struct {
 	// Clock overrides the wall clock used to timestamp roster entries.
 	// Defaults to time.Now. Test seam.
 	Clock func() time.Time
+
+	// Permissions returns a FRESH permission engine for each new session's guard
+	// (see [config.Config.Engine]). A per-session engine keeps a remember-grant
+	// — an allow rule appended by [loop.RuleGuard.Grant] when a human answers
+	// "allow, remember" — scoped to the session that approved it, rather than
+	// leaking that grant into every other live session over one shared engine.
+	// Nil defaults to a permissive catch-all factory (allow → contain-or-ask),
+	// matching an empty config — so a supervisor built without an explicit
+	// policy never runs a tool uncontained without asking.
+	Permissions func() *permission.Engine
 
 	// Store, when set, is used instead of building a store from Root, and is
 	// NOT closed by [Supervisor.Close] — the caller owns its lifecycle. Test
@@ -50,6 +64,12 @@ type Supervisor struct {
 
 	newSession    func(ctx context.Context, opts runner.Options) (Session, error)
 	resumeSession func(ctx context.Context, id string, opts runner.Options) (Session, error)
+
+	// newEngine builds a fresh permission ruleset for each session's per-session
+	// RuleGuard, so a remember-grant stays scoped to the approving session
+	// (never nil after New — a nil Config.Permissions resolves to the default
+	// contain-or-ask catch-all factory).
+	newEngine func() *permission.Engine
 
 	// resumeMu serializes Resume end-to-end (roster check through
 	// registration) so two concurrent Resumes of the same id can never both
@@ -112,6 +132,23 @@ func New(cfg Config) (*Supervisor, error) {
 		}
 	}
 
+	newEngine := cfg.Permissions
+	if newEngine == nil {
+		// No explicit policy: default to a catch-all allow so an unmatched call
+		// resolves to allow → the RuleGuard consults the sandbox Container
+		// (contain-or-ask), never running a tool uncontained. Mirrors
+		// config.Config{}.Engine(). A fresh engine per session keeps grants
+		// session-scoped.
+		newEngine = func() *permission.Engine {
+			return permission.New(permission.Rule{
+				Verdict:   event.VerdictAllow,
+				Tool:      "*",
+				Specifier: "*",
+				Source:    "default",
+			})
+		}
+	}
+
 	return &Supervisor{
 		root:          root,
 		store:         store,
@@ -119,10 +156,24 @@ func New(cfg Config) (*Supervisor, error) {
 		clock:         clock,
 		newSession:    newSession,
 		resumeSession: resumeSession,
+		newEngine:     newEngine,
 		roster:        make(map[string]*managed),
 		watchers:      make(map[*watcher]struct{}),
 		watchDone:     make(chan struct{}),
 	}, nil
+}
+
+// sessionGuard builds the per-session permission plumbing: a fresh reply Gate
+// (reply routing is per-session — see [Supervisor.Reply]), a sandbox Container
+// shared between the RuleGuard's containability check and the sandbox-wrapping
+// tool registry, and the compiled RuleGuard over the shared engine. It returns
+// the three runner.Options fields to inject plus the Gate to store on the
+// managed session.
+func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.Gate, tools loop.ToolRegistry) {
+	gate := loop.NewGate()
+	container := sandbox.New()
+	rg := loop.RuleGuard{Engine: s.newEngine(), Container: container, Target: sandbox.ToolTarget}
+	return rg, gate, sandbox.WrapRegistry(cwd, container)
 }
 
 // ResolveRoot is gofer's single source of the ~/.gofer default — the SDK
@@ -167,15 +218,17 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts CreateOptio
 	if s.isClosed() {
 		return SessionInfo{}, ErrClosed
 	}
+	guard, gate, tools := s.sessionGuard(opts.Cwd)
 	sess, err := s.newSession(ctx, runner.Options{
 		Root: s.root, Cwd: opts.Cwd, Model: opts.Model, System: opts.System,
 		Params: opts.Params, MaxIters: opts.MaxIters,
+		Guard: guard, Approver: gate, Tools: tools,
 	})
 	if err != nil {
 		return SessionInfo{}, fmt.Errorf("supervisor: create session: %w", err)
 	}
 
-	m, err := s.register(sess, opts.Model, opts.Cwd)
+	m, err := s.register(sess, opts.Model, opts.Cwd, gate)
 	if err != nil {
 		// Lost a race with Close between the isClosed check above and here:
 		// tear down the just-built session so it does not leak. Its store is
@@ -221,15 +274,17 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 		return SessionInfo{}, ErrClosed
 	}
 
+	guard, gate, tools := s.sessionGuard(opts.Cwd)
 	sess, err := s.resumeSession(ctx, id, runner.Options{
 		Root: s.root, Cwd: opts.Cwd, Model: opts.Model, System: opts.System,
 		Params: opts.Params, MaxIters: opts.MaxIters,
+		Guard: guard, Approver: gate, Tools: tools,
 	})
 	if err != nil {
 		return SessionInfo{}, fmt.Errorf("supervisor: resume %s: %w", id, err)
 	}
 
-	m, err := s.register(sess, opts.Model, opts.Cwd)
+	m, err := s.register(sess, opts.Model, opts.Cwd, gate)
 	if err != nil {
 		_ = sess.Close()
 		return SessionInfo{}, fmt.Errorf("supervisor: resume %s: %w", id, err)
@@ -245,17 +300,22 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 // racing Close can never insert a session (and leak its pump) into a roster
 // Close has already drained. The managed value (and its context) is built
 // only once the insert is committed, so a rejected registration leaks nothing.
-func (s *Supervisor) register(sess Session, model, cwd string) (*managed, error) {
+func (s *Supervisor) register(sess Session, model, cwd string, gate *loop.Gate) (*managed, error) {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		return nil, ErrClosed
 	}
-	m := newManaged(sess, model, s.clock(), s.clock, s.notify, cwd)
+	m := newManaged(sess, model, s.clock(), s.clock, s.notify, cwd, gate)
 	s.roster[m.id] = m
 	s.mu.Unlock()
 
 	go m.pump()
+	// Subscribe to the session's own stream to keep the live pending-approval
+	// count (see managed.watchPermissions). Subscribed here, at registration,
+	// before any turn can run — so the count never misses this session's first
+	// permission request.
+	go m.watchPermissions(sess.Events())
 	return m, nil
 }
 
@@ -329,6 +389,21 @@ func (s *Supervisor) Interrupt(ctx context.Context, sessionID string) error {
 	if cancel != nil {
 		cancel()
 	}
+	return nil
+}
+
+// Reply routes a human's permission answer to sessionID's approval gate,
+// unblocking the guard's Await for the matching call id (see [loop.Gate]). It
+// errors with [ErrNotLive] for an unknown session. The reply carries no session
+// id itself (see [event.PermissionReply]); the daemon resolves which session by
+// the call id it recorded when it broadcast the request (see the daemon's
+// permission-route map).
+func (s *Supervisor) Reply(sessionID string, op event.PermissionReply) error {
+	m, err := s.lookup(sessionID)
+	if err != nil {
+		return fmt.Errorf("supervisor: reply %s: %w", sessionID, err)
+	}
+	m.gate.Reply(op)
 	return nil
 }
 

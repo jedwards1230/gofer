@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/daemon"
 	"github.com/jedwards1230/gofer/internal/supervisor"
 )
@@ -126,7 +127,16 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		}
 	}
 
-	sup, err := supervisor.New(supervisor.Config{Root: rootDir})
+	// Load gofer's native config (permissions ruleset) from <root>/config.json.
+	// A missing file is not an error — it compiles to the default
+	// contain-or-ask policy (see config.Config.Engine); a malformed or invalid
+	// file fails fast here, before the daemon starts accepting tool calls.
+	cfg, err := config.Load(config.DefaultPath(rootDir))
+	if err != nil {
+		return err
+	}
+
+	sup, err := supervisor.New(supervisor.Config{Root: rootDir, Permissions: cfg.Engine})
 	if err != nil {
 		return fmt.Errorf("build supervisor: %w", err)
 	}

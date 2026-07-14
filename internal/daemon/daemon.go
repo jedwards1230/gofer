@@ -112,6 +112,19 @@ type Daemon struct {
 	// by every other client attached to the same session. Empty session sets
 	// are deleted, so a live entry always has at least one peer.
 	sessionPeers map[string]map[*peer]struct{}
+
+	// permMu guards permRoutes.
+	permMu sync.Mutex
+	// permRoutes maps a permission request's call id to the session it belongs
+	// to. An event.PermissionReply op carries only the call id (no session id —
+	// see event.PermissionReply), so the daemon records the route when it
+	// broadcasts a permission.requested (where it knows the session) and looks
+	// it up again in handlePermissionReply to route the reply to that session's
+	// gate. Cleared on the matching permission.resolved. A route left dangling
+	// by a turn cancelled before it resolves lingers until the next daemon
+	// restart — bounded by the unique tool-call ids of a session, the same M3
+	// bound the SDK Gate's own pending map carries.
+	permRoutes map[string]string
 }
 
 // New builds a Daemon around sup. It does not start listening — call Serve
@@ -134,6 +147,7 @@ func New(sup *supervisor.Supervisor, cfg Config) *Daemon {
 		cancel:       cancel,
 		connSem:      make(chan struct{}, maxConns),
 		sessionPeers: make(map[string]map[*peer]struct{}),
+		permRoutes:   make(map[string]string),
 	}
 }
 
@@ -207,6 +221,32 @@ func (d *Daemon) peersForSession(sessionID string) []*peer {
 		out = append(out, p)
 	}
 	return out
+}
+
+// recordPermRoute remembers that permission call id belongs to sessionID, so a
+// later permission.reply carrying only that id can be routed to the right
+// session's gate (see handlePermissionReply). Called as a permission.requested
+// is broadcast.
+func (d *Daemon) recordPermRoute(id, sessionID string) {
+	d.permMu.Lock()
+	d.permRoutes[id] = sessionID
+	d.permMu.Unlock()
+}
+
+// clearPermRoute drops id's route once its request has resolved.
+func (d *Daemon) clearPermRoute(id string) {
+	d.permMu.Lock()
+	delete(d.permRoutes, id)
+	d.permMu.Unlock()
+}
+
+// lookupPermRoute returns the session a permission call id belongs to, or
+// ("", false) if no outstanding request has that id.
+func (d *Daemon) lookupPermRoute(id string) (string, bool) {
+	d.permMu.Lock()
+	defer d.permMu.Unlock()
+	s, ok := d.permRoutes[id]
+	return s, ok
 }
 
 // Handler returns the daemon's WebSocket upgrade handler, exported so tests

@@ -6,6 +6,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jedwards1230/agent-sdk-go/event"
+	"github.com/jedwards1230/agent-sdk-go/loop"
 )
 
 // managed is one live session's supervisor-side bookkeeping: the Session it
@@ -43,6 +46,14 @@ type managed struct {
 	// stopped (no turn still running against it) before its lifecycle event
 	// is emitted and it is closed.
 	done chan struct{}
+	// gate is this session's approval Gate: the guard's Await blocks on it, and
+	// [Supervisor.Reply] routes a human's inbound reply into it. One per session,
+	// never nil.
+	gate *loop.Gate
+	// permDone is closed by the watchPermissions goroutine when it returns, so
+	// stop joins it alongside the pump — leaving no subscription goroutine
+	// behind on shutdown.
+	permDone chan struct{}
 	// submitCh wakes an idle pump when Send enqueues a prompt. Buffered
 	// size 1 and sent to non-blockingly: multiple submits while the pump is
 	// busy coalesce into one wakeup, which is fine — the pump drains the
@@ -74,6 +85,10 @@ type managed struct {
 	// this closes. Send also checks it, so a prompt cannot be queued onto a
 	// session that has already decided to stop.
 	closing bool
+	// pending is the live count of outstanding permission requests: +1 on this
+	// session's event.PermissionRequested, −1 on event.PermissionResolved,
+	// maintained by watchPermissions and surfaced as SessionInfo.Pending.
+	pending int
 	// lastErr is the most recent turn's Prompt error, kept for diagnostics
 	// only (see [Supervisor.LastError]). Provider/loop errors already reach
 	// subscribers as session.error events on the session's own stream, and a
@@ -84,7 +99,7 @@ type managed struct {
 
 // newManaged builds a managed session ready to register: idle, empty queue,
 // its own cancellable base context.
-func newManaged(sess Session, model string, now time.Time, clock func() time.Time, notify func(), cwd string) *managed {
+func newManaged(sess Session, model string, now time.Time, clock func() time.Time, notify func(), cwd string, gate *loop.Gate) *managed {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &managed{
 		sess:       sess,
@@ -99,6 +114,8 @@ func newManaged(sess Session, model string, now time.Time, clock func() time.Tim
 		baseCtx:    ctx,
 		baseCancel: cancel,
 		done:       make(chan struct{}),
+		gate:       gate,
+		permDone:   make(chan struct{}),
 		submitCh:   make(chan struct{}, 1),
 		state:      stateIdle,
 	}
@@ -128,6 +145,7 @@ func (m *managed) info() SessionInfo {
 		Model:       m.model,
 		Cost:        report.Cost,
 		Usage:       report.Usage,
+		Pending:     m.pending,
 		Created:     m.createdAt,
 		Updated:     m.updated,
 		Project:     m.project,
@@ -215,14 +233,58 @@ func (m *managed) pump() {
 	}
 }
 
+// watchPermissions maintains the live pending-approval count from the session's
+// own event stream: +1 on a permission.requested, −1 on a permission.resolved.
+// It runs for the session's whole lifetime, exiting when baseCtx is cancelled
+// (stop) or the subscription closes (the session's broker shutting down),
+// whichever comes first — so it never outlives the session. sub is closed on
+// exit so the broker drops it.
+func (m *managed) watchPermissions(sub *event.Subscription) {
+	defer close(m.permDone)
+	defer sub.Close()
+	for {
+		select {
+		case e, ok := <-sub.C:
+			if !ok {
+				return
+			}
+			switch e.(type) {
+			case event.PermissionRequested:
+				m.adjustPending(1)
+			case event.PermissionResolved:
+				m.adjustPending(-1)
+			}
+		case <-m.baseCtx.Done():
+			return
+		}
+	}
+}
+
+// adjustPending bumps the outstanding-approval count by delta and pushes a
+// fresh roster snapshot. It clamps at zero so a stray resolved (e.g. a
+// replayed must-deliver event with no matching request) never drives the count
+// negative. notify is called AFTER releasing m.mu, per the lock discipline in
+// this file's doc.
+func (m *managed) adjustPending(delta int) {
+	m.mu.Lock()
+	m.pending += delta
+	if m.pending < 0 {
+		m.pending = 0
+	}
+	m.mu.Unlock()
+	m.notify()
+}
+
 // stop marks m closing, cancels its base context (interrupting any in-flight
-// turn and waking an idle pump), and waits for its pump goroutine to exit.
+// turn, waking an idle pump, and waking watchPermissions), and waits for both
+// its pump and permission-watcher goroutines to exit.
 func (m *managed) stop() {
 	m.mu.Lock()
 	m.closing = true
 	m.mu.Unlock()
 	m.baseCancel()
 	<-m.done
+	<-m.permDone
 }
 
 // snippet renders a one-line, bounded title from a prompt: leading/trailing

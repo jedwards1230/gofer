@@ -26,6 +26,23 @@ const (
 	methodGoferPS      = "gofer/ps"
 	methodGoferKill    = "gofer/kill"
 	methodGoferArchive = "gofer/archive"
+
+	// methodGoferPermissionRequested / methodGoferPermissionResolved are the
+	// gofer-native notifications the daemon fans a session's permission events
+	// out to every attached peer with. ACP deliberately keeps permission.*
+	// outside its session/update surface (see acp.ToSessionUpdate) and models a
+	// request as a client-answered REQUEST, which does not fit a must-deliver
+	// fan-out to N peers — so gofer emits its own notifications instead. Their
+	// params are a lossless projection of event.PermissionRequested /
+	// event.PermissionResolved (plus the session id for routing), so a client
+	// reconstructs the events directly (see internal/daemonbridge).
+	methodGoferPermissionRequested = "gofer/permission_requested"
+	methodGoferPermissionResolved  = "gofer/permission_resolved"
+
+	// methodPermissionReply is the inbound op a client sends to answer a
+	// permission request (contract: JSON-RPC method "permission.reply", params
+	// {id, verdict, remember?}). It is a notification — no result.
+	methodPermissionReply = "permission.reply"
 )
 
 // methodHandler answers one JSON-RPC method call. params is the raw request
@@ -49,6 +66,8 @@ var methodTable = map[string]methodHandler{
 	methodGoferPS:      handleGoferPS,
 	methodGoferKill:    handleGoferKill,
 	methodGoferArchive: handleGoferArchive,
+
+	methodPermissionReply: handlePermissionReply,
 }
 
 // decodeOp decodes method's params via acp.DecodeOp and asserts the result to
@@ -454,6 +473,36 @@ func handleSessionPrompt(d *Daemon, ctx context.Context, p *peer, params json.Ra
 				lastFatal = se.Err
 			}
 
+			// Permission events are outside ACP's session/update surface
+			// (acp.ToSessionUpdate returns ok=false for them), so they would be
+			// silently dropped by the projection below. Fan them out explicitly
+			// as gofer-native notifications — a must-deliver path reaching EVERY
+			// attached peer, so a phone can approve a turn a laptop drives (and
+			// vice versa). Recording the call->session route here (where the
+			// session is known) is what lets a later permission.reply, which
+			// carries only the call id, find this session's gate.
+			switch pe := e.(type) {
+			case event.PermissionRequested:
+				d.recordPermRoute(pe.ID, op.SessionID)
+				d.broadcastPermission(ctx, op.SessionID, methodGoferPermissionRequested, permissionRequestedParams{
+					SessionID: op.SessionID,
+					ID:        pe.ID,
+					Tool:      pe.Tool,
+					Spec:      pe.Spec,
+					Trace:     pe.Trace,
+				})
+				continue
+			case event.PermissionResolved:
+				d.clearPermRoute(pe.ID)
+				d.broadcastPermission(ctx, op.SessionID, methodGoferPermissionResolved, permissionResolvedParams{
+					SessionID: op.SessionID,
+					ID:        pe.ID,
+					Verdict:   string(pe.Verdict),
+					Rule:      pe.Rule,
+				})
+				continue
+			}
+
 			if notif, ok := acp.ToSessionUpdate(op.SessionID, e); ok {
 				// The user-message echo (a settled event.MessageUser projects
 				// to user_message_chunk) is suppressed to the ORIGINATOR — the
@@ -535,6 +584,51 @@ func (d *Daemon) broadcastUpdate(ctx context.Context, sessionID string, origin *
 		return internalErr(fmt.Errorf("session/prompt %s: write session/update: %w", sessionID, werr))
 	}
 	return nil
+}
+
+// broadcastPermission fans a permission notification out to EVERY peer attached
+// to sessionID — including the origin peer driving the turn (a permission
+// prompt is not an echo the origin already knows; it must see it to answer, and
+// so must every other attached device). Unlike broadcastUpdate, a write failure
+// to any single peer (origin included) is non-fatal and only logged: the turn
+// is blocked in the loop awaiting the gate regardless of any one peer's socket,
+// and a wedged observer must never abort a turn nor stop delivery to the other
+// peers. The peer set is snapshotted under the registry RLock and released
+// before any notify runs (see peersForSession).
+func (d *Daemon) broadcastPermission(ctx context.Context, sessionID, method string, params any) {
+	for _, pr := range d.peersForSession(sessionID) {
+		if werr := pr.notify(ctx, method, params); werr != nil {
+			// Session id + method only — never the params (tool input/spec);
+			// see handleFrame's redaction rule.
+			d.log.Debug("permission broadcast: peer notify failed", "session", sessionID, "method", method, "err", werr)
+		}
+	}
+}
+
+// handlePermissionReply answers a client's "permission.reply" op: it routes the
+// verdict to the awaiting session's gate. The op carries only the call id (no
+// session id — see event.PermissionReply), so the session is resolved from the
+// call->session route the daemon recorded when it broadcast the request (see
+// [Daemon.recordPermRoute]). It is a notification (no result); an unknown id or
+// an already-resolved/gone session surfaces as an error the router logs but
+// sends nowhere.
+func handlePermissionReply(d *Daemon, _ context.Context, _ *peer, params json.RawMessage) (any, *rpcError) {
+	var req permissionReplyParams
+	if err := json.Unmarshal(params, &req); err != nil {
+		return nil, invalidParams(err)
+	}
+	if req.ID == "" {
+		return nil, invalidParamsMsg(methodPermissionReply + ": id is required")
+	}
+	sessionID, ok := d.lookupPermRoute(req.ID)
+	if !ok {
+		return nil, invalidParamsMsg(fmt.Sprintf("%s: no outstanding permission request with id %q", methodPermissionReply, req.ID))
+	}
+	if err := d.sup.Reply(sessionID, event.PermissionReply{ID: req.ID, Verdict: req.Verdict, Remember: req.Remember}); err != nil {
+		return nil, appError(err)
+	}
+	d.log.Debug("permission reply routed", "session", sessionID, "verdict", string(req.Verdict))
+	return struct{}{}, nil
 }
 
 // handleGoferRoster answers gofer/roster: the live roster, newest-first.
