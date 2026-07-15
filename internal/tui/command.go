@@ -9,6 +9,7 @@ package tui
 // /model behavior lands in follow-up PRs without changing this seam.
 
 import (
+	"sort"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -57,6 +58,47 @@ func (r *Registry) register(cmd Command) {
 func (r Registry) Lookup(token string) (Command, bool) {
 	cmd, ok := r.cmds[token]
 	return cmd, ok
+}
+
+// List returns every non-Hidden registered command, deduplicated (a command
+// registered under several aliases is stored once per alias in r.cmds but
+// appears once here, keyed by Name) and sorted by Name — the source list the
+// command-autocomplete popup filters from (command_menu.go) and any future
+// palette.
+func (r Registry) List() []Command {
+	seen := make(map[string]bool, len(r.cmds))
+	out := make([]Command, 0, len(r.cmds))
+	for _, cmd := range r.cmds {
+		if cmd.Hidden || seen[cmd.Name] {
+			continue
+		}
+		seen[cmd.Name] = true
+		out = append(out, cmd)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// matching returns [Registry.List] filtered to commands whose Name or any
+// Alias has partial as a case-insensitive prefix. An empty partial (a bare
+// "/") matches every command — the popup's initial, unfiltered state.
+func (r Registry) matching(partial string) []Command {
+	q := strings.ToLower(partial)
+	all := r.List()
+	out := make([]Command, 0, len(all))
+	for _, cmd := range all {
+		if strings.HasPrefix(strings.ToLower(cmd.Name), q) {
+			out = append(out, cmd)
+			continue
+		}
+		for _, alias := range cmd.Aliases {
+			if strings.HasPrefix(strings.ToLower(alias), q) {
+				out = append(out, cmd)
+				break
+			}
+		}
+	}
+	return out
 }
 
 // newBuiltinRegistry returns the M4 registry: the three commands that open

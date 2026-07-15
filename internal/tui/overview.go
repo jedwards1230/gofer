@@ -160,6 +160,14 @@ func (o Overview) Backspace() Overview {
 // empty input backs out; with text it edits).
 func (o Overview) InputEmpty() bool { return o.input == "" }
 
+// SetInput replaces the dispatch-bar buffer outright — used by the command
+// menu's Tab-complete and Enter-select (command_menu.go), which splice or
+// clear the buffer wholesale rather than one rune at a time.
+func (o Overview) SetInput(s string) Overview {
+	o.input = s
+	return o
+}
+
 // Submit records the dispatch-bar buffer as submitted (retrievable via
 // [Overview.TakeSubmitted]) and clears it. Submitting an empty buffer is a
 // no-op.

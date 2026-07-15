@@ -16,7 +16,8 @@ added the `CommandEnv` data seam (`env.go`) and the real `/status` view
 (`status.go`); M4 step 3 added `config.Save`, the settings registry
 (`settings.go`), and the real `/config` view (`config_view.go`); M4 step 4
 added the real `/model` picker view (`modelpicker.go`) and its coupled
-Enter/select action (`App.handleModelSelect`, panel.go) — see [Slash
+Enter/select action (`App.handleModelSelect`, panel.go); a follow-up added
+the slash-command autocomplete popup (`command_menu.go`) — see [Slash
 commands](#slash-commands) below. **M4 is done.** Still ahead: a general
 reusable dialog abstraction, the central keymap registry, and plugin UI.
 
@@ -349,6 +350,24 @@ never replaces, the golden tests.
 `/` is reserved for commands; file mentions are `@` (fuzzy path completion).
 ONE registry powers the palette, slash parsing, and keybindings. Collision
 order: extension commands > markdown templates > builtins.
+
+**Built (autocomplete)**: `command_menu.go` is the palette — a popup listing
+`Registry.List()` (Name-sorted, `Hidden` excluded), composed above the
+dispatch bar/attach input's rule in `App.render`. It opens whenever
+`commandToken(buf, cursor)` finds an active command token at the cursor: a
+`/` at buffer start or immediately preceded by whitespace, with no
+whitespace between it and the cursor, prefix-matched (case-insensitive)
+against every command's Name and Aliases. A `/` preceded by any other
+character (`` `/x ``, `foo/bar`) is literal text — no popup. Rows scroll past
+`commandMenuMaxRows` (6) with a muted "↑/↓ N more" affordance. While open,
+`↓`/`↑` move the highlight ahead of the per-screen handlers (dispatch
+precedence: panel > approval > menu > active screen > global); `Tab`
+completes the highlighted Name into the buffer, appending a trailing space
+when the command has an `ArgHint` (ready for an argument) or none otherwise
+(ready to submit); `Enter` runs the highlighted command directly; `Esc`
+closes the popup but keeps the typed text. Any other key (ordinary typing,
+Backspace) falls through to the buffer as usual, and `App.syncMenu`
+recomputes the popup from the edited buffer on the way back out.
 
 **Built (M4 step 1)**: `command.go` holds `Command{Name, Aliases, Summary,
 ArgHint, Hidden, Run}` and `Registry` (name/alias → `Command`). Both submit

@@ -53,6 +53,13 @@ type App struct {
 	// the [Command] that runs it.
 	registry Registry
 
+	// menu is the slash-command autocomplete popup (command_menu.go): closed
+	// (zero value) whenever the overview dispatch bar / attach input's
+	// buffer has no active command token, kept in sync by [App.syncMenu]
+	// after every per-screen key handler runs (see Update). Composed above
+	// the active screen's input rule in render.
+	menu commandMenu
+
 	// commandEnv is the read-only data source the command panel's views read
 	// (version/cwd/store-root identity, lazy auth/config reads — see
 	// env.go). Handed to the panel at open time by openPanel (command.go).
@@ -338,7 +345,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.status = ""
 		// The command panel takes every key ahead of the approval overlay and
 		// the per-screen handlers (dispatch precedence: panel > approval >
-		// active screen > global) — see handlePanelKey.
+		// menu > active screen > global) — see handlePanelKey.
 		if a.panel != nil {
 			return a.handlePanelKey(msg)
 		}
@@ -349,7 +356,21 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.scr == screenAttach && a.sess.HasPendingApproval() {
 			return a.handleApprovalKey(msg)
 		}
-		return a.handleKey(msg)
+		// The open command-autocomplete menu (command_menu.go) claims
+		// ↓/↑/Tab/Enter/Esc ahead of the per-screen handlers, same overlay
+		// precedence as the panel/approval checks above; any other key
+		// (ordinary typing, backspace, ctrl-c) is the per-screen handler's as
+		// usual.
+		if a.menu.open() {
+			if next, cmd, handled := a.handleMenuKey(msg); handled {
+				return next, cmd
+			}
+		}
+		next, cmd := a.handleKey(msg)
+		if app, ok := next.(App); ok {
+			return app.syncMenu(), cmd
+		}
+		return next, cmd
 	}
 	return a, nil
 }
@@ -599,14 +620,30 @@ func (a App) render() string {
 		h -= panelH
 	}
 
+	// The command-autocomplete menu (command_menu.go) takes a slice out of
+	// the bottom of the content budget the same way the panel/footer already
+	// do, composed above the active screen's input rule via
+	// Overview/Model's *WithMenu variant. It only applies to the overview
+	// and attach screens — the two text-entry surfaces the command-token
+	// grammar covers, see App.syncMenu — and is mutually exclusive with the
+	// panel (a.menu is always closed while a.panel != nil).
+	var menuLines []string
+	if a.scr == screenOverview || a.scr == screenAttach {
+		menuLines = a.menu.Lines(a.width)
+		if len(menuLines) > h {
+			menuLines = menuLines[:h]
+		}
+		h -= len(menuLines)
+	}
+
 	var body string
 	switch a.scr {
 	case screenPeek:
 		body = NewPeek(a.theme, a.over, a.peekReply).View(a.width, h)
 	case screenAttach:
-		body = a.sess.View(a.width, h)
+		body = a.sess.ViewWithMenu(a.width, h, menuLines)
 	default:
-		body = a.over.View(a.width, h)
+		body = a.over.ViewWithMenu(a.width, h, menuLines)
 	}
 
 	if a.panel != nil {
