@@ -661,6 +661,56 @@ func TestHandleWheelScrollsAndClampsAtTail(t *testing.T) {
 	}
 }
 
+// TestHandleWheelScrollsOverflowingTranscript is the render-level companion
+// to TestHandleWheelScrollsAndClampsAtTail: that test only asserts a.scroll's
+// numeric field moves, which would pass even if the wheel-driven offset were
+// never actually consumed by render (e.g. scrolling a region other than the
+// one that overflows, per this PR's BUG 2 investigation). This test builds a
+// transcript long enough to genuinely overflow a real terminal height (same
+// setup as TestHeaderScrollsAwayOnLongTranscript) and proves a single wheel
+// notch changes the VISIBLE WINDOW of rendered content: the tailed frame
+// shows the latest turn, and after one handleWheel(MouseWheelUp) it no
+// longer does — an earlier turn is visible instead. This is the actual
+// user-observable behavior a working mouse wheel produces; content that
+// fits the viewport (no overflow) legitimately has nothing to scroll, so
+// that case is deliberately not asserted here.
+func TestHandleWheelScrollsOverflowingTranscript(t *testing.T) {
+	meta := GoldenMeta()
+	meta.AttachSessionID = "sess-x"
+	a := NewApp(theme.Test(), &internalFakeSup{}, meta, GoldenCommandEnv())
+	mdl, _ := a.Update(tea.WindowSizeMsg{Width: testkit.Width, Height: testkit.Height})
+	a = mdl.(App)
+
+	// testkit.Height (24) leaves far fewer rows than 40 turns once the
+	// header/footer are carved out — see TestHeaderScrollsAwayOnLongTranscript's
+	// doc for the same math.
+	for i := 0; i < 40; i++ {
+		mdl, _ = a.Update(sessEventMsg{
+			id: "sess-x",
+			ev: event.NewMessageFinished("sess-x", event.MessageUser, fmt.Sprintf("turn %d", i)),
+		})
+		a = mdl.(App)
+	}
+
+	tailed := a.render()
+	if !strings.Contains(tailed, "turn 39") {
+		t.Fatalf("precondition failed: tailed render missing the latest turn:\n%s", tailed)
+	}
+
+	a = a.handleWheel(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	if a.scroll == 0 {
+		t.Fatal("precondition failed: handleWheel(up) left a.scroll at 0")
+	}
+
+	scrolled := a.render()
+	if strings.Contains(scrolled, "turn 39") {
+		t.Errorf("one wheel-up notch on overflowing content still shows the latest turn — the visible window did not move:\ntailed:\n%s\nscrolled:\n%s", tailed, scrolled)
+	}
+	if scrolled == tailed {
+		t.Error("render() unchanged after handleWheel(up) on overflowing content — the wheel notch had no visible effect")
+	}
+}
+
 // TestHandleWheelIgnoredOnPeek verifies the wheel is a no-op on the peek
 // screen — item 7 scopes mouse-wheel scrolling to "overview + attach" only;
 // peek carries no scrollable transcript of its own (see peek.go).

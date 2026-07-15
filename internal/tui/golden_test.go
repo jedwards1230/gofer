@@ -133,6 +133,46 @@ func TestGoldenReasoningAndText(t *testing.T) {
 	)
 }
 
+// TestEmptyReasoningRendersNoMarker covers a provider (Claude does this)
+// emitting a reasoning block that settles with no content at all — Ingest
+// still records the item, but renderItemLines must suppress it rather than
+// show a bare "●" marker with nothing after it. The following turn's
+// non-empty text still renders normally, proving the guard is scoped to
+// empty content and doesn't swallow real turns.
+func TestEmptyReasoningRendersNoMarker(t *testing.T) {
+	m := ingest(
+		event.NewTurnStarted(sid),
+		event.NewMessageStarted(sid, event.MessageReasoning),
+		event.NewMessageFinished(sid, event.MessageReasoning, ""),
+	)
+	got := testkit.Render(m, testkit.Width, testkit.Height)
+	if strings.Contains(got, "●") {
+		t.Errorf("empty reasoning item rendered a marker glyph; want no visible line:\n%s", got)
+	}
+
+	m = m.Ingest(event.NewMessageStarted(sid, event.MessageText))
+	m = m.Ingest(event.NewMessageFinished(sid, event.MessageText, "Hello! How can I help you today?"))
+	got = testkit.Render(m, testkit.Width, testkit.Height)
+	if !strings.Contains(got, "● Hello! How can I help you today?") {
+		t.Errorf("non-empty text after the empty reasoning item didn't render:\n%s", got)
+	}
+}
+
+// TestEmptyAssistantTextRendersNoMarker is TestEmptyReasoningRendersNoMarker's
+// itemAssistantText counterpart — an assistant-text item that settles with no
+// content renders no marker line either.
+func TestEmptyAssistantTextRendersNoMarker(t *testing.T) {
+	m := ingest(
+		event.NewTurnStarted(sid),
+		event.NewMessageStarted(sid, event.MessageText),
+		event.NewMessageFinished(sid, event.MessageText, ""),
+	)
+	got := testkit.Render(m, testkit.Width, testkit.Height)
+	if strings.Contains(got, "●") {
+		t.Errorf("empty assistant-text item rendered a marker glyph; want no visible line:\n%s", got)
+	}
+}
+
 // TestGoldenToolCall covers a tool call from start through its settled
 // result, rendered as one compact block.
 func TestGoldenToolCall(t *testing.T) {

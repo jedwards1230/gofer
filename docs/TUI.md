@@ -191,6 +191,19 @@ class of underflow) can never slice out of range. `App.scroll` resets to 0
 whenever the screen or the attached/peeked session changes, so navigating
 away and back always lands back at the tail.
 
+Cell-motion mouse reporting (1002) plus SGR extended coordinates (1006) is
+the minimal enable pair bubbletea v2.0.8 offers — there is no wheel-only
+mode, only `MouseModeNone`/`MouseModeCellMotion`/`MouseModeAllMotion` — so
+turning on wheel scroll also captures the terminal's own click-to-select:
+selecting transcript text with a plain click-drag needs Option-drag on
+macOS terminals (iTerm2/Terminal.app) or the equivalent modifier-drag
+elsewhere, a known, accepted tradeoff. Not every terminal honors mouse
+reporting at all — macOS's stock Terminal.app in particular sends no mouse
+events to the foreground program regardless of what a TUI enables — so a
+wheel that does nothing there is a terminal limitation, not a gofer bug; a
+tmux/Zellij session also needs its own `mouse on` setting to pass wheel
+events through to the program it hosts.
+
 `App.render` composes the autocomplete menu into the pinned input block
 rather than budgeting for it separately — `Overview`/`Model`'s `*WithMenu`
 variants already carve its rows out of their own height budget. The command
