@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -233,6 +234,185 @@ func TestSelectionHighlightAndCopyExcludeChrome(t *testing.T) {
 	if strings.Contains(copied, ">") || strings.Contains(copied, "─") {
 		t.Errorf("clipboard payload leaked chrome text (input/rule) = %q", copied)
 	}
+}
+
+// bigRoster returns n synthetic sessions, most-recently-active first, all
+// under the fixture cwd (no per-session Cwd) so the flat view groups them
+// into one cwd block — enough rows to overflow the overview's roster body
+// so its bottom-most visible row carries real content (not blank filler),
+// which the tail-selectable assertion in
+// TestSelectionRegionExcludesStatusRowKeepsTail needs.
+func bigRoster(n int) []SessionInfo {
+	out := make([]SessionInfo, n)
+	for i := range out {
+		out[i] = SessionInfo{
+			ID:      fmt.Sprintf("0192a1b2-app0-7000-8000-%012d", i+1),
+			Title:   fmt.Sprintf("session %02d", i),
+			Summary: "roster row summary",
+			Status:  StatusWorking,
+			Updated: GoldenNow.Add(-time.Duration(i) * time.Minute),
+		}
+	}
+	return out
+}
+
+// TestSelectionRegionExcludesStatusRowKeepsTail pins the transcript-region
+// boundary against the app-level status footer (a.status — the transient
+// error row render() appends when set). It is the anti-regression guard for
+// the two review-bot threads that flagged transcriptRegion for "not
+// accounting for fl.footer": that report is a false positive, because
+// frameLayout already does h-- when a.status != "" (app.go), so fl.h — the
+// budget transcriptRegion divides into header/transcript/Model-footer —
+// ALREADY excludes the app status row (render appends it AFTER the fl.h-row
+// body, outside that budget). The proposed footerLen++/bodyAvail-- "fix"
+// would DOUBLE-count it and shrink the region by one, dropping the newest
+// tail line from selection whenever a status shows.
+//
+// So this asserts BOTH halves for overview and attach: (a) a drag that
+// reaches the status row never highlights or copies it (nor the input box /
+// dispatch rule between), AND (b) the region still includes the bottom-most
+// real content row — the newest transcript line on attach, the last visible
+// roster row on overview — so it stays selectable/copyable. Half (b) is the
+// one that fails against the bot's proposed change.
+func TestSelectionRegionExcludesStatusRowKeepsTail(t *testing.T) {
+	const status = "unknown command: /foo"
+	const reverseOn = "\x1b[7m"
+
+	t.Run("attach", func(t *testing.T) {
+		meta := GoldenMeta()
+		meta.AttachSessionID = "sess-x"
+		a := NewApp(testkit.ColorTheme(), &internalFakeSup{}, meta, GoldenCommandEnv())
+		mdl, _ := a.Update(tea.WindowSizeMsg{Width: testkit.Width, Height: testkit.Height})
+		a = mdl.(App)
+		const turns = 40
+		for i := 0; i < turns; i++ {
+			mdl, _ = a.Update(sessEventMsg{
+				id: "sess-x",
+				ev: event.NewMessageFinished("sess-x", event.MessageUser, fmt.Sprintf("turn %d", i)),
+			})
+			a = mdl.(App)
+		}
+		a.status = status
+
+		// Locate the rows in the composed frame before selecting.
+		lines := strings.Split(a.render(), "\n")
+		statusRow, tailRow, inputRow := -1, -1, -1
+		for i, l := range lines {
+			plain := ansi.Strip(l)
+			switch {
+			case plain == status:
+				statusRow = i
+			case strings.HasPrefix(plain, "○ turn "):
+				tailRow = i // the loop's final match is the tailmost (newest) turn
+			case strings.HasPrefix(plain, "> "):
+				inputRow = i
+			}
+		}
+		if statusRow < 0 || tailRow < 0 || inputRow < 0 {
+			t.Fatalf("precondition failed: statusRow=%d tailRow=%d inputRow=%d not all found:\n%s", statusRow, tailRow, inputRow, a.render())
+		}
+		if tailRow >= inputRow || inputRow >= statusRow {
+			t.Fatalf("precondition failed: expected tail(%d) < input(%d) < status(%d)", tailRow, inputRow, statusRow)
+		}
+		if got := ansi.Strip(lines[tailRow]); got != "○ turn 39" {
+			t.Fatalf("precondition failed: expected the tail row to be the newest turn, got %q", got)
+		}
+
+		// Drag from the newest transcript row DOWN through the input box onto
+		// the status row.
+		a.sel = &selectionState{dragging: true, startX: 2, startY: tailRow, curX: 10, curY: statusRow}
+
+		hl := strings.Split(a.render(), "\n")
+		// (a) chrome below the transcript is never highlighted.
+		if strings.Contains(hl[statusRow], reverseOn) {
+			t.Errorf("status row %d highlighted; it is outside the transcript region: %q", statusRow, hl[statusRow])
+		}
+		if strings.Contains(hl[inputRow], reverseOn) {
+			t.Errorf("input row %d highlighted; it is outside the transcript region: %q", inputRow, hl[inputRow])
+		}
+		// (b) the newest tail transcript row stays selectable — the exact row
+		// the bot's proposed footerLen++ would have dropped.
+		if !strings.Contains(hl[tailRow], reverseOn) {
+			t.Errorf("newest tail transcript row %d not highlighted; the region must still include it: %q", tailRow, hl[tailRow])
+		}
+
+		text := a.selectedText()
+		if !strings.Contains(text, "turn 39") {
+			t.Errorf("selectedText dropped the newest tail line; got %q", text)
+		}
+		if strings.Contains(text, status) || strings.Contains(text, ">") || strings.Contains(text, "─") {
+			t.Errorf("selectedText leaked chrome (status/input/rule): %q", text)
+		}
+
+		_, cmd := a.handleMouseRelease(tea.MouseReleaseMsg{X: 10, Y: statusRow, Button: tea.MouseLeft})
+		if cmd == nil {
+			t.Fatal("handleMouseRelease produced no clipboard Cmd for a non-empty selection")
+		}
+		if copied := fmt.Sprintf("%v", cmd()); copied != text {
+			t.Errorf("clipboard payload %q != region-clamped selectedText %q", copied, text)
+		}
+	})
+
+	t.Run("overview", func(t *testing.T) {
+		// Built directly (not newAppForGolden, which hardcodes GoldenRoster
+		// and theme.Test) so the roster overflows and the reverse-video SGR
+		// is observable.
+		a := NewApp(testkit.ColorTheme(), newInternalFakeSup(nil), GoldenMeta(), GoldenCommandEnv())
+		mdl, _ := a.Update(tea.WindowSizeMsg{Width: testkit.Width, Height: testkit.Height})
+		a = mdl.(App)
+		mdl, _ = a.Update(rosterMsg{sessions: bigRoster(20)})
+		a = mdl.(App)
+		a.status = status
+
+		lines := strings.Split(a.render(), "\n")
+		// The dispatch bar's rule is the first all-"─" row after the roster
+		// body; the roster body's bottom-most visible row is just above it,
+		// and (with an overflowing roster) carries a real session, not blank
+		// filler. The status row is the frame's trailing app-footer line.
+		statusRow, ruleRow := -1, -1
+		for i, l := range lines {
+			s := ansi.Strip(l)
+			if s == status {
+				statusRow = i
+			}
+			if ruleRow < 0 && len(s) > 0 && strings.Trim(s, "─") == "" {
+				ruleRow = i
+			}
+		}
+		if statusRow < 0 || ruleRow < 1 {
+			t.Fatalf("precondition failed: statusRow=%d ruleRow=%d not found:\n%s", statusRow, ruleRow, a.render())
+		}
+		bottomRosterRow := ruleRow - 1
+		if got := ansi.Strip(lines[bottomRosterRow]); !strings.Contains(got, "session ") {
+			t.Fatalf("precondition failed: bottom roster row %d isn't real session content (roster didn't overflow?): %q", bottomRosterRow, got)
+		}
+		if bottomRosterRow >= ruleRow || ruleRow >= statusRow {
+			t.Fatalf("precondition failed: expected bottomRoster(%d) < rule(%d) < status(%d)", bottomRosterRow, ruleRow, statusRow)
+		}
+
+		// Drag from an upper roster row DOWN through the dispatch bar onto the
+		// status row.
+		a.sel = &selectionState{dragging: true, startX: 2, startY: bottomRosterRow - 2, curX: 10, curY: statusRow}
+
+		hl := strings.Split(a.render(), "\n")
+		if strings.Contains(hl[statusRow], reverseOn) {
+			t.Errorf("status row %d highlighted; it is outside the roster region: %q", statusRow, hl[statusRow])
+		}
+		if strings.Contains(hl[ruleRow], reverseOn) {
+			t.Errorf("dispatch rule row %d highlighted; it is outside the roster region: %q", ruleRow, hl[ruleRow])
+		}
+		if !strings.Contains(hl[bottomRosterRow], reverseOn) {
+			t.Errorf("bottom roster row %d not highlighted; the region must still include it: %q", bottomRosterRow, hl[bottomRosterRow])
+		}
+
+		text := a.selectedText()
+		if !strings.Contains(text, "session ") {
+			t.Errorf("selectedText dropped the bottom roster row; got %q", text)
+		}
+		if strings.Contains(text, status) {
+			t.Errorf("selectedText leaked the status row: %q", text)
+		}
+	})
 }
 
 // TestSelectedTextMultiLineSpan covers a drag spanning several rows: the
