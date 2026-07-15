@@ -146,6 +146,23 @@ tool-block rendering — a status-count header, grouped sections, a one-line
 session row, and a bottom dispatch bar with a hint line — reimplemented here
 for gofer's Event/Op model.
 
+**Bottom-anchored layout** (chat-style, like Claude Code): on overview and
+attach, the input block — the autocomplete menu when open, the input's
+framing rules, the `>`/`❯` line, and the status/usage footer — is pinned to
+the terminal's last rows; the transcript/roster fills the region above it,
+top-aligned, growing downward and tailing (unchanged scroll behavior) once
+it overflows. `Overview.render` and `Model.view` each pad their own
+transcript/roster rows with blank filler up to the height they're handed
+before appending the pinned block, so a short conversation leaves blank rows
+*above* the input instead of trailing directly beneath it. `App.render`
+composes the autocomplete menu into that same pinned block rather than
+budgeting for it separately — `Overview`/`Model`'s `*WithMenu` variants
+already carve its rows out of their own height budget. The command panel
+still takes its own slice out of the bottom when open (unaffected — panel
+and menu are mutually exclusive). `layout.TopPadding` is unrelated: a fixed
+one-row workaround for a terminal that clips the frame's first row, applied
+once in `App.render` on top of the bottom-anchored frame.
+
 **Tool blocks** in the attach transcript render as a collapsed tree: a
 header line `‹marker› tool(command)`, then the result tree-indented beneath — the
 first line on a `└`, up to two more indented, and any remainder collapsed to
