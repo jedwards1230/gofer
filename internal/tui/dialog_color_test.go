@@ -83,7 +83,8 @@ func TestColorApprovalDialogComposite(t *testing.T) {
 	// display-width bug.
 	stripped := ansi.Strip(colored)
 	for _, want := range []string{
-		"bash · cmd=rm -rf /tmp/x",
+		"bash command",
+		"cmd=rm -rf /tmp/x",
 		"Allow this tool call?",
 		"[a] allow   [d] deny   [r] remember: off",
 		"esc cancel · session ",

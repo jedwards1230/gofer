@@ -18,8 +18,14 @@ added the `CommandEnv` data seam (`env.go`) and the real `/status` view
 added the real `/model` picker view (`modelpicker.go`) and its coupled
 Enter/select action (`App.handleModelSelect`, panel.go); a follow-up added
 the slash-command autocomplete popup (`command_menu.go`) — see [Slash
-commands](#slash-commands) below. **M4 is done.** Still ahead: a general
-reusable dialog abstraction, the central keymap registry, and plugin UI.
+commands](#slash-commands) below. **M4 is done.** A later redesign pass put a
+global identity header on every screen, reformatted the approval prompt,
+hid the roster dispatch bar while a command panel is open, unified the
+header into the same scrollable region as the attach transcript, and added
+mouse-wheel/PgUp-PgDn scrolling — see [Bottom-anchored
+layout](#roster--navigation-m2) and the approval-prompt example below. Still
+ahead: a general reusable dialog abstraction, the central keymap registry,
+and plugin UI.
 
 ## The three altitudes
 
@@ -38,19 +44,30 @@ carries no transcript tail — it is a roster-only projection.
 
 **Attach** — full transcript + input; `esc` detaches back to overview.
 
+Every screen — overview, attach's transcript, its approval prompts, and its
+command-menu/panel overlays — opens with the same two-line identity header:
+`gofer v<version>` then `<model> · <cwd>` (`identityHeaderLines`,
+overview_render.go; `attachHeaderLines`, app.go). The overview's own header
+adds a third status-count line beneath it; the attach screen's copy leaves
+that row blank instead (a global roster tally means nothing once attached to
+one session).
+
 A pending permission request is **not** a centered modal — it renders inline in
 the conversation's bottom UI. The transcript records a permanent `● <tool>`
 badge the moment the request arrives, but while it's unresolved the live
 prompt **commandeers the whole footer** (status line, input box, and its
 framing rules) and the badge is suppressed from the transcript so it isn't
 shown twice; once answered, the footer returns and the badge becomes visible
-again. It reads as a confirm prompt — the tool + args, the question, the
-action row, and a dim footer — keyed `a`/`d`/`r` (`r` toggles remember), `esc`
-dismisses without answering (the request stays pending; a re-attach
-re-surfaces it):
+again. It reads as a confirm prompt — a rule, a titled `<tool> command`
+header, the indented args, the question, and the action row, keyed `a`/`d`/`r`
+(`r` toggles remember), `esc` dismisses without answering (the request stays
+pending; a re-attach re-surfaces it):
 
 ```
- ● bash · cmd=rm -rf /tmp/session-fixtures
+ ────────────────────────────────────────────────
+ bash command
+
+   cmd=rm -rf /tmp/session-fixtures
 
  Allow this tool call?
    [a] allow   [d] deny   [r] remember: off
@@ -146,22 +163,45 @@ tool-block rendering — a status-count header, grouped sections, a one-line
 session row, and a bottom dispatch bar with a hint line — reimplemented here
 for gofer's Event/Op model.
 
-**Bottom-anchored layout** (chat-style, like Claude Code): on overview and
-attach, the input block — the autocomplete menu when open, the input's
-framing rules, the `>`/`❯` line, and the status/usage footer — is pinned to
-the terminal's last rows; the transcript/roster fills the region above it,
-top-aligned, growing downward and tailing (unchanged scroll behavior) once
-it overflows. `Overview.render` and `Model.view` each pad their own
-transcript/roster rows with blank filler up to the height they're handed
-before appending the pinned block, so a short conversation leaves blank rows
-*above* the input instead of trailing directly beneath it. `App.render`
-composes the autocomplete menu into that same pinned block rather than
-budgeting for it separately — `Overview`/`Model`'s `*WithMenu` variants
-already carve its rows out of their own height budget. The command panel
-still takes its own slice out of the bottom when open (unaffected — panel
-and menu are mutually exclusive). `layout.TopPadding` is unrelated: a fixed
-one-row workaround for a terminal that clips the frame's first row, applied
-once in `App.render` on top of the bottom-anchored frame.
+**Bottom-anchored layout, scroll-away header** (chat-style, like Claude
+Code): on overview and attach, the input block — the autocomplete menu when
+open, the input's framing rules, the `>`/`❯` line, and the status/usage
+footer — is pinned to the terminal's last rows; everything above it is one
+scrollable region. On attach that region is the identity header **plus** the
+transcript (`Model.view` joins `attachHeaderLines` to `transcriptLines`
+before windowing) — a short conversation leaves the header pinned at the top
+with blank filler below it, exactly as before, but a transcript long enough
+to overflow the viewport scrolls the header off the top along with the
+oldest messages, tailing to the latest by default. `Overview.render` pads
+its own header (unaffected — the overview's header stays fixed; only its
+roster rows scroll) plus roster rows with blank filler up to the height it's
+handed before appending the pinned dispatch block, so a short roster leaves
+blank rows *above* the input instead of trailing directly beneath it.
+
+**Scroll**: a mouse wheel (`tea.MouseWheelMsg`, enabled via `View().MouseMode
+= tea.MouseModeCellMotion` — bubbletea v2 moved mouse mode off
+`tea.NewProgram` and onto the View) or `PgUp`/`PgDn` moves `App.scroll` — 0 is
+the default, tail-to-latest; wheel-up/`PgUp` scroll back into history,
+wheel-down/`PgDn` scroll toward the tail, floored at 0. On overview it
+overrides the roster's selection-anchored windowing while active; on attach
+it scrolls the header+transcript region described above. Both go through the
+shared `scrollTail` primitive, which clamps the offset to the content's
+actual length so an oversized offset (or a zero/negative viewport — the #87
+class of underflow) can never slice out of range. `App.scroll` resets to 0
+whenever the screen or the attached/peeked session changes, so navigating
+away and back always lands back at the tail.
+
+`App.render` composes the autocomplete menu into the pinned input block
+rather than budgeting for it separately — `Overview`/`Model`'s `*WithMenu`
+variants already carve its rows out of their own height budget. The command
+panel takes its own slice out of the bottom when open (unaffected — panel
+and menu are mutually exclusive) and, on the overview, blanks the dispatch
+bar's three rows in its place (`Overview.dispatch`'s `hide` parameter) — the
+panel then owns the bottom of the screen, so the roster's own (un-typeable)
+dispatch chrome doesn't render redundantly beneath it. `layout.TopPadding`
+is unrelated: a fixed one-row workaround for a terminal that clips the
+frame's first row, applied once in `App.render` on top of the bottom-anchored
+frame.
 
 **Tool blocks** in the attach transcript render as a collapsed tree: a
 header line `‹marker› tool(command)`, then the result tree-indented beneath — the
@@ -287,8 +327,10 @@ tui/
   below the editor, not as an absolute overlay.
 - **Per-tool-kind `ToolRenderer`** interface + width-aware diff view (split
   ≥ 140 cols, else unified).
-- Deferred: mouse, animations beyond one shared spinner, a second theme,
-  raw-ANSI subprocess remapping.
+- Mouse-wheel scroll shipped (see [Bottom-anchored layout, scroll-away
+  header](#roster--navigation-m2)) — click/drag selection is still deferred.
+- Deferred: click/drag mouse selection, animations beyond one shared spinner,
+  a second theme, raw-ANSI subprocess remapping.
 
 ## How the TUI is tested
 

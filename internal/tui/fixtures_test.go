@@ -23,7 +23,7 @@ var GoldenNow = time.Date(2026, 7, 12, 18, 0, 0, 0, time.UTC)
 // GoldenMeta returns the shared OverviewMeta the App/Overview golden tests
 // build through.
 func GoldenMeta() OverviewMeta {
-	return OverviewMeta{App: "gofer", Version: "0.3.0", Model: "fable-5", Cwd: "~/orchestration", Now: GoldenNow}
+	return OverviewMeta{App: "gofer", Version: "0.3.0", Model: "claude-sonnet-5", Cwd: "~/orchestration", Now: GoldenNow}
 }
 
 // GoldenCommandEnv returns the shared [CommandEnv] the App/command-panel

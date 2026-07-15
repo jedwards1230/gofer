@@ -28,6 +28,19 @@ const (
 // status/summary changes from sessions it isn't currently subscribed to.
 const rosterInterval = 1 * time.Second
 
+// scrollPageLines and scrollWheelLines are the step sizes App.scroll moves by
+// per PgUp/PgDn key press and per mouse-wheel notch, respectively — a page
+// jump is deliberately larger than a wheel notch, matching how most terminal
+// apps pace the two inputs differently. Both are plain line counts, not tied
+// to the terminal's actual height: [Overview.body]/[Model.view] clamp the
+// resulting offset to the content's real length via scrollTail, so an
+// oversized step just clamps to the top of the content instead of
+// overshooting.
+const (
+	scrollPageLines  = 10
+	scrollWheelLines = 3
+)
+
 // App is gofer's TUI root: the bubbletea [tea.Model] that ties the
 // overview/peek/attach screens together, enforces the navigation contract
 // between them, and drives the daemon exclusively through [Supervisor] — the
@@ -85,6 +98,19 @@ type App struct {
 	height int
 
 	status string // transient error/status line, cleared on the next key press
+
+	// scroll is the active screen's manual scroll-back offset into its
+	// header+content region — 0 (the default) is tail-to-latest: the
+	// overview follows the selection and the attach transcript tails new
+	// messages, exactly as before this field existed. A mouse wheel
+	// (handleWheel) or PgUp/PgDn (handleOverviewKey/handleAttachKey) moves
+	// it; [Overview.body]/[Model.view] clamp it to the content's actual
+	// length via scrollTail, so it is safe to grow unbounded here. Reset to
+	// 0 wherever the screen or the attached/peeked session changes (see
+	// switchSession and the a.scr assignments below) so navigating away and
+	// back always lands back at the tail rather than a stale offset into
+	// different content.
+	scroll int
 }
 
 // NewApp returns an App rendering through th, driving sup, with its roster
@@ -248,6 +274,7 @@ func (a *App) switchSession(id string) tea.Cmd {
 	a.sessID = id
 	a.sess = New(a.theme) // a fresh Model has no pending approval either
 	a.sub = nil
+	a.scroll = 0 // a different session's transcript starts back at the tail
 	return a.subscribe(id)
 }
 
@@ -288,6 +315,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		a.width, a.height = msg.Width, msg.Height
 		return a, nil
+
+	case tea.MouseWheelMsg:
+		return a.handleWheel(msg), nil
 
 	case rosterMsg:
 		if msg.err != nil {
@@ -375,6 +405,31 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
+// handleWheel applies a mouse-wheel notch to a.scroll — the roster on the
+// overview, or the header+transcript on attach (see [Overview.body]/
+// [Model.view]); wheel-up scrolls back into history, wheel-down scrolls
+// toward the tail, clamped at 0 (peek has no scrollable content of its own,
+// and a command panel takes over the bottom of whichever screen is showing
+// but doesn't stop the screen underneath it from scrolling, so this only
+// gates on the screen, not a.panel). Content-length clamping happens at
+// render time (scrollTail), so this never needs to know the actual
+// viewport/content size.
+func (a App) handleWheel(msg tea.MouseWheelMsg) App {
+	if a.scr != screenOverview && a.scr != screenAttach {
+		return a
+	}
+	switch msg.Mouse().Button {
+	case tea.MouseWheelUp:
+		a.scroll += scrollWheelLines
+	case tea.MouseWheelDown:
+		a.scroll -= scrollWheelLines
+		if a.scroll < 0 {
+			a.scroll = 0
+		}
+	}
+	return a
+}
+
 // handleKey dispatches a key press to the current screen's handler.
 func (a App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch a.scr {
@@ -414,8 +469,20 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.scr = screenAttach
+		a.scroll = 0
 		cmd := a.enter(id)
 		return a, cmd
+
+	case key.Code == tea.KeyPgUp:
+		a.scroll += scrollPageLines
+		return a, nil
+
+	case key.Code == tea.KeyPgDown:
+		a.scroll -= scrollPageLines
+		if a.scroll < 0 {
+			a.scroll = 0
+		}
+		return a, nil
 
 	case key.Code == tea.KeyEnter:
 		if a.over.InputEmpty() {
@@ -426,6 +493,7 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// Peek renders a roster-only card — it does not subscribe. The
 			// subscription is established only if the user attaches from peek.
 			a.scr = screenPeek
+			a.scroll = 0
 			a.peekReply = ""
 			return a, nil
 		}
@@ -498,6 +566,7 @@ func (a App) handlePeekKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if a.peekReply == "" {
 			// Open: attach the peeked session, subscribing now (peek did not).
 			a.scr = screenAttach
+			a.scroll = 0
 			return a, a.enter(a.over.SelectedID())
 		}
 		id := a.over.SelectedID()
@@ -511,6 +580,7 @@ func (a App) handlePeekKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Code == tea.KeySpace || key.Text == " ":
 		if a.peekReply == "" {
 			a.scr = screenOverview
+			a.scroll = 0
 			return a, nil
 		}
 		a.peekReply += " "
@@ -557,6 +627,18 @@ func (a App) handleAttachKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Code == tea.KeyLeft:
 		if a.sess.InputEmpty() {
 			a.scr = screenOverview
+			a.scroll = 0
+		}
+		return a, nil
+
+	case key.Code == tea.KeyPgUp:
+		a.scroll += scrollPageLines
+		return a, nil
+
+	case key.Code == tea.KeyPgDown:
+		a.scroll -= scrollPageLines
+		if a.scroll < 0 {
+			a.scroll = 0
 		}
 		return a, nil
 
@@ -572,6 +654,9 @@ func (a App) handleAttachKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		a.sess = a.sess.Submit()
 		var cmd tea.Cmd
 		if txt, ok := a.sess.TakeSubmitted(); ok && a.sessID != "" {
+			// Sending a prompt is exactly the moment a scrolled-back reader
+			// wants to see the reply as it streams in — snap back to the tail.
+			a.scroll = 0
 			cmd = a.doSend(a.sessID, txt)
 		}
 		return a, cmd
@@ -661,9 +746,17 @@ func (a App) render() string {
 	case screenPeek:
 		body = NewPeek(a.theme, a.over, a.peekReply).View(a.width, h)
 	case screenAttach:
-		body = a.sess.ViewWithMenu(a.width, h, menuLines)
+		// attachHeaderLines is the same two-line "gofer v<version>" /
+		// "<model> · <cwd>" identity chrome the overview's own header opens
+		// with (see identityHeaderLines, overview_render.go) — the redesign's
+		// global header, now topping the attach transcript, its approval
+		// prompts, and its menu/panel overlays too, not just the overview.
+		// Model.view joins it to the transcript as one scrollable region
+		// (a.scroll), so it tails off the top for a long enough conversation
+		// exactly like the oldest messages do.
+		body = a.sess.ViewWithMenu(a.width, h, menuLines, attachHeaderLines(a.theme, a.over.meta, a.width), a.scroll)
 	default:
-		body = a.over.ViewWithMenu(a.width, h, menuLines)
+		body = a.over.ViewWithMenu(a.width, h, menuLines, a.scroll, a.panel != nil)
 	}
 
 	if a.panel != nil {
@@ -685,9 +778,26 @@ func (a App) render() string {
 }
 
 // View satisfies tea.Model, rendering the current screen at the last known
-// terminal size. It requests the alternate screen, matching [Program.View].
+// terminal size. It requests the alternate screen, matching [Program.View],
+// and enables cell-motion mouse reporting — bubbletea v2 moved mouse mode
+// from a tea.NewProgram option onto the View itself (see the upgrade guide's
+// "Mouse mode is now a View field") — so a terminal that supports it starts
+// sending [tea.MouseWheelMsg] (see handleWheel) as soon as this frame draws;
+// cmd/gofer's tui_app.go/attach.go build the [tea.Program] wrapping App and
+// need no extra option for this.
 func (a App) View() tea.View {
 	v := tea.NewView(a.render())
 	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
 	return v
+}
+
+// attachHeaderLines renders the attach screen's identity header: the same
+// title/context lines [Overview.header] shows (identityHeaderLines,
+// overview_render.go), padded to headerLines rows with blank lines in place
+// of the overview's status-count line — a global roster tally has no meaning
+// once attached to one session. Model.view treats these as the top of the
+// scrollable header+transcript region (see App.render's screenAttach case).
+func attachHeaderLines(th theme.Theme, meta OverviewMeta, width int) []string {
+	return pad(identityHeaderLines(th, meta, width), headerLines)
 }
