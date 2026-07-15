@@ -36,9 +36,18 @@ const rosterInterval = 1 * time.Second
 // resulting offset to the content's real length via scrollTail, so an
 // oversized step just clamps to the top of the content instead of
 // overshooting.
+//
+// scrollWheelLines was tuned down from 3 to 2 for a smoother feel: every
+// wheel notch this package receives is applied in full (handleWheel has no
+// debounce/coalescing of its own, and bubbletea delivers one MouseWheelMsg
+// per notch — see TestWheelNotchesAccumulateWithoutDrops), so the
+// "jumpiness" a fixed per-notch step can produce is purely a function of the
+// step size, not dropped input. 2 lines/notch stays inside the same 1-3 line
+// band most terminal apps use for line-based (non-pixel) wheel scroll, just
+// gentler than 3.
 const (
 	scrollPageLines  = 10
-	scrollWheelLines = 3
+	scrollWheelLines = 2
 )
 
 // App is gofer's TUI root: the bubbletea [tea.Model] that ties the

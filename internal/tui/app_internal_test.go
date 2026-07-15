@@ -661,6 +661,77 @@ func TestHandleWheelScrollsAndClampsAtTail(t *testing.T) {
 	}
 }
 
+// TestWheelNotchesAccumulateWithoutDrops drives N mouse-wheel notches
+// through the real Update path (not handleWheel directly, so this exercises
+// the same message dispatch a live tea.Program uses) and asserts a.scroll
+// lands at exactly the expected total — proof that App.Update applies every
+// notch it receives (no debounce/coalescing of its own drops or merges
+// consecutive wheel events), the way a fast trackpad flick delivers many
+// MouseWheelMsg values back to back.
+func TestWheelNotchesAccumulateWithoutDrops(t *testing.T) {
+	a := App{scr: screenOverview}
+
+	const upNotches = 11
+	var mdl tea.Model = a
+	for i := 0; i < upNotches; i++ {
+		mdl, _ = mdl.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	}
+	if got := mdl.(App).scroll; got != upNotches*scrollWheelLines {
+		t.Fatalf("scroll after %d wheel-up notches = %d, want %d (every notch applied, none dropped)", upNotches, got, upNotches*scrollWheelLines)
+	}
+
+	const downNotches = 4
+	for i := 0; i < downNotches; i++ {
+		mdl, _ = mdl.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
+	}
+	want := (upNotches - downNotches) * scrollWheelLines
+	if got := mdl.(App).scroll; got != want {
+		t.Fatalf("scroll after %d up + %d down notches = %d, want %d", upNotches, downNotches, got, want)
+	}
+}
+
+// TestWheelScrollsMassiveTranscriptWithoutPanic exercises wheel scroll
+// against a transcript far larger than any golden fixture (2,000 turns) —
+// proof the wheel path stays correct (moves the visible window, doesn't
+// panic/hang) at a scale where a render regression reintroducing O(n)
+// per-notch cost, or an off-by-one in scrollTail's bound math, would be far
+// more likely to surface than at the golden tests' ~2-item fixtures.
+func TestWheelScrollsMassiveTranscriptWithoutPanic(t *testing.T) {
+	meta := GoldenMeta()
+	meta.AttachSessionID = "sess-x"
+	a := NewApp(theme.Test(), &internalFakeSup{}, meta, GoldenCommandEnv())
+	mdl, _ := a.Update(tea.WindowSizeMsg{Width: testkit.Width, Height: testkit.Height})
+	a = mdl.(App)
+
+	const turns = 2000
+	for i := 0; i < turns; i++ {
+		mdl, _ = a.Update(sessEventMsg{
+			id: "sess-x",
+			ev: event.NewMessageFinished("sess-x", event.MessageUser, fmt.Sprintf("turn %d", i)),
+		})
+		a = mdl.(App)
+	}
+
+	tailed := a.render()
+	if !strings.Contains(tailed, fmt.Sprintf("turn %d", turns-1)) {
+		t.Fatalf("precondition failed: tailed render missing the latest turn on a %d-turn transcript", turns)
+	}
+
+	const notches = 50
+	for i := 0; i < notches; i++ {
+		mdl, _ = a.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+		a = mdl.(App)
+	}
+	if want := notches * scrollWheelLines; a.scroll != want {
+		t.Fatalf("scroll after %d wheel-up notches on a massive transcript = %d, want %d", notches, a.scroll, want)
+	}
+
+	scrolled := a.render() // must not panic even at this scale
+	if strings.Contains(scrolled, fmt.Sprintf("turn %d", turns-1)) {
+		t.Error("wheel-scrolled render on a massive transcript still shows the latest turn — the visible window did not move")
+	}
+}
+
 // TestHandleWheelScrollsOverflowingTranscript is the render-level companion
 // to TestHandleWheelScrollsAndClampsAtTail: that test only asserts a.scroll's
 // numeric field moves, which would pass even if the wheel-driven offset were
@@ -817,5 +888,35 @@ func TestViewEnablesMouseMode(t *testing.T) {
 	a := NewApp(theme.Test(), &internalFakeSup{}, GoldenMeta(), GoldenCommandEnv())
 	if got := a.View().MouseMode; got != tea.MouseModeCellMotion {
 		t.Errorf("View().MouseMode = %v; want tea.MouseModeCellMotion", got)
+	}
+}
+
+// BenchmarkAppRenderMassiveTranscript measures render() cost on a
+// transcript far larger than any real conversation is likely to reach
+// (5,000 turns) — an on-demand way to observe whether a render stays fast
+// enough for smooth wheel scroll (the "stays smooth on a massive
+// transcript" property Part B's docs/TUI.md section describes) without a
+// wall-clock assertion in the regular gate (flaky in CI). Run explicitly
+// with `go test ./internal/tui -run '^$' -bench BenchmarkAppRenderMassiveTranscript`.
+func BenchmarkAppRenderMassiveTranscript(b *testing.B) {
+	meta := GoldenMeta()
+	meta.AttachSessionID = "sess-x"
+	a := NewApp(theme.Test(), &internalFakeSup{}, meta, GoldenCommandEnv())
+	mdl, _ := a.Update(tea.WindowSizeMsg{Width: testkit.Width, Height: testkit.Height})
+	a = mdl.(App)
+
+	const turns = 5000
+	for i := 0; i < turns; i++ {
+		mdl, _ = a.Update(sessEventMsg{
+			id: "sess-x",
+			ev: event.NewMessageFinished("sess-x", event.MessageUser, fmt.Sprintf("turn %d", i)),
+		})
+		a = mdl.(App)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		a.scroll = i % 200 // simulate wheel notches moving the window each render
+		_ = a.render()
 	}
 }
