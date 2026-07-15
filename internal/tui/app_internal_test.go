@@ -207,6 +207,100 @@ func TestRenderBeforeWindowSize(t *testing.T) {
 	}
 }
 
+// TestRenderNoPanicAtTinyHeights extends TestRenderBeforeWindowSize's
+// no-panic guarantee to the small terminal sizes most likely to underflow
+// the bottom-anchoring filler math: [Model.view]'s avail clamp and
+// [Overview.render]'s bodyAvail clamp both floor at 0 before any
+// strings.Repeat/slice op, but a height of 0, 1, or 2 (and a small-but-real
+// terminal) is exactly where a regression in that flooring would surface as
+// a negative-count strings.Repeat or an out-of-range slice bound — the #87
+// class of bug this PR's bottom-anchoring math must not reintroduce.
+func TestRenderNoPanicAtTinyHeights(t *testing.T) {
+	screens := []struct {
+		name string
+		meta OverviewMeta
+	}{
+		{"overview", GoldenMeta()},
+		{"attach", OverviewMeta{AttachSessionID: "sess-x"}},
+	}
+	sizes := []struct {
+		name          string
+		width, height int
+	}{
+		{"height0", 80, 0},
+		{"height1", 80, 1},
+		{"height2", 80, 2},
+		{"tiny", 10, 5},
+	}
+	for _, scr := range screens {
+		for _, sz := range sizes {
+			t.Run(scr.name+"/"+sz.name, func(t *testing.T) {
+				a := NewApp(theme.Test(), &internalFakeSup{}, scr.meta, GoldenCommandEnv())
+				mdl, _ := a.Update(tea.WindowSizeMsg{Width: sz.width, Height: sz.height})
+				a = mdl.(App)
+				_ = a.render() // must not panic
+			})
+		}
+	}
+}
+
+// TestBottomAnchoredOverviewInput verifies the overview dispatch bar — the
+// rule/input/hint block [Overview.dispatch] renders — lands on the render's
+// last rows at a normal terminal size, with blank filler directly above it
+// when the roster is short, instead of trailing the roster rows the way a
+// top-anchored frame would.
+func TestBottomAnchoredOverviewInput(t *testing.T) {
+	a := newAppForGolden(t, newInternalFakeSup(GoldenRoster()))
+
+	rows := strings.Split(a.render(), "\n")
+	if len(rows) != testkit.Height {
+		t.Fatalf("render() produced %d rows; want exactly testkit.Height (%d) — the bottom-anchored frame must still total a.height", len(rows), testkit.Height)
+	}
+
+	rule := strings.Repeat("─", testkit.Width)
+	last := len(rows) - 1
+	if rows[last-2] != rule {
+		t.Errorf("row %d (dispatch rule) = %q; want the full-width rule", last-2, rows[last-2])
+	}
+	if !strings.HasPrefix(rows[last-1], "❯") {
+		t.Errorf("row %d (dispatch input) = %q; want it to start with the ❯ prompt", last-1, rows[last-1])
+	}
+	if rows[last-3] != "" {
+		t.Errorf("row %d = %q; want blank filler directly above the pinned dispatch bar", last-3, rows[last-3])
+	}
+}
+
+// TestBottomAnchoredAttachInput is TestBottomAnchoredOverviewInput's attach
+// counterpart: the input's framing rules + input line [Model.view] renders
+// land on the render's last rows, with blank filler above them when the
+// transcript is short (here, empty — a freshly opened attach with no events
+// ingested yet).
+func TestBottomAnchoredAttachInput(t *testing.T) {
+	a := NewApp(theme.Test(), &internalFakeSup{}, OverviewMeta{AttachSessionID: "sess-x"}, GoldenCommandEnv())
+	mdl, _ := a.Update(tea.WindowSizeMsg{Width: testkit.Width, Height: testkit.Height})
+	a = mdl.(App)
+
+	rows := strings.Split(a.render(), "\n")
+	if len(rows) != testkit.Height {
+		t.Fatalf("render() produced %d rows; want exactly testkit.Height (%d) — the bottom-anchored frame must still total a.height", len(rows), testkit.Height)
+	}
+
+	rule := strings.Repeat("─", testkit.Width)
+	last := len(rows) - 1
+	if rows[last] != rule {
+		t.Errorf("row %d (closing input rule) = %q; want the full-width rule", last, rows[last])
+	}
+	if !strings.HasPrefix(rows[last-1], "> ") {
+		t.Errorf("row %d (input line) = %q; want it to start with the > prompt", last-1, rows[last-1])
+	}
+	if rows[last-2] != rule {
+		t.Errorf("row %d (opening input rule) = %q; want the full-width rule", last-2, rows[last-2])
+	}
+	if rows[last-3] != "" {
+		t.Errorf("row %d = %q; want blank filler directly above the pinned input block", last-3, rows[last-3])
+	}
+}
+
 // TestAppStaleEventGuard verifies a sessEventMsg tagged for a session other
 // than the one currently attached/peeked is dropped rather than ingested —
 // the guard against a previous subscription's in-flight waitForEvent read

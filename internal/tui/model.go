@@ -468,9 +468,25 @@ func (m Model) view(width, height int, menuLines []string) string {
 		}
 	}
 
-	if avail := height - len(footer); avail >= 0 && len(lines) > avail {
+	// The footer — the menu (when open) + input framing + status, or the
+	// approval prompt in its place — is pinned to the bottom of the frame:
+	// the transcript above it tails to fit when it overflows avail (the
+	// existing scroll behavior, unchanged) and is padded with blank filler
+	// rows when it's shorter, so the footer lands on height's last row
+	// instead of trailing directly beneath a short conversation (chat-style
+	// bottom anchoring, matching how [Overview.render] already pads its
+	// body before the dispatch bar). avail is floored at 0 rather than left
+	// negative — a terminal shorter than the footer alone (the first frame,
+	// before WindowSizeMsg arrives, or a tiny window) skips both truncation
+	// and padding instead of underflowing the slice bound below.
+	avail := height - len(footer)
+	if avail < 0 {
+		avail = 0
+	}
+	if len(lines) > avail {
 		lines = lines[len(lines)-avail:]
 	}
+	lines = pad(lines, avail)
 	lines = append(lines, footer...)
 	return strings.Join(lines, "\n")
 }

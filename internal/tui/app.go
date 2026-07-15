@@ -595,9 +595,20 @@ func (a App) handleAttachKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // rather than three. The content budget is shrunk by the same amount so the
 // padded frame still totals a.height rows (status/input lines stay on
 // screen instead of being pushed off the bottom). The trailing status line
-// is included when set. This is the pure core [App.View] wraps into a
-// tea.View, kept separate so golden tests can assert on it directly without
-// a bubbletea dependency.
+// is included when set.
+//
+// The overview/attach screens each bottom-anchor their own input block
+// (dispatch bar / input rule + menu + footer) within the h budget they're
+// handed here — Overview.render pads its roster rows and Model.view pads
+// its transcript with blank filler up to h before appending the pinned
+// block, so the block always lands on h's last row and a short
+// transcript/roster leaves blank rows ABOVE it (chat-style bottom
+// anchoring) instead of trailing directly beneath the content. TopPadding
+// above is unrelated — a fixed workaround for a terminal that clips the
+// frame's very first row, not part of this bottom-anchoring math.
+//
+// This is the pure core [App.View] wraps into a tea.View, kept separate so
+// golden tests can assert on it directly without a bubbletea dependency.
 func (a App) render() string {
 	h := a.height - layout.TopPadding
 
@@ -620,13 +631,13 @@ func (a App) render() string {
 		h -= panelH
 	}
 
-	// The command-autocomplete menu (command_menu.go) takes a slice out of
-	// the bottom of the content budget the same way the panel/footer already
-	// do, composed above the active screen's input rule via
-	// Overview/Model's *WithMenu variant. It only applies to the overview
-	// and attach screens — the two text-entry surfaces the command-token
-	// grammar covers, see App.syncMenu — and is mutually exclusive with the
-	// panel (a.menu is always closed while a.panel != nil).
+	// The command-autocomplete menu (command_menu.go) is part of the
+	// bottom-anchored block Overview/Model's *WithMenu variant composes
+	// above the active screen's input rule — see the h-budget note below.
+	// It only applies to the overview and attach screens — the two
+	// text-entry surfaces the command-token grammar covers, see
+	// App.syncMenu — and is mutually exclusive with the panel (a.menu is
+	// always closed while a.panel != nil).
 	var menuLines []string
 	// Guard on h > 0: the first render happens before the terminal-size
 	// message arrives (a.height == 0), so the content budget can be negative
@@ -637,7 +648,12 @@ func (a App) render() string {
 		if len(menuLines) > h {
 			menuLines = menuLines[:h]
 		}
-		h -= len(menuLines)
+		// h is NOT reduced by len(menuLines) here: unlike the panel/footer
+		// above (which sit outside the screen's own render budget),
+		// Overview.render and Model.view already carve the menu's rows out
+		// of the height they're handed — see their own bottom-block/filler
+		// math — so subtracting it again here would double-count it and
+		// shrink the bottom-anchored frame short of a.height.
 	}
 
 	var body string
