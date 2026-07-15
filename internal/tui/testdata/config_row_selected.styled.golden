@@ -2,5 +2,6 @@
 <accent>▸ Default model … </accent>
   Permission mode … ask
   Roster view … flat
+  Auto-scroll transcript … true
   Telemetry enabled … false
   Telemetry endpoint … 

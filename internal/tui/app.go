@@ -278,6 +278,52 @@ func (a *App) switchSession(id string) tea.Cmd {
 	return a.subscribe(id)
 }
 
+// ingestAttach applies ev to a.sess in place, honoring the tui.autoscroll
+// setting (settings.go/config.TUI.AutoscrollEnabled — default true): with
+// autoscroll enabled (the default), an event is ingested exactly like
+// before this setting existed — a.scroll is left untouched, so at its
+// default of 0 the transcript keeps tailing to the latest content, per
+// [scrollTail]'s offset-0-is-the-tail contract. With autoscroll explicitly
+// disabled, ev must not be allowed to silently pull an already-rendered
+// view down toward the tail: this bumps a.scroll by however many transcript
+// lines ev just added, so the window of content actually on screen — same
+// start/end line indices into the (now longer) transcript — stays exactly
+// where the operator left it. Gated to the attach screen only: peek and the
+// overview never hold a live subscription this fires for. A pointer
+// receiver (like switchSession/enter) because it must mutate a.scroll, not
+// just a.sess.
+func (a *App) ingestAttach(ev event.Event) {
+	if a.scr != screenAttach || a.autoscrollEnabled() {
+		a.sess = a.sess.Ingest(ev)
+		return
+	}
+	before := len(a.sess.transcriptLines(a.width))
+	a.sess = a.sess.Ingest(ev)
+	if delta := len(a.sess.transcriptLines(a.width)) - before; delta > 0 {
+		a.scroll += delta
+	}
+}
+
+// autoscrollEnabled reports the effective tui.autoscroll setting
+// (config.TUI.AutoscrollEnabled — default true), read directly off
+// a.commandEnv.Config() on every call rather than cached: the same
+// "always current, never a stale snapshot" contract every other CommandEnv
+// read follows (see env.go's doc) — an edit from the /config panel, or from
+// config.json changing under a different attached client, takes effect on
+// the very next streamed event, not just the next process start. A nil
+// Config closure (the zero CommandEnv — e.g. a test that doesn't wire one)
+// or a read error both fall through to the same default: true.
+func (a App) autoscrollEnabled() bool {
+	if a.commandEnv.Config == nil {
+		return true
+	}
+	cfg, err := a.commandEnv.Config()
+	if err != nil {
+		return true
+	}
+	return cfg.TUI.AutoscrollEnabled()
+}
+
 // currentSessionInfo returns the roster snapshot for whichever session is
 // currently peeked or attached, or nil on the overview — there is no active
 // session for a command-panel view (e.g. /status's Session name/ID/Model
@@ -348,7 +394,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Ingest owns the pending-approval bookkeeping (set on
 		// PermissionRequested, cleared on a matching PermissionResolved) —
 		// see Model.Ingest and approval.go.
-		a.sess = a.sess.Ingest(msg.ev)
+		a.ingestAttach(msg.ev)
 		return a, waitForEvent(msg.id, msg.sub)
 
 	case sessClosedMsg:

@@ -18,11 +18,12 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := config.DefaultPath(dir)
 
+	disabled := false
 	want := config.Config{
 		Permissions: []config.Rule{{Verdict: "deny", Tool: "bash", Specifier: "rm:*"}},
 		Telemetry:   config.Telemetry{Enabled: true, Endpoint: "localhost:4317"},
 		Session:     config.Session{Model: "claude-sonnet-5", PermissionMode: "yolo"},
-		TUI:         config.TUI{RosterView: "grouped"},
+		TUI:         config.TUI{RosterView: "grouped", Autoscroll: &disabled},
 	}
 
 	if err := config.Save(path, want); err != nil {

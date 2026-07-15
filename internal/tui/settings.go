@@ -89,6 +89,22 @@ func settingsRegistry() []Setting {
 			},
 		},
 		{
+			Key:   "tui.autoscroll",
+			Label: "Auto-scroll transcript",
+			Kind:  SettingBool,
+			Get: func(c config.Config) string {
+				if c.TUI.AutoscrollEnabled() {
+					return "true"
+				}
+				return "false"
+			},
+			Set: func(c config.Config, v string) config.Config {
+				enabled := v == "true"
+				c.TUI.Autoscroll = &enabled
+				return c
+			},
+		},
+		{
 			Key:   "telemetry.enabled",
 			Label: "Telemetry enabled",
 			Kind:  SettingBool,

@@ -534,11 +534,54 @@ func markerLine(style lipgloss.Style, glyph, rest string) string {
 	return style.Render(glyph) + " " + rest
 }
 
+// styledMarkerLines splits text on embedded "\n" — a real multi-paragraph or
+// code-block reply is the ordinary case for streamed assistant/reasoning
+// content and pasted user input, not a rare one — into one display line per
+// physical line: [markerLine] for the first, then each further physical line
+// run through render and indented to align under the marker glyph rather than
+// left flush or repeating it. render lets callers apply their own per-line
+// styling (e.g. reasoning's muted body) the same way the single-line
+// markerLine call always could.
+//
+// Splitting here — never leaving a raw embedded "\n" inside one []string
+// entry — is the fix for the streaming top-anchor bug: transcriptLines'
+// returned slice LENGTH is what [Model.view]'s height math (avail,
+// scrollTail, pad) budgets against, on the assumption that one slice entry is
+// one terminal row. A slice entry carrying a raw "\n" prints as more than one
+// terminal row while counting as only one against avail — avail/scrollTail
+// then under-clip and pad under-fills, so a multi-line item (which real LLM
+// output almost always is) silently overflows past the bottom of the frame
+// while the header/oldest messages stay wrongly pinned in view: avail
+// (wrongly) thought there was still room, so scrollTail (correctly, on the
+// slice length it was given) never scrolled anything away. A single-line text
+// (the common short case, and every existing fixture) round-trips through
+// this unchanged: strings.Split on a string with no "\n" returns a
+// one-element slice, so the loop below never runs and this is byte-identical
+// to the old single-markerLine call.
+func styledMarkerLines(style lipgloss.Style, glyph, text string, render func(string) string) []string {
+	parts := strings.Split(text, "\n")
+	lines := make([]string, len(parts))
+	lines[0] = markerLine(style, glyph, render(parts[0]))
+	indent := strings.Repeat(" ", ansi.StringWidth(glyph)+1)
+	for i := 1; i < len(parts); i++ {
+		lines[i] = indent + render(parts[i])
+	}
+	return lines
+}
+
+// plainRender is the identity [styledMarkerLines] render func for item kinds
+// whose continuation lines carry no extra per-line styling beyond the
+// marker's — the rest of the line, on every physical row, is exactly the
+// item's own text.
+func plainRender(s string) string { return s }
+
 // renderItemLines renders a single transcript item to its display lines. A
 // tool item is a collapsed tree block spanning header + up to three
-// result lines; every other kind renders to exactly one line. Every kind is
-// marker-only styled: the leading glyph carries the state color, the text
-// after it keeps its own styling (plain, or muted for reasoning/status body).
+// result lines; every text-bearing kind renders to one line per physical line
+// its content contains (see [styledMarkerLines]) — exactly one for the common
+// single-line case. Every kind is marker-only styled: the leading glyph
+// carries the state color, the text after it keeps its own styling (plain, or
+// muted for reasoning/status body).
 func (m Model) renderItemLines(it item) []string {
 	switch it.kind {
 	case itemAssistantReasoning:
@@ -550,16 +593,17 @@ func (m Model) renderItemLines(it item) []string {
 		if strings.TrimSpace(it.text) == "" {
 			return nil
 		}
-		return []string{markerLine(m.theme.WarnStyle(), m.theme.GlyphAgent, m.theme.MutedStyle().Render(it.text))}
+		muted := m.theme.MutedStyle()
+		return styledMarkerLines(m.theme.WarnStyle(), m.theme.GlyphAgent, it.text, func(s string) string { return muted.Render(s) })
 
 	case itemUser:
-		return []string{markerLine(m.theme.InkStyle(), m.theme.GlyphHuman, it.text)}
+		return styledMarkerLines(m.theme.InkStyle(), m.theme.GlyphHuman, it.text, plainRender)
 
 	case itemTool:
 		return m.renderToolLines(it)
 
 	case itemError:
-		return []string{markerLine(m.theme.DangerStyle(), m.theme.GlyphAgent, it.text)}
+		return styledMarkerLines(m.theme.DangerStyle(), m.theme.GlyphAgent, it.text, plainRender)
 
 	case itemApproval:
 		return []string{markerLine(m.theme.WarnStyle(), m.theme.GlyphAgent, it.text)}
@@ -582,7 +626,7 @@ func (m Model) renderItemLines(it item) []string {
 		if it.done {
 			style = m.theme.OKStyle()
 		}
-		return []string{markerLine(style, m.theme.GlyphAgent, it.text)}
+		return styledMarkerLines(style, m.theme.GlyphAgent, it.text, plainRender)
 	}
 }
 
@@ -607,7 +651,12 @@ func (m Model) renderToolLines(it item) []string {
 	if summary := summarizeToolInput(it.toolInput); summary != "" {
 		header = fmt.Sprintf("%s(%s)", it.toolName, summary)
 	}
-	lines := []string{markerLine(style, m.theme.GlyphAgent, header)}
+	// A multi-line command (a heredoc, an inline multi-statement script) is a
+	// literal "\n" inside summary, not a rare shape for a bash tool call —
+	// styledMarkerLines splits it the same way the transcript's own text
+	// items are split above, for the same avail/scrollTail height-accounting
+	// reason (see its doc).
+	lines := styledMarkerLines(style, m.theme.GlyphAgent, header, plainRender)
 
 	if !it.done || it.toolResult == "" {
 		return lines

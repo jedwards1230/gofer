@@ -68,6 +68,27 @@ type TUI struct {
 	// (recency across the whole roster, the default) or "grouped" (by
 	// status). Mirrors the `tab` key's [Overview.ToggleView] toggle.
 	RosterView string `json:"roster_view,omitempty"`
+
+	// Autoscroll controls whether the attach screen's transcript auto-tails
+	// new streaming content: nil (unset) or true is the default — the
+	// transcript stays pinned to the latest message as it streams in,
+	// scrolling the header/oldest messages away exactly like before this
+	// setting existed. An explicit false is "manual": new events never move
+	// the view — it stays wherever the operator last left it (wheel/PgUp/
+	// PgDn) — until they scroll back down themselves. A *bool, not a plain
+	// bool, is required: JSON can't distinguish "field absent" from "field
+	// explicitly false" on a plain bool (both marshal from, and unmarshal
+	// to, the zero value), so an explicit false would silently come back as
+	// the default true on the next Load. See [TUI.AutoscrollEnabled] for the
+	// resolved value every caller should read instead of this field
+	// directly.
+	Autoscroll *bool `json:"autoscroll,omitempty"`
+}
+
+// AutoscrollEnabled resolves [TUI.Autoscroll]'s effective value: true (the
+// default) when unset, else the explicit stored value.
+func (t TUI) AutoscrollEnabled() bool {
+	return t.Autoscroll == nil || *t.Autoscroll
 }
 
 // Telemetry is gofer's native OpenTelemetry configuration block, mirroring

@@ -23,9 +23,12 @@ global identity header on every screen, reformatted the approval prompt,
 hid the roster dispatch bar while a command panel is open, unified the
 header into the same scrollable region as the attach transcript, and added
 mouse-wheel/PgUp-PgDn scrolling — see [Bottom-anchored
-layout](#roster--navigation-m2) and the approval-prompt example below. Still
-ahead: a general reusable dialog abstraction, the central keymap registry,
-and plugin UI.
+layout](#roster--navigation-m2) and the approval-prompt example below. A
+later fix pass closed a real streaming-attach bug (multi-line items breaking
+the tail-follow height accounting, wheel scroll along with it) and added the
+`tui.autoscroll` setting — see [Multi-line items and the height-accounting
+invariant](#roster--navigation-m2). Still ahead: a general reusable dialog
+abstraction, the central keymap registry, and plugin UI.
 
 ## The three altitudes
 
@@ -190,6 +193,34 @@ actual length so an oversized offset (or a zero/negative viewport — the #87
 class of underflow) can never slice out of range. `App.scroll` resets to 0
 whenever the screen or the attached/peeked session changes, so navigating
 away and back always lands back at the tail.
+
+**Multi-line items and the height-accounting invariant**: `Model.view`'s
+avail/scrollTail/pad math assumes `transcriptLines`' returned slice LENGTH
+equals the transcript's actual terminal row count — one slice entry, one
+row. A streamed assistant reply (or a pasted multi-line user prompt, or a
+multi-line tool command) is virtually always more than one physical line —
+paragraphs, lists, code blocks — so `renderItemLines` splits each item's text
+on embedded `"\n"` into one display-line entry per physical line
+(`styledMarkerLines`, model.go), continuation lines indented to align under
+the marker glyph rather than repeating it. Leaving a raw `"\n"` inside a
+single slice entry instead (the pre-fix shape) undercounts the item's real
+height: avail/scrollTail never clip it, so it silently overflows past the
+bottom of the frame while the header/oldest messages stay wrongly pinned in
+view — the streaming top-anchor bug (`internal/tui/streaming_test.go`
+reproduces it end to end via incremental `MessageStarted`/`MessageDelta`
+events, the same shape a live daemon attach streams, before asserting the
+fix).
+
+**`tui.autoscroll`** (settings.go, default true/unset) controls whether new
+streaming events pull the attach view down toward the tail: enabled (the
+default) behaves exactly as scroll always has — offset 0 always renders the
+current tail, so growing content keeps the latest message in view. Disabled,
+`App.ingestAttach` bumps `App.scroll` by however many transcript lines the
+just-ingested event added, keeping the *absolute* window of visible content
+fixed (same start/end line indices) rather than sliding toward the tail —
+"manual", the operator moves it themselves with the wheel/PgUp/PgDn. Read
+live off `CommandEnv.Config()` on every streamed event, not cached, the same
+"always current" contract every other `CommandEnv` read follows.
 
 Cell-motion mouse reporting (1002) plus SGR extended coordinates (1006) is
 the minimal enable pair bubbletea v2.0.8 offers — there is no wheel-only
@@ -475,8 +506,9 @@ rather than blank-filling it. Opens cleanly with zero providers
 authenticated and never resolves a credential (auth-independence).
 
 **Built (M4 step 3)**: `internal/config` adds `Session`/`TUI` config sections
-(`session.model`, `session.permission_mode`, `tui.roster_view`, alongside the
-existing `telemetry.*`) and `Save(path, Config)` — indented JSON, mode 0600,
+(`session.model`, `session.permission_mode`, `tui.roster_view`,
+`tui.autoscroll`, alongside the existing `telemetry.*`) and `Save(path,
+Config)` — indented JSON, mode 0600,
 atomic (temp file + rename). `settings.go` adds the setting registry: a
 `[]Setting{Key, Label, Kind, Options, Get(Config), Set(Config, val) Config}`
 table parallel to the command registry, namespaced (`session.*`, `tui.*`,
