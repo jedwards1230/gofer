@@ -14,10 +14,13 @@ the `App` screen-stack root that composes them under the navigation contract
 slash dispatcher + command panel host (`command.go`, `panel.go`); M4 step 2
 added the `CommandEnv` data seam (`env.go`) and the real `/status` view
 (`status.go`); M4 step 3 added `config.Save`, the settings registry
-(`settings.go`), and the real `/config` view (`config_view.go`) — see [Slash
-commands](#slash-commands) below. `/model` still renders as a placeholder tab
-until its own step lands. Still ahead: a general reusable dialog abstraction,
-the central keymap registry, and plugin UI.
+(`settings.go`), and the real `/config` view (`config_view.go`); M4 step 4
+added the real `/model` picker view (`modelpicker.go`) — see [Slash
+commands](#slash-commands) below. The picker's Enter/select action is still a
+stub: the coupled `Supervisor.SetModel` + `config.Save` swap lands once the
+parallel plumbing (ACP `session/new` model field, `Supervisor.SetModel`) does.
+Still ahead: a general reusable dialog abstraction, the central keymap
+registry, and plugin UI.
 
 ## The three altitudes
 
@@ -352,8 +355,9 @@ routed with the same precedence as the approval overlay — `panel > approval >
 active screen > global` — and closed by Esc, sized to whatever the active
 tab's body actually renders (`commandPanel.Height`) rather than always a
 worst-case max. Three builtins (`/status`, `/config`, `/model`) register now
-and open the panel on their tab; `/model` still renders a placeholder
-("`Model — coming soon.`") until its own step lands. `@` and `!` are not
+and open the panel on their tab; each opened on a one-line placeholder body
+until its own step landed the real view (`/status` in step 2, `/config` in
+step 3, `/model` in step 4 — see below). `@` and `!` are not
 implemented — the intercept only switches on a leading `/` so they can slot
 in later.
 
@@ -388,6 +392,24 @@ string opens an inline edit line — and a commit calls `env.SaveConfig`
 immediately, no separate save step. Esc is two-stage: it cancels an
 in-progress edit or clears the filter before a second Esc closes the panel.
 Pure local: reads/writes `config.json` only, no auth path at all.
+
+**Built (M4 step 4)**: `modelpicker.go` is the real `/model` body: the SDK's
+static catalog (`provider.Models()`/`provider.Lookup`) filtered to the
+providers `CommandEnv.Auth()` reports authenticated (the same seam
+`status.go` reads — no new credential path), grouped by provider, ✓-marking
+the active model (the attached session's override, else the persisted
+`session.model` config default, else the resolved roster default) with a
+one-line context-window/pricing description through a small gofer-side
+display-name table (`modelDisplayNames`) that falls back to the raw id. Zero
+providers authenticated renders an empty list plus a `/login` warning line
+instead of blocking the picker from opening (§4c/auth-independence). ↓/↑
+move the row highlight; **Enter is currently a no-op stub** — the coupled
+select (`Supervisor.SetModel` on the attached session + persisting
+`session.model` via `env.SaveConfig`) is held pending the parallel
+`Supervisor.SetModel`/ACP `session/new` plumbing, and lands as a follow-up.
+Effort-adjust (←/→) stays deferred (no SDK backing) — and has no room on the
+Model tab regardless, since ←/→ are already claimed by the panel host for
+tab switching.
 
 - **P0**: user markdown commands (`~/.gofer/commands` + project
   `.gofer/commands`, with `$1`, `$ARGUMENTS`, `${1:-def}`, `${@:N}`

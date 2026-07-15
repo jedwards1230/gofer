@@ -6,9 +6,10 @@ package tui
 // overlay's exactly (see dialog.go) — one field on [App], checked ahead of
 // the per-screen key handlers in App.Update, and one insertion point in
 // App.render(). M4 step 1 proved this seam with a one-line placeholder per
-// tab; M4 step 2 landed the real /status body (status.go); M4 step 3 lands
-// the real /config body (config_view.go) — Model stays a placeholder until
-// its own step.
+// tab; M4 step 2 landed the real /status body (status.go); M4 step 3 landed
+// the real /config body (config_view.go); M4 step 4 lands the real /model
+// body (modelpicker.go) — its Enter/select action is still a stub pending
+// the Supervisor.SetModel plumbing (see modelpicker.go's TODO).
 
 import (
 	"strings"
@@ -62,8 +63,9 @@ type commandPanel struct {
 	active commandPanelTab
 
 	// env, sess, and defaultModel are the data the Status tab's [statusView]
-	// reads (see status.go); the Model placeholder ignores them until its own
-	// step lands.
+	// reads (see status.go) — the Model tab's [modelPickerView] (below) reads
+	// the same three fields, captured once more into its own struct at open
+	// time.
 	env          CommandEnv
 	sess         *SessionInfo
 	defaultModel string
@@ -74,12 +76,16 @@ type commandPanel struct {
 	// consistent, once-loaded working copy rather than reloading on every
 	// tab switch.
 	cfg configView
+
+	// model is the Model tab's state (modelpicker.go), built the same way as
+	// cfg — env/sess/defaultModel captured once at open time.
+	model modelPickerView
 }
 
 // newCommandPanel returns a panel open on tab, rendering through th, with env
 // and the current session snapshot (nil on the overview) captured at open
-// time for the Status tab to read, and the Config tab's working copy loaded
-// from env.Config().
+// time for the Status tab to read, and the Config/Model tabs' working state
+// loaded from env at the same time.
 func newCommandPanel(th theme.Theme, tab commandPanelTab, env CommandEnv, sess *SessionInfo, defaultModel string) commandPanel {
 	return commandPanel{
 		theme:        th,
@@ -88,18 +94,20 @@ func newCommandPanel(th theme.Theme, tab commandPanelTab, env CommandEnv, sess *
 		sess:         sess,
 		defaultModel: defaultModel,
 		cfg:          newConfigView(th, env),
+		model:        newModelPickerView(th, env, sess, defaultModel),
 	}
 }
 
 // handleKey applies one key press to the panel. ←/→ always move the active
 // tab, regardless of what the active tab's own state is (an in-progress
-// Config-tab edit is simply left as-is on tab-away, same as any other
-// unsaved buffer). Every other key routes to the active tab's own handler —
-// only the Config tab has one today ([configView.handleKey]); Status and the
-// Model placeholder swallow the rest, matching M4 step 1/2's read-only
-// behavior. Esc is handled by the caller ([App.handlePanelKey]) via
-// [commandPanel.handleEscape] instead of here, since closing the panel
-// mutates App state (a.panel = nil) that this pure value doesn't hold.
+// Config-tab edit, or the Model tab's row highlight, is simply left as-is on
+// tab-away, same as any other unsaved buffer) — this is also why the Model
+// tab's deferred effort-adjust has no room on ←/→ (see modelpicker.go).
+// Every other key routes to the active tab's own handler; Status has none,
+// matching its read-only, no-selection design. Esc is handled by the caller
+// ([App.handlePanelKey]) via [commandPanel.handleEscape] instead of here,
+// since closing the panel mutates App state (a.panel = nil) that this pure
+// value doesn't hold.
 func (p commandPanel) handleKey(msg tea.KeyPressMsg) commandPanel {
 	switch msg.Key().Code {
 	case tea.KeyRight:
@@ -107,8 +115,11 @@ func (p commandPanel) handleKey(msg tea.KeyPressMsg) commandPanel {
 	case tea.KeyLeft:
 		return p.moveTab(-1)
 	}
-	if p.active == panelConfig {
+	switch p.active {
+	case panelConfig:
 		p.cfg = p.cfg.handleKey(msg)
+	case panelModel:
+		p.model = p.model.handleKey(msg)
 	}
 	return p
 }
@@ -197,8 +208,8 @@ func (p commandPanel) View(width, height int) string {
 // Height returns the number of rows p.View(width, panelHeight) will actually
 // render — the fixed chrome plus however many lines the active tab's body
 // needs, capped to panelHeight. [App.render] reserves exactly this many rows
-// rather than always the worst-case panelHeight, so a short body (the
-// Config/Model placeholders, or Status with little to report) doesn't steal
+// rather than always the worst-case panelHeight, so a short body (Status with
+// little to report, or the Model tab's empty-list warning) doesn't steal
 // screen space the roster above it could use.
 func (p commandPanel) Height(width int) int {
 	bodyRows := panelHeight - panelFixedRows
@@ -239,9 +250,8 @@ func (p commandPanel) tabBar() string {
 	return strings.Join(parts, "  ")
 }
 
-// body renders the active tab's content at the given width/bodyRows budget.
-// Status and Config render their real views; Model still renders its step-1
-// placeholder until its own step lands.
+// body renders the active tab's content at the given width/bodyRows budget —
+// every tab (Status, Config, Model) renders its real view.
 func (p commandPanel) body(width, bodyRows int) string {
 	switch p.active {
 	case panelStatus:
@@ -249,11 +259,8 @@ func (p commandPanel) body(width, bodyRows int) string {
 		return v.View(width, bodyRows)
 	case panelConfig:
 		return p.cfg.View(width, bodyRows)
-	}
-	for _, t := range panelTabs {
-		if t.tab == p.active {
-			return t.label + " — coming soon."
-		}
+	case panelModel:
+		return p.model.View(width, bodyRows)
 	}
 	return ""
 }
