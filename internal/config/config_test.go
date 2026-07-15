@@ -194,6 +194,59 @@ func TestLoadRejectsBadVerdict(t *testing.T) {
 	}
 }
 
+// TestAutoscrollDefaultsTrueOnMissingConfig covers the tui.autoscroll
+// default: a missing config.json (the common case — an unconfigured gofer)
+// must resolve to autoscroll ENABLED, even though the underlying field is a
+// *bool whose zero value (nil) has to mean "unset", not "false" — see
+// [config.TUI.AutoscrollEnabled]'s doc for why a plain bool can't carry this
+// default safely through a JSON round trip.
+func TestAutoscrollDefaultsTrueOnMissingConfig(t *testing.T) {
+	cfg, err := config.Load(filepath.Join(t.TempDir(), "does-not-exist.json"))
+	if err != nil {
+		t.Fatalf("Load(missing): %v", err)
+	}
+	if !cfg.TUI.AutoscrollEnabled() {
+		t.Fatal("AutoscrollEnabled() on a missing config = false, want true (the default)")
+	}
+}
+
+// TestAutoscrollExplicitFalseRoundTrips covers the failure mode a plain bool
+// would have here: Save-ing an explicit tui.autoscroll=false, then Load-ing
+// it back, must still read back as false — not silently revert to the
+// nil/absent default of true.
+func TestAutoscrollExplicitFalseRoundTrips(t *testing.T) {
+	dir := t.TempDir()
+	path := config.DefaultPath(dir)
+
+	disabled := false
+	if err := config.Save(path, config.Config{TUI: config.TUI{Autoscroll: &disabled}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.TUI.AutoscrollEnabled() {
+		t.Fatal("AutoscrollEnabled() after Save/Load of an explicit false = true, want false")
+	}
+
+	// The explicit true case round-trips too, and is byte-distinguishable
+	// from "unset" only in that both resolve to the same effective value —
+	// AutoscrollEnabled is what every caller should read, not the raw field.
+	enabled := true
+	if err := config.Save(path, config.Config{TUI: config.TUI{Autoscroll: &enabled}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err = config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !got.TUI.AutoscrollEnabled() {
+		t.Fatal("AutoscrollEnabled() after Save/Load of an explicit true = false, want true")
+	}
+}
+
 func TestLoadRejectsMalformedJSON(t *testing.T) {
 	dir := t.TempDir()
 	path := config.DefaultPath(dir)
