@@ -185,6 +185,28 @@ func TestAttachOpenPreselectsAndIngests(t *testing.T) {
 	}
 }
 
+// TestRenderBeforeWindowSize guards the very first frame: bubbletea calls View
+// before the initial WindowSizeMsg, so a.width/height are 0 and the content
+// budget h goes negative after the padding/footer slices. render must not
+// panic. Regression for the command-menu block (#86), which sliced
+// menuLines[:h] with a negative bound before this frame ever had room.
+func TestRenderBeforeWindowSize(t *testing.T) {
+	cases := []struct {
+		name string
+		meta OverviewMeta
+	}{
+		{"overview", GoldenMeta()},
+		{"attach", OverviewMeta{AttachSessionID: "sess-x"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := NewApp(theme.Test(), &internalFakeSup{}, tc.meta, GoldenCommandEnv())
+			// No WindowSizeMsg sent: a.width == a.height == 0, the first frame.
+			_ = a.View() // must not panic
+		})
+	}
+}
+
 // TestAppStaleEventGuard verifies a sessEventMsg tagged for a session other
 // than the one currently attached/peeked is dropped rather than ingested —
 // the guard against a previous subscription's in-flight waitForEvent read

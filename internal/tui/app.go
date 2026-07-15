@@ -628,7 +628,11 @@ func (a App) render() string {
 	// grammar covers, see App.syncMenu — and is mutually exclusive with the
 	// panel (a.menu is always closed while a.panel != nil).
 	var menuLines []string
-	if a.scr == screenOverview || a.scr == screenAttach {
+	// Guard on h > 0: the first render happens before the terminal-size
+	// message arrives (a.height == 0), so the content budget can be negative
+	// after the padding/footer slices. With no room there is no menu to show,
+	// and skipping avoids a menuLines[:h] slice with a negative bound (panic).
+	if (a.scr == screenOverview || a.scr == screenAttach) && h > 0 {
 		menuLines = a.menu.Lines(a.width)
 		if len(menuLines) > h {
 			menuLines = menuLines[:h]
