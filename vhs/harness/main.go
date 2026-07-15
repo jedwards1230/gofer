@@ -212,14 +212,18 @@ func (m overviewModel) View() tea.View {
 // scenes, these have no scripted event.Event stream of their own — the tape
 // drives the app directly, typing the slash command (and any navigation
 // keys) into the running program's stdin, the same path a real terminal's
-// keystrokes take (see command.go's dispatchSlash).
+// keystrokes take (see command.go's dispatchSlash). Model fields use the
+// SDK catalog's real ids (provider.Models()), not display names — the
+// panel-model scene's ✓ active mark is [modelPickerView.activeModel] matching
+// a row's id verbatim, so a display-name shorthand here would silently mark
+// nothing.
 func commandViewApp(env tui.CommandEnv) tea.Model {
 	now := fixedNow
 	sessions := []tui.SessionInfo{
-		{ID: "sess-1", Title: "wire the websocket ACP listener", Summary: "streaming the daemon handshake", Status: tui.StatusWorking, Model: "fable-5", Cwd: "~/orchestration", Updated: now.Add(-30 * time.Second)},
-		{ID: "sess-2", Title: "keycloak path-b groundwork", Summary: "turn finished — awaiting the next prompt", Status: tui.StatusNeedsInput, Model: "sonnet-5", Cwd: "~/orchestration", Updated: now.Add(-5 * time.Minute)},
+		{ID: "sess-1", Title: "wire the websocket ACP listener", Summary: "streaming the daemon handshake", Status: tui.StatusWorking, Model: "claude-fable-5", Cwd: "~/orchestration", Updated: now.Add(-30 * time.Second)},
+		{ID: "sess-2", Title: "keycloak path-b groundwork", Summary: "turn finished — awaiting the next prompt", Status: tui.StatusNeedsInput, Model: "claude-sonnet-5", Cwd: "~/orchestration", Updated: now.Add(-5 * time.Minute)},
 	}
-	meta := tui.OverviewMeta{App: "gofer", Version: "0.4.0", Model: "fable-5", Cwd: "~/orchestration", Now: now}
+	meta := tui.OverviewMeta{App: "gofer", Version: "0.4.0", Model: "claude-fable-5", Cwd: "~/orchestration", Now: now}
 	return tui.NewApp(theme.Default(), newVHSSupervisor(sessions), meta, env)
 }
 
