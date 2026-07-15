@@ -51,6 +51,10 @@ func (f *toolCallSession) Emit(e event.Event)       { f.broker.Publish(e) }
 func (f *toolCallSession) Cost() session.CostReport { return session.CostReport{} }
 func (f *toolCallSession) Close() error             { f.broker.Close(); return nil }
 
+// SetModel is a no-op: this fake's Prompt scripts a fixed tool-call +
+// permission round-trip and never reads a model.
+func (f *toolCallSession) SetModel(string) error { return nil }
+
 func (f *toolCallSession) Prompt(ctx context.Context, text string) error {
 	f.broker.Publish(event.NewToolCallStarted(f.id, f.callID, "bash", json.RawMessage(`{"command":"ls"}`)))
 	f.broker.Publish(event.NewPermissionRequested(f.id, f.callID, "bash", map[string]any{"command": text}, []string{"rule: ask"}))

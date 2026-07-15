@@ -411,6 +411,60 @@ func (s *Supervisor) Interrupt(ctx context.Context, sessionID string) error {
 	return nil
 }
 
+// SetModel changes sessionID's model for its next turn, consuming the SDK
+// runner's own setter ([runner.Runner.SetModel]) — no journal rebuild is
+// needed, since the swap is same-provider and takes effect on the session's
+// next turn (see that method's doc). Unlike Archive, SetModel has no
+// idle-only restriction: the SDK setter is concurrency-safe with a turn
+// already in flight (it reads the model once, at the top of the NEXT turn),
+// so calling it on a running session is fine.
+//
+// Before calling into the SDK, SetModel does its own cross-provider
+// pre-check via [provider.Lookup] so a rejection surfaces as the typed
+// [ErrCrossProvider] sentinel — the SDK's own rejection (invoked below as
+// defense-in-depth) is a plain, unwrapped error a caller cannot errors.Is
+// against (see [runner.Runner.SetModel]'s doc). The pre-check compares the
+// TARGET model's provider against the session's CURRENT model (as tracked in
+// this package's own roster bookkeeping — the [Session] interface exposes no
+// model accessor). If the current model is not a registered id (only
+// possible for a non-registry/test model id — a session's model at creation
+// is never itself validated against the registry), the provider comparison
+// is skipped and the call defers entirely to the SDK's own validation.
+func (s *Supervisor) SetModel(ctx context.Context, sessionID, model string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if model == "" {
+		return fmt.Errorf("supervisor: set model %s: %w", sessionID, ErrEmptyModel)
+	}
+	m, err := s.lookup(sessionID)
+	if err != nil {
+		return fmt.Errorf("supervisor: set model %s: %w", sessionID, err)
+	}
+
+	next, ok := provider.Lookup(model)
+	if !ok {
+		return fmt.Errorf("supervisor: set model %s: unknown model %q", sessionID, model)
+	}
+	m.mu.Lock()
+	current := m.model
+	m.mu.Unlock()
+	if cur, ok := provider.Lookup(current); ok && cur.Provider != next.Provider {
+		return fmt.Errorf("supervisor: set model %s: cannot change from %q (%s) to %q (%s): %w",
+			sessionID, current, cur.Provider, model, next.Provider, ErrCrossProvider)
+	}
+
+	if err := m.sess.SetModel(model); err != nil {
+		return fmt.Errorf("supervisor: set model %s: %w", sessionID, err)
+	}
+
+	m.mu.Lock()
+	m.model = model
+	m.mu.Unlock()
+	s.notify()
+	return nil
+}
+
 // Reply routes a human's permission answer to sessionID's approval gate,
 // unblocking the guard's Await for the matching call id (see [loop.Gate]). It
 // errors with [ErrNotLive] for an unknown session. The reply carries no session

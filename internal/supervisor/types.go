@@ -77,6 +77,12 @@ type Session interface {
 	Emit(e event.Event)
 	// Cost returns the session's token/cost tally across every journaled turn.
 	Cost() session.CostReport
+	// SetModel changes the model this session uses for its next turn. It
+	// rejects an unknown model id or a cross-provider change (the runner's
+	// provider is fixed at construction) without changing anything. Safe to
+	// call while a turn is in flight — the change takes effect on the next
+	// turn.
+	SetModel(model string) error
 	// Close shuts the session down, releasing its broker and journal.
 	Close() error
 }

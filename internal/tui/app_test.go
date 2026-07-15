@@ -98,6 +98,13 @@ func (f *fakeSup) Archive(_ context.Context, id string) error {
 	return nil
 }
 
+func (f *fakeSup) SetModel(_ context.Context, id, model string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ops = append(f.ops, "set-model:"+id+":"+model)
+	return nil
+}
+
 // Reply is a no-op here: the approval prompt it answers needs the unexported
 // sessEventMsg to trigger (see app_internal_test.go, package tui, for the
 // behavioral Reply-emission tests), which this package (tui_test) has no

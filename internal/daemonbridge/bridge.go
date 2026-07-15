@@ -22,9 +22,10 @@ import (
 // rather than import them, since they ARE the daemon's public wire contract,
 // not an internal implementation detail).
 const (
-	methodGoferRoster  = "gofer/roster"
-	methodGoferKill    = "gofer/kill"
-	methodGoferArchive = "gofer/archive"
+	methodGoferRoster   = "gofer/roster"
+	methodGoferKill     = "gofer/kill"
+	methodGoferArchive  = "gofer/archive"
+	methodGoferSetModel = "gofer/set_model"
 
 	// methodGoferPermissionRequested / methodGoferPermissionResolved are the
 	// gofer-native notifications the daemon fans a session's permission events
@@ -436,6 +437,22 @@ func (s *Supervisor) Kill(ctx context.Context, sessionID string) error {
 func (s *Supervisor) Archive(ctx context.Context, sessionID string) error {
 	if _, err := s.client.Call(ctx, methodGoferArchive, map[string]string{"sessionId": sessionID}); err != nil {
 		return fmt.Errorf("daemonbridge: archive %s: %w", sessionID, err)
+	}
+	return nil
+}
+
+// SetModel calls gofer/set_model. A cross-provider rejection (the
+// supervisor's own [supervisor.ErrCrossProvider] sentinel, in-process)
+// arrives here as a plain, messaged error like any other JSON-RPC
+// application error — the concrete sentinel type does not survive the wire
+// (see [daemon.Client.Call]'s error wrapping). A daemon-backed caller that
+// needs to branch on the cross-provider case specifically (rather than just
+// surface the message) should pre-check provider families itself — e.g.
+// against the same model registry the SDK's provider package exposes —
+// before calling, instead of trying to errors.Is against this return value.
+func (s *Supervisor) SetModel(ctx context.Context, sessionID, model string) error {
+	if _, err := s.client.Call(ctx, methodGoferSetModel, map[string]string{"sessionId": sessionID, "model": model}); err != nil {
+		return fmt.Errorf("daemonbridge: set model %s: %w", sessionID, err)
 	}
 	return nil
 }

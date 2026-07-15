@@ -20,12 +20,14 @@ import (
 // gofer-native control methods, namespaced so they never collide with an ACP
 // method name. They serve the CLI client (a later PR): roster/ps mirror
 // [supervisor.Supervisor.Roster]/[supervisor.Supervisor.List], kill/archive
-// mirror the lifecycle operations.
+// mirror the lifecycle operations, and set_model mirrors
+// [supervisor.Supervisor.SetModel].
 const (
-	methodGoferRoster  = "gofer/roster"
-	methodGoferPS      = "gofer/ps"
-	methodGoferKill    = "gofer/kill"
-	methodGoferArchive = "gofer/archive"
+	methodGoferRoster   = "gofer/roster"
+	methodGoferPS       = "gofer/ps"
+	methodGoferKill     = "gofer/kill"
+	methodGoferArchive  = "gofer/archive"
+	methodGoferSetModel = "gofer/set_model"
 
 	// methodGoferPermissionRequested / methodGoferPermissionResolved are the
 	// gofer-native notifications the daemon fans a session's permission events
@@ -79,10 +81,11 @@ var methodTable = map[string]methodHandler{
 	acp.MethodSessionCancel: handleSessionCancel,
 	acp.MethodSessionList:   handleSessionList,
 
-	methodGoferRoster:  handleGoferRoster,
-	methodGoferPS:      handleGoferPS,
-	methodGoferKill:    handleGoferKill,
-	methodGoferArchive: handleGoferArchive,
+	methodGoferRoster:   handleGoferRoster,
+	methodGoferPS:       handleGoferPS,
+	methodGoferKill:     handleGoferKill,
+	methodGoferArchive:  handleGoferArchive,
+	methodGoferSetModel: handleGoferSetModel,
 
 	methodPermissionReply: handlePermissionReply,
 }
@@ -910,5 +913,25 @@ func handleGoferArchive(d *Daemon, ctx context.Context, _ *peer, params json.Raw
 		return nil, appError(err)
 	}
 	d.log.Info("session archived", "session", req.SessionID)
+	return struct{}{}, nil
+}
+
+// handleGoferSetModel answers gofer/set_model {sessionId, model}, changing
+// the session's model for its next turn (see [supervisor.Supervisor.SetModel]).
+// [supervisor.ErrNotLive] (unknown session), an unknown model id, and
+// [supervisor.ErrCrossProvider] (a same-session cross-provider swap) all
+// surface as clear application errors — the wrapped error's message names
+// both models and providers, so a client sees exactly why it was rejected
+// even though the concrete ErrCrossProvider type itself does not cross the
+// wire (see internal/daemonbridge's SetModel doc).
+func handleGoferSetModel(d *Daemon, ctx context.Context, _ *peer, params json.RawMessage) (any, *rpcError) {
+	req, rerr := decodeSetModelParams(params)
+	if rerr != nil {
+		return nil, rerr
+	}
+	if err := d.sup.SetModel(ctx, req.SessionID, req.Model); err != nil {
+		return nil, appError(err)
+	}
+	d.log.Info("session model set", "session", req.SessionID, "model", req.Model)
 	return struct{}{}, nil
 }
