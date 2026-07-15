@@ -20,5 +20,5 @@ enter peek · → attach · tab toggle view · ctrl-x kill · ? shortcuts
 ────────────────────────────────────────────────────────────────────────────────
 Status  Config  [Model]
 ────────────────────────────────────────────────────────────────────────────────
-Model — coming soon.
+No providers authenticated. Run /login (or 'gofer login <anthropic|openai>').
 ←/→ to switch tabs · esc to close

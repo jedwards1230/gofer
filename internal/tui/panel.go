@@ -6,15 +6,20 @@ package tui
 // overlay's exactly (see dialog.go) — one field on [App], checked ahead of
 // the per-screen key handlers in App.Update, and one insertion point in
 // App.render(). M4 step 1 proved this seam with a one-line placeholder per
-// tab; M4 step 2 landed the real /status body (status.go); M4 step 3 lands
-// the real /config body (config_view.go) — Model stays a placeholder until
-// its own step.
+// tab; M4 step 2 landed the real /status body (status.go); M4 step 3 landed
+// the real /config body (config_view.go); M4 step 4 lands the real /model
+// body (modelpicker.go) and its Enter/select coupling
+// ([App.handleModelSelect], below) — the final M4 command-view piece.
 
 import (
+	"context"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/jedwards1230/agent-sdk-go/provider"
+
+	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
 
@@ -62,8 +67,9 @@ type commandPanel struct {
 	active commandPanelTab
 
 	// env, sess, and defaultModel are the data the Status tab's [statusView]
-	// reads (see status.go); the Model placeholder ignores them until its own
-	// step lands.
+	// reads (see status.go) — the Model tab's [modelPickerView] (below) reads
+	// the same three fields, captured once more into its own struct at open
+	// time.
 	env          CommandEnv
 	sess         *SessionInfo
 	defaultModel string
@@ -74,12 +80,16 @@ type commandPanel struct {
 	// consistent, once-loaded working copy rather than reloading on every
 	// tab switch.
 	cfg configView
+
+	// model is the Model tab's state (modelpicker.go), built the same way as
+	// cfg — env/sess/defaultModel captured once at open time.
+	model modelPickerView
 }
 
 // newCommandPanel returns a panel open on tab, rendering through th, with env
 // and the current session snapshot (nil on the overview) captured at open
-// time for the Status tab to read, and the Config tab's working copy loaded
-// from env.Config().
+// time for the Status tab to read, and the Config/Model tabs' working state
+// loaded from env at the same time.
 func newCommandPanel(th theme.Theme, tab commandPanelTab, env CommandEnv, sess *SessionInfo, defaultModel string) commandPanel {
 	return commandPanel{
 		theme:        th,
@@ -88,18 +98,20 @@ func newCommandPanel(th theme.Theme, tab commandPanelTab, env CommandEnv, sess *
 		sess:         sess,
 		defaultModel: defaultModel,
 		cfg:          newConfigView(th, env),
+		model:        newModelPickerView(th, env, sess, defaultModel),
 	}
 }
 
 // handleKey applies one key press to the panel. ←/→ always move the active
 // tab, regardless of what the active tab's own state is (an in-progress
-// Config-tab edit is simply left as-is on tab-away, same as any other
-// unsaved buffer). Every other key routes to the active tab's own handler —
-// only the Config tab has one today ([configView.handleKey]); Status and the
-// Model placeholder swallow the rest, matching M4 step 1/2's read-only
-// behavior. Esc is handled by the caller ([App.handlePanelKey]) via
-// [commandPanel.handleEscape] instead of here, since closing the panel
-// mutates App state (a.panel = nil) that this pure value doesn't hold.
+// Config-tab edit, or the Model tab's row highlight, is simply left as-is on
+// tab-away, same as any other unsaved buffer) — this is also why the Model
+// tab's deferred effort-adjust has no room on ←/→ (see modelpicker.go).
+// Every other key routes to the active tab's own handler; Status has none,
+// matching its read-only, no-selection design. Esc is handled by the caller
+// ([App.handlePanelKey]) via [commandPanel.handleEscape] instead of here,
+// since closing the panel mutates App state (a.panel = nil) that this pure
+// value doesn't hold.
 func (p commandPanel) handleKey(msg tea.KeyPressMsg) commandPanel {
 	switch msg.Key().Code {
 	case tea.KeyRight:
@@ -107,8 +119,11 @@ func (p commandPanel) handleKey(msg tea.KeyPressMsg) commandPanel {
 	case tea.KeyLeft:
 		return p.moveTab(-1)
 	}
-	if p.active == panelConfig {
+	switch p.active {
+	case panelConfig:
 		p.cfg = p.cfg.handleKey(msg)
+	case panelModel:
+		p.model = p.model.handleKey(msg)
 	}
 	return p
 }
@@ -197,8 +212,8 @@ func (p commandPanel) View(width, height int) string {
 // Height returns the number of rows p.View(width, panelHeight) will actually
 // render — the fixed chrome plus however many lines the active tab's body
 // needs, capped to panelHeight. [App.render] reserves exactly this many rows
-// rather than always the worst-case panelHeight, so a short body (the
-// Config/Model placeholders, or Status with little to report) doesn't steal
+// rather than always the worst-case panelHeight, so a short body (Status with
+// little to report, or the Model tab's empty-list warning) doesn't steal
 // screen space the roster above it could use.
 func (p commandPanel) Height(width int) int {
 	bodyRows := panelHeight - panelFixedRows
@@ -239,9 +254,8 @@ func (p commandPanel) tabBar() string {
 	return strings.Join(parts, "  ")
 }
 
-// body renders the active tab's content at the given width/bodyRows budget.
-// Status and Config render their real views; Model still renders its step-1
-// placeholder until its own step lands.
+// body renders the active tab's content at the given width/bodyRows budget —
+// every tab (Status, Config, Model) renders its real view.
 func (p commandPanel) body(width, bodyRows int) string {
 	switch p.active {
 	case panelStatus:
@@ -249,11 +263,8 @@ func (p commandPanel) body(width, bodyRows int) string {
 		return v.View(width, bodyRows)
 	case panelConfig:
 		return p.cfg.View(width, bodyRows)
-	}
-	for _, t := range panelTabs {
-		if t.tab == p.active {
-			return t.label + " — coming soon."
-		}
+	case panelModel:
+		return p.model.View(width, bodyRows)
 	}
 	return ""
 }
@@ -278,8 +289,101 @@ func (a App) handlePanelKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		a.panel = &p
 		return a, nil
+	case key.Code == tea.KeyEnter && a.panel.active == panelModel:
+		// The Model tab's Enter/select coupling needs IO (SetModel,
+		// SaveConfig) [commandPanel]/[modelPickerView] can't do as pure
+		// values — App is the client that does the calling (invariant #2),
+		// so it intercepts Enter here instead of routing it into
+		// commandPanel.handleKey below.
+		return a.handleModelSelect()
 	}
 	p := a.panel.handleKey(msg)
 	a.panel = &p
 	return a, nil
+}
+
+// handleModelSelect applies Enter on the Model tab: the coupled /model
+// select (docs/projects/gofer-m4-command-views-plan.md §4b). It always
+// persists the highlighted row's id as the session.model config default —
+// this alone is possible with zero providers authenticated, so it keeps
+// Enter auth-independent (§5) even when there is nothing else to do. When a
+// session is attached or peeked (a.panel.model.sess, captured at open time —
+// the same field [modelPickerView.activeModel] reads), the decision to also
+// hot-swap that session's live model is made HERE, client-side, before ever
+// calling the daemon: same provider (compared via the SDK's static catalog,
+// [provider.Lookup]) swaps through [Supervisor.SetModel] — the swap applies
+// on the session's next turn, not the one in flight — while a cross-provider
+// pick leaves the running session on its current model (a session's provider
+// is fixed at creation, see [Supervisor.SetModel]'s doc) and the status note
+// explains why instead. Selecting nothing (no row highlighted, or the picker's
+// empty/warn state) is a pure no-op — the panel stays open, untouched. Every
+// other outcome closes the panel: Enter is a committing action here, matching
+// the picker footer's "select" semantics, leaving the outcome in the
+// transient a.status line.
+func (a App) handleModelSelect() (tea.Model, tea.Cmd) {
+	selected := a.panel.model.selectedModel()
+	if selected == "" {
+		return a, nil
+	}
+
+	var cfg config.Config
+	if a.commandEnv.Config != nil {
+		if c, err := a.commandEnv.Config(); err == nil {
+			cfg = c
+		}
+	}
+	cfg.Session.Model = selected
+	if a.commandEnv.SaveConfig != nil {
+		if err := a.commandEnv.SaveConfig(cfg); err != nil {
+			a.status = "couldn't save default model: " + err.Error()
+			a.panel = nil
+			return a, nil
+		}
+	}
+
+	sess := a.panel.model.sess
+	if sess == nil {
+		// The overview: no running session to swap, only the default.
+		a.status = "Default model set to " + modelDisplayName(selected) + "."
+		a.panel = nil
+		return a, nil
+	}
+
+	if modelProvider(sess.Model) != modelProvider(selected) {
+		a.status = "Live model swap needs the same provider — default set for new sessions; this session keeps its model."
+		a.panel = nil
+		return a, nil
+	}
+
+	a.status = "Model set to " + modelDisplayName(selected) + "."
+	a.panel = nil
+	sessionID, sup := sess.ID, a.sup
+	return a, func() tea.Msg {
+		// A defensive backstop, not the primary guard: the client-side
+		// provider check above already keeps this call same-provider on the
+		// common path. [Supervisor.SetModel]'s own cross-provider rejection
+		// (its doc: the concrete error type does not cross the daemon wire)
+		// still surfaces cleanly here — opDoneMsg's existing error handling
+		// (App.Update) turns any error into the same transient status note
+		// rather than a crash.
+		err := sup.SetModel(context.Background(), sessionID, selected)
+		return opDoneMsg{err: err}
+	}
+}
+
+// modelProvider resolves id's provider family via the SDK's static catalog,
+// or "" for an id the catalog doesn't recognize — including "" itself, the
+// state a session created with no explicit model override carries
+// ([SessionInfo.Model]). [App.handleModelSelect] treats two unresolvable
+// providers as a mismatch rather than guessing, so an unknown current model
+// never triggers a live swap it can't reason about.
+func modelProvider(id string) string {
+	if id == "" {
+		return ""
+	}
+	info, ok := provider.Lookup(id)
+	if !ok {
+		return ""
+	}
+	return info.Provider
 }
