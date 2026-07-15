@@ -328,9 +328,17 @@ func (a App) handleModelSelect() (tea.Model, tea.Cmd) {
 
 	var cfg config.Config
 	if a.commandEnv.Config != nil {
-		if c, err := a.commandEnv.Config(); err == nil {
-			cfg = c
+		c, err := a.commandEnv.Config()
+		if err != nil {
+			// A read failure must NOT fall through to SaveConfig with a
+			// zero-value config — that would overwrite config.json and drop
+			// the user's permissions/telemetry settings. Surface it and abort,
+			// preserving the on-disk state (mirrors the SaveConfig-error path).
+			a.status = "couldn't load config: " + err.Error()
+			a.panel = nil
+			return a, nil
 		}
+		cfg = c
 	}
 	cfg.Session.Model = selected
 	if a.commandEnv.SaveConfig != nil {

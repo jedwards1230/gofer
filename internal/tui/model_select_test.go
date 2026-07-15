@@ -220,6 +220,41 @@ func TestModelSelectSaveConfigErrorStopsBeforeSetModel(t *testing.T) {
 	}
 }
 
+// TestModelSelectConfigReadErrorAbortsBeforeSave guards against silent data
+// loss: when the config read fails, handleModelSelect must NOT save a
+// zero-value config over config.json (which would drop the user's
+// permissions/telemetry) — it surfaces the error and aborts before any
+// SaveConfig or SetModel call, preserving the on-disk state.
+func TestModelSelectConfigReadErrorAbortsBeforeSave(t *testing.T) {
+	sup := newFakeSup(modelSelectRoster())
+	env := tui.GoldenCommandEnv()
+	env.Auth = func() ([]tui.ProviderAuth, error) {
+		return []tui.ProviderAuth{{Provider: "anthropic", Kind: tui.KindOAuth}}, nil
+	}
+	env.Config = func() (config.Config, error) {
+		return config.Config{}, errors.New("read fail")
+	}
+	var saved []config.Config
+	env.SaveConfig = func(c config.Config) error { saved = append(saved, c); return nil }
+
+	m := newModelSelectApp(t, sup, env)
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected (sonnet) session
+	m = dispatchSlash(t, m, "/model")
+	m = pressDown(t, m, pressesToHaiku)
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	if len(saved) != 0 {
+		t.Fatalf("SaveConfig calls = %v; want none — a config read error must abort before save (no data loss)", saved)
+	}
+	if len(sup.ops) != 0 {
+		t.Fatalf("sup.ops = %v; want none — the read error must short-circuit before SetModel", sup.ops)
+	}
+	got := content(m)
+	if !strings.Contains(got, "couldn't load config") {
+		t.Fatalf("expected the config-load error status note, got:\n%s", got)
+	}
+}
+
 // TestGoldenModelSelectHotSwap covers the full post-select rendered state
 // for a same-provider attached select: the panel has closed back to the
 // attach screen underneath it, with the confirmation note as the visible
