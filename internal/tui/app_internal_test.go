@@ -20,6 +20,7 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
+	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/tui/testkit"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
@@ -918,5 +919,144 @@ func BenchmarkAppRenderMassiveTranscript(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		a.scroll = i % 200 // simulate wheel notches moving the window each render
 		_ = a.render()
+	}
+}
+
+// TestMouseDragSelectsWithoutModifier is the required "plain drag selects
+// without a modifier" coverage: a left-button click/motion/release with a
+// zero Mod field (tea.KeyMod's zero value — no Alt/Ctrl/Shift/Super) drives
+// a full selection through App's exported Update, ending with a. sel
+// populated and a clipboard-copy Cmd issued. Selection is app-owned now
+// (cell-motion mouse mode routes clicks/drags to the program), so this
+// coexists with — doesn't need — any modifier the old native-terminal-
+// selection tradeoff (docs/TUI.md, pre-#Part-C) required.
+func TestMouseDragSelectsWithoutModifier(t *testing.T) {
+	a := newAppForGolden(t, newInternalFakeSup(GoldenRoster()))
+
+	mdl, _ := a.Update(tea.MouseClickMsg{X: 0, Y: 1, Button: tea.MouseLeft})
+	a = mdl.(App)
+	if a.sel == nil || !a.sel.dragging {
+		t.Fatal("expected a dragging selection after a plain left-button click with no modifier")
+	}
+
+	mdl, _ = a.Update(tea.MouseMotionMsg{X: 4, Y: 1, Button: tea.MouseLeft})
+	a = mdl.(App)
+	if a.sel.curX != 4 {
+		t.Fatalf("expected motion to extend the selection to X=4, got X=%d", a.sel.curX)
+	}
+
+	mdl, cmd := a.Update(tea.MouseReleaseMsg{X: 4, Y: 1, Button: tea.MouseLeft})
+	a = mdl.(App)
+	if a.sel == nil || a.sel.dragging {
+		t.Fatal("expected the selection to remain (frozen, not dragging) after release")
+	}
+	if cmd == nil {
+		t.Fatal("expected a clipboard-copy Cmd after release over real content")
+	}
+}
+
+// TestMouseClickAlwaysStartsFreshSelection covers "clear the selection on
+// the next click": a second click overwrites any previous (even still-
+// dragging) selection outright rather than extending or merging with it.
+func TestMouseClickAlwaysStartsFreshSelection(t *testing.T) {
+	a := newAppForGolden(t, newInternalFakeSup(GoldenRoster()))
+	mdl, _ := a.Update(tea.MouseClickMsg{X: 0, Y: 1, Button: tea.MouseLeft})
+	a = mdl.(App)
+	mdl, _ = a.Update(tea.MouseReleaseMsg{X: 4, Y: 1, Button: tea.MouseLeft})
+	a = mdl.(App)
+
+	mdl, _ = a.Update(tea.MouseClickMsg{X: 10, Y: 2, Button: tea.MouseLeft})
+	a = mdl.(App)
+	if a.sel.startX != 10 || a.sel.startY != 2 || a.sel.curX != 10 || a.sel.curY != 2 || !a.sel.dragging {
+		t.Fatalf("expected a fresh selection at (10,2), got %+v", a.sel)
+	}
+}
+
+// TestMouseClickIgnoredOffMouseButton covers a non-left click being a no-op
+// — it must not start a selection.
+func TestMouseClickIgnoredOffMouseButton(t *testing.T) {
+	a := newAppForGolden(t, newInternalFakeSup(GoldenRoster()))
+	mdl, _ := a.Update(tea.MouseClickMsg{X: 0, Y: 1, Button: tea.MouseRight})
+	a = mdl.(App)
+	if a.sel != nil {
+		t.Errorf("expected a right-button click to start no selection, got %+v", a.sel)
+	}
+}
+
+// TestKeyPressClearsSelection covers "clear the selection on ... a key
+// press": any key press drops a.sel outright, even mid-drag.
+func TestKeyPressClearsSelection(t *testing.T) {
+	a := newAppForGolden(t, newInternalFakeSup(GoldenRoster()))
+	mdl, _ := a.Update(tea.MouseClickMsg{X: 0, Y: 1, Button: tea.MouseLeft})
+	a = mdl.(App)
+	if a.sel == nil {
+		t.Fatal("precondition failed: expected a selection after the click")
+	}
+
+	mdl, _ = a.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	a = mdl.(App)
+	if a.sel != nil {
+		t.Errorf("expected a key press to clear the selection, got %+v", a.sel)
+	}
+}
+
+// TestMouseSelectionCoexistsWithWheelScroll covers "must coexist with wheel
+// scroll (scrolling during/after selection is fine)": a wheel notch after a
+// selection is frozen (released, not dragging) leaves the selection in
+// place — only a click or a key press clears it, not scroll.
+func TestMouseSelectionCoexistsWithWheelScroll(t *testing.T) {
+	a := newAppForGolden(t, newInternalFakeSup(GoldenRoster()))
+	mdl, _ := a.Update(tea.MouseClickMsg{X: 0, Y: 1, Button: tea.MouseLeft})
+	a = mdl.(App)
+	mdl, _ = a.Update(tea.MouseReleaseMsg{X: 4, Y: 1, Button: tea.MouseLeft})
+	a = mdl.(App)
+	if a.sel == nil {
+		t.Fatal("precondition failed: expected a frozen selection after release")
+	}
+
+	mdl, _ = a.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	a = mdl.(App)
+	if a.sel == nil {
+		t.Error("expected a wheel notch to leave an existing selection in place")
+	}
+	if a.scroll == 0 {
+		t.Error("expected the wheel notch to still scroll while a selection is active")
+	}
+}
+
+// TestMouseMessagesNoOpWhenMouseDisabled covers tui.mouse=false: wheel,
+// click, motion, and release messages are all defensively ignored at the
+// Update level too, not just left uncaptured at the protocol level (see
+// mouseEnabled's doc).
+func TestMouseMessagesNoOpWhenMouseDisabled(t *testing.T) {
+	env := GoldenCommandEnv()
+	disabled := false
+	env.Config = func() (config.Config, error) { return config.Config{TUI: config.TUI{Mouse: &disabled}}, nil }
+	a := newAppForGolden(t, newInternalFakeSup(GoldenRoster()))
+	a.commandEnv = env
+
+	mdl, _ := a.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	a = mdl.(App)
+	if a.scroll != 0 {
+		t.Errorf("expected a wheel notch to be ignored with mouse disabled, scroll = %d", a.scroll)
+	}
+
+	mdl, _ = a.Update(tea.MouseClickMsg{X: 0, Y: 1, Button: tea.MouseLeft})
+	a = mdl.(App)
+	if a.sel != nil {
+		t.Errorf("expected a click to be ignored with mouse disabled, got selection %+v", a.sel)
+	}
+}
+
+// TestViewDisablesMouseModeWhenConfigured covers tui.mouse=false disabling
+// mouse capture at the View level (tea.MouseModeNone), handing native
+// click-select/scroll back to the terminal.
+func TestViewDisablesMouseModeWhenConfigured(t *testing.T) {
+	env := GoldenCommandEnv()
+	disabled := false
+	env.Config = func() (config.Config, error) { return config.Config{TUI: config.TUI{Mouse: &disabled}}, nil }
+	a := NewApp(theme.Test(), &internalFakeSup{}, GoldenMeta(), env)
+	if got := a.View().MouseMode; got != tea.MouseModeNone {
+		t.Errorf("View().MouseMode with tui.mouse=false = %v; want tea.MouseModeNone", got)
 	}
 }

@@ -120,6 +120,15 @@ type App struct {
 	// back always lands back at the tail rather than a stale offset into
 	// different content.
 	scroll int
+
+	// sel is the app-owned mouse click-drag text selection (mouse.go); nil
+	// when nothing is selected. Set on tea.MouseClickMsg, extended on
+	// tea.MouseMotionMsg while the left button stays held, and frozen (but
+	// still shown/copyable) on tea.MouseReleaseMsg. Cleared on the next
+	// click (handleMouseClick always installs a fresh one) or any key press
+	// (see Update's tea.KeyPressMsg case) — never on scroll, so wheel/PgUp-
+	// PgDn scrolling during or after a selection leaves it in place.
+	sel *selectionState
 }
 
 // NewApp returns an App rendering through th, driving sup, with its roster
@@ -333,6 +342,26 @@ func (a App) autoscrollEnabled() bool {
 	return cfg.TUI.AutoscrollEnabled()
 }
 
+// mouseEnabled reports the effective tui.mouse setting
+// (config.TUI.MouseEnabled — default true), read directly off
+// a.commandEnv.Config() on every call, the same "always current" contract
+// autoscrollEnabled follows. Gates both View's mouse-capture enable
+// (tea.MouseModeCellMotion vs tea.MouseModeNone) and, defensively, every
+// mouse-message case in Update — so even a message a misbehaving terminal
+// sends despite MouseModeNone (or a synthetic one from a non-terminal
+// client) is a no-op while mouse is configured off, not just uncaptured at
+// the protocol level.
+func (a App) mouseEnabled() bool {
+	if a.commandEnv.Config == nil {
+		return true
+	}
+	cfg, err := a.commandEnv.Config()
+	if err != nil {
+		return true
+	}
+	return cfg.TUI.MouseEnabled()
+}
+
 // currentSessionInfo returns the roster snapshot for whichever session is
 // currently peeked or attached, or nil on the overview — there is no active
 // session for a command-panel view (e.g. /status's Session name/ID/Model
@@ -372,7 +401,28 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case tea.MouseWheelMsg:
+		if !a.mouseEnabled() {
+			return a, nil
+		}
 		return a.handleWheel(msg), nil
+
+	case tea.MouseClickMsg:
+		if !a.mouseEnabled() {
+			return a, nil
+		}
+		return a.handleMouseClick(msg), nil
+
+	case tea.MouseMotionMsg:
+		if !a.mouseEnabled() {
+			return a, nil
+		}
+		return a.handleMouseMotion(msg), nil
+
+	case tea.MouseReleaseMsg:
+		if !a.mouseEnabled() {
+			return a, nil
+		}
+		return a.handleMouseRelease(msg)
 
 	case rosterMsg:
 		if msg.err != nil {
@@ -428,6 +478,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyPressMsg:
 		a.status = ""
+		// Any key press clears an active/frozen mouse selection — docs/TUI.md's
+		// "clear the selection on the next click / a key press" contract (a
+		// fresh click already clears it via handleMouseClick installing a new
+		// selectionState outright, so this is the key-press half).
+		a.sel = nil
 		// The command panel takes every key ahead of the approval overlay and
 		// the per-screen handlers (dispatch precedence: panel > approval >
 		// menu > active screen > global) — see handlePanelKey.
@@ -838,6 +893,14 @@ func (a App) render() string {
 	}
 	content := strings.Repeat("\n", layout.TopPadding) + body
 
+	// An active/frozen mouse selection (mouse.go) overlays its reverse-video
+	// highlight on top of the fully composed frame — after every other
+	// overlay (panel/footer) so the highlight always draws over whatever it
+	// covers, on whichever screen actually participates in selection.
+	if a.sel != nil && a.mouseSelectable() {
+		content = highlightSelection(content, *a.sel, a.theme)
+	}
+
 	// A pending approval, when there is one, is already rendered inline by
 	// a.sess.View/Peek.View above — the overview screen shows only the
 	// roster's colored status word (see overview_render.go's statusColorFor), never the
@@ -849,16 +912,25 @@ func (a App) render() string {
 
 // View satisfies tea.Model, rendering the current screen at the last known
 // terminal size. It requests the alternate screen, matching [Program.View],
-// and enables cell-motion mouse reporting — bubbletea v2 moved mouse mode
-// from a tea.NewProgram option onto the View itself (see the upgrade guide's
+// and enables cell-motion mouse reporting when tui.mouse is on (the
+// default; see mouseEnabled) — bubbletea v2 moved mouse mode from a
+// tea.NewProgram option onto the View itself (see the upgrade guide's
 // "Mouse mode is now a View field") — so a terminal that supports it starts
-// sending [tea.MouseWheelMsg] (see handleWheel) as soon as this frame draws;
-// cmd/gofer's tui_app.go/attach.go build the [tea.Program] wrapping App and
-// need no extra option for this.
+// sending [tea.MouseWheelMsg]/click/drag/release (see handleWheel and
+// mouse.go) as soon as this frame draws; cmd/gofer's tui_app.go/attach.go
+// build the [tea.Program] wrapping App and need no extra option for this.
+// tui.mouse explicitly off sets tea.MouseModeNone instead, handing mouse
+// reporting back to the terminal entirely — its own native click-to-select
+// and scrollback return, and gofer's own wheel/selection handling goes
+// quiet (also defensively gated in Update — see mouseEnabled's doc).
 func (a App) View() tea.View {
 	v := tea.NewView(a.render())
 	v.AltScreen = true
-	v.MouseMode = tea.MouseModeCellMotion
+	if a.mouseEnabled() {
+		v.MouseMode = tea.MouseModeCellMotion
+	} else {
+		v.MouseMode = tea.MouseModeNone
+	}
 	return v
 }
 
