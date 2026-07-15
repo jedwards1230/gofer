@@ -13,10 +13,10 @@
 
 
 
+────────────────────────────────────────────────────────────────────────────────
+<yellow>bash command</yellow>
 
-
-
-<yellow>●</yellow> bash · cmd=rm -rf /tmp/x
+  cmd=rm -rf /tmp/x
 
 Allow this tool call?
   [a] allow   [d] deny   [r] remember: off

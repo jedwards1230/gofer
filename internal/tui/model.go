@@ -421,23 +421,29 @@ func (m Model) transcriptLines(width int) []string {
 // approval prompt) at the given size. Width wraps nothing (M1's virtualized
 // transcript and stable-prefix markdown cache from docs/TUI.md land later); a
 // line longer than width is truncated. Height keeps only the most recent
-// lines, tailing the transcript like a live attach.
+// lines, tailing the transcript like a live attach. Carries no identity
+// header or scroll offset — the plain golden tests that call this directly
+// render the transcript alone; [App.render] goes through ViewWithMenu.
 func (m Model) View(width, height int) string {
-	return m.view(width, height, nil)
+	return m.view(width, height, nil, nil, 0)
 }
 
 // ViewWithMenu renders like View but splices menuLines — pre-rendered,
 // already width-truncated rows from [commandMenu.Lines] — directly above the
-// input box's rule, the same way [Overview.ViewWithMenu] does. A pending
-// approval commandeers the whole footer regardless (menuLines is always nil
-// then — there is nothing to type into during an approval), so menuLines
-// only ever lands above the rule/input/rule block. Called only from
-// App.render.
-func (m Model) ViewWithMenu(width, height int, menuLines []string) string {
-	return m.view(width, height, menuLines)
+// input box's rule, the same way [Overview.ViewWithMenu] does. headerLines,
+// when non-empty, is [attachHeaderLines] (app.go) — the attach screen's own
+// copy of the identity chrome every screen shows — prepended to the
+// transcript as part of the same scrollable region (see the scroll doc
+// below); a pending approval commandeers the whole footer regardless
+// (menuLines is always nil then — there is nothing to type into during an
+// approval), so menuLines only ever lands above the rule/input/rule block.
+// scroll is the manual scroll-back offset (0 = tail-to-latest, the default).
+// Called only from App.render.
+func (m Model) ViewWithMenu(width, height int, menuLines, headerLines []string, scroll int) string {
+	return m.view(width, height, menuLines, headerLines, scroll)
 }
 
-func (m Model) view(width, height int, menuLines []string) string {
+func (m Model) view(width, height int, menuLines, headerLines []string, scroll int) string {
 	if width < 1 {
 		width = 1
 	}
@@ -445,7 +451,21 @@ func (m Model) view(width, height int, menuLines []string) string {
 		height = 1
 	}
 
+	// The identity header (when the caller supplies one — only the attach
+	// screen does, via ViewWithMenu) joins the transcript as one scrollable
+	// document: short content leaves it pinned at the top exactly like
+	// before (scrollTail below is then a no-op), but a transcript long
+	// enough to overflow avail scrolls the header up and out of view along
+	// with the oldest messages — the "header + transcript are the
+	// scrollable region" redesign, with the input/footer staying pinned
+	// below regardless (untouched by this).
 	lines := m.transcriptLines(width)
+	if len(headerLines) > 0 {
+		combined := make([]string, 0, len(headerLines)+len(lines))
+		combined = append(combined, headerLines...)
+		combined = append(combined, lines...)
+		lines = combined
+	}
 
 	// The input box is framed by full-width rules above and below, with the
 	// status line beneath it. A pending approval commandeers the whole
@@ -470,22 +490,21 @@ func (m Model) view(width, height int, menuLines []string) string {
 
 	// The footer — the menu (when open) + input framing + status, or the
 	// approval prompt in its place — is pinned to the bottom of the frame:
-	// the transcript above it tails to fit when it overflows avail (the
-	// existing scroll behavior, unchanged) and is padded with blank filler
-	// rows when it's shorter, so the footer lands on height's last row
-	// instead of trailing directly beneath a short conversation (chat-style
-	// bottom anchoring, matching how [Overview.render] already pads its
-	// body before the dispatch bar). avail is floored at 0 rather than left
-	// negative — a terminal shorter than the footer alone (the first frame,
-	// before WindowSizeMsg arrives, or a tiny window) skips both truncation
-	// and padding instead of underflowing the slice bound below.
+	// the header+transcript above it scroll-tail to fit when they overflow
+	// avail (scrollTail; offset 0 is the existing tail behavior, unchanged)
+	// and are padded with blank filler rows when shorter, so the footer
+	// lands on height's last row instead of trailing directly beneath a
+	// short conversation (chat-style bottom anchoring, matching how
+	// [Overview.render] already pads its body before the dispatch bar).
+	// avail is floored at 0 rather than left negative — a terminal shorter
+	// than the footer alone (the first frame, before WindowSizeMsg arrives,
+	// or a tiny window) skips both scrolling and padding instead of
+	// underflowing the slice bound scrollTail guards against.
 	avail := height - len(footer)
 	if avail < 0 {
 		avail = 0
 	}
-	if len(lines) > avail {
-		lines = lines[len(lines)-avail:]
-	}
+	lines = scrollTail(lines, avail, scroll)
 	lines = pad(lines, avail)
 	lines = append(lines, footer...)
 	return strings.Join(lines, "\n")
@@ -498,7 +517,7 @@ func (m Model) promptLines(width int) []string {
 	if m.pending == nil {
 		return nil
 	}
-	raw := renderApprovalPrompt(m.theme, *m.pending)
+	raw := renderApprovalPrompt(m.theme, *m.pending, width)
 	out := make([]string, len(raw))
 	for i, l := range raw {
 		out[i] = truncate(l, width)

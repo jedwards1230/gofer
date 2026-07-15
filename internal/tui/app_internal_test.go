@@ -10,6 +10,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -215,6 +216,15 @@ func TestRenderBeforeWindowSize(t *testing.T) {
 // terminal) is exactly where a regression in that flooring would surface as
 // a negative-count strings.Repeat or an out-of-range slice bound — the #87
 // class of bug this PR's bottom-anchoring math must not reintroduce.
+//
+// The scroll dimension extends the same guarantee to this PR's own new
+// underflow surface: [scrollTail] (shared by the attach screen's
+// header+transcript scroll and the roster's own mouse-wheel/PgUp-PgDn
+// scroll) computes start/end slice bounds from avail and an arbitrary
+// offset — a huge offset (larger than the content will ever be) at a tiny
+// or zero avail is exactly where a clamping regression would surface as an
+// out-of-range slice, so it's exercised at every size/screen combination
+// below alongside the pre-existing scroll-0 (tail) case.
 func TestRenderNoPanicAtTinyHeights(t *testing.T) {
 	screens := []struct {
 		name string
@@ -232,16 +242,68 @@ func TestRenderNoPanicAtTinyHeights(t *testing.T) {
 		{"height2", 80, 2},
 		{"tiny", 10, 5},
 	}
+	scrolls := []int{0, 1, scrollPageLines, 1_000_000}
 	for _, scr := range screens {
 		for _, sz := range sizes {
-			t.Run(scr.name+"/"+sz.name, func(t *testing.T) {
-				a := NewApp(theme.Test(), &internalFakeSup{}, scr.meta, GoldenCommandEnv())
-				mdl, _ := a.Update(tea.WindowSizeMsg{Width: sz.width, Height: sz.height})
-				a = mdl.(App)
-				_ = a.render() // must not panic
-			})
+			for _, sc := range scrolls {
+				t.Run(fmt.Sprintf("%s/%s/scroll=%d", scr.name, sz.name, sc), func(t *testing.T) {
+					a := NewApp(theme.Test(), &internalFakeSup{}, scr.meta, GoldenCommandEnv())
+					mdl, _ := a.Update(tea.WindowSizeMsg{Width: sz.width, Height: sz.height})
+					a = mdl.(App)
+					a.scroll = sc
+					_ = a.render() // must not panic
+				})
+			}
 		}
 	}
+}
+
+// TestRenderNoPanicAtTinyHeightsWithContent extends the tiny-height guard
+// further: a populated transcript (attach) and roster (overview) — the
+// header+transcript combined doc ([Model.view]) and the roster's own scroll
+// path ([Overview.body]) both have real content to slice at these sizes, not
+// just the empty/zero-item case the fixtures above cover.
+func TestRenderNoPanicAtTinyHeightsWithContent(t *testing.T) {
+	sizes := []struct{ width, height int }{
+		{80, 0}, {80, 1}, {80, 2}, {10, 5},
+	}
+	scrolls := []int{0, scrollPageLines, 1_000_000}
+
+	t.Run("overview", func(t *testing.T) {
+		for _, sz := range sizes {
+			for _, sc := range scrolls {
+				t.Run(fmt.Sprintf("%dx%d/scroll=%d", sz.width, sz.height, sc), func(t *testing.T) {
+					a := newAppForGolden(t, newInternalFakeSup(GoldenRoster()))
+					mdl, _ := a.Update(tea.WindowSizeMsg{Width: sz.width, Height: sz.height})
+					a = mdl.(App)
+					a.scroll = sc
+					_ = a.render() // must not panic
+				})
+			}
+		}
+	})
+
+	t.Run("attach", func(t *testing.T) {
+		a := newAppForGolden(t, newInternalFakeSup(GoldenRoster()))
+		mdl, cmd := a.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+		a = mdl.(App)
+		mdl, _ = a.Update(cmd())
+		a = mdl.(App)
+		for _, ev := range appTranscriptEvents(a.sessID) {
+			mdl, _ = a.Update(sessEventMsg{id: a.sessID, ev: ev})
+			a = mdl.(App)
+		}
+		for _, sz := range sizes {
+			for _, sc := range scrolls {
+				t.Run(fmt.Sprintf("%dx%d/scroll=%d", sz.width, sz.height, sc), func(t *testing.T) {
+					mdl, _ := a.Update(tea.WindowSizeMsg{Width: sz.width, Height: sz.height})
+					b := mdl.(App)
+					b.scroll = sc
+					_ = b.render() // must not panic
+				})
+			}
+		}
+	})
 }
 
 // TestBottomAnchoredOverviewInput verifies the overview dispatch bar — the
@@ -505,5 +567,205 @@ func TestAppApprovalDialogHiddenOnOverview(t *testing.T) {
 	}
 	if strings.Contains(a.render(), "Allow this tool call?") {
 		t.Error("overview render contains the approval prompt; want it hidden outside attach/peek")
+	}
+}
+
+// TestAppHeaderOnEveryScreen verifies the redesign's global two-line
+// identity header ("gofer v<version>" / "<model> · <cwd>", see
+// identityHeaderLines/attachHeaderLines) tops every screen it's specified
+// for (docs/TUI.md's redesign item 1): the overview (already had its own
+// copy pre-redesign), the attach transcript, and a pending approval prompt
+// (which replaces the attach input but is still part of the same
+// header+transcript region). Peek is deliberately excluded — it already
+// composes Overview.Rail's own header (see peek.go), not a second copy.
+func TestAppHeaderOnEveryScreen(t *testing.T) {
+	const wantHeader = "claude-sonnet-5 · ~/orchestration"
+
+	overview := newAppForGolden(t, newInternalFakeSup(GoldenRoster()))
+	if got := overview.render(); !strings.Contains(got, wantHeader) {
+		t.Errorf("overview render missing identity header %q:\n%s", wantHeader, got)
+	}
+
+	attach := attachForDialogTest(t, newInternalFakeSup(GoldenRoster()))
+	if got := attach.render(); !strings.Contains(got, wantHeader) {
+		t.Errorf("attach render missing identity header %q:\n%s", wantHeader, got)
+	}
+
+	withApproval := requestApproval(t, attach, "perm-1")
+	if got := withApproval.render(); !strings.Contains(got, wantHeader) {
+		t.Errorf("approval-prompt render missing identity header %q:\n%s", wantHeader, got)
+	}
+}
+
+// TestHeaderScrollsAwayOnLongTranscript exercises the redesign's scroll-away
+// behavior end to end (not just the always-short golden fixtures, none of
+// which overflow a normal terminal): the header and a long transcript form
+// one scrollable region ([Model.view]'s headerLines+transcriptLines join),
+// so tailing to the latest message on a transcript long enough to overflow
+// the viewport scrolls the header off the top — while scrolling back
+// (a.scroll set high) brings it back into view, same as the oldest
+// messages.
+func TestHeaderScrollsAwayOnLongTranscript(t *testing.T) {
+	meta := GoldenMeta()
+	meta.AttachSessionID = "sess-x"
+	a := NewApp(theme.Test(), &internalFakeSup{}, meta, GoldenCommandEnv())
+	mdl, _ := a.Update(tea.WindowSizeMsg{Width: testkit.Width, Height: testkit.Height})
+	a = mdl.(App)
+
+	const wantHeader = "gofer v0.3.0"
+
+	// Enough short user/assistant turns to overflow the transcript's avail
+	// rows several times over — testkit.Height (24) leaves far fewer than 40
+	// rows for content once the footer is carved out.
+	for i := 0; i < 40; i++ {
+		mdl, _ = a.Update(sessEventMsg{
+			id: "sess-x",
+			ev: event.NewMessageFinished("sess-x", event.MessageUser, fmt.Sprintf("turn %d", i)),
+		})
+		a = mdl.(App)
+	}
+
+	if got := a.render(); strings.Contains(got, wantHeader) {
+		t.Errorf("tailed render (scroll=0) still shows the header on an overflowing transcript; want it scrolled away:\n%s", got)
+	}
+	if got := a.render(); !strings.Contains(got, "turn 39") {
+		t.Errorf("tailed render missing the latest message:\n%s", got)
+	}
+
+	a.scroll = 1_000_000 // clamped internally by scrollTail to the content's start
+	if got := a.render(); !strings.Contains(got, wantHeader) {
+		t.Errorf("fully scrolled-back render is missing the header; want it back in view at the top of the content:\n%s", got)
+	}
+}
+
+// TestHandleWheelScrollsAndClampsAtTail verifies mouse-wheel notches move
+// a.scroll (wheel-up back into history, wheel-down toward the tail) and that
+// wheel-down never drives it negative — [scrollTail] only clamps the upper
+// bound (content length), so the lower bound has to hold here.
+func TestHandleWheelScrollsAndClampsAtTail(t *testing.T) {
+	a := App{scr: screenOverview}
+
+	up := a.handleWheel(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	if up.scroll != scrollWheelLines {
+		t.Errorf("scroll after one wheel-up = %d; want %d", up.scroll, scrollWheelLines)
+	}
+
+	down := up.handleWheel(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
+	if down.scroll != 0 {
+		t.Errorf("scroll after wheel-up then wheel-down = %d; want back to 0", down.scroll)
+	}
+
+	atTail := a.handleWheel(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
+	if atTail.scroll != 0 {
+		t.Errorf("scroll after wheel-down at the tail = %d; want clamped to 0, not negative", atTail.scroll)
+	}
+}
+
+// TestHandleWheelIgnoredOnPeek verifies the wheel is a no-op on the peek
+// screen — item 7 scopes mouse-wheel scrolling to "overview + attach" only;
+// peek carries no scrollable transcript of its own (see peek.go).
+func TestHandleWheelIgnoredOnPeek(t *testing.T) {
+	a := App{scr: screenPeek}
+	got := a.handleWheel(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	if got.scroll != 0 {
+		t.Errorf("scroll after wheel-up on peek = %d; want unchanged (0) — peek has no scrollable content", got.scroll)
+	}
+}
+
+// TestPgUpPgDownScrollOverviewAndAttach verifies the keyboard pairing for
+// mouse-wheel scroll (item 7's "nice pairing"): PgUp/PgDn move a.scroll by
+// scrollPageLines on both the overview dispatch bar and the attach input,
+// and PgDn floors at 0 the same way wheel-down does.
+func TestPgUpPgDownScrollOverviewAndAttach(t *testing.T) {
+	overview := newAppForGolden(t, newInternalFakeSup(GoldenRoster()))
+	mdl, _ := overview.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	overview = mdl.(App)
+	if overview.scroll != scrollPageLines {
+		t.Errorf("overview scroll after PgUp = %d; want %d", overview.scroll, scrollPageLines)
+	}
+	mdl, _ = overview.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	overview = mdl.(App)
+	if overview.scroll != 0 {
+		t.Errorf("overview scroll after PgUp then PgDn = %d; want back to 0", overview.scroll)
+	}
+	mdl, _ = overview.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	overview = mdl.(App)
+	if overview.scroll != 0 {
+		t.Errorf("overview scroll after PgDn at the tail = %d; want clamped to 0", overview.scroll)
+	}
+
+	attach := attachForDialogTest(t, newInternalFakeSup(GoldenRoster()))
+	mdl, _ = attach.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	attach = mdl.(App)
+	if attach.scroll != scrollPageLines {
+		t.Errorf("attach scroll after PgUp = %d; want %d", attach.scroll, scrollPageLines)
+	}
+}
+
+// TestScrollResetsOnScreenAndSessionSwitch verifies a.scroll — a stale
+// scroll-back offset would otherwise point at unrelated content — is reset
+// to 0 (tail) whenever the screen changes or the attached session switches,
+// per App.scroll's doc.
+func TestScrollResetsOnScreenAndSessionSwitch(t *testing.T) {
+	a := newAppForGolden(t, newInternalFakeSup(GoldenRoster()))
+	mdl, _ := a.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	a = mdl.(App)
+	if a.scroll == 0 {
+		t.Fatal("expected a nonzero scroll after PgUp, precondition for this test")
+	}
+
+	mdl, _ = a.Update(tea.KeyPressMsg{Code: tea.KeyRight}) // attach: a different scrollable region
+	a = mdl.(App)
+	if a.scroll != 0 {
+		t.Errorf("scroll not reset entering attach: got %d, want 0", a.scroll)
+	}
+
+	mdl, _ = a.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	a = mdl.(App)
+	mdl, _ = a.Update(tea.KeyPressMsg{Code: tea.KeyLeft}) // back to overview (input is empty)
+	a = mdl.(App)
+	if a.scroll != 0 {
+		t.Errorf("scroll not reset backing out to overview: got %d, want 0", a.scroll)
+	}
+}
+
+// TestScrollTailClampsOffset unit-tests scrollTail's bound math directly —
+// the shared primitive behind both the attach header+transcript scroll and
+// the roster's own scroll, and the thing an underflow regression in this PR
+// would actually live in (see TestRenderNoPanicAtTinyHeights's doc).
+func TestScrollTailClampsOffset(t *testing.T) {
+	lines := []string{"a", "b", "c", "d", "e"}
+
+	if got := scrollTail(lines, 0, 5); got != nil {
+		t.Errorf("scrollTail with avail<=0 = %v; want nil", got)
+	}
+	if got := scrollTail(lines, -3, 5); got != nil {
+		t.Errorf("scrollTail with negative avail = %v; want nil", got)
+	}
+	if got := scrollTail(lines, 10, 0); len(got) != 5 {
+		t.Errorf("scrollTail with avail > len(lines) = %v; want all 5 lines unchanged", got)
+	}
+	if got := scrollTail(lines, 2, 0); fmt.Sprint(got) != "[d e]" {
+		t.Errorf("scrollTail tail (offset 0) = %v; want the last 2 lines [d e]", got)
+	}
+	if got := scrollTail(lines, 2, 1); fmt.Sprint(got) != "[c d]" {
+		t.Errorf("scrollTail offset 1 = %v; want [c d]", got)
+	}
+	if got := scrollTail(lines, 2, 1_000_000); fmt.Sprint(got) != "[a b]" {
+		t.Errorf("scrollTail with an oversized offset = %v; want clamped to the start [a b], not an out-of-range slice", got)
+	}
+	if got := scrollTail(lines, 2, -5); fmt.Sprint(got) != "[d e]" {
+		t.Errorf("scrollTail with a negative offset = %v; want clamped to the tail [d e]", got)
+	}
+}
+
+// TestViewEnablesMouseMode verifies App.View requests cell-motion mouse
+// reporting (bubbletea v2 moved this from a tea.NewProgram option onto the
+// View — see View's doc) so a terminal that supports it starts sending
+// tea.MouseWheelMsg without any extra opt-in from cmd/gofer.
+func TestViewEnablesMouseMode(t *testing.T) {
+	a := NewApp(theme.Test(), &internalFakeSup{}, GoldenMeta(), GoldenCommandEnv())
+	if got := a.View().MouseMode; got != tea.MouseModeCellMotion {
+		t.Errorf("View().MouseMode = %v; want tea.MouseModeCellMotion", got)
 	}
 }

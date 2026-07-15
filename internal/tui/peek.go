@@ -76,7 +76,17 @@ func (p Peek) View(width, height int) string {
 		title = truncate(s.Title, width)
 		verb := statusVerb(effectiveStatus(s))
 		dur := humanDuration(p.over.meta.Now.Sub(s.Updated))
-		waiting = "  " + p.theme.MutedStyle().Render(verb+" "+dur)
+		text := verb + " " + dur
+		// The peeked session's own model — when it carries an explicit
+		// override — rides the waiting line too: "current model should be
+		// visible in the peek menu" per the redesign brief. A session with no
+		// override (the common single-model-fleet case) already shows the
+		// resolved default on the rail's own header (o.header, via
+		// Overview.Rail above), so this stays silent rather than repeating it.
+		if s.Model != "" {
+			text = s.Model + " · " + text
+		}
+		waiting = "  " + p.theme.MutedStyle().Render(text)
 	}
 
 	var replyLine string

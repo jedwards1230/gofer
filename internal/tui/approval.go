@@ -36,20 +36,31 @@ type pendingApproval struct {
 }
 
 // renderApprovalPrompt renders p as the inline approval prompt's blank-padded
-// block, structured like a confirm prompt that has taken over the whole
-// footer: the tool + args summary (marker-only styled, matching every other
-// transcript line), a blank separator, the question and the allow/deny/
-// remember action row (the primary choices, keyed a/d/r) in the default
-// style, another blank separator, and a dim footer hint carrying the cancel
-// key and the session id. No leading blank line — [App.render]'s
-// [layout.TopPadding] already supplies the frame's top margin, and Model.View
-// stacks this block directly onto whatever transcript is above it. Unlike the
-// old modal, this is plain multi-line text composed top to bottom — never
-// composited by absolute display-column splicing, which was the overlay's
-// defect class.
-func renderApprovalPrompt(th theme.Theme, p pendingApproval) []string {
+// block at the given width, structured like a confirm prompt that has taken
+// over the whole footer: a full-width rule, a titled "<tool> command"
+// header, the indented args summary, a blank separator, the question and the
+// allow/deny/remember action row (the primary choices, keyed a/d/r) in the
+// default style, another blank separator, and a dim footer hint carrying the
+// cancel key and the session id. This replaces the earlier single
+// marker-line "● bash · cmd=…" summary with the rule/title/args block the
+// redesign's goldens specify — args now read as an indented, labeled line
+// rather than riding the same line as the tool name. No leading blank line —
+// [App.render]'s [layout.TopPadding] already supplies the frame's top
+// margin, and Model.View stacks this block directly onto whatever transcript
+// is above it. Unlike the old modal, this is plain multi-line text composed
+// top to bottom — never composited by absolute display-column splicing,
+// which was the overlay's defect class. width < 1 floors to 1 (matching
+// every other component's width guard), so the rule can never
+// strings.Repeat a negative count.
+func renderApprovalPrompt(th theme.Theme, p pendingApproval, width int) []string {
+	if width < 1 {
+		width = 1
+	}
 	return []string{
-		markerLine(th.WarnStyle(), th.GlyphAgent, p.tool+" · "+specSummary(p.spec)),
+		strings.Repeat("─", width),
+		th.WarnStyle().Render(p.tool + " command"),
+		"",
+		"  " + specSummary(p.spec),
 		"",
 		"Allow this tool call?",
 		fmt.Sprintf("  [a] allow   [d] deny   [r] remember: %s", rememberLabel(p.remember)),
