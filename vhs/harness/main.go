@@ -38,6 +38,12 @@ import (
 // sid is a fixed session id; the scripted stream is single-session.
 const sid = "0192a1b2-c3d4-7e5f-8a90-000000000001"
 
+// fixedNow is a frozen wall clock so VHS frames render identically on every
+// run — a prerequisite for committing them as golden images and diffing them
+// cleanly in PRs. Any absolute timestamp the TUI derives from it (e.g. an
+// OAuth token expiry) is then stable across renders.
+var fixedNow = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
 // step is one scripted event plus how long to hold before sending the next, so
 // VHS records the intermediate streaming frames a live turn produces (a running
 // tool header, a delta-by-delta message) rather than only the settled state.
@@ -149,7 +155,7 @@ func approvalScene() []step {
 // pending count), an awaiting-input row (yellow ●), and a finished row
 // (green ●).
 func overviewScene() tea.Model {
-	now := time.Now()
+	now := fixedNow
 	meta := tui.OverviewMeta{App: "gofer", Version: "0.3.0", Model: "fable-5", Cwd: "~/orchestration", Now: now}
 	sessions := []tui.SessionInfo{
 		{ID: "sess-1", Title: "wire the websocket ACP listener", Summary: "streaming the daemon handshake", Status: tui.StatusWorking, Updated: now.Add(-30 * time.Second)},
@@ -197,7 +203,7 @@ func (m overviewModel) View() tea.View {
 // navigation keys) into the running program's stdin, the same path a real
 // terminal's keystrokes take (see command.go's dispatchSlash).
 func commandViewApp() tea.Model {
-	now := time.Now()
+	now := fixedNow
 	sessions := []tui.SessionInfo{
 		{ID: "sess-1", Title: "wire the websocket ACP listener", Summary: "streaming the daemon handshake", Status: tui.StatusWorking, Model: "fable-5", Cwd: "~/orchestration", Updated: now.Add(-30 * time.Second)},
 		{ID: "sess-2", Title: "keycloak path-b groundwork", Summary: "turn finished — awaiting the next prompt", Status: tui.StatusNeedsInput, Model: "sonnet-5", Cwd: "~/orchestration", Updated: now.Add(-5 * time.Minute)},
@@ -220,7 +226,7 @@ func cannedCommandEnv() tui.CommandEnv {
 		Root:    "~/.gofer",
 		Auth: func() ([]tui.ProviderAuth, error) {
 			return []tui.ProviderAuth{
-				{Provider: "anthropic", Kind: tui.KindOAuth, Expires: time.Now().Add(90 * 24 * time.Hour)},
+				{Provider: "anthropic", Kind: tui.KindOAuth, Expires: fixedNow.Add(90 * 24 * time.Hour)},
 				{Provider: "openai", Kind: tui.KindAPIKey},
 			}, nil
 		},
