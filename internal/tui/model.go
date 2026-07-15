@@ -542,6 +542,14 @@ func markerLine(style lipgloss.Style, glyph, rest string) string {
 func (m Model) renderItemLines(it item) []string {
 	switch it.kind {
 	case itemAssistantReasoning:
+		// Some providers (Claude included) emit a reasoning/thinking block
+		// with no content at all — nothing worth rendering, and rendering it
+		// anyway would leave a bare marker glyph with no text after it,
+		// floating alone between the user's prompt and the reply. Suppress
+		// the line entirely rather than show an empty state marker.
+		if strings.TrimSpace(it.text) == "" {
+			return nil
+		}
 		return []string{markerLine(m.theme.WarnStyle(), m.theme.GlyphAgent, m.theme.MutedStyle().Render(it.text))}
 
 	case itemUser:
@@ -564,6 +572,12 @@ func (m Model) renderItemLines(it item) []string {
 		return []string{markerLine(style, m.theme.GlyphAgent, "permission "+it.approvalVerdict)}
 
 	default: // itemAssistantText
+		// Same empty-guard as itemAssistantReasoning above: an assistant-text
+		// item with no content yet (or that resolved empty) renders nothing
+		// rather than a bare marker.
+		if strings.TrimSpace(it.text) == "" {
+			return nil
+		}
 		style := m.theme.WarnStyle()
 		if it.done {
 			style = m.theme.OKStyle()
