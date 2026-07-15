@@ -212,6 +212,13 @@ func resolveSessionCwd(raw string) (string, *rpcError) {
 
 // handleSessionNew creates an idle session (no first turn — the prompt
 // arrives via a subsequent session/prompt) and replies its id.
+//
+// Model resolution: event.SessionNew carries no model field — per
+// [acp.FromNewSession]'s doc, the ACP projection deliberately drops
+// NewSessionRequest.Model, leaving a consuming application to read it off the
+// decoded request directly. So params is decoded a second time here, the same
+// way handleSessionLoad recovers Cwd from acp.LoadSessionRequest. An empty
+// (or absent) model falls back to the daemon's configured default.
 func handleSessionNew(d *Daemon, ctx context.Context, _ *peer, params json.RawMessage) (any, *rpcError) {
 	op, rerr := decodeOp[event.SessionNew](acp.MethodSessionNew, params)
 	if rerr != nil {
@@ -221,7 +228,15 @@ func handleSessionNew(d *Daemon, ctx context.Context, _ *peer, params json.RawMe
 	if rerr != nil {
 		return nil, rerr
 	}
-	info, err := d.sup.Create(ctx, "", supervisor.CreateOptions{Cwd: cwd, Model: d.cfg.DefaultModel})
+	var req acp.NewSessionRequest
+	if err := json.Unmarshal(params, &req); err != nil {
+		return nil, invalidParams(fmt.Errorf("acp: decode %s params: %w", acp.MethodSessionNew, err))
+	}
+	model := d.cfg.DefaultModel
+	if req.Model != "" {
+		model = req.Model
+	}
+	info, err := d.sup.Create(ctx, "", supervisor.CreateOptions{Cwd: cwd, Model: model})
 	if err != nil {
 		return nil, appError(err)
 	}

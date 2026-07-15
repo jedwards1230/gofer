@@ -16,6 +16,7 @@ import (
 type sessionInfoWire struct {
 	ID     string `json:"id"`
 	Status string `json:"status"`
+	Model  string `json:"model"`
 	Live   bool   `json:"live"`
 }
 
