@@ -70,9 +70,10 @@ type Config struct {
 	// (see [Daemon.Handler]). Empty disables auth — appropriate only for a
 	// loopback-bound daemon.
 	BearerToken string
-	// DefaultModel is the model a session/new or session/load ACP request
-	// resolves to, since ACP's session/new carries no model field. Callers
-	// resolve this the same way `gofer run` does (the sole logged-in
+	// DefaultModel is the fallback a session/new request resolves to when it
+	// supplies no (or an empty) model, and the model a session/load request
+	// always resolves to (ACP's LoadSessionRequest has no model field).
+	// Callers resolve this the same way `gofer run` does (the sole logged-in
 	// provider's model) before constructing Config; the daemon does not
 	// re-derive it.
 	DefaultModel string

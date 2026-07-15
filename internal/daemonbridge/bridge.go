@@ -378,14 +378,15 @@ func (s *Supervisor) Subscribe(_ context.Context, sessionID string) (*event.Subs
 	return rec.broker.Subscribe(event.FilterAll, subBuffer), nil
 }
 
-// Create starts a new session via session/new. The daemon resolves its own
-// default model (session/new carries no model field in ACP; see
-// internal/daemon's handleSessionNew) — opts.Model is display-only here,
-// carried onto the returned row but never sent to the daemon. When prompt is
-// non-empty, Create kicks off [Supervisor.Send] in the background (the same
-// fire-and-forget path a subsequent Send call would take) and returns a
-// minimal row immediately; the App's 1s roster poll refreshes it with the
-// daemon's authoritative state.
+// Create starts a new session via session/new. opts.Model, when non-empty, is
+// forwarded on the request and the daemon honors it for the new session (see
+// internal/daemon's handleSessionNew); an empty opts.Model resolves to the
+// daemon's own configured default. Either way opts.Model is also carried
+// directly onto the returned row so the roster reflects what was requested
+// before the next poll confirms it. When prompt is non-empty, Create kicks
+// off [Supervisor.Send] in the background (the same fire-and-forget path a
+// subsequent Send call would take) and returns a minimal row immediately; the
+// App's 1s roster poll refreshes it with the daemon's authoritative state.
 //
 // Create pre-registers the new session's reconstruction state via
 // [Supervisor.registerFresh] as soon as it has an id — before optionally
@@ -395,7 +396,7 @@ func (s *Supervisor) Subscribe(_ context.Context, sessionID string) (*event.Subs
 // ever triggers a needless session/load for a session that, by construction,
 // has no history yet.
 func (s *Supervisor) Create(ctx context.Context, prompt string, opts tui.CreateOptions) (tui.SessionInfo, error) {
-	raw, err := s.client.Call(ctx, acp.MethodSessionNew, acp.NewSessionRequest{Cwd: opts.Cwd})
+	raw, err := s.client.Call(ctx, acp.MethodSessionNew, acp.NewSessionRequest{Cwd: opts.Cwd, Model: opts.Model})
 	if err != nil {
 		return tui.SessionInfo{}, fmt.Errorf("daemonbridge: create: %w", err)
 	}
