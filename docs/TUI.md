@@ -262,6 +262,17 @@ a fresh `selectionState`, clearing any previous one outright) or **any key
 press** (`App.Update`'s `tea.KeyPressMsg` case drops `a.sel`); it does *not*
 clear on scroll, so wheel/PgUp-PgDn during or after a selection is fine.
 
+Both the highlight and the copy are clamped to `App.transcriptRegion` —
+the active screen's own scrollable content, computed via the same
+`frameLayout` row-budget arithmetic `render` uses (so the two can't drift
+apart): the attach transcript (plus whatever of its identity header is
+still scrolled into view) or the overview roster body. A drag that runs off
+the transcript into the input box and its framing rules, off the bottom
+into the usage/status footer, past the top into the identity header, or
+over a command panel/menu never paints or copies those rows — a row the
+clamped range still covers is painted/copied in full, not bounded by a
+click/release column that itself landed outside the region.
+
 **`tui.mouse`** (settings.go, default true/unset) is the escape hatch for a
 terminal where OSC 52 or SGR mouse reporting misbehaves: off sets
 `View().MouseMode = tea.MouseModeNone` instead of `tea.MouseModeCellMotion`,

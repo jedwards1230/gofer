@@ -125,14 +125,19 @@ func TestProgramEmitsMouseEnableSequence(t *testing.T) {
 // emission (captured-output test, like the mouse-enable test)": it drives a
 // real tea.Program (same in-memory input/output harness as
 // TestProgramEmitsMouseEnableSequence above) through a plain left-button
-// click/drag/release over the overview's identity-header row and asserts
+// click/drag/release over a roster row — INSIDE the overview's
+// transcript-region equivalent, not its identity header (row 1, which
+// [App.transcriptRegion] deliberately excludes from selection — see
+// mouse_test.go's TestSelectionHighlightAndCopyExcludeChrome) — and asserts
 // the raw output bytes carry bubbletea's OSC 52 clipboard-set sequence
 // ("\x1b]52;c;<base64>\x07" — tea.SetClipboard, per the ansi package's
-// SetSystemClipboard) for the exact text that selection covers ("gofer",
-// row 1's first 5 columns: row 0 is layout.TopPadding's blank filler, row 1
-// is "gofer v0.3.0").
+// SetSystemClipboard) for the exact text that selection covers ("wire", row
+// 6's columns 2-5: row 0 is layout.TopPadding's blank filler, rows 1-4 are
+// the identity header, row 5 is the "~/orchestration" cwd group header, row 6
+// is "▸ wire the app root …", the first roster row — see
+// testdata/app_overview.golden).
 func TestProgramCopiesSelectionViaOSC52(t *testing.T) {
-	sup := newFakeSup(nil)
+	sup := newFakeSup(tui.GoldenRoster())
 	app := tui.NewApp(theme.Test(), sup, tui.GoldenMeta(), tui.GoldenCommandEnv())
 
 	out := &syncBuffer{}
@@ -151,11 +156,17 @@ func TestProgramCopiesSelectionViaOSC52(t *testing.T) {
 	}()
 
 	p.Send(tea.WindowSizeMsg{Width: 80, Height: 24})
-	p.Send(tea.MouseClickMsg{X: 0, Y: 1, Button: tea.MouseLeft})
-	p.Send(tea.MouseMotionMsg{X: 4, Y: 1, Button: tea.MouseLeft})
-	p.Send(tea.MouseReleaseMsg{X: 4, Y: 1, Button: tea.MouseLeft})
+	// Init's fetchRoster Cmd (app.go) resolves asynchronously — wait for the
+	// roster row the click targets to actually be on screen before clicking
+	// it, rather than racing a frame that still shows the initial empty
+	// roster (both would have their own render, but only one has "wire" at
+	// row 6).
+	_ = waitForOutput(out.String, "wire the app root", 2*time.Second)
+	p.Send(tea.MouseClickMsg{X: 2, Y: 6, Button: tea.MouseLeft})
+	p.Send(tea.MouseMotionMsg{X: 5, Y: 6, Button: tea.MouseLeft})
+	p.Send(tea.MouseReleaseMsg{X: 5, Y: 6, Button: tea.MouseLeft})
 
-	wantB64 := base64.StdEncoding.EncodeToString([]byte("gofer"))
+	wantB64 := base64.StdEncoding.EncodeToString([]byte("wire"))
 	wantSeq := "\x1b]52;c;" + wantB64 + "\x07"
 	// tea.SetClipboard's Cmd executes asynchronously (its own goroutine,
 	// round-tripping the resulting message back through the event loop
