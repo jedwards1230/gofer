@@ -36,9 +36,18 @@ const rosterInterval = 1 * time.Second
 // resulting offset to the content's real length via scrollTail, so an
 // oversized step just clamps to the top of the content instead of
 // overshooting.
+//
+// scrollWheelLines was tuned down from 3 to 2 for a smoother feel: every
+// wheel notch this package receives is applied in full (handleWheel has no
+// debounce/coalescing of its own, and bubbletea delivers one MouseWheelMsg
+// per notch — see TestWheelNotchesAccumulateWithoutDrops), so the
+// "jumpiness" a fixed per-notch step can produce is purely a function of the
+// step size, not dropped input. 2 lines/notch stays inside the same 1-3 line
+// band most terminal apps use for line-based (non-pixel) wheel scroll, just
+// gentler than 3.
 const (
 	scrollPageLines  = 10
-	scrollWheelLines = 3
+	scrollWheelLines = 2
 )
 
 // App is gofer's TUI root: the bubbletea [tea.Model] that ties the
@@ -111,6 +120,15 @@ type App struct {
 	// back always lands back at the tail rather than a stale offset into
 	// different content.
 	scroll int
+
+	// sel is the app-owned mouse click-drag text selection (mouse.go); nil
+	// when nothing is selected. Set on tea.MouseClickMsg, extended on
+	// tea.MouseMotionMsg while the left button stays held, and frozen (but
+	// still shown/copyable) on tea.MouseReleaseMsg. Cleared on the next
+	// click (handleMouseClick always installs a fresh one) or any key press
+	// (see Update's tea.KeyPressMsg case) — never on scroll, so wheel/PgUp-
+	// PgDn scrolling during or after a selection leaves it in place.
+	sel *selectionState
 }
 
 // NewApp returns an App rendering through th, driving sup, with its roster
@@ -324,6 +342,26 @@ func (a App) autoscrollEnabled() bool {
 	return cfg.TUI.AutoscrollEnabled()
 }
 
+// mouseEnabled reports the effective tui.mouse setting
+// (config.TUI.MouseEnabled — default true), read directly off
+// a.commandEnv.Config() on every call, the same "always current" contract
+// autoscrollEnabled follows. Gates both View's mouse-capture enable
+// (tea.MouseModeCellMotion vs tea.MouseModeNone) and, defensively, every
+// mouse-message case in Update — so even a message a misbehaving terminal
+// sends despite MouseModeNone (or a synthetic one from a non-terminal
+// client) is a no-op while mouse is configured off, not just uncaptured at
+// the protocol level.
+func (a App) mouseEnabled() bool {
+	if a.commandEnv.Config == nil {
+		return true
+	}
+	cfg, err := a.commandEnv.Config()
+	if err != nil {
+		return true
+	}
+	return cfg.TUI.MouseEnabled()
+}
+
 // currentSessionInfo returns the roster snapshot for whichever session is
 // currently peeked or attached, or nil on the overview — there is no active
 // session for a command-panel view (e.g. /status's Session name/ID/Model
@@ -363,7 +401,28 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case tea.MouseWheelMsg:
+		if !a.mouseEnabled() {
+			return a, nil
+		}
 		return a.handleWheel(msg), nil
+
+	case tea.MouseClickMsg:
+		if !a.mouseEnabled() {
+			return a, nil
+		}
+		return a.handleMouseClick(msg), nil
+
+	case tea.MouseMotionMsg:
+		if !a.mouseEnabled() {
+			return a, nil
+		}
+		return a.handleMouseMotion(msg), nil
+
+	case tea.MouseReleaseMsg:
+		if !a.mouseEnabled() {
+			return a, nil
+		}
+		return a.handleMouseRelease(msg)
 
 	case rosterMsg:
 		if msg.err != nil {
@@ -419,6 +478,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyPressMsg:
 		a.status = ""
+		// Any key press clears an active/frozen mouse selection — docs/TUI.md's
+		// "clear the selection on the next click / a key press" contract (a
+		// fresh click already clears it via handleMouseClick installing a new
+		// selectionState outright, so this is the key-press half).
+		a.sel = nil
 		// The command panel takes every key ahead of the approval overlay and
 		// the per-screen handlers (dispatch precedence: panel > approval >
 		// menu > active screen > global) — see handlePanelKey.
@@ -509,7 +573,11 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		a.over = a.over.ToggleView()
 		return a, nil
 
-	case key.Code == tea.KeyRight:
+	case key.Code == tea.KeyRight && key.Mod == 0:
+		// Bare (unmodified) Right only — a modified Right (Alt+Right, the
+		// input keymap's word-move) is NOT the navigation contract's
+		// attach-selected-session binding; it falls through to
+		// applyInputKey below like any other editing key.
 		id := a.over.SelectedID()
 		if id == "" {
 			return a, nil
@@ -547,7 +615,7 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// creating a session from the literal text. The intercept switches on
 		// the first rune so "@" (file mention) / "!" (shell escape) can slot
 		// in beside it later (docs/TUI.md); out of scope here.
-		if strings.HasPrefix(a.over.input, "/") {
+		if strings.HasPrefix(a.over.input.String(), "/") {
 			a.over = a.over.Submit()
 			buf, _ := a.over.TakeSubmitted()
 			return a.dispatchSlash(buf)
@@ -560,9 +628,11 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return a, cmd
 
 	case key.Code == tea.KeyEscape:
-		for !a.over.InputEmpty() {
-			a.over = a.over.Backspace()
-		}
+		// Clears the WHOLE buffer regardless of the cursor's position — a
+		// repeated Backspace loop would only clear the text before the
+		// cursor and could stall forever once the cursor (but not the
+		// buffer) reaches 0.
+		a.over = a.over.SetInput("")
 		return a, nil
 
 	case key.Mod.Contains(tea.ModCtrl) && key.Code == 'x':
@@ -573,16 +643,16 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return a, a.doKill(s.ID)
 		}
 		return a, nil
+	}
 
-	case key.Code == tea.KeyBackspace:
-		a.over = a.over.Backspace()
-		return a, nil
-
-	case key.Text != "":
-		for _, r := range key.Text {
-			a.over = a.over.TypeRune(r)
-		}
-		return a, nil
+	// Every key not already claimed by the navigation contract above falls
+	// through to the shared input keymap (input_keymap.go) — movement,
+	// insertion at the cursor, and deletion, the same keymap the attach
+	// input uses. A bare Right never reaches here: it is already claimed by
+	// the tea.KeyRight case above ("→ attaches the selected session" — see
+	// applyInputKey's doc).
+	if buf, ok := applyInputKey(a.over.input, key); ok {
+		a.over.input = buf
 	}
 	return a, nil
 }
@@ -670,11 +740,20 @@ func (a App) handleAttachKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
-	case key.Code == tea.KeyLeft:
+	case key.Code == tea.KeyLeft && key.Mod == 0:
+		// Bare (unmodified) Left only — a modified Left (Alt+Left, the input
+		// keymap's word-move) falls through to applyInputKey below like any
+		// other editing key. ← in an EMPTY input backs out to the overview
+		// (the navigation contract); with text, it edits — moves the cursor
+		// left one rune, the same as everywhere else Left means "move left"
+		// — rather than the pre-cursor no-op this case used to fall through
+		// to.
 		if a.sess.InputEmpty() {
 			a.scr = screenOverview
 			a.scroll = 0
+			return a, nil
 		}
+		a.sess = a.sess.MoveLeft()
 		return a, nil
 
 	case key.Code == tea.KeyPgUp:
@@ -692,7 +771,7 @@ func (a App) handleAttachKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// A leading "/" is a command, not a prompt — same intercept as the
 		// dispatch bar (handleOverviewKey), applied here too so /status,
 		// /config, and /model work from the attach input as well.
-		if strings.HasPrefix(a.sess.input, "/") {
+		if strings.HasPrefix(a.sess.input.String(), "/") {
 			a.sess = a.sess.Submit()
 			buf, _ := a.sess.TakeSubmitted()
 			return a.dispatchSlash(buf)
@@ -706,16 +785,16 @@ func (a App) handleAttachKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			cmd = a.doSend(a.sessID, txt)
 		}
 		return a, cmd
+	}
 
-	case key.Code == tea.KeyBackspace:
-		a.sess = a.sess.Backspace()
-		return a, nil
-
-	case key.Text != "":
-		for _, r := range key.Text {
-			a.sess = a.sess.TypeRune(r)
-		}
-		return a, nil
+	// Every key not already claimed by the navigation contract above falls
+	// through to the shared input keymap (input_keymap.go) — the same
+	// movement/insertion/deletion keymap the overview dispatch bar uses.
+	// Bare Left never reaches here: it is already claimed by the tea.KeyLeft
+	// case above (conditionally — back out to the overview, or edit — see
+	// its own comment).
+	if buf, ok := applyInputKey(a.sess.input, key); ok {
+		a.sess.input = buf
 	}
 	return a, nil
 }
@@ -814,6 +893,14 @@ func (a App) render() string {
 	}
 	content := strings.Repeat("\n", layout.TopPadding) + body
 
+	// An active/frozen mouse selection (mouse.go) overlays its reverse-video
+	// highlight on top of the fully composed frame — after every other
+	// overlay (panel/footer) so the highlight always draws over whatever it
+	// covers, on whichever screen actually participates in selection.
+	if a.sel != nil && a.mouseSelectable() {
+		content = highlightSelection(content, *a.sel, a.theme)
+	}
+
 	// A pending approval, when there is one, is already rendered inline by
 	// a.sess.View/Peek.View above — the overview screen shows only the
 	// roster's colored status word (see overview_render.go's statusColorFor), never the
@@ -825,16 +912,25 @@ func (a App) render() string {
 
 // View satisfies tea.Model, rendering the current screen at the last known
 // terminal size. It requests the alternate screen, matching [Program.View],
-// and enables cell-motion mouse reporting — bubbletea v2 moved mouse mode
-// from a tea.NewProgram option onto the View itself (see the upgrade guide's
+// and enables cell-motion mouse reporting when tui.mouse is on (the
+// default; see mouseEnabled) — bubbletea v2 moved mouse mode from a
+// tea.NewProgram option onto the View itself (see the upgrade guide's
 // "Mouse mode is now a View field") — so a terminal that supports it starts
-// sending [tea.MouseWheelMsg] (see handleWheel) as soon as this frame draws;
-// cmd/gofer's tui_app.go/attach.go build the [tea.Program] wrapping App and
-// need no extra option for this.
+// sending [tea.MouseWheelMsg]/click/drag/release (see handleWheel and
+// mouse.go) as soon as this frame draws; cmd/gofer's tui_app.go/attach.go
+// build the [tea.Program] wrapping App and need no extra option for this.
+// tui.mouse explicitly off sets tea.MouseModeNone instead, handing mouse
+// reporting back to the terminal entirely — its own native click-to-select
+// and scrollback return, and gofer's own wheel/selection handling goes
+// quiet (also defensively gated in Update — see mouseEnabled's doc).
 func (a App) View() tea.View {
 	v := tea.NewView(a.render())
 	v.AltScreen = true
-	v.MouseMode = tea.MouseModeCellMotion
+	if a.mouseEnabled() {
+		v.MouseMode = tea.MouseModeCellMotion
+	} else {
+		v.MouseMode = tea.MouseModeNone
+	}
 	return v
 }
 

@@ -83,12 +83,30 @@ type TUI struct {
 	// resolved value every caller should read instead of this field
 	// directly.
 	Autoscroll *bool `json:"autoscroll,omitempty"`
+
+	// Mouse controls whether the TUI enables mouse capture (cell-motion
+	// reporting) at all: nil (unset) or true is the default — mouse-wheel
+	// scroll and app-owned click-drag text selection with OSC 52 copy are
+	// both live. An explicit false disables mouse capture altogether
+	// (App.View sets tea.MouseModeNone instead of tea.MouseModeCellMotion),
+	// handing control back to the terminal's own native click-to-select and
+	// native scroll — the escape hatch for a terminal where OSC 52 or SGR
+	// mouse reporting misbehaves. Same *bool rationale as [TUI.Autoscroll]:
+	// a plain bool can't distinguish "unset" from "explicitly false". See
+	// [TUI.MouseEnabled] for the resolved value every caller should read.
+	Mouse *bool `json:"mouse,omitempty"`
 }
 
 // AutoscrollEnabled resolves [TUI.Autoscroll]'s effective value: true (the
 // default) when unset, else the explicit stored value.
 func (t TUI) AutoscrollEnabled() bool {
 	return t.Autoscroll == nil || *t.Autoscroll
+}
+
+// MouseEnabled resolves [TUI.Mouse]'s effective value: true (the default)
+// when unset, else the explicit stored value.
+func (t TUI) MouseEnabled() bool {
+	return t.Mouse == nil || *t.Mouse
 }
 
 // Telemetry is gofer's native OpenTelemetry configuration block, mirroring

@@ -100,9 +100,9 @@ func TestGoldenConfigBoolToggle(t *testing.T) {
 	}
 	v := newConfigView(theme.Test(), env)
 	// session.model, session.permission_mode, tui.roster_view,
-	// tui.autoscroll, telemetry.enabled — five ↓ presses (the first selects
-	// row 0) land on telemetry.enabled.
-	for i := 0; i < 5; i++ {
+	// tui.autoscroll, tui.mouse, telemetry.enabled — six ↓ presses (the first
+	// selects row 0) land on telemetry.enabled.
+	for i := 0; i < 6; i++ {
 		v = pressKey(v, tea.KeyDown)
 	}
 	v = pressKey(v, tea.KeyEnter)
@@ -225,7 +225,7 @@ func TestConfigZeroCommandEnvDoesNotPanic(t *testing.T) {
 		t.Fatalf("expected the empty-filter placeholder, got:\n%s", got)
 	}
 
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		v = pressKey(v, tea.KeyDown)
 	}
 	v = pressKey(v, tea.KeyEnter) // toggles telemetry.enabled in memory; SaveConfig is nil
@@ -255,7 +255,7 @@ func TestConfigSaveErrorSurfacesAsRow(t *testing.T) {
 	env := GoldenCommandEnv()
 	env.SaveConfig = func(config.Config) error { return errors.New("disk full") }
 	v := newConfigView(theme.Test(), env)
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		v = pressKey(v, tea.KeyDown)
 	}
 	v = pressKey(v, tea.KeyEnter)

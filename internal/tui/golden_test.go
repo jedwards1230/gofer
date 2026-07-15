@@ -348,3 +348,19 @@ func TestGoldenInputBuffer(t *testing.T) {
 	got := testkit.Render(m, testkit.Width, testkit.Height)
 	testkit.AssertGolden(t, "input_buffer", got)
 }
+
+// TestGoldenInputBufferCursorMidText covers the cursor-aware buffer
+// (inputbuf.go) rendering the "▏" glyph at its actual mid-text position
+// after moving left, not always appended at the end the way the pre-cursor
+// append-only buffer rendered it.
+func TestGoldenInputBufferCursorMidText(t *testing.T) {
+	m := tui.New(theme.Test())
+	for _, r := range "help me" {
+		m = m.TypeRune(r)
+	}
+	for i := 0; i < 3; i++ {
+		m = m.MoveLeft()
+	}
+	got := testkit.Render(m, testkit.Width, testkit.Height)
+	testkit.AssertGolden(t, "input_buffer_cursor_mid_text", got)
+}

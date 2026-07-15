@@ -26,9 +26,10 @@ type Overview struct {
 	// the view (which reorders rows) keeps the same session selected.
 	selectedID string
 
-	// input is the dispatch-bar buffer; submitted/hasSubmitted mirror
-	// [Model]'s take-once submission handoff.
-	input        string
+	// input is the dispatch-bar buffer — a cursor-aware [inputBuffer]
+	// (inputbuf.go), not just an append-only string; submitted/hasSubmitted
+	// mirror [Model]'s take-once submission handoff.
+	input        inputBuffer
 	submitted    string
 	hasSubmitted bool
 }
@@ -139,32 +140,83 @@ func (o Overview) Selected() (SessionInfo, bool) {
 	return SessionInfo{}, false
 }
 
-// TypeRune appends r to the dispatch-bar buffer.
+// TypeRune inserts r into the dispatch-bar buffer at the cursor.
 func (o Overview) TypeRune(r rune) Overview {
-	o.input += string(r)
+	o.input = o.input.InsertRune(r)
 	return o
 }
 
-// Backspace removes the last rune from the dispatch-bar buffer, if any.
+// InsertText inserts s into the dispatch-bar buffer at the cursor —
+// key.Text can in principle carry more than one rune (an IME commit).
+func (o Overview) InsertText(s string) Overview {
+	o.input = o.input.InsertText(s)
+	return o
+}
+
+// Backspace removes the rune immediately before the cursor, if any.
 func (o Overview) Backspace() Overview {
-	if o.input == "" {
-		return o
-	}
-	runes := []rune(o.input)
-	o.input = string(runes[:len(runes)-1])
+	o.input = o.input.Backspace()
+	return o
+}
+
+// DeleteForward removes the rune at the cursor, if any — Delete/Ctrl+D.
+func (o Overview) DeleteForward() Overview {
+	o.input = o.input.DeleteForward()
+	return o
+}
+
+// MoveLeft/MoveRight move the dispatch-bar cursor one rune.
+func (o Overview) MoveLeft() Overview  { o.input = o.input.MoveLeft(); return o }
+func (o Overview) MoveRight() Overview { o.input = o.input.MoveRight(); return o }
+
+// MoveWordLeft/MoveWordRight move the dispatch-bar cursor one word —
+// Alt+Left/Alt+Right.
+func (o Overview) MoveWordLeft() Overview  { o.input = o.input.MoveWordLeft(); return o }
+func (o Overview) MoveWordRight() Overview { o.input = o.input.MoveWordRight(); return o }
+
+// MoveHome/MoveEnd jump the dispatch-bar cursor to the buffer's start/end —
+// Home/Ctrl+A and End/Ctrl+E.
+func (o Overview) MoveHome() Overview { o.input = o.input.MoveHome(); return o }
+func (o Overview) MoveEnd() Overview  { o.input = o.input.MoveEnd(); return o }
+
+// DeleteWordBackward deletes the word before the cursor — Alt+Backspace/Ctrl+W.
+func (o Overview) DeleteWordBackward() Overview {
+	o.input = o.input.DeleteWordBackward()
+	return o
+}
+
+// DeleteToLineStart/DeleteToLineEnd delete from the cursor to the buffer's
+// start/end — Ctrl+U and Ctrl+K.
+func (o Overview) DeleteToLineStart() Overview {
+	o.input = o.input.DeleteToLineStart()
+	return o
+}
+
+func (o Overview) DeleteToLineEnd() Overview {
+	o.input = o.input.DeleteToLineEnd()
 	return o
 }
 
 // InputEmpty reports whether the dispatch bar has no pending text. The app
 // root consults this to resolve the navigation contract's left-arrow (← in an
 // empty input backs out; with text it edits).
-func (o Overview) InputEmpty() bool { return o.input == "" }
+func (o Overview) InputEmpty() bool { return o.input.Empty() }
 
-// SetInput replaces the dispatch-bar buffer outright — used by the command
-// menu's Tab-complete and Enter-select (command_menu.go), which splice or
-// clear the buffer wholesale rather than one rune at a time.
+// SetInput replaces the dispatch-bar buffer outright, cursor moving to the
+// end — used by the command menu's Enter-select (command_menu.go), which
+// clears the buffer wholesale rather than one rune at a time.
 func (o Overview) SetInput(s string) Overview {
-	o.input = s
+	o.input = o.input.SetText(s)
+	return o
+}
+
+// SetInputCursor replaces the dispatch-bar buffer and places the cursor
+// explicitly — used by the command menu's Tab-complete (command_menu.go),
+// which splices a completion in place of the active token and wants the
+// cursor right after it, not at the end of any trailing text the splice
+// left in place.
+func (o Overview) SetInputCursor(s string, cursor int) Overview {
+	o.input = o.input.SetTextCursor(s, cursor)
 	return o
 }
 
@@ -172,12 +224,12 @@ func (o Overview) SetInput(s string) Overview {
 // [Overview.TakeSubmitted]) and clears it. Submitting an empty buffer is a
 // no-op.
 func (o Overview) Submit() Overview {
-	if o.input == "" {
+	if o.input.Empty() {
 		return o
 	}
-	o.submitted = o.input
+	o.submitted = o.input.String()
 	o.hasSubmitted = true
-	o.input = ""
+	o.input = inputBuffer{}
 	return o
 }
 

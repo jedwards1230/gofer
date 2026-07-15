@@ -18,6 +18,7 @@ func TestSettingsRegistryDefaults(t *testing.T) {
 		"session.permission_mode": "ask",
 		"tui.roster_view":         "flat",
 		"tui.autoscroll":          "true",
+		"tui.mouse":               "true",
 		"telemetry.enabled":       "false",
 		"telemetry.endpoint":      "",
 	}
@@ -72,6 +73,7 @@ func TestSettingsRegistryKinds(t *testing.T) {
 		"session.permission_mode": {SettingEnum, []string{"ask", "yolo"}},
 		"tui.roster_view":         {SettingEnum, []string{"flat", "grouped"}},
 		"tui.autoscroll":          {SettingBool, nil},
+		"tui.mouse":               {SettingBool, nil},
 		"telemetry.enabled":       {SettingBool, nil},
 		"telemetry.endpoint":      {SettingString, nil},
 	}

@@ -10,7 +10,6 @@ claude-sonnet-5 · ~/orchestration
 
 
 
-
 ────────────────────────────────────────────────────────────────────────────────
 Status  [Config]  Model
 ────────────────────────────────────────────────────────────────────────────────
@@ -19,6 +18,7 @@ Search settings…
   Permission mode … ask
   Roster view … flat
   Auto-scroll transcript … true
+  Mouse capture (scroll + selection) … true
   Telemetry enabled … false
   Telemetry endpoint … 
 Type to filter · Enter/↓ to select · ↑ to tabs · Esc to clear

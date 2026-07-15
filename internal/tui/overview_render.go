@@ -309,10 +309,10 @@ func (o Overview) dispatch(width int, hide bool) []string {
 	rule := strings.Repeat("─", width)
 
 	var line string
-	if o.input == "" {
+	if o.input.Empty() {
 		line = "❯ " + o.theme.MutedStyle().Render("describe a task for a new session")
 	} else {
-		line = "❯ " + o.input + "▏"
+		line = "❯ " + o.input.Render("▏")
 	}
 
 	hint := o.theme.MutedStyle().Render("enter peek · → attach · tab toggle view · ctrl-x kill · ? shortcuts")

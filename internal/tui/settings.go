@@ -105,6 +105,22 @@ func settingsRegistry() []Setting {
 			},
 		},
 		{
+			Key:   "tui.mouse",
+			Label: "Mouse capture (scroll + selection)",
+			Kind:  SettingBool,
+			Get: func(c config.Config) string {
+				if c.TUI.MouseEnabled() {
+					return "true"
+				}
+				return "false"
+			},
+			Set: func(c config.Config, v string) config.Config {
+				enabled := v == "true"
+				c.TUI.Mouse = &enabled
+				return c
+			},
+		},
+		{
 			Key:   "telemetry.enabled",
 			Label: "Telemetry enabled",
 			Kind:  SettingBool,

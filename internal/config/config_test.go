@@ -247,6 +247,54 @@ func TestAutoscrollExplicitFalseRoundTrips(t *testing.T) {
 	}
 }
 
+// TestMouseDefaultsTrueOnMissingConfig covers the tui.mouse default: a
+// missing config.json must resolve to mouse capture ENABLED, the same
+// *bool nil-means-unset contract [TestAutoscrollDefaultsTrueOnMissingConfig]
+// pins for tui.autoscroll (see [config.TUI.MouseEnabled]'s doc).
+func TestMouseDefaultsTrueOnMissingConfig(t *testing.T) {
+	cfg, err := config.Load(filepath.Join(t.TempDir(), "does-not-exist.json"))
+	if err != nil {
+		t.Fatalf("Load(missing): %v", err)
+	}
+	if !cfg.TUI.MouseEnabled() {
+		t.Fatal("MouseEnabled() on a missing config = false, want true (the default)")
+	}
+}
+
+// TestMouseExplicitFalseRoundTrips is tui.mouse's counterpart to
+// [TestAutoscrollExplicitFalseRoundTrips]: an explicit false must survive a
+// Save/Load round trip rather than silently reverting to the nil/absent
+// default of true.
+func TestMouseExplicitFalseRoundTrips(t *testing.T) {
+	dir := t.TempDir()
+	path := config.DefaultPath(dir)
+
+	disabled := false
+	if err := config.Save(path, config.Config{TUI: config.TUI{Mouse: &disabled}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.TUI.MouseEnabled() {
+		t.Fatal("MouseEnabled() after Save/Load of an explicit false = true, want false")
+	}
+
+	enabled := true
+	if err := config.Save(path, config.Config{TUI: config.TUI{Mouse: &enabled}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err = config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !got.TUI.MouseEnabled() {
+		t.Fatal("MouseEnabled() after Save/Load of an explicit true = false, want true")
+	}
+}
+
 func TestLoadRejectsMalformedJSON(t *testing.T) {
 	dir := t.TempDir()
 	path := config.DefaultPath(dir)

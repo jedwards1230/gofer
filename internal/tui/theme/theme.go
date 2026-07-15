@@ -98,3 +98,12 @@ func (t Theme) WarnStyle() lipgloss.Style { return t.colored(t.Warn) }
 
 // DangerStyle styles error/failure states.
 func (t Theme) DangerStyle() lipgloss.Style { return t.colored(t.Danger) }
+
+// SelectionStyle styles the mouse click-drag selection highlight (reverse
+// video). Unlike the marker-vocabulary colors above, this is NOT gated by
+// [Theme.Profile]: reverse video is a text attribute every ANSI terminal
+// supports, including one with no color capability at all, so a selection
+// stays visible even under [Test]'s forced Ascii profile — only an actual
+// mouse drag ever sets it, so no existing Ascii golden exercises this path
+// or would gain unexpected escape codes from it.
+func (t Theme) SelectionStyle() lipgloss.Style { return lipgloss.NewStyle().Reverse(true) }

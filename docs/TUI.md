@@ -27,8 +27,13 @@ layout](#roster--navigation-m2) and the approval-prompt example below. A
 later fix pass closed a real streaming-attach bug (multi-line items breaking
 the tail-follow height accounting, wheel scroll along with it) and added the
 `tui.autoscroll` setting — see [Multi-line items and the height-accounting
-invariant](#roster--navigation-m2). Still ahead: a general reusable dialog
-abstraction, the central keymap registry, and plugin UI.
+invariant](#roster--navigation-m2). A follow-up pass replaced the append-only
+input buffers with a cursor-aware one and native editing keymap, tuned wheel
+scroll, and added app-owned click-drag text selection with OSC 52 copy plus
+the `tui.mouse` escape hatch — see [Input editing](#input-editing) and
+[Mouse: scroll + selection](#mouse-scroll--selection) below. Still ahead: a
+general reusable dialog abstraction, the central keymap registry, and plugin
+UI.
 
 ## The three altitudes
 
@@ -222,18 +227,92 @@ fixed (same start/end line indices) rather than sliding toward the tail —
 live off `CommandEnv.Config()` on every streamed event, not cached, the same
 "always current" contract every other `CommandEnv` read follows.
 
+## Mouse: scroll + selection
+
 Cell-motion mouse reporting (1002) plus SGR extended coordinates (1006) is
 the minimal enable pair bubbletea v2.0.8 offers — there is no wheel-only
 mode, only `MouseModeNone`/`MouseModeCellMotion`/`MouseModeAllMotion` — so
-turning on wheel scroll also captures the terminal's own click-to-select:
-selecting transcript text with a plain click-drag needs Option-drag on
-macOS terminals (iTerm2/Terminal.app) or the equivalent modifier-drag
-elsewhere, a known, accepted tradeoff. Not every terminal honors mouse
-reporting at all — macOS's stock Terminal.app in particular sends no mouse
-events to the foreground program regardless of what a TUI enables — so a
-wheel that does nothing there is a terminal limitation, not a gofer bug; a
-tmux/Zellij session also needs its own `mouse on` setting to pass wheel
-events through to the program it hosts.
+turning on wheel scroll also captures every click/drag/release the terminal
+would otherwise hand to its own native selection. Rather than accept that as
+a tradeoff, the app **owns** selection instead: `mouse.go` tracks a
+`selectionState` (a screen-cell region, absolute terminal row/column
+coordinates — the same space `App.render`'s own output uses) from
+`tea.MouseClickMsg` (left button only) through `tea.MouseMotionMsg` (motion
+while the left button stays held — cell-motion mode never reports it
+otherwise) to `tea.MouseReleaseMsg`, on whichever of overview/attach is
+showing (the same gate `handleWheel` uses; peek has no selectable content of
+its own, and a command panel/menu/approval overlay composes *over* the
+screen without stopping selection on it either, matching wheel scroll).
+
+`App.render` overlays the selection's span as reverse video after every
+other overlay, cutting each covered line via `ansi.Cut` so a colored line's
+existing styling around the selection survives untouched. On release,
+`App.selectedText` extracts the plain (ANSI-stripped) text the span covers
+straight out of `App.render`'s own output — the *same* fully composed frame
+the terminal shows, so the scroll offset and the identity header are already
+baked in with no separate coordinate space to translate between — and copies
+it to the system clipboard via bubbletea's built-in OSC 52 support
+(`tea.SetClipboard`, an `"\x1b]52;c;<base64>\x07"` sequence written straight
+to the program's output; no external clipboard dependency). A multi-row span
+takes the clicked line from its start column to the end, every full line in
+between whole, and the released line from its own start through the released
+column — the standard terminal click-drag shape. The selection stays
+shown/copyable after release until the **next click** (which always installs
+a fresh `selectionState`, clearing any previous one outright) or **any key
+press** (`App.Update`'s `tea.KeyPressMsg` case drops `a.sel`); it does *not*
+clear on scroll, so wheel/PgUp-PgDn during or after a selection is fine.
+
+**`tui.mouse`** (settings.go, default true/unset) is the escape hatch for a
+terminal where OSC 52 or SGR mouse reporting misbehaves: off sets
+`View().MouseMode = tea.MouseModeNone` instead of `tea.MouseModeCellMotion`,
+handing mouse reporting back to the terminal entirely — its native
+click-to-select and scrollback return — and every mouse-message case in
+`Update` is also defensively gated on the same setting, so a message a
+misbehaving terminal sends anyway (or one a non-terminal client synthesizes)
+is a no-op too, not just uncaptured at the protocol level. Not every
+terminal honors mouse reporting at all — macOS's stock Terminal.app in
+particular sends no mouse events to the foreground program regardless of
+what a TUI enables — so a wheel/selection that does nothing there is a
+terminal limitation, not a gofer bug; a tmux/Zellij session also needs its
+own `mouse on` setting to pass mouse events through to the program it
+hosts.
+
+## Input editing
+
+The overview dispatch bar and the attach input (the two text-entry surfaces
+the slash-command grammar covers — see [Slash commands](#slash-commands))
+share `inputBuffer` (`inputbuf.go`): text plus a cursor index (a rune
+offset), copy-on-write like every other TUI value. Before this it was
+append-only (`TypeRune` appended, `Backspace` dropped the last rune, no
+cursor at all); now every op — insertion, movement, deletion — applies at
+the cursor, and the `▏` glyph renders at its real mid-text position
+(`inputBuffer.Render`) instead of always at the end.
+
+The keymap (`input_keymap.go`'s `applyInputKey`, shared by both surfaces) is
+the standard readline/macOS set, bound to what bubbletea v2.0.8 actually
+delivers: Option/Alt reaches the app as `tea.ModAlt` on terminals that
+forward it (Ghostty does); Cmd/Super doesn't reliably reach a terminal
+program at all, so Home/End and their Ctrl-A/Ctrl-E equivalents are the
+dependable line-start/end bindings, not a Cmd pairing.
+
+| Action | Keys |
+|---|---|
+| Move one char | `←`/`→` |
+| Move one word | `Alt+←`/`Alt+→` |
+| Move to line start/end | `Home`/`Ctrl-A`, `End`/`Ctrl-E` |
+| Delete char before/at cursor | `Backspace`, `Delete`/`Ctrl-D` |
+| Delete word before cursor | `Alt+Backspace`/`Ctrl-W` |
+| Delete to line start/end | `Ctrl-U`, `Ctrl-K` |
+
+Word movement/deletion only treats whitespace as a boundary — `foo.bar` is
+one word, matching bash/zsh/readline's own Ctrl-W convention rather than an
+editor's finer-grained punctuation-splitting. A bare (unmodified) `→` on the
+overview screen stays the navigation contract's "attach the selected
+session" (`handleOverviewKey`'s own `key.Mod == 0` guard keeps it from
+colliding with the keymap's word/char-right bindings); a bare `←` on the
+attach screen is conditional the same way — an empty input backs out to the
+overview, a non-empty one moves the cursor left — so both nav-contract
+arrows take priority over the shared keymap only when unmodified.
 
 `App.render` composes the autocomplete menu into the pinned input block
 rather than budgeting for it separately — `Overview`/`Model`'s `*WithMenu`
@@ -366,15 +445,20 @@ tui/
 - **Dialog grace-period absorption**: async-opened dialogs swallow in-flight
   keystrokes (200ms-quiet / 1500ms-max window) — the approval-pops-mid-
   keystroke race.
-- **Editor internals**: flat cursor model, grapheme-aware word-wrap
-  (CJK-correct), kill-ring, snapshot undo. Autocomplete renders in-flow
-  below the editor, not as an absolute overlay.
+- **Editor internals**: flat cursor model shipped (`inputBuffer`,
+  inputbuf.go — see [Input editing](#input-editing)); grapheme-aware
+  word-wrap (CJK-correct), a kill-ring, and snapshot undo are still ahead.
+  Autocomplete renders in-flow below the editor, not as an absolute overlay.
 - **Per-tool-kind `ToolRenderer`** interface + width-aware diff view (split
   ≥ 140 cols, else unified).
-- Mouse-wheel scroll shipped (see [Bottom-anchored layout, scroll-away
-  header](#roster--navigation-m2)) — click/drag selection is still deferred.
-- Deferred: click/drag mouse selection, animations beyond one shared spinner,
-  a second theme, raw-ANSI subprocess remapping.
+- Mouse-wheel scroll and app-owned click/drag text selection with OSC 52
+  copy both shipped (see [Mouse: scroll + selection](#mouse-scroll--selection)).
+- Deferred: transcript virtualization with a frozen-item cache (see the
+  first bullet above — `Model.transcriptLines` is still O(items) per
+  render, negligible at realistic transcript sizes but the thing to revisit
+  if a genuinely massive transcript ever makes wheel scroll feel slow),
+  animations beyond one shared spinner, a second theme, raw-ANSI subprocess
+  remapping.
 
 ## How the TUI is tested
 

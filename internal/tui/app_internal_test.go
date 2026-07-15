@@ -20,6 +20,7 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
+	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/tui/testkit"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
@@ -661,6 +662,77 @@ func TestHandleWheelScrollsAndClampsAtTail(t *testing.T) {
 	}
 }
 
+// TestWheelNotchesAccumulateWithoutDrops drives N mouse-wheel notches
+// through the real Update path (not handleWheel directly, so this exercises
+// the same message dispatch a live tea.Program uses) and asserts a.scroll
+// lands at exactly the expected total — proof that App.Update applies every
+// notch it receives (no debounce/coalescing of its own drops or merges
+// consecutive wheel events), the way a fast trackpad flick delivers many
+// MouseWheelMsg values back to back.
+func TestWheelNotchesAccumulateWithoutDrops(t *testing.T) {
+	a := App{scr: screenOverview}
+
+	const upNotches = 11
+	var mdl tea.Model = a
+	for i := 0; i < upNotches; i++ {
+		mdl, _ = mdl.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	}
+	if got := mdl.(App).scroll; got != upNotches*scrollWheelLines {
+		t.Fatalf("scroll after %d wheel-up notches = %d, want %d (every notch applied, none dropped)", upNotches, got, upNotches*scrollWheelLines)
+	}
+
+	const downNotches = 4
+	for i := 0; i < downNotches; i++ {
+		mdl, _ = mdl.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
+	}
+	want := (upNotches - downNotches) * scrollWheelLines
+	if got := mdl.(App).scroll; got != want {
+		t.Fatalf("scroll after %d up + %d down notches = %d, want %d", upNotches, downNotches, got, want)
+	}
+}
+
+// TestWheelScrollsMassiveTranscriptWithoutPanic exercises wheel scroll
+// against a transcript far larger than any golden fixture (2,000 turns) —
+// proof the wheel path stays correct (moves the visible window, doesn't
+// panic/hang) at a scale where a render regression reintroducing O(n)
+// per-notch cost, or an off-by-one in scrollTail's bound math, would be far
+// more likely to surface than at the golden tests' ~2-item fixtures.
+func TestWheelScrollsMassiveTranscriptWithoutPanic(t *testing.T) {
+	meta := GoldenMeta()
+	meta.AttachSessionID = "sess-x"
+	a := NewApp(theme.Test(), &internalFakeSup{}, meta, GoldenCommandEnv())
+	mdl, _ := a.Update(tea.WindowSizeMsg{Width: testkit.Width, Height: testkit.Height})
+	a = mdl.(App)
+
+	const turns = 2000
+	for i := 0; i < turns; i++ {
+		mdl, _ = a.Update(sessEventMsg{
+			id: "sess-x",
+			ev: event.NewMessageFinished("sess-x", event.MessageUser, fmt.Sprintf("turn %d", i)),
+		})
+		a = mdl.(App)
+	}
+
+	tailed := a.render()
+	if !strings.Contains(tailed, fmt.Sprintf("turn %d", turns-1)) {
+		t.Fatalf("precondition failed: tailed render missing the latest turn on a %d-turn transcript", turns)
+	}
+
+	const notches = 50
+	for i := 0; i < notches; i++ {
+		mdl, _ = a.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+		a = mdl.(App)
+	}
+	if want := notches * scrollWheelLines; a.scroll != want {
+		t.Fatalf("scroll after %d wheel-up notches on a massive transcript = %d, want %d", notches, a.scroll, want)
+	}
+
+	scrolled := a.render() // must not panic even at this scale
+	if strings.Contains(scrolled, fmt.Sprintf("turn %d", turns-1)) {
+		t.Error("wheel-scrolled render on a massive transcript still shows the latest turn — the visible window did not move")
+	}
+}
+
 // TestHandleWheelScrollsOverflowingTranscript is the render-level companion
 // to TestHandleWheelScrollsAndClampsAtTail: that test only asserts a.scroll's
 // numeric field moves, which would pass even if the wheel-driven offset were
@@ -817,5 +889,174 @@ func TestViewEnablesMouseMode(t *testing.T) {
 	a := NewApp(theme.Test(), &internalFakeSup{}, GoldenMeta(), GoldenCommandEnv())
 	if got := a.View().MouseMode; got != tea.MouseModeCellMotion {
 		t.Errorf("View().MouseMode = %v; want tea.MouseModeCellMotion", got)
+	}
+}
+
+// BenchmarkAppRenderMassiveTranscript measures render() cost on a
+// transcript far larger than any real conversation is likely to reach
+// (5,000 turns) — an on-demand way to observe whether a render stays fast
+// enough for smooth wheel scroll (the "stays smooth on a massive
+// transcript" property Part B's docs/TUI.md section describes) without a
+// wall-clock assertion in the regular gate (flaky in CI). Run explicitly
+// with `go test ./internal/tui -run '^$' -bench BenchmarkAppRenderMassiveTranscript`.
+func BenchmarkAppRenderMassiveTranscript(b *testing.B) {
+	meta := GoldenMeta()
+	meta.AttachSessionID = "sess-x"
+	a := NewApp(theme.Test(), &internalFakeSup{}, meta, GoldenCommandEnv())
+	mdl, _ := a.Update(tea.WindowSizeMsg{Width: testkit.Width, Height: testkit.Height})
+	a = mdl.(App)
+
+	const turns = 5000
+	for i := 0; i < turns; i++ {
+		mdl, _ = a.Update(sessEventMsg{
+			id: "sess-x",
+			ev: event.NewMessageFinished("sess-x", event.MessageUser, fmt.Sprintf("turn %d", i)),
+		})
+		a = mdl.(App)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		a.scroll = i % 200 // simulate wheel notches moving the window each render
+		_ = a.render()
+	}
+}
+
+// TestMouseDragSelectsWithoutModifier is the required "plain drag selects
+// without a modifier" coverage: a left-button click/motion/release with a
+// zero Mod field (tea.KeyMod's zero value — no Alt/Ctrl/Shift/Super) drives
+// a full selection through App's exported Update, ending with a. sel
+// populated and a clipboard-copy Cmd issued. Selection is app-owned now
+// (cell-motion mouse mode routes clicks/drags to the program), so this
+// coexists with — doesn't need — any modifier the old native-terminal-
+// selection tradeoff (docs/TUI.md, pre-#Part-C) required.
+func TestMouseDragSelectsWithoutModifier(t *testing.T) {
+	a := newAppForGolden(t, newInternalFakeSup(GoldenRoster()))
+
+	mdl, _ := a.Update(tea.MouseClickMsg{X: 0, Y: 1, Button: tea.MouseLeft})
+	a = mdl.(App)
+	if a.sel == nil || !a.sel.dragging {
+		t.Fatal("expected a dragging selection after a plain left-button click with no modifier")
+	}
+
+	mdl, _ = a.Update(tea.MouseMotionMsg{X: 4, Y: 1, Button: tea.MouseLeft})
+	a = mdl.(App)
+	if a.sel.curX != 4 {
+		t.Fatalf("expected motion to extend the selection to X=4, got X=%d", a.sel.curX)
+	}
+
+	mdl, cmd := a.Update(tea.MouseReleaseMsg{X: 4, Y: 1, Button: tea.MouseLeft})
+	a = mdl.(App)
+	if a.sel == nil || a.sel.dragging {
+		t.Fatal("expected the selection to remain (frozen, not dragging) after release")
+	}
+	if cmd == nil {
+		t.Fatal("expected a clipboard-copy Cmd after release over real content")
+	}
+}
+
+// TestMouseClickAlwaysStartsFreshSelection covers "clear the selection on
+// the next click": a second click overwrites any previous (even still-
+// dragging) selection outright rather than extending or merging with it.
+func TestMouseClickAlwaysStartsFreshSelection(t *testing.T) {
+	a := newAppForGolden(t, newInternalFakeSup(GoldenRoster()))
+	mdl, _ := a.Update(tea.MouseClickMsg{X: 0, Y: 1, Button: tea.MouseLeft})
+	a = mdl.(App)
+	mdl, _ = a.Update(tea.MouseReleaseMsg{X: 4, Y: 1, Button: tea.MouseLeft})
+	a = mdl.(App)
+
+	mdl, _ = a.Update(tea.MouseClickMsg{X: 10, Y: 2, Button: tea.MouseLeft})
+	a = mdl.(App)
+	if a.sel.startX != 10 || a.sel.startY != 2 || a.sel.curX != 10 || a.sel.curY != 2 || !a.sel.dragging {
+		t.Fatalf("expected a fresh selection at (10,2), got %+v", a.sel)
+	}
+}
+
+// TestMouseClickIgnoredOffMouseButton covers a non-left click being a no-op
+// — it must not start a selection.
+func TestMouseClickIgnoredOffMouseButton(t *testing.T) {
+	a := newAppForGolden(t, newInternalFakeSup(GoldenRoster()))
+	mdl, _ := a.Update(tea.MouseClickMsg{X: 0, Y: 1, Button: tea.MouseRight})
+	a = mdl.(App)
+	if a.sel != nil {
+		t.Errorf("expected a right-button click to start no selection, got %+v", a.sel)
+	}
+}
+
+// TestKeyPressClearsSelection covers "clear the selection on ... a key
+// press": any key press drops a.sel outright, even mid-drag.
+func TestKeyPressClearsSelection(t *testing.T) {
+	a := newAppForGolden(t, newInternalFakeSup(GoldenRoster()))
+	mdl, _ := a.Update(tea.MouseClickMsg{X: 0, Y: 1, Button: tea.MouseLeft})
+	a = mdl.(App)
+	if a.sel == nil {
+		t.Fatal("precondition failed: expected a selection after the click")
+	}
+
+	mdl, _ = a.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	a = mdl.(App)
+	if a.sel != nil {
+		t.Errorf("expected a key press to clear the selection, got %+v", a.sel)
+	}
+}
+
+// TestMouseSelectionCoexistsWithWheelScroll covers "must coexist with wheel
+// scroll (scrolling during/after selection is fine)": a wheel notch after a
+// selection is frozen (released, not dragging) leaves the selection in
+// place — only a click or a key press clears it, not scroll.
+func TestMouseSelectionCoexistsWithWheelScroll(t *testing.T) {
+	a := newAppForGolden(t, newInternalFakeSup(GoldenRoster()))
+	mdl, _ := a.Update(tea.MouseClickMsg{X: 0, Y: 1, Button: tea.MouseLeft})
+	a = mdl.(App)
+	mdl, _ = a.Update(tea.MouseReleaseMsg{X: 4, Y: 1, Button: tea.MouseLeft})
+	a = mdl.(App)
+	if a.sel == nil {
+		t.Fatal("precondition failed: expected a frozen selection after release")
+	}
+
+	mdl, _ = a.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	a = mdl.(App)
+	if a.sel == nil {
+		t.Error("expected a wheel notch to leave an existing selection in place")
+	}
+	if a.scroll == 0 {
+		t.Error("expected the wheel notch to still scroll while a selection is active")
+	}
+}
+
+// TestMouseMessagesNoOpWhenMouseDisabled covers tui.mouse=false: wheel,
+// click, motion, and release messages are all defensively ignored at the
+// Update level too, not just left uncaptured at the protocol level (see
+// mouseEnabled's doc).
+func TestMouseMessagesNoOpWhenMouseDisabled(t *testing.T) {
+	env := GoldenCommandEnv()
+	disabled := false
+	env.Config = func() (config.Config, error) { return config.Config{TUI: config.TUI{Mouse: &disabled}}, nil }
+	a := newAppForGolden(t, newInternalFakeSup(GoldenRoster()))
+	a.commandEnv = env
+
+	mdl, _ := a.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	a = mdl.(App)
+	if a.scroll != 0 {
+		t.Errorf("expected a wheel notch to be ignored with mouse disabled, scroll = %d", a.scroll)
+	}
+
+	mdl, _ = a.Update(tea.MouseClickMsg{X: 0, Y: 1, Button: tea.MouseLeft})
+	a = mdl.(App)
+	if a.sel != nil {
+		t.Errorf("expected a click to be ignored with mouse disabled, got selection %+v", a.sel)
+	}
+}
+
+// TestViewDisablesMouseModeWhenConfigured covers tui.mouse=false disabling
+// mouse capture at the View level (tea.MouseModeNone), handing native
+// click-select/scroll back to the terminal.
+func TestViewDisablesMouseModeWhenConfigured(t *testing.T) {
+	env := GoldenCommandEnv()
+	disabled := false
+	env.Config = func() (config.Config, error) { return config.Config{TUI: config.TUI{Mouse: &disabled}}, nil }
+	a := NewApp(theme.Test(), &internalFakeSup{}, GoldenMeta(), env)
+	if got := a.View().MouseMode; got != tea.MouseModeNone {
+		t.Errorf("View().MouseMode with tui.mouse=false = %v; want tea.MouseModeNone", got)
 	}
 }

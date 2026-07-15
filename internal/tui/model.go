@@ -95,7 +95,9 @@ type Model struct {
 	usage *provider.Usage
 	cost  *provider.Cost
 
-	input string
+	// input is the attach input's buffer — a cursor-aware [inputBuffer]
+	// (inputbuf.go), not just an append-only string.
+	input inputBuffer
 
 	submitted    string
 	hasSubmitted bool
@@ -329,32 +331,83 @@ func summarizeToolInput(compact string) string {
 	return compact
 }
 
-// TypeRune appends r to the input buffer.
+// TypeRune inserts r into the input buffer at the cursor.
 func (m Model) TypeRune(r rune) Model {
-	m.input += string(r)
+	m.input = m.input.InsertRune(r)
 	return m
 }
 
-// Backspace removes the last rune in the input buffer, if any.
+// InsertText inserts s into the input buffer at the cursor — key.Text can in
+// principle carry more than one rune (an IME commit).
+func (m Model) InsertText(s string) Model {
+	m.input = m.input.InsertText(s)
+	return m
+}
+
+// Backspace removes the rune immediately before the cursor, if any.
 func (m Model) Backspace() Model {
-	if m.input == "" {
-		return m
-	}
-	runes := []rune(m.input)
-	m.input = string(runes[:len(runes)-1])
+	m.input = m.input.Backspace()
+	return m
+}
+
+// DeleteForward removes the rune at the cursor, if any — Delete/Ctrl+D.
+func (m Model) DeleteForward() Model {
+	m.input = m.input.DeleteForward()
+	return m
+}
+
+// MoveLeft/MoveRight move the input cursor one rune.
+func (m Model) MoveLeft() Model  { m.input = m.input.MoveLeft(); return m }
+func (m Model) MoveRight() Model { m.input = m.input.MoveRight(); return m }
+
+// MoveWordLeft/MoveWordRight move the input cursor one word —
+// Alt+Left/Alt+Right.
+func (m Model) MoveWordLeft() Model  { m.input = m.input.MoveWordLeft(); return m }
+func (m Model) MoveWordRight() Model { m.input = m.input.MoveWordRight(); return m }
+
+// MoveHome/MoveEnd jump the input cursor to the buffer's start/end —
+// Home/Ctrl+A and End/Ctrl+E.
+func (m Model) MoveHome() Model { m.input = m.input.MoveHome(); return m }
+func (m Model) MoveEnd() Model  { m.input = m.input.MoveEnd(); return m }
+
+// DeleteWordBackward deletes the word before the cursor — Alt+Backspace/Ctrl+W.
+func (m Model) DeleteWordBackward() Model {
+	m.input = m.input.DeleteWordBackward()
+	return m
+}
+
+// DeleteToLineStart/DeleteToLineEnd delete from the cursor to the buffer's
+// start/end — Ctrl+U and Ctrl+K.
+func (m Model) DeleteToLineStart() Model {
+	m.input = m.input.DeleteToLineStart()
+	return m
+}
+
+func (m Model) DeleteToLineEnd() Model {
+	m.input = m.input.DeleteToLineEnd()
 	return m
 }
 
 // InputEmpty reports whether the input buffer has no pending text. The app
 // root consults this to resolve the navigation contract's left-arrow (← in
 // an empty attach input backs out to the overview; with text it edits).
-func (m Model) InputEmpty() bool { return m.input == "" }
+func (m Model) InputEmpty() bool { return m.input.Empty() }
 
-// SetInput replaces the input buffer outright — used by the command menu's
-// Tab-complete and Enter-select (command_menu.go), which splice or clear the
-// buffer wholesale rather than one rune at a time.
+// SetInput replaces the input buffer outright, cursor moving to the end —
+// used by the command menu's Enter-select (command_menu.go), which clears
+// the buffer wholesale rather than one rune at a time.
 func (m Model) SetInput(s string) Model {
-	m.input = s
+	m.input = m.input.SetText(s)
+	return m
+}
+
+// SetInputCursor replaces the input buffer and places the cursor
+// explicitly — used by the command menu's Tab-complete (command_menu.go),
+// which splices a completion in place of the active token and wants the
+// cursor right after it, not at the end of any trailing text the splice
+// left in place.
+func (m Model) SetInputCursor(s string, cursor int) Model {
+	m.input = m.input.SetTextCursor(s, cursor)
 	return m
 }
 
@@ -362,12 +415,12 @@ func (m Model) SetInput(s string) Model {
 // [Model.TakeSubmitted]) and clears it. Submitting an empty buffer is a
 // no-op: there is nothing to send.
 func (m Model) Submit() Model {
-	if m.input == "" {
+	if m.input.Empty() {
 		return m
 	}
-	m.submitted = m.input
+	m.submitted = m.input.String()
 	m.hasSubmitted = true
-	m.input = ""
+	m.input = inputBuffer{}
 	return m
 }
 
@@ -702,9 +755,11 @@ func (m Model) statusLine() string {
 	return m.theme.MutedStyle().Render(line)
 }
 
-// inputLine renders the input buffer with a trailing cursor marker.
+// inputLine renders the input buffer with the cursor marker spliced in at
+// its actual position — mid-text when the cursor sits mid-buffer, not
+// always at the end.
 func (m Model) inputLine() string {
-	return "> " + m.input + "▏"
+	return "> " + m.input.Render("▏")
 }
 
 // FullTranscript renders every transcript item unclipped by height, followed

@@ -139,6 +139,24 @@ func (m commandMenu) complete(buf string, cursor int) (newBuf string, ok bool) {
 	return string(r[:m.start]) + repl + string(r[cursor:]), true
 }
 
+// completionCursor returns the rune index the cursor should land at after
+// [commandMenu.complete] splices the highlighted command's Name in — right
+// after the inserted replacement (the name, plus the ArgHint trailing
+// space, if any), not the end of the whole buffer, which may carry trailing
+// text the splice left in place after the original cursor. ok is false when
+// the menu is closed, mirroring complete's own ok.
+func (m commandMenu) completionCursor() (cursor int, ok bool) {
+	cmd, ok := m.selected()
+	if !ok {
+		return 0, false
+	}
+	repl := "/" + cmd.Name
+	if cmd.ArgHint != "" {
+		repl += " "
+	}
+	return m.start + len([]rune(repl)), true
+}
+
 // Lines renders the popup: a plain rule (matching the panel/dispatch bar's
 // rule-based chrome, no lipgloss borders), then up to [commandMenuMaxRows]
 // rows scrolled to keep the highlighted row visible, with a muted "↑ N
@@ -210,17 +228,17 @@ func (m commandMenu) Lines(width int) []string {
 // current screen — the overview dispatch bar or the attach input, the two
 // surfaces the command-token grammar covers (peek's reply input and an open
 // panel are always closed, see the default/a.panel cases below) — against
-// the current cursor. Both buffers only ever support appending/backspacing
-// at the end today (neither Overview nor Model has a movable cursor), so the
-// cursor is always end-of-buffer. [App.Update] calls this after every
-// per-screen key handler returns, so a.menu always reflects the just-applied
-// edit before the next key's precedence check (a.menu.open()) runs.
+// the buffer's real cursor position ([inputBuffer.Cursor], inputbuf.go), so
+// the popup tracks the active token wherever the cursor actually sits, not
+// just end-of-buffer. [App.Update] calls this after every per-screen key
+// handler returns, so a.menu always reflects the just-applied edit before
+// the next key's precedence check (a.menu.open()) runs.
 func (a App) syncMenu() App {
 	if a.panel != nil {
 		a.menu = commandMenu{}
 		return a
 	}
-	var buf string
+	var buf inputBuffer
 	switch a.scr {
 	case screenOverview:
 		buf = a.over.input
@@ -230,7 +248,7 @@ func (a App) syncMenu() App {
 		a.menu = commandMenu{}
 		return a
 	}
-	a.menu = newCommandMenu(a.theme, a.registry, buf, len([]rune(buf)))
+	a.menu = newCommandMenu(a.theme, a.registry, buf.String(), buf.Cursor())
 	return a
 }
 
@@ -264,11 +282,14 @@ func (a App) handleMenuKey(msg tea.KeyPressMsg) (next tea.Model, cmd tea.Cmd, ha
 }
 
 // completeMenu applies Tab: splices the highlighted command's Name into
-// whichever buffer is live via [commandMenu.complete], then resyncs the menu
-// against the new buffer (closed when a trailing space was added — the
-// ArgHint case; reopened, matching just that one command, otherwise).
+// whichever buffer is live via [commandMenu.complete], places the cursor
+// right after the spliced-in text ([commandMenu.completionCursor] — not the
+// end of the whole buffer, which may carry trailing text the splice left in
+// place), then resyncs the menu against the new buffer (closed when a
+// trailing space was added — the ArgHint case; reopened, matching just that
+// one command, otherwise).
 func (a App) completeMenu() App {
-	var buf string
+	var buf inputBuffer
 	switch a.scr {
 	case screenOverview:
 		buf = a.over.input
@@ -277,15 +298,16 @@ func (a App) completeMenu() App {
 	default:
 		return a
 	}
-	newBuf, ok := a.menu.complete(buf, len([]rune(buf)))
+	newBuf, ok := a.menu.complete(buf.String(), buf.Cursor())
 	if !ok {
 		return a
 	}
+	newCursor, _ := a.menu.completionCursor() // ok mirrors complete's above
 	switch a.scr {
 	case screenOverview:
-		a.over = a.over.SetInput(newBuf)
+		a.over = a.over.SetInputCursor(newBuf, newCursor)
 	case screenAttach:
-		a.sess = a.sess.SetInput(newBuf)
+		a.sess = a.sess.SetInputCursor(newBuf, newCursor)
 	}
 	return a.syncMenu()
 }
