@@ -509,7 +509,11 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		a.over = a.over.ToggleView()
 		return a, nil
 
-	case key.Code == tea.KeyRight:
+	case key.Code == tea.KeyRight && key.Mod == 0:
+		// Bare (unmodified) Right only — a modified Right (Alt+Right, the
+		// input keymap's word-move) is NOT the navigation contract's
+		// attach-selected-session binding; it falls through to
+		// applyInputKey below like any other editing key.
 		id := a.over.SelectedID()
 		if id == "" {
 			return a, nil
@@ -547,7 +551,7 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// creating a session from the literal text. The intercept switches on
 		// the first rune so "@" (file mention) / "!" (shell escape) can slot
 		// in beside it later (docs/TUI.md); out of scope here.
-		if strings.HasPrefix(a.over.input, "/") {
+		if strings.HasPrefix(a.over.input.String(), "/") {
 			a.over = a.over.Submit()
 			buf, _ := a.over.TakeSubmitted()
 			return a.dispatchSlash(buf)
@@ -560,9 +564,11 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return a, cmd
 
 	case key.Code == tea.KeyEscape:
-		for !a.over.InputEmpty() {
-			a.over = a.over.Backspace()
-		}
+		// Clears the WHOLE buffer regardless of the cursor's position — a
+		// repeated Backspace loop would only clear the text before the
+		// cursor and could stall forever once the cursor (but not the
+		// buffer) reaches 0.
+		a.over = a.over.SetInput("")
 		return a, nil
 
 	case key.Mod.Contains(tea.ModCtrl) && key.Code == 'x':
@@ -573,16 +579,16 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return a, a.doKill(s.ID)
 		}
 		return a, nil
+	}
 
-	case key.Code == tea.KeyBackspace:
-		a.over = a.over.Backspace()
-		return a, nil
-
-	case key.Text != "":
-		for _, r := range key.Text {
-			a.over = a.over.TypeRune(r)
-		}
-		return a, nil
+	// Every key not already claimed by the navigation contract above falls
+	// through to the shared input keymap (input_keymap.go) — movement,
+	// insertion at the cursor, and deletion, the same keymap the attach
+	// input uses. A bare Right never reaches here: it is already claimed by
+	// the tea.KeyRight case above ("→ attaches the selected session" — see
+	// applyInputKey's doc).
+	if buf, ok := applyInputKey(a.over.input, key); ok {
+		a.over.input = buf
 	}
 	return a, nil
 }
@@ -670,11 +676,20 @@ func (a App) handleAttachKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
-	case key.Code == tea.KeyLeft:
+	case key.Code == tea.KeyLeft && key.Mod == 0:
+		// Bare (unmodified) Left only — a modified Left (Alt+Left, the input
+		// keymap's word-move) falls through to applyInputKey below like any
+		// other editing key. ← in an EMPTY input backs out to the overview
+		// (the navigation contract); with text, it edits — moves the cursor
+		// left one rune, the same as everywhere else Left means "move left"
+		// — rather than the pre-cursor no-op this case used to fall through
+		// to.
 		if a.sess.InputEmpty() {
 			a.scr = screenOverview
 			a.scroll = 0
+			return a, nil
 		}
+		a.sess = a.sess.MoveLeft()
 		return a, nil
 
 	case key.Code == tea.KeyPgUp:
@@ -692,7 +707,7 @@ func (a App) handleAttachKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// A leading "/" is a command, not a prompt — same intercept as the
 		// dispatch bar (handleOverviewKey), applied here too so /status,
 		// /config, and /model work from the attach input as well.
-		if strings.HasPrefix(a.sess.input, "/") {
+		if strings.HasPrefix(a.sess.input.String(), "/") {
 			a.sess = a.sess.Submit()
 			buf, _ := a.sess.TakeSubmitted()
 			return a.dispatchSlash(buf)
@@ -706,16 +721,16 @@ func (a App) handleAttachKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			cmd = a.doSend(a.sessID, txt)
 		}
 		return a, cmd
+	}
 
-	case key.Code == tea.KeyBackspace:
-		a.sess = a.sess.Backspace()
-		return a, nil
-
-	case key.Text != "":
-		for _, r := range key.Text {
-			a.sess = a.sess.TypeRune(r)
-		}
-		return a, nil
+	// Every key not already claimed by the navigation contract above falls
+	// through to the shared input keymap (input_keymap.go) — the same
+	// movement/insertion/deletion keymap the overview dispatch bar uses.
+	// Bare Left never reaches here: it is already claimed by the tea.KeyLeft
+	// case above (conditionally — back out to the overview, or edit — see
+	// its own comment).
+	if buf, ok := applyInputKey(a.sess.input, key); ok {
+		a.sess.input = buf
 	}
 	return a, nil
 }

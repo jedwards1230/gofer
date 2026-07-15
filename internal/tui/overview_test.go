@@ -105,6 +105,21 @@ func TestGoldenOverviewDispatchTyping(t *testing.T) {
 	testkit.AssertGolden(t, "overview_dispatch_typing", testkit.Render(o, testkit.Width, testkit.Height))
 }
 
+// TestGoldenOverviewDispatchCursorMidText covers the cursor-aware buffer
+// (inputbuf.go) rendering the "▏" glyph at its actual mid-text position, not
+// always appended at the end the way the pre-cursor append-only buffer
+// rendered it: type a phrase, then move left a few runes before rendering.
+func TestGoldenOverviewDispatchCursorMidText(t *testing.T) {
+	o := newOverview().WithSessions(rosterFixture())
+	for _, r := range "fix the flaky peek test" {
+		o = o.TypeRune(r)
+	}
+	for i := 0; i < 5; i++ {
+		o = o.MoveLeft()
+	}
+	testkit.AssertGolden(t, "overview_dispatch_cursor_mid_text", testkit.Render(o, testkit.Width, testkit.Height))
+}
+
 // TestGoldenOverviewSelectionMoves renders the roster after moving the
 // selection down twice, exercising the caret and selection-follow.
 func TestGoldenOverviewSelectionMoves(t *testing.T) {
