@@ -220,10 +220,12 @@ func TestModelCursorClampsAtBounds(t *testing.T) {
 	}
 }
 
-// TestModelEnterIsNoOpStub covers the deliberately-held Enter/select coupling
-// (see modelpicker.go's TODO): pressing Enter must not change the rendered
-// view — the real SetModel + config.Save behavior lands once the parallel
-// plumbing does.
+// TestModelEnterIsNoOpStub covers modelPickerView.handleKey's own Enter
+// handling in isolation: it is deliberately a no-op at this pure-value
+// layer — the real SetModel + config.Save coupling lives one level up in
+// App.handleModelSelect (panel.go), which intercepts Enter before it ever
+// reaches this method (see model_select_test.go for that end-to-end
+// behavior).
 func TestModelEnterIsNoOpStub(t *testing.T) {
 	auths := []ProviderAuth{{Provider: "anthropic", Kind: KindOAuth}}
 	v := newModelPickerView(theme.Test(), modelTestEnv(auths, nil), nil, "claude-sonnet-5")

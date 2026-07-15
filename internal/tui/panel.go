@@ -8,14 +8,18 @@ package tui
 // App.render(). M4 step 1 proved this seam with a one-line placeholder per
 // tab; M4 step 2 landed the real /status body (status.go); M4 step 3 landed
 // the real /config body (config_view.go); M4 step 4 lands the real /model
-// body (modelpicker.go) — its Enter/select action is still a stub pending
-// the Supervisor.SetModel plumbing (see modelpicker.go's TODO).
+// body (modelpicker.go) and its Enter/select coupling
+// ([App.handleModelSelect], below) — the final M4 command-view piece.
 
 import (
+	"context"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/jedwards1230/agent-sdk-go/provider"
+
+	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
 
@@ -285,8 +289,101 @@ func (a App) handlePanelKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		a.panel = &p
 		return a, nil
+	case key.Code == tea.KeyEnter && a.panel.active == panelModel:
+		// The Model tab's Enter/select coupling needs IO (SetModel,
+		// SaveConfig) [commandPanel]/[modelPickerView] can't do as pure
+		// values — App is the client that does the calling (invariant #2),
+		// so it intercepts Enter here instead of routing it into
+		// commandPanel.handleKey below.
+		return a.handleModelSelect()
 	}
 	p := a.panel.handleKey(msg)
 	a.panel = &p
 	return a, nil
+}
+
+// handleModelSelect applies Enter on the Model tab: the coupled /model
+// select (docs/projects/gofer-m4-command-views-plan.md §4b). It always
+// persists the highlighted row's id as the session.model config default —
+// this alone is possible with zero providers authenticated, so it keeps
+// Enter auth-independent (§5) even when there is nothing else to do. When a
+// session is attached or peeked (a.panel.model.sess, captured at open time —
+// the same field [modelPickerView.activeModel] reads), the decision to also
+// hot-swap that session's live model is made HERE, client-side, before ever
+// calling the daemon: same provider (compared via the SDK's static catalog,
+// [provider.Lookup]) swaps through [Supervisor.SetModel] — the swap applies
+// on the session's next turn, not the one in flight — while a cross-provider
+// pick leaves the running session on its current model (a session's provider
+// is fixed at creation, see [Supervisor.SetModel]'s doc) and the status note
+// explains why instead. Selecting nothing (no row highlighted, or the picker's
+// empty/warn state) is a pure no-op — the panel stays open, untouched. Every
+// other outcome closes the panel: Enter is a committing action here, matching
+// the picker footer's "select" semantics, leaving the outcome in the
+// transient a.status line.
+func (a App) handleModelSelect() (tea.Model, tea.Cmd) {
+	selected := a.panel.model.selectedModel()
+	if selected == "" {
+		return a, nil
+	}
+
+	var cfg config.Config
+	if a.commandEnv.Config != nil {
+		if c, err := a.commandEnv.Config(); err == nil {
+			cfg = c
+		}
+	}
+	cfg.Session.Model = selected
+	if a.commandEnv.SaveConfig != nil {
+		if err := a.commandEnv.SaveConfig(cfg); err != nil {
+			a.status = "couldn't save default model: " + err.Error()
+			a.panel = nil
+			return a, nil
+		}
+	}
+
+	sess := a.panel.model.sess
+	if sess == nil {
+		// The overview: no running session to swap, only the default.
+		a.status = "Default model set to " + modelDisplayName(selected) + "."
+		a.panel = nil
+		return a, nil
+	}
+
+	if modelProvider(sess.Model) != modelProvider(selected) {
+		a.status = "Live model swap needs the same provider — default set for new sessions; this session keeps its model."
+		a.panel = nil
+		return a, nil
+	}
+
+	a.status = "Model set to " + modelDisplayName(selected) + "."
+	a.panel = nil
+	sessionID, sup := sess.ID, a.sup
+	return a, func() tea.Msg {
+		// A defensive backstop, not the primary guard: the client-side
+		// provider check above already keeps this call same-provider on the
+		// common path. [Supervisor.SetModel]'s own cross-provider rejection
+		// (its doc: the concrete error type does not cross the daemon wire)
+		// still surfaces cleanly here — opDoneMsg's existing error handling
+		// (App.Update) turns any error into the same transient status note
+		// rather than a crash.
+		err := sup.SetModel(context.Background(), sessionID, selected)
+		return opDoneMsg{err: err}
+	}
+}
+
+// modelProvider resolves id's provider family via the SDK's static catalog,
+// or "" for an id the catalog doesn't recognize — including "" itself, the
+// state a session created with no explicit model override carries
+// ([SessionInfo.Model]). [App.handleModelSelect] treats two unresolvable
+// providers as a mismatch rather than guessing, so an unknown current model
+// never triggers a live swap it can't reason about.
+func modelProvider(id string) string {
+	if id == "" {
+		return ""
+	}
+	info, ok := provider.Lookup(id)
+	if !ok {
+		return ""
+	}
+	return info.Provider
 }

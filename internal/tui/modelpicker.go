@@ -11,14 +11,15 @@ package tui
 // warning line tells the user how to sign in — the picker still opens
 // (auth-independence, docs/projects/gofer-m4-command-views-plan.md §5).
 //
-// Selecting a model (Enter) couples Supervisor.SetModel (a mid-session swap)
-// with persisting the session.model default via env.SaveConfig — plumbing a
-// parallel M4 step lands separately (see the TODO on
-// [modelPickerView.handleKey]). This step ships the list, the active mark,
-// and the empty/warn state only; Enter is a stub that leaves the view
-// unchanged. Effort-adjust (←/→) is deferred — the SDK carries no per-model
-// effort levels ([provider.ModelInfo.Reasoning] is a bool) — and ←/→ are
-// already claimed by the panel host for tab switching (panel.go's
+// Selecting a model (Enter) couples [Supervisor.SetModel] (a mid-session
+// swap) with persisting the selected id as the session.model config default
+// via env.SaveConfig — see [App.handleModelSelect] (panel.go), which
+// intercepts Enter ahead of this pure value's own handleKey, since a value
+// type has no IO seam to make the daemon/config calls itself.
+// [modelPickerView.selectedModel] is the seam between them: the highlighted
+// row's id at Enter time. Effort-adjust (←/→) is deferred — the SDK carries
+// no per-model effort levels ([provider.ModelInfo.Reasoning] is a bool) —
+// and ←/→ are already claimed by the panel host for tab switching (panel.go's
 // commandPanel.handleKey), so there is no room to bind them here regardless.
 import (
 	"fmt"
@@ -242,26 +243,32 @@ func (v modelPickerView) activeModel() string {
 	return v.defaultModel
 }
 
-// handleKey applies one key press: ↓/↑ move the row highlight; Enter is
-// currently a no-op stub.
-//
-// TODO(m4 step4): couple SetModel + config.Save once plumbing lands. Enter
-// should call Supervisor.SetModel on the attached session (if any) and
-// persist the selected id as session.model via env.SaveConfig — see
-// docs/projects/gofer-m4-command-views-plan.md §4b. That needs
-// Supervisor.SetModel (internal/tui/supervisor.go's Supervisor interface),
-// which a parallel M4 step adds; this step deliberately leaves Enter inert
-// so the view compiles and renders without it.
+// handleKey applies one key press: ↓/↑ move the row highlight; Enter is a
+// no-op HERE — this is a pure value with no IO seam. The real coupled select
+// (SetModel + config.Save) lives one level up in [App.handleModelSelect]
+// (panel.go), which intercepts Enter ahead of this method whenever the Model
+// tab is active (see App.handlePanelKey); [modelPickerView.selectedModel]
+// tells it which row was highlighted.
 func (v modelPickerView) handleKey(msg tea.KeyPressMsg) modelPickerView {
 	switch msg.Key().Code {
 	case tea.KeyDown:
 		return v.selectDown()
 	case tea.KeyUp:
 		return v.selectUp()
-	case tea.KeyEnter:
-		return v // TODO(m4 step4): couple SetModel + config.Save once plumbing lands.
 	}
 	return v
+}
+
+// selectedModel returns the model id at the highlighted row (v.cursor), or
+// "" when no row is highlighted (cursor < 0 — the initial state before any
+// ↓/↑) or the row list is empty (zero providers authenticated, §4c). This is
+// the value [App.handleModelSelect] reads on Enter.
+func (v modelPickerView) selectedModel() string {
+	rows := v.rows()
+	if v.cursor < 0 || v.cursor >= len(rows) {
+		return ""
+	}
+	return rows[v.cursor].id
 }
 
 // selectDown moves the highlight onto the first row (from no highlight) or
