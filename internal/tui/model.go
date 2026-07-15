@@ -350,6 +350,14 @@ func (m Model) Backspace() Model {
 // an empty attach input backs out to the overview; with text it edits).
 func (m Model) InputEmpty() bool { return m.input == "" }
 
+// SetInput replaces the input buffer outright — used by the command menu's
+// Tab-complete and Enter-select (command_menu.go), which splice or clear the
+// buffer wholesale rather than one rune at a time.
+func (m Model) SetInput(s string) Model {
+	m.input = s
+	return m
+}
+
 // Submit records the current input buffer as submitted (retrievable via
 // [Model.TakeSubmitted]) and clears it. Submitting an empty buffer is a
 // no-op: there is nothing to send.
@@ -415,6 +423,21 @@ func (m Model) transcriptLines(width int) []string {
 // line longer than width is truncated. Height keeps only the most recent
 // lines, tailing the transcript like a live attach.
 func (m Model) View(width, height int) string {
+	return m.view(width, height, nil)
+}
+
+// ViewWithMenu renders like View but splices menuLines — pre-rendered,
+// already width-truncated rows from [commandMenu.Lines] — directly above the
+// input box's rule, the same way [Overview.ViewWithMenu] does. A pending
+// approval commandeers the whole footer regardless (menuLines is always nil
+// then — there is nothing to type into during an approval), so menuLines
+// only ever lands above the rule/input/rule block. Called only from
+// App.render.
+func (m Model) ViewWithMenu(width, height int, menuLines []string) string {
+	return m.view(width, height, menuLines)
+}
+
+func (m Model) view(width, height int, menuLines []string) string {
 	if width < 1 {
 		width = 1
 	}
@@ -435,7 +458,8 @@ func (m Model) View(width, height int) string {
 		footer = prompt
 	} else {
 		rule := strings.Repeat("─", width)
-		footer = []string{rule, truncate(m.inputLine(), width), rule}
+		footer = append(footer, menuLines...)
+		footer = append(footer, rule, truncate(m.inputLine(), width), rule)
 		// The status line carries only usage/cost now, and only once a turn has
 		// finished — omit it (no blank row) until then, so the box sits flush
 		// against the transcript.

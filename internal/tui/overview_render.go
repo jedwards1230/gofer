@@ -24,6 +24,20 @@ const (
 // The body windows to keep the selected row visible; the dispatch bar is
 // always pinned to the bottom.
 func (o Overview) View(width, height int) string {
+	return o.render(width, height, nil)
+}
+
+// ViewWithMenu renders like View but splices menuLines — pre-rendered,
+// already width-truncated rows from [commandMenu.Lines] — directly above the
+// dispatch bar's rule, shrinking the roster body's row budget by the same
+// amount so the frame still totals height rows, the same way the command
+// panel and status footer already do in [App.render]. Called only from
+// App.render; a nil/empty menuLines renders identically to View.
+func (o Overview) ViewWithMenu(width, height int, menuLines []string) string {
+	return o.render(width, height, menuLines)
+}
+
+func (o Overview) render(width, height int, menuLines []string) string {
 	if width < 1 {
 		width = 1
 	}
@@ -34,11 +48,12 @@ func (o Overview) View(width, height int) string {
 	var out []string
 	out = append(out, o.header(width)...)
 
-	bodyAvail := height - headerLines - dispatchH
+	bodyAvail := height - headerLines - dispatchH - len(menuLines)
 	if bodyAvail < 0 {
 		bodyAvail = 0
 	}
 	out = append(out, o.body(width, bodyAvail)...)
+	out = append(out, menuLines...)
 	out = append(out, o.dispatch(width)...)
 
 	// Clip defensively so a component never overruns its allotted height.
