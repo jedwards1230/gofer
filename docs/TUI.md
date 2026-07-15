@@ -319,18 +319,26 @@ human-eye check of real rendered frames, `vhs/` holds on-demand
 [charmbracelet VHS](https://github.com/charmbracelet/vhs) tooling:
 
 - `vhs/harness/` — a tiny `main` that drives the **real** `internal/tui` render
-  path (`theme.Default`, live `tui.Program`, `Program.Send`), exactly as
-  `cmd/gofer`'s `driveTUI` forwards a session. Pick a scene with
-  `-scenario tool-call | approval | overview`: the attach scenes replay a
-  scripted event stream, the overview scene renders a static roster snapshot.
-- `vhs/tool-call.tape` — a clean turn with a bash tool call (real command in the
-  header, block rhythm). `vhs/approval.tape` — a turn ending in the inline
-  permission prompt, with a failed call's red error marker and dimmed body
-  above it. `vhs/overview.tape` — the roster with mixed states, showing the
-  status words in color (yellow working/awaiting vs green finished) — the state
-  that now lives only in color.
+  path, exactly as `cmd/gofer`'s `driveTUI` forwards a session (the
+  `transcript-*` scenes) or as a real terminal's keystrokes drive the command
+  panel (the `panel-*` scenes). Pick a scene with `-scenario <slug>`; every
+  slug follows `<area>-<view>[-<state>]`, kebab-case.
+- `transcript-tool-call` — a clean turn with a bash tool call (real command in
+  the header, block rhythm). `transcript-approval` — a turn ending in the
+  inline permission prompt, with a failed call's red error marker and dimmed
+  body above it.
+- `roster-overview` — the roster with mixed states, showing the status words
+  in color (yellow working/awaiting vs green finished) — the state that now
+  lives only in color.
+- `panel-status-overview` — the command panel opened via `/status` with no
+  session attached (Session rows read "—"). `panel-status` — the same tab
+  attached to a session, showing real session identity and both provider auth
+  kinds. `panel-config` — the Config tab's settings-registry list at gofer's
+  own defaults. `panel-model` / `panel-model-empty` — the Model tab's picker
+  with authenticated providers (populated list, ✓ active mark) vs zero
+  providers (empty state, "/login" hint).
 
-Run `scripts/tui-vhs.sh [tool-call|approval|overview]` (no arg = all). It prebuilds
+Run `scripts/tui-vhs.sh [slug...]` (no arg = all tapes). It prebuilds
 `vhs/.bin/harness`, then renders each tape to `vhs/out/` (GIF of the whole turn
 + PNG of the key frame); both are gitignored. If VHS isn't installed the script
 prints an install hint and exits. This is **not** a CI gate — VHS complements,

@@ -6,7 +6,7 @@
 # Run via scripts/tui-vhs.sh (it prebuilds vhs/.bin/harness first). Outputs a
 # GIF of the whole turn plus a PNG of the pending-approval frame under vhs/out/.
 
-Output vhs/out/approval.gif
+Output vhs/out/transcript-approval.gif
 
 Set Shell "bash"
 Set FontSize 16
@@ -15,11 +15,11 @@ Set Height 760
 Set Padding 20
 
 Hide
-Type "./vhs/.bin/harness -scenario approval"
+Type "./vhs/.bin/harness -scenario transcript-approval"
 Enter
 Show
 
 Sleep 3500ms
-Screenshot vhs/out/approval.png
+Screenshot vhs/out/transcript-approval.png
 Sleep 500ms
 Ctrl+C

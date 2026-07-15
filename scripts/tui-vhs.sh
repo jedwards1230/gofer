@@ -6,7 +6,7 @@
 # regressions like the #61 color scatter. The golden tests remain the
 # authoritative assertion; this only complements them.
 #
-# Usage: scripts/tui-vhs.sh [tool-call|approval|overview]   (no arg = all tapes)
+# Usage: scripts/tui-vhs.sh [slug...]   (no arg = all tapes; slugs match vhs/*.tape)
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -32,13 +32,13 @@ go build -o vhs/.bin/harness ./vhs/harness
 
 tapes=("$@")
 if [ ${#tapes[@]} -eq 0 ]; then
-	tapes=(tool-call approval overview)
+	tapes=(transcript-tool-call transcript-approval roster-overview panel-status-overview panel-status panel-config panel-model panel-model-empty)
 fi
 
 for name in "${tapes[@]}"; do
 	tape="vhs/${name}.tape"
 	if [ ! -f "$tape" ]; then
-		echo "no such tape: $tape (want tool-call | approval | overview)" >&2
+		echo "no such tape: $tape (see vhs/*.tape for the available slugs)" >&2
 		exit 2
 	fi
 	echo "vhs $tape"

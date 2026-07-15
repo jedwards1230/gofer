@@ -5,7 +5,7 @@
 # Run via scripts/tui-vhs.sh (it prebuilds vhs/.bin/harness first). Outputs a
 # GIF of the whole turn plus a PNG of the final frame under vhs/out/.
 
-Output vhs/out/tool-call.gif
+Output vhs/out/transcript-tool-call.gif
 
 Set Shell "bash"
 Set FontSize 16
@@ -14,13 +14,13 @@ Set Height 760
 Set Padding 20
 
 Hide
-Type "./vhs/.bin/harness -scenario tool-call"
+Type "./vhs/.bin/harness -scenario transcript-tool-call"
 Enter
 Show
 
 Sleep 2s
-Screenshot vhs/out/tool-call-running.png
+Screenshot vhs/out/transcript-tool-call-running.png
 Sleep 4s
-Screenshot vhs/out/tool-call.png
+Screenshot vhs/out/transcript-tool-call.png
 Sleep 500ms
 Ctrl+C
