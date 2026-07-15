@@ -817,9 +817,21 @@ func (a App) handleAttachKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // above is unrelated — a fixed workaround for a terminal that clips the
 // frame's very first row, not part of this bottom-anchoring math.
 //
-// This is the pure core [App.View] wraps into a tea.View, kept separate so
-// golden tests can assert on it directly without a bubbletea dependency.
-func (a App) render() string {
+// frameLayout is the row-budget arithmetic render and [App.transcriptRegion]
+// both need — the status-footer/command-panel/command-menu carve-out of
+// a.height that every screen's own body renders within. Computed once behind
+// this method so the two call sites can never drift apart (they used to be
+// one copy of this math inline in render; transcriptRegion needs the exact
+// same numbers to find the active screen's selectable rows within the frame
+// render produces).
+type frameLayout struct {
+	h         int      // content budget handed to the active screen's own render
+	footer    string   // trailing status line, "" when a.status is unset
+	panelH    int      // command-panel row count, 0 when a.panel is nil
+	menuLines []string // pre-rendered command-menu rows, nil when closed/not applicable
+}
+
+func (a App) frameLayout() frameLayout {
 	h := a.height - layout.TopPadding
 
 	var footer string
@@ -866,10 +878,18 @@ func (a App) render() string {
 		// shrink the bottom-anchored frame short of a.height.
 	}
 
+	return frameLayout{h: h, footer: footer, panelH: panelH, menuLines: menuLines}
+}
+
+// This is the pure core [App.View] wraps into a tea.View, kept separate so
+// golden tests can assert on it directly without a bubbletea dependency.
+func (a App) render() string {
+	fl := a.frameLayout()
+
 	var body string
 	switch a.scr {
 	case screenPeek:
-		body = NewPeek(a.theme, a.over, a.peekReply).View(a.width, h)
+		body = NewPeek(a.theme, a.over, a.peekReply).View(a.width, fl.h)
 	case screenAttach:
 		// attachHeaderLines is the same two-line "gofer v<version>" /
 		// "<model> · <cwd>" identity chrome the overview's own header opens
@@ -879,26 +899,34 @@ func (a App) render() string {
 		// Model.view joins it to the transcript as one scrollable region
 		// (a.scroll), so it tails off the top for a long enough conversation
 		// exactly like the oldest messages do.
-		body = a.sess.ViewWithMenu(a.width, h, menuLines, attachHeaderLines(a.theme, a.over.meta, a.width), a.scroll)
+		body = a.sess.ViewWithMenu(a.width, fl.h, fl.menuLines, attachHeaderLines(a.theme, a.over.meta, a.width), a.scroll)
 	default:
-		body = a.over.ViewWithMenu(a.width, h, menuLines, a.scroll, a.panel != nil)
+		body = a.over.ViewWithMenu(a.width, fl.h, fl.menuLines, a.scroll, a.panel != nil)
 	}
 
 	if a.panel != nil {
-		body += "\n" + a.panel.View(a.width, panelH)
+		body += "\n" + a.panel.View(a.width, fl.panelH)
 	}
 
-	if footer != "" {
-		body += "\n" + footer
+	if fl.footer != "" {
+		body += "\n" + fl.footer
 	}
 	content := strings.Repeat("\n", layout.TopPadding) + body
 
 	// An active/frozen mouse selection (mouse.go) overlays its reverse-video
 	// highlight on top of the fully composed frame — after every other
 	// overlay (panel/footer) so the highlight always draws over whatever it
-	// covers, on whichever screen actually participates in selection.
+	// covers, on whichever screen actually participates in selection. The
+	// highlight is clamped to [App.transcriptRegion] — the active screen's
+	// own scrollable content — so a drag that extends into the input box,
+	// the usage/status footer, the identity header, or an open panel never
+	// paints those rows (see transcriptRegion's doc for why: they sit
+	// outside the row range highlightSelection is handed).
 	if a.sel != nil && a.mouseSelectable() {
-		content = highlightSelection(content, *a.sel, a.theme)
+		top, bottom, ok := a.transcriptRegion()
+		if ok {
+			content = highlightSelection(content, *a.sel, a.theme, top, bottom)
+		}
 	}
 
 	// A pending approval, when there is one, is already rendered inline by

@@ -933,19 +933,23 @@ func BenchmarkAppRenderMassiveTranscript(b *testing.B) {
 func TestMouseDragSelectsWithoutModifier(t *testing.T) {
 	a := newAppForGolden(t, newInternalFakeSup(GoldenRoster()))
 
-	mdl, _ := a.Update(tea.MouseClickMsg{X: 0, Y: 1, Button: tea.MouseLeft})
+	// Row 6 (0-indexed) is inside the roster body — the overview screen's
+	// transcript-region equivalent, see testdata/app_overview.golden — not
+	// row 1's identity header, which [App.transcriptRegion] excludes from
+	// selection.
+	mdl, _ := a.Update(tea.MouseClickMsg{X: 2, Y: 6, Button: tea.MouseLeft})
 	a = mdl.(App)
 	if a.sel == nil || !a.sel.dragging {
 		t.Fatal("expected a dragging selection after a plain left-button click with no modifier")
 	}
 
-	mdl, _ = a.Update(tea.MouseMotionMsg{X: 4, Y: 1, Button: tea.MouseLeft})
+	mdl, _ = a.Update(tea.MouseMotionMsg{X: 5, Y: 6, Button: tea.MouseLeft})
 	a = mdl.(App)
-	if a.sel.curX != 4 {
-		t.Fatalf("expected motion to extend the selection to X=4, got X=%d", a.sel.curX)
+	if a.sel.curX != 5 {
+		t.Fatalf("expected motion to extend the selection to X=5, got X=%d", a.sel.curX)
 	}
 
-	mdl, cmd := a.Update(tea.MouseReleaseMsg{X: 4, Y: 1, Button: tea.MouseLeft})
+	mdl, cmd := a.Update(tea.MouseReleaseMsg{X: 5, Y: 6, Button: tea.MouseLeft})
 	a = mdl.(App)
 	if a.sel == nil || a.sel.dragging {
 		t.Fatal("expected the selection to remain (frozen, not dragging) after release")

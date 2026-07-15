@@ -23,6 +23,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/jedwards1230/gofer/internal/tui/layout"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
 
@@ -63,6 +64,101 @@ func clampInt(v, lo, hi int) int {
 		return hi
 	}
 	return v
+}
+
+// transcriptRegion returns the inclusive [top, bottom] row range — in
+// a.render's own absolute row coordinates, the same space a.sel's
+// coordinates and highlightSelection/selectedText's line indices live in —
+// that belongs to the active screen's own scrollable content: the attach
+// transcript (plus whatever of its identity header is still scrolled into
+// view) or the overview roster body. This is deliberately narrower than
+// "every row render() produces": it excludes layout.TopPadding's leading
+// blank rows, the command menu/panel, the trailing status/usage footer, and
+// (attach only) the input box and its framing rules — selection and its
+// highlight both clamp to exactly this range so a drag that runs off the
+// bottom of the transcript into the input/footer, or off the top into a
+// scrolled-away header, never paints or copies those rows. ok is false when
+// there is no selectable row at all (e.g. a terminal too short to show any
+// content, or a screen selection doesn't apply to).
+func (a App) transcriptRegion() (top, bottom int, ok bool) {
+	if !a.mouseSelectable() {
+		return 0, 0, false
+	}
+	fl := a.frameLayout()
+
+	switch a.scr {
+	case screenOverview:
+		// Overview.render's own row order (see overview_render.go): a fixed
+		// headerLines rows, then exactly bodyAvail roster rows (padded to
+		// that height, whether or not the roster fills it), then the
+		// command menu (if open), then the dispatchH-row dispatch bar. The
+		// roster body is the only slice that's this screen's "transcript".
+		bodyAvail := fl.h - headerLines - dispatchH - len(fl.menuLines)
+		if bodyAvail <= 0 {
+			return 0, 0, false
+		}
+		top = layout.TopPadding + headerLines
+		bottom = top + bodyAvail - 1
+		return top, bottom, true
+
+	case screenAttach:
+		// Model.view (model.go) treats the identity header and the
+		// transcript as ONE scrollable list, windowed to `avail` rows via
+		// scrollTail — so the header is only sometimes present in the
+		// window (short conversations keep it pinned at the top; a long
+		// enough one scrolls it up and out, same as the oldest messages).
+		// Reproduce that same windowing here to find exactly which window
+		// rows are transcript (as opposed to header, or blank fill below a
+		// short conversation) rather than any fixed offset.
+		header := headerLines // attachHeaderLines always pads to this many rows
+		transcript := len(a.sess.transcriptLines(a.width))
+
+		var footerLen int
+		if prompt := a.sess.promptLines(a.width); prompt != nil {
+			footerLen = len(prompt)
+		} else {
+			footerLen = len(fl.menuLines) + 3 // rule, input line, rule
+			if a.sess.statusLine() != "" {
+				footerLen++
+			}
+		}
+		avail := fl.h - footerLen
+		if avail <= 0 {
+			return 0, 0, false
+		}
+
+		total := header + transcript
+		start := 0
+		if total > avail {
+			maxOffset := total - avail
+			offset := clampInt(a.scroll, 0, maxOffset)
+			end := total - offset
+			start = end - avail
+		}
+		// Deliberately single-sided clamps, not clampInt: topRow can
+		// legitimately land at avail (one past the last row) when the
+		// header alone fills the whole window (nothing left for the
+		// transcript) — that's what signals "empty" below, and clamping it
+		// down to avail-1 would wrongly claim the header's own last row as
+		// a transcript row.
+		topRow := header - start
+		if topRow < 0 {
+			topRow = 0
+		}
+		bottomRow := total - 1 - start
+		if bottomRow > avail-1 {
+			bottomRow = avail - 1
+		}
+		if topRow > bottomRow {
+			return 0, 0, false
+		}
+		top = layout.TopPadding + topRow
+		bottom = layout.TopPadding + bottomRow
+		return top, bottom, true
+
+	default:
+		return 0, 0, false
+	}
 }
 
 // mouseSelectable reports whether a's current screen participates in
@@ -143,19 +239,43 @@ func (a App) handleMouseRelease(msg tea.MouseReleaseMsg) (App, tea.Cmd) {
 // translate between). Multi-row spans take the clicked line from its start
 // column to the line's end, every full line in between whole, and the
 // release line from its own start to the release column — the standard
-// terminal click-drag selection shape. "" when nothing is selected or the
-// span covers no cells (e.g. a selection scrolled entirely out of the
-// current frame).
+// terminal click-drag selection shape. The span is clamped to
+// [App.transcriptRegion] first, so a drag that runs into the input box, the
+// usage/status footer, the identity header, or an open panel never copies
+// those rows — only the transcript/roster content itself. "" when nothing is
+// selected or the (region-clamped) span covers no cells (e.g. a selection
+// scrolled entirely out of the current frame, or entirely outside the
+// transcript region).
 func (a App) selectedText() string {
 	if a.sel == nil {
 		return ""
 	}
-	lines := strings.Split(ansi.Strip(a.render()), "\n")
-	y0, x0, y1, x1 := a.sel.span()
-	if y0 >= len(lines) || y1 < 0 {
+	top, bottom, ok := a.transcriptRegion()
+	if !ok {
 		return ""
 	}
-	y0 = clampInt(y0, 0, len(lines)-1)
+	lines := strings.Split(ansi.Strip(a.render()), "\n")
+	spanY0, x0, spanY1, x1 := a.sel.span()
+
+	// The loop range is [spanY0, spanY1] intersected with the transcript
+	// region — never the input/footer/header rows outside it
+	// (transcriptRegion's doc). This MUST be a one-sided max/min on each
+	// bound, not a symmetric clamp of both spanY0 and spanY1 into
+	// [top, bottom]: a symmetric clamp would pull a span that lies entirely
+	// outside the region (e.g. a click-drag that starts and ends inside the
+	// input box, below the region) onto the region's near edge as a false
+	// single-row overlap, instead of correctly yielding no selection at all.
+	// When intersecting moves the range's start/end row inward, that row is
+	// no longer the drag's real click/release row, so its column bound below
+	// (which only fires on y == spanY0 / y == spanY1, the UNCLAMPED span
+	// edges) correctly falls through to the row's full width instead of the
+	// click/release column — the row is fully inside the selection, the
+	// drag just continued past it into content that got clamped away.
+	y0 := max(spanY0, top)
+	y1 := min(spanY1, bottom)
+	if y0 > y1 || y0 >= len(lines) {
+		return ""
+	}
 	y1 = clampInt(y1, 0, len(lines)-1)
 
 	out := make([]string, 0, y1-y0+1)
@@ -163,10 +283,10 @@ func (a App) selectedText() string {
 		line := lines[y]
 		width := ansi.StringWidth(line)
 		left, right := 0, width
-		if y == y0 {
+		if y == spanY0 {
 			left = clampInt(x0, 0, width)
 		}
-		if y == y1 {
+		if y == spanY1 {
 			right = clampInt(x1+1, 0, width) // the released-over cell is included
 		}
 		if left >= right {
@@ -184,14 +304,29 @@ func (a App) selectedText() string {
 // selected/unselected-after runs via ansi.Cut (grapheme/ANSI-aware, so a
 // colored line's existing styling around the selection survives untouched)
 // and re-joining them. A span with no covered cells on a given line (e.g.
-// every row outside [y0,y1]) leaves that line untouched.
-func highlightSelection(content string, sel selectionState, th theme.Theme) string {
+// every row outside [y0,y1]) leaves that line untouched. regionTop/
+// regionBottom (App.transcriptRegion, inclusive, in the same absolute row
+// coordinates as content) clamp the painted rows to the active screen's own
+// scrollable content — never the input box, the usage/status footer, the
+// identity header, or an open panel/menu — the same clamp [App.selectedText]
+// applies so the highlight and the copied text always agree on what's
+// selected. Content outside [regionTop, regionBottom] is never painted, full
+// stop, even when sel's span extends past it: same reasoning as
+// selectedText's raw-span column bounds (see its comment) — a row inside the
+// region that the clamped range still covers is fully painted, not bounded
+// by a click/release column that landed outside the region.
+func highlightSelection(content string, sel selectionState, th theme.Theme, regionTop, regionBottom int) string {
 	lines := strings.Split(content, "\n")
-	y0, x0, y1, x1 := sel.span()
-	if y0 >= len(lines) || y1 < 0 {
+	spanY0, x0, spanY1, x1 := sel.span()
+	// One-sided max/min, matching selectedText's intersection — see its
+	// comment for why a symmetric clamp of both bounds is wrong here (it
+	// would turn a span entirely outside the region into a false overlap on
+	// the region's near edge).
+	y0 := max(spanY0, regionTop)
+	y1 := min(spanY1, regionBottom)
+	if y0 > y1 || y0 >= len(lines) {
 		return content
 	}
-	y0 = clampInt(y0, 0, len(lines)-1)
 	y1 = clampInt(y1, 0, len(lines)-1)
 
 	style := th.SelectionStyle()
@@ -199,10 +334,10 @@ func highlightSelection(content string, sel selectionState, th theme.Theme) stri
 		line := lines[y]
 		width := ansi.StringWidth(line)
 		left, right := 0, width
-		if y == y0 {
+		if y == spanY0 {
 			left = clampInt(x0, 0, width)
 		}
-		if y == y1 {
+		if y == spanY1 {
 			right = clampInt(x1+1, 0, width)
 		}
 		if left >= right {
