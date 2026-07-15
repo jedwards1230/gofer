@@ -119,6 +119,31 @@ func decodeSessionIDParams(method string, params json.RawMessage) (sessionIDPara
 	return req, nil
 }
 
+// setModelParams is the params shape of gofer/set_model: {sessionId, model}.
+type setModelParams struct {
+	SessionID string `json:"sessionId"`
+	Model     string `json:"model"`
+}
+
+// decodeSetModelParams decodes gofer/set_model's params, rejecting a missing
+// sessionId or model locally (a clear invalid-params error) rather than
+// forwarding an empty model down to [supervisor.Supervisor.SetModel], whose
+// own [supervisor.ErrEmptyModel] would otherwise surface identically but
+// with a less specific message.
+func decodeSetModelParams(params json.RawMessage) (setModelParams, *rpcError) {
+	var req setModelParams
+	if err := json.Unmarshal(params, &req); err != nil {
+		return setModelParams{}, invalidParams(err)
+	}
+	if req.SessionID == "" {
+		return setModelParams{}, invalidParamsMsg(methodGoferSetModel + ": sessionId is required")
+	}
+	if req.Model == "" {
+		return setModelParams{}, invalidParamsMsg(methodGoferSetModel + ": model is required")
+	}
+	return req, nil
+}
+
 // encodeSessionCursor renders a session/list pagination offset as an opaque
 // cursor token (base64 of the decimal offset) — opaque so a client never
 // depends on its internal shape, only round-trips it via

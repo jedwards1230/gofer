@@ -61,6 +61,10 @@ func (f *approvalSession) EventsLive() *event.Subscription {
 func (f *approvalSession) Emit(e event.Event)       { f.broker.Publish(e) }
 func (f *approvalSession) Cost() session.CostReport { return session.CostReport{} }
 
+// SetModel is a no-op: this fake's Prompt scripts a fixed permission
+// round-trip and never reads a model, so nothing observes the change.
+func (f *approvalSession) SetModel(string) error { return nil }
+
 func (f *approvalSession) Close() error {
 	f.broker.Close()
 	return nil

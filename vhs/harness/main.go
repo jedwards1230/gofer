@@ -266,4 +266,6 @@ func (s *vhsSupervisor) Kill(context.Context, string) error { return nil }
 
 func (s *vhsSupervisor) Archive(context.Context, string) error { return nil }
 
+func (s *vhsSupervisor) SetModel(context.Context, string, string) error { return nil }
+
 func (s *vhsSupervisor) Reply(context.Context, string, string, bool, bool) error { return nil }

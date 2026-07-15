@@ -120,6 +120,16 @@ type Supervisor interface {
 	// Archive drops a finished session from the roster. The journal is kept.
 	Archive(ctx context.Context, sessionID string) error
 
+	// SetModel changes the model a session uses for its next turn. It is
+	// valid to call while the session is running — the swap takes effect on
+	// the NEXT turn, not the one in flight. It returns an error for an
+	// unknown model id or a cross-provider target (a session's provider is
+	// fixed at creation; switching providers requires a new session). A
+	// caller wanting to branch on the cross-provider case specifically
+	// should compare provider families itself before calling — the concrete
+	// error type does not cross the daemon wire (see internal/daemonbridge).
+	SetModel(ctx context.Context, sessionID, model string) error
+
 	// Reply answers a pending permission request identified by id: allow or
 	// deny it, and — when remember is true — persist the verdict as a
 	// standing grant for future matching calls (the SDK's
