@@ -1,0 +1,24 @@
+
+<accent>gofer</accent> <muted>v0.3.0</muted>
+<muted>claude-sonnet-5 · ~/orchestration</muted>
+<muted>1 awaiting input · 1 working · 0 completed</muted>
+
+<muted>~/orchestration</muted>
+<accent>▸ wire the app root             </accent><yellow>Working</yellow><muted> · overview <-> peek <-> attach nav</muted>    2m
+  review the supervisor contr…  <yellow>Needs input</yellow><muted> · turn finished — awaiting the…</muted>   5m
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+<accent>▸ /config  View and edit settings</accent>
+────────────────────────────────────────────────────────────────────────────────
+❯ /c▏
+<muted>enter peek · → attach · tab toggle view · ctrl-x kill · ? shortcuts</muted>

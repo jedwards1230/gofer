@@ -1,18 +1,24 @@
-// Command harness drives the real attach TUI (internal/tui) through a fixed,
-// scripted event stream so charmbracelet VHS can capture true rendered frames —
-// colors, spacing, glyphs — that the plain-text Ascii golden tests can't show.
-// It is dev tooling, not part of the shipped gofer binary: the tapes under
-// vhs/ point VHS at it (see scripts/tui-vhs.sh and docs/TUI.md).
+// Command harness drives the real gofer TUI (internal/tui) through fixed,
+// canned data so charmbracelet VHS can capture true rendered frames — colors,
+// spacing, glyphs — that the plain-text Ascii golden tests can't show. It is
+// dev tooling, not part of the shipped gofer binary: the tapes under vhs/
+// point VHS at it (see scripts/tui-vhs.sh and docs/TUI.md).
 //
-// It renders through [theme.Default] (real color profile) and feeds a canned
-// [event.Event] sequence into a live bubbletea [tui.Program] via Program.Send,
-// exactly as cmd/gofer's driveTUI forwards a session's events — so what VHS
-// records is the same render path a real attach produces. Pick the scene with
-// -scenario; the process holds the final frame until the tape quits it (Ctrl+C)
-// or the safety hold elapses.
+// It renders through [theme.Default] (real color profile). The transcript-*
+// scenes feed a scripted [event.Event] sequence into a live bubbletea
+// [tui.Program] via Program.Send, exactly as cmd/gofer's driveTUI forwards a
+// session's events; the roster-* scene renders a static [tui.Overview]
+// snapshot; the panel-* scenes build the real [tui.App] over a canned
+// [tui.Supervisor]/[tui.CommandEnv] and let the tape drive it with real
+// keystrokes (see command.go's dispatchSlash) — so in every case what VHS
+// records is the same render path a real gofer session produces. Pick the
+// scene with -scenario (see [scenarioHelp] for the slug list — every slug
+// follows `<area>-<view>[-<state>]`); the process holds the final frame
+// until the tape quits it (Ctrl+C) or the safety hold elapses.
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -24,12 +30,19 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
+	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/tui"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
 
 // sid is a fixed session id; the scripted stream is single-session.
 const sid = "0192a1b2-c3d4-7e5f-8a90-000000000001"
+
+// fixedNow is a frozen wall clock so VHS frames render identically on every
+// run — a prerequisite for committing them as golden images and diffing them
+// cleanly in PRs. Any absolute timestamp the TUI derives from it (e.g. an
+// OAuth token expiry) is then stable across renders.
+var fixedNow = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 // step is one scripted event plus how long to hold before sending the next, so
 // VHS records the intermediate streaming frames a live turn produces (a running
@@ -39,26 +52,41 @@ type step struct {
 	pause time.Duration
 }
 
+// scenarioHelp is both the -scenario flag's usage text and the unknown-
+// scenario error's "want" list — the single place the harness's slug
+// vocabulary is spelled out, so the two never drift apart. Slugs follow
+// `<area>-<view>[-<state>]`, kebab-case: transcript-* (the attach scenes),
+// roster-* (the overview scene), panel-* (the command-panel scenes).
+const scenarioHelp = "transcript-tool-call | transcript-approval | roster-overview | panel-status-overview | panel-status | panel-config | panel-model | panel-model-empty"
+
 func main() {
-	scenario := flag.String("scenario", "tool-call", "scripted scene to play: tool-call | approval | overview")
+	scenario := flag.String("scenario", "transcript-tool-call", "scripted scene to play: "+scenarioHelp)
 	flag.Parse()
 
 	// The attach scenes drive tui.NewProgram (the transcript) with a scripted
-	// event stream; the overview scene is a pure roster snapshot with no event
-	// stream, so it runs a static model and leaves script nil.
+	// event stream; the roster scene is a pure snapshot with no event stream,
+	// so it runs a static model and leaves script nil. The panel scenes drive
+	// the real [tui.App] instead — they have no scripted event.Event stream of
+	// their own; the tape types the slash command and any navigation keys
+	// directly into the running program's stdin, the same path a real
+	// terminal's keystrokes take.
 	var (
 		model  tea.Model = tui.NewProgram(theme.Default())
 		script []step
 	)
 	switch *scenario {
-	case "tool-call":
+	case "transcript-tool-call":
 		script = toolCallScene()
-	case "approval":
+	case "transcript-approval":
 		script = approvalScene()
-	case "overview":
+	case "roster-overview":
 		model = overviewScene()
+	case "panel-status-overview", "panel-status", "panel-config", "panel-model":
+		model = commandViewApp(cannedCommandEnv())
+	case "panel-model-empty":
+		model = commandViewApp(emptyCommandEnv())
 	default:
-		fmt.Fprintf(os.Stderr, "harness: unknown scenario %q (want tool-call | approval | overview)\n", *scenario)
+		fmt.Fprintf(os.Stderr, "harness: unknown scenario %q (want %s)\n", *scenario, scenarioHelp)
 		os.Exit(2)
 	}
 
@@ -136,7 +164,7 @@ func approvalScene() []step {
 // pending count), an awaiting-input row (yellow ●), and a finished row
 // (green ●).
 func overviewScene() tea.Model {
-	now := time.Now()
+	now := fixedNow
 	meta := tui.OverviewMeta{App: "gofer", Version: "0.3.0", Model: "fable-5", Cwd: "~/orchestration", Now: now}
 	sessions := []tui.SessionInfo{
 		{ID: "sess-1", Title: "wire the websocket ACP listener", Summary: "streaming the daemon handshake", Status: tui.StatusWorking, Updated: now.Add(-30 * time.Second)},
@@ -175,3 +203,100 @@ func (m overviewModel) View() tea.View {
 	v.AltScreen = true
 	return v
 }
+
+// commandViewApp builds the real [tui.App] every panel-* scene shares: a
+// canned two-session roster (so panel-status has a session to describe once
+// the tape attaches into one) plus env, the [tui.CommandEnv] the caller
+// supplies — cannedCommandEnv for the panel-status/panel-config/panel-model
+// scenes, emptyCommandEnv for panel-model-empty. Unlike the transcript-*
+// scenes, these have no scripted event.Event stream of their own — the tape
+// drives the app directly, typing the slash command (and any navigation
+// keys) into the running program's stdin, the same path a real terminal's
+// keystrokes take (see command.go's dispatchSlash). Model fields use the
+// SDK catalog's real ids (provider.Models()), not display names — the
+// panel-model scene's ✓ active mark is [modelPickerView.activeModel] matching
+// a row's id verbatim, so a display-name shorthand here would silently mark
+// nothing.
+func commandViewApp(env tui.CommandEnv) tea.Model {
+	now := fixedNow
+	sessions := []tui.SessionInfo{
+		{ID: "sess-1", Title: "wire the websocket ACP listener", Summary: "streaming the daemon handshake", Status: tui.StatusWorking, Model: "claude-fable-5", Cwd: "~/orchestration", Updated: now.Add(-30 * time.Second)},
+		{ID: "sess-2", Title: "keycloak path-b groundwork", Summary: "turn finished — awaiting the next prompt", Status: tui.StatusNeedsInput, Model: "claude-sonnet-5", Cwd: "~/orchestration", Updated: now.Add(-5 * time.Minute)},
+	}
+	meta := tui.OverviewMeta{App: "gofer", Version: "0.4.0", Model: "claude-fable-5", Cwd: "~/orchestration", Now: now}
+	return tui.NewApp(theme.Default(), newVHSSupervisor(sessions), meta, env)
+}
+
+// cannedCommandEnv is the [tui.CommandEnv] most panel-* scenes read: a fixed
+// version/cwd/root plus two representative authenticated providers — an
+// Anthropic OAuth token with a real expiry and an OpenAI API key, exercising
+// both [tui.AuthKind]s and their color states on the Status tab, and (once
+// the Model tab reads them the same way) a non-empty picker list with an
+// active-model checkmark — and the zero-value [config.Config] (gofer's own
+// unconfigured defaults) so the Config tab's settings list renders real
+// rows. SaveConfig is a no-op: none of these tapes commits an edit.
+func cannedCommandEnv() tui.CommandEnv {
+	return tui.CommandEnv{
+		Version: "0.4.0",
+		Cwd:     "~/orchestration",
+		Root:    "~/.gofer",
+		Auth: func() ([]tui.ProviderAuth, error) {
+			return []tui.ProviderAuth{
+				{Provider: "anthropic", Kind: tui.KindOAuth, Expires: fixedNow.Add(90 * 24 * time.Hour)},
+				{Provider: "openai", Kind: tui.KindAPIKey},
+			}, nil
+		},
+		Config:     func() (config.Config, error) { return config.Config{}, nil },
+		SaveConfig: func(config.Config) error { return nil },
+	}
+}
+
+// emptyCommandEnv is the [tui.CommandEnv] panel-model-empty reads: identical
+// to cannedCommandEnv but with zero authenticated providers, so the Model
+// tab renders its no-credentials empty state instead of a picker list.
+func emptyCommandEnv() tui.CommandEnv {
+	env := cannedCommandEnv()
+	env.Auth = func() ([]tui.ProviderAuth, error) { return nil, nil }
+	return env
+}
+
+// vhsSupervisor is the canned [tui.Supervisor] every panel-* scene drives:
+// Roster answers with the fixed session set [commandViewApp] seeds, and
+// Subscribe hands back a real (empty) [event.Subscription] off a private
+// broker so attaching into a session doesn't error — nothing publishes to it,
+// so the transcript underneath the panel stays empty, which is fine: these
+// scenes are about the command panel, not the transcript. The write ops
+// (Create/Send/Interrupt/Kill/Archive/SetModel/Reply) are no-ops; none of
+// these tapes exercises them.
+type vhsSupervisor struct {
+	sessions []tui.SessionInfo
+	broker   *event.Broker
+}
+
+func newVHSSupervisor(sessions []tui.SessionInfo) *vhsSupervisor {
+	return &vhsSupervisor{sessions: sessions, broker: event.NewBroker()}
+}
+
+func (s *vhsSupervisor) Roster(context.Context) ([]tui.SessionInfo, error) {
+	return s.sessions, nil
+}
+
+func (s *vhsSupervisor) Subscribe(context.Context, string) (*event.Subscription, error) {
+	return s.broker.Subscribe(event.FilterAll, 8), nil
+}
+
+func (s *vhsSupervisor) Create(context.Context, string, tui.CreateOptions) (tui.SessionInfo, error) {
+	return tui.SessionInfo{}, nil
+}
+
+func (s *vhsSupervisor) Send(context.Context, string, string) error { return nil }
+
+func (s *vhsSupervisor) Interrupt(context.Context, string) error { return nil }
+
+func (s *vhsSupervisor) Kill(context.Context, string) error { return nil }
+
+func (s *vhsSupervisor) Archive(context.Context, string) error { return nil }
+
+func (s *vhsSupervisor) SetModel(context.Context, string, string) error { return nil }
+
+func (s *vhsSupervisor) Reply(context.Context, string, string, bool, bool) error { return nil }

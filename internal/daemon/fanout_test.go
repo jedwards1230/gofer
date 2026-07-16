@@ -288,6 +288,11 @@ func (s *scriptedToolTurnSession) EventsLive() *event.Subscription {
 }
 func (s *scriptedToolTurnSession) Emit(e event.Event)       { s.broker.Publish(e) }
 func (s *scriptedToolTurnSession) Cost() session.CostReport { return session.CostReport{} }
+
+// SetModel is a no-op: this fake's Prompt is a fully scripted event
+// sequence that never reads a model.
+func (s *scriptedToolTurnSession) SetModel(string) error { return nil }
+
 func (s *scriptedToolTurnSession) Close() error {
 	s.broker.Close()
 	return nil

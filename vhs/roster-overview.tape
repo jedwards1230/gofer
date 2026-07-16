@@ -7,7 +7,7 @@
 # Run via scripts/tui-vhs.sh (it prebuilds vhs/.bin/harness first). Outputs a
 # GIF plus a PNG of the roster under vhs/out/.
 
-Output vhs/out/overview.gif
+Output vhs/out/roster-overview.gif
 
 Set Shell "bash"
 Set FontSize 16
@@ -16,11 +16,11 @@ Set Height 760
 Set Padding 20
 
 Hide
-Type "./vhs/.bin/harness -scenario overview"
+Type "./vhs/.bin/harness -scenario roster-overview"
 Enter
 Show
 
 Sleep 2s
-Screenshot vhs/out/overview.png
+Screenshot vhs/out/roster-overview.png
 Sleep 500ms
 Ctrl+C

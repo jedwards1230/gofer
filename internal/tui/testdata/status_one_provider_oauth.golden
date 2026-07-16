@@ -1,0 +1,7 @@
+Version: 0.3.0
+Session: —
+Session ID: —
+Cwd: ~/orchestration
+Providers:
+  anthropic  OAuth (valid until 2026-08-01T00:00:00Z)
+Model: fable-5

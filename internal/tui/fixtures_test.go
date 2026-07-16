@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/jedwards1230/agent-sdk-go/provider"
+
+	"github.com/jedwards1230/gofer/internal/config"
 )
 
 // GoldenNow is the fixed reference instant every golden-test fixture ages its
@@ -21,7 +23,26 @@ var GoldenNow = time.Date(2026, 7, 12, 18, 0, 0, 0, time.UTC)
 // GoldenMeta returns the shared OverviewMeta the App/Overview golden tests
 // build through.
 func GoldenMeta() OverviewMeta {
-	return OverviewMeta{App: "gofer", Version: "0.3.0", Model: "fable-5", Cwd: "~/orchestration", Now: GoldenNow}
+	return OverviewMeta{App: "gofer", Version: "0.3.0", Model: "claude-sonnet-5", Cwd: "~/orchestration", Now: GoldenNow}
+}
+
+// GoldenCommandEnv returns the shared [CommandEnv] the App/command-panel
+// golden tests build through: fixed version/cwd/root and the
+// auth-independence default (zero providers authenticated, no persisted
+// config) — the state every panel view must open cleanly in. SaveConfig is a
+// no-op (never touches disk) — it exists so /config's edit paths exercise a
+// non-nil closure in golden tests without leaving files behind; tests that
+// need to observe what was written supply their own CommandEnv (see
+// config_view_test.go).
+func GoldenCommandEnv() CommandEnv {
+	return CommandEnv{
+		Version:    "0.3.0",
+		Cwd:        "~/orchestration",
+		Root:       "~/.gofer",
+		Auth:       func() ([]ProviderAuth, error) { return nil, nil },
+		Config:     func() (config.Config, error) { return config.Config{}, nil },
+		SaveConfig: func(config.Config) error { return nil },
+	}
 }
 
 // GoldenRoster returns the two-session fixture the App golden and behavioral

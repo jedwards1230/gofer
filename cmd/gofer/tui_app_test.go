@@ -66,7 +66,7 @@ func TestRunTUI_ConstructionOnly(t *testing.T) {
 		Version: version,
 		Model:   resolveOverviewModel(context.Background(), root),
 		Cwd:     "/tmp/example",
-	})
+	}, buildCommandEnv(root, "/tmp/example"))
 
 	if cmd := app.Init(); cmd == nil {
 		t.Fatal("app.Init() = nil, want a roster-fetch command")

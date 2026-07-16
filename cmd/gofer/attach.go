@@ -12,6 +12,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/jedwards1230/gofer/internal/daemonbridge"
+	"github.com/jedwards1230/gofer/internal/supervisor"
 	"github.com/jedwards1230/gofer/internal/tui"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
@@ -84,6 +85,15 @@ func runAttach(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 		return fmt.Errorf("getwd: %w", err)
 	}
 
+	// attach takes no --root flag (it is always daemon-backed), so the
+	// command panel's env — auth.json/config.json, always local to this
+	// operator's machine regardless of which daemon the roster comes from —
+	// resolves gofer's default store root the same way bare `gofer` does.
+	rootDir, err := supervisor.ResolveRoot("")
+	if err != nil {
+		return err
+	}
+
 	_, _ = fmt.Fprintf(stderr, "gofer attach: connected to daemon at %s\n", df.addr)
 	app := tui.NewApp(theme.Default(), b, tui.OverviewMeta{
 		App:             "gofer",
@@ -91,7 +101,7 @@ func runAttach(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 		Cwd:             cwd,
 		Now:             time.Now(),
 		AttachSessionID: attachID,
-	})
+	}, buildCommandEnv(rootDir, cwd))
 
 	ctx, stop := interruptCtx(ctx)
 	defer stop()

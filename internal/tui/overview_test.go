@@ -1,6 +1,7 @@
 package tui_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -104,6 +105,21 @@ func TestGoldenOverviewDispatchTyping(t *testing.T) {
 	testkit.AssertGolden(t, "overview_dispatch_typing", testkit.Render(o, testkit.Width, testkit.Height))
 }
 
+// TestGoldenOverviewDispatchCursorMidText covers the cursor-aware buffer
+// (inputbuf.go) rendering the "▏" glyph at its actual mid-text position, not
+// always appended at the end the way the pre-cursor append-only buffer
+// rendered it: type a phrase, then move left a few runes before rendering.
+func TestGoldenOverviewDispatchCursorMidText(t *testing.T) {
+	o := newOverview().WithSessions(rosterFixture())
+	for _, r := range "fix the flaky peek test" {
+		o = o.TypeRune(r)
+	}
+	for i := 0; i < 5; i++ {
+		o = o.MoveLeft()
+	}
+	testkit.AssertGolden(t, "overview_dispatch_cursor_mid_text", testkit.Render(o, testkit.Width, testkit.Height))
+}
+
 // TestGoldenOverviewSelectionMoves renders the roster after moving the
 // selection down twice, exercising the caret and selection-follow.
 func TestGoldenOverviewSelectionMoves(t *testing.T) {
@@ -199,6 +215,77 @@ func multiCwdFixture() []tui.SessionInfo {
 func TestGoldenOverviewMultiCwd(t *testing.T) {
 	o := newOverview().WithSessions(multiCwdFixture())
 	testkit.AssertGolden(t, "overview_multi_cwd", testkit.Render(o, testkit.Width, testkit.Height))
+}
+
+// bigRosterFixture returns enough sessions (well past a small viewport's
+// row budget) for the scroll tests below to force real windowing/scrolling,
+// unlike rosterFixture's 5 rows.
+func bigRosterFixture() []tui.SessionInfo {
+	var out []tui.SessionInfo
+	for i := 0; i < 20; i++ {
+		out = append(out, tui.SessionInfo{
+			ID:      fmt.Sprintf("0192a1b2-big0-7000-8000-%012d", i),
+			Title:   fmt.Sprintf("session %02d", i),
+			Status:  tui.StatusWorking,
+			Updated: tui.GoldenNow.Add(-time.Duration(i) * time.Minute),
+		})
+	}
+	return out
+}
+
+// TestOverviewScrollOverridesSelectionWindow verifies a positive scroll
+// offset ([Overview.ViewWithMenu]'s new parameter) shows different rows than
+// the default (scroll 0) selection-anchored window on a roster long enough
+// to overflow the viewport — the manual scroll a mouse wheel/PgUp-PgDn
+// drives (see App.handleWheel/handleOverviewKey), overriding the
+// selection-follow behavior rather than replacing it (scroll 0 renders
+// byte-identical to before this parameter existed — see the golden tests
+// above).
+func TestOverviewScrollOverridesSelectionWindow(t *testing.T) {
+	o := newOverview().WithSessions(bigRosterFixture())
+	const width, height = 80, 10 // a small viewport: bigRosterFixture overflows it
+
+	// Move selection all the way down to the oldest (last) row, so the
+	// default scroll-0 selection-anchored window sits at the BOTTOM of the
+	// roster — an unambiguous contrast against a large scroll offset, which
+	// scrolls back toward the TOP regardless of where the selection is.
+	for range bigRosterFixture() {
+		o = o.MoveDown()
+	}
+
+	selectionAnchored := o.ViewWithMenu(width, height, nil, 0, false)
+	scrolledToTop := o.ViewWithMenu(width, height, nil, 1_000_000, false)
+	if selectionAnchored == scrolledToTop {
+		t.Fatal("a large scroll offset rendered identically to scroll=0; want the roster window to move")
+	}
+	if !strings.Contains(scrolledToTop, "session 00") {
+		t.Errorf("fully scrolled-back render missing the newest row (session 00):\n%s", scrolledToTop)
+	}
+	if strings.Contains(selectionAnchored, "session 00") {
+		t.Errorf("selection-anchored render (selection on the oldest row) unexpectedly shows the newest row:\n%s", selectionAnchored)
+	}
+}
+
+// TestOverviewHideDispatchBlanksBar verifies the panel-open row hides the
+// dispatch bar's rule/input/hint (item 3) while keeping the row COUNT
+// unchanged, so the frame still totals the same height — the app_panel_*
+// goldens' three-blank-line replacement, exercised directly against
+// Overview rather than through the full App+panel round trip.
+func TestOverviewHideDispatchBlanksBar(t *testing.T) {
+	o := newOverview().WithSessions(rosterFixture())
+	shown := o.ViewWithMenu(testkit.Width, testkit.Height, nil, 0, false)
+	hidden := o.ViewWithMenu(testkit.Width, testkit.Height, nil, 0, true)
+
+	if strings.Count(shown, "\n") != strings.Count(hidden, "\n") {
+		t.Fatalf("hideDispatch changed the total row count: shown=%d hidden=%d rows",
+			strings.Count(shown, "\n")+1, strings.Count(hidden, "\n")+1)
+	}
+	if !strings.Contains(shown, "describe a task for a new session") {
+		t.Fatal("precondition failed: expected the dispatch placeholder with hideDispatch=false")
+	}
+	if strings.Contains(hidden, "describe a task for a new session") || strings.Contains(hidden, "enter peek") {
+		t.Errorf("hideDispatch=true still shows the dispatch bar/hint:\n%s", hidden)
+	}
 }
 
 // TestOverviewSelectionByID verifies selection tracks a session across a view

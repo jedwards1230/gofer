@@ -16,6 +16,9 @@ The SDK owns loop/provider/session/permission testing (see agent-sdk-go's
 - Script turns in code (typed builders); JSONL fixtures only for captured
   session histories.
 - Never test through a PTY; teatest is not a first move.
+- An edit-committing view (e.g. `/config`) is tested by supplying a fake
+  writer closure (`CommandEnv.SaveConfig`) that captures what was written,
+  asserted alongside the golden render — never a real file on disk.
 
 ## CI
 

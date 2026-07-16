@@ -95,7 +95,9 @@ type Model struct {
 	usage *provider.Usage
 	cost  *provider.Cost
 
-	input string
+	// input is the attach input's buffer — a cursor-aware [inputBuffer]
+	// (inputbuf.go), not just an append-only string.
+	input inputBuffer
 
 	submitted    string
 	hasSubmitted bool
@@ -329,37 +331,96 @@ func summarizeToolInput(compact string) string {
 	return compact
 }
 
-// TypeRune appends r to the input buffer.
+// TypeRune inserts r into the input buffer at the cursor.
 func (m Model) TypeRune(r rune) Model {
-	m.input += string(r)
+	m.input = m.input.InsertRune(r)
 	return m
 }
 
-// Backspace removes the last rune in the input buffer, if any.
+// InsertText inserts s into the input buffer at the cursor — key.Text can in
+// principle carry more than one rune (an IME commit).
+func (m Model) InsertText(s string) Model {
+	m.input = m.input.InsertText(s)
+	return m
+}
+
+// Backspace removes the rune immediately before the cursor, if any.
 func (m Model) Backspace() Model {
-	if m.input == "" {
-		return m
-	}
-	runes := []rune(m.input)
-	m.input = string(runes[:len(runes)-1])
+	m.input = m.input.Backspace()
+	return m
+}
+
+// DeleteForward removes the rune at the cursor, if any — Delete/Ctrl+D.
+func (m Model) DeleteForward() Model {
+	m.input = m.input.DeleteForward()
+	return m
+}
+
+// MoveLeft/MoveRight move the input cursor one rune.
+func (m Model) MoveLeft() Model  { m.input = m.input.MoveLeft(); return m }
+func (m Model) MoveRight() Model { m.input = m.input.MoveRight(); return m }
+
+// MoveWordLeft/MoveWordRight move the input cursor one word —
+// Alt+Left/Alt+Right.
+func (m Model) MoveWordLeft() Model  { m.input = m.input.MoveWordLeft(); return m }
+func (m Model) MoveWordRight() Model { m.input = m.input.MoveWordRight(); return m }
+
+// MoveHome/MoveEnd jump the input cursor to the buffer's start/end —
+// Home/Ctrl+A and End/Ctrl+E.
+func (m Model) MoveHome() Model { m.input = m.input.MoveHome(); return m }
+func (m Model) MoveEnd() Model  { m.input = m.input.MoveEnd(); return m }
+
+// DeleteWordBackward deletes the word before the cursor — Alt+Backspace/Ctrl+W.
+func (m Model) DeleteWordBackward() Model {
+	m.input = m.input.DeleteWordBackward()
+	return m
+}
+
+// DeleteToLineStart/DeleteToLineEnd delete from the cursor to the buffer's
+// start/end — Ctrl+U and Ctrl+K.
+func (m Model) DeleteToLineStart() Model {
+	m.input = m.input.DeleteToLineStart()
+	return m
+}
+
+func (m Model) DeleteToLineEnd() Model {
+	m.input = m.input.DeleteToLineEnd()
 	return m
 }
 
 // InputEmpty reports whether the input buffer has no pending text. The app
 // root consults this to resolve the navigation contract's left-arrow (← in
 // an empty attach input backs out to the overview; with text it edits).
-func (m Model) InputEmpty() bool { return m.input == "" }
+func (m Model) InputEmpty() bool { return m.input.Empty() }
+
+// SetInput replaces the input buffer outright, cursor moving to the end —
+// used by the command menu's Enter-select (command_menu.go), which clears
+// the buffer wholesale rather than one rune at a time.
+func (m Model) SetInput(s string) Model {
+	m.input = m.input.SetText(s)
+	return m
+}
+
+// SetInputCursor replaces the input buffer and places the cursor
+// explicitly — used by the command menu's Tab-complete (command_menu.go),
+// which splices a completion in place of the active token and wants the
+// cursor right after it, not at the end of any trailing text the splice
+// left in place.
+func (m Model) SetInputCursor(s string, cursor int) Model {
+	m.input = m.input.SetTextCursor(s, cursor)
+	return m
+}
 
 // Submit records the current input buffer as submitted (retrievable via
 // [Model.TakeSubmitted]) and clears it. Submitting an empty buffer is a
 // no-op: there is nothing to send.
 func (m Model) Submit() Model {
-	if m.input == "" {
+	if m.input.Empty() {
 		return m
 	}
-	m.submitted = m.input
+	m.submitted = m.input.String()
 	m.hasSubmitted = true
-	m.input = ""
+	m.input = inputBuffer{}
 	return m
 }
 
@@ -413,8 +474,29 @@ func (m Model) transcriptLines(width int) []string {
 // approval prompt) at the given size. Width wraps nothing (M1's virtualized
 // transcript and stable-prefix markdown cache from docs/TUI.md land later); a
 // line longer than width is truncated. Height keeps only the most recent
-// lines, tailing the transcript like a live attach.
+// lines, tailing the transcript like a live attach. Carries no identity
+// header or scroll offset — the plain golden tests that call this directly
+// render the transcript alone; [App.render] goes through ViewWithMenu.
 func (m Model) View(width, height int) string {
+	return m.view(width, height, nil, nil, 0)
+}
+
+// ViewWithMenu renders like View but splices menuLines — pre-rendered,
+// already width-truncated rows from [commandMenu.Lines] — directly above the
+// input box's rule, the same way [Overview.ViewWithMenu] does. headerLines,
+// when non-empty, is [attachHeaderLines] (app.go) — the attach screen's own
+// copy of the identity chrome every screen shows — prepended to the
+// transcript as part of the same scrollable region (see the scroll doc
+// below); a pending approval commandeers the whole footer regardless
+// (menuLines is always nil then — there is nothing to type into during an
+// approval), so menuLines only ever lands above the rule/input/rule block.
+// scroll is the manual scroll-back offset (0 = tail-to-latest, the default).
+// Called only from App.render.
+func (m Model) ViewWithMenu(width, height int, menuLines, headerLines []string, scroll int) string {
+	return m.view(width, height, menuLines, headerLines, scroll)
+}
+
+func (m Model) view(width, height int, menuLines, headerLines []string, scroll int) string {
 	if width < 1 {
 		width = 1
 	}
@@ -422,7 +504,21 @@ func (m Model) View(width, height int) string {
 		height = 1
 	}
 
+	// The identity header (when the caller supplies one — only the attach
+	// screen does, via ViewWithMenu) joins the transcript as one scrollable
+	// document: short content leaves it pinned at the top exactly like
+	// before (scrollTail below is then a no-op), but a transcript long
+	// enough to overflow avail scrolls the header up and out of view along
+	// with the oldest messages — the "header + transcript are the
+	// scrollable region" redesign, with the input/footer staying pinned
+	// below regardless (untouched by this).
 	lines := m.transcriptLines(width)
+	if len(headerLines) > 0 {
+		combined := make([]string, 0, len(headerLines)+len(lines))
+		combined = append(combined, headerLines...)
+		combined = append(combined, lines...)
+		lines = combined
+	}
 
 	// The input box is framed by full-width rules above and below, with the
 	// status line beneath it. A pending approval commandeers the whole
@@ -435,7 +531,8 @@ func (m Model) View(width, height int) string {
 		footer = prompt
 	} else {
 		rule := strings.Repeat("─", width)
-		footer = []string{rule, truncate(m.inputLine(), width), rule}
+		footer = append(footer, menuLines...)
+		footer = append(footer, rule, truncate(m.inputLine(), width), rule)
 		// The status line carries only usage/cost now, and only once a turn has
 		// finished — omit it (no blank row) until then, so the box sits flush
 		// against the transcript.
@@ -444,9 +541,24 @@ func (m Model) View(width, height int) string {
 		}
 	}
 
-	if avail := height - len(footer); avail >= 0 && len(lines) > avail {
-		lines = lines[len(lines)-avail:]
+	// The footer — the menu (when open) + input framing + status, or the
+	// approval prompt in its place — is pinned to the bottom of the frame:
+	// the header+transcript above it scroll-tail to fit when they overflow
+	// avail (scrollTail; offset 0 is the existing tail behavior, unchanged)
+	// and are padded with blank filler rows when shorter, so the footer
+	// lands on height's last row instead of trailing directly beneath a
+	// short conversation (chat-style bottom anchoring, matching how
+	// [Overview.render] already pads its body before the dispatch bar).
+	// avail is floored at 0 rather than left negative — a terminal shorter
+	// than the footer alone (the first frame, before WindowSizeMsg arrives,
+	// or a tiny window) skips both scrolling and padding instead of
+	// underflowing the slice bound scrollTail guards against.
+	avail := height - len(footer)
+	if avail < 0 {
+		avail = 0
 	}
+	lines = scrollTail(lines, avail, scroll)
+	lines = pad(lines, avail)
 	lines = append(lines, footer...)
 	return strings.Join(lines, "\n")
 }
@@ -458,7 +570,7 @@ func (m Model) promptLines(width int) []string {
 	if m.pending == nil {
 		return nil
 	}
-	raw := renderApprovalPrompt(m.theme, *m.pending)
+	raw := renderApprovalPrompt(m.theme, *m.pending, width)
 	out := make([]string, len(raw))
 	for i, l := range raw {
 		out[i] = truncate(l, width)
@@ -475,24 +587,76 @@ func markerLine(style lipgloss.Style, glyph, rest string) string {
 	return style.Render(glyph) + " " + rest
 }
 
+// styledMarkerLines splits text on embedded "\n" — a real multi-paragraph or
+// code-block reply is the ordinary case for streamed assistant/reasoning
+// content and pasted user input, not a rare one — into one display line per
+// physical line: [markerLine] for the first, then each further physical line
+// run through render and indented to align under the marker glyph rather than
+// left flush or repeating it. render lets callers apply their own per-line
+// styling (e.g. reasoning's muted body) the same way the single-line
+// markerLine call always could.
+//
+// Splitting here — never leaving a raw embedded "\n" inside one []string
+// entry — is the fix for the streaming top-anchor bug: transcriptLines'
+// returned slice LENGTH is what [Model.view]'s height math (avail,
+// scrollTail, pad) budgets against, on the assumption that one slice entry is
+// one terminal row. A slice entry carrying a raw "\n" prints as more than one
+// terminal row while counting as only one against avail — avail/scrollTail
+// then under-clip and pad under-fills, so a multi-line item (which real LLM
+// output almost always is) silently overflows past the bottom of the frame
+// while the header/oldest messages stay wrongly pinned in view: avail
+// (wrongly) thought there was still room, so scrollTail (correctly, on the
+// slice length it was given) never scrolled anything away. A single-line text
+// (the common short case, and every existing fixture) round-trips through
+// this unchanged: strings.Split on a string with no "\n" returns a
+// one-element slice, so the loop below never runs and this is byte-identical
+// to the old single-markerLine call.
+func styledMarkerLines(style lipgloss.Style, glyph, text string, render func(string) string) []string {
+	parts := strings.Split(text, "\n")
+	lines := make([]string, len(parts))
+	lines[0] = markerLine(style, glyph, render(parts[0]))
+	indent := strings.Repeat(" ", ansi.StringWidth(glyph)+1)
+	for i := 1; i < len(parts); i++ {
+		lines[i] = indent + render(parts[i])
+	}
+	return lines
+}
+
+// plainRender is the identity [styledMarkerLines] render func for item kinds
+// whose continuation lines carry no extra per-line styling beyond the
+// marker's — the rest of the line, on every physical row, is exactly the
+// item's own text.
+func plainRender(s string) string { return s }
+
 // renderItemLines renders a single transcript item to its display lines. A
 // tool item is a collapsed tree block spanning header + up to three
-// result lines; every other kind renders to exactly one line. Every kind is
-// marker-only styled: the leading glyph carries the state color, the text
-// after it keeps its own styling (plain, or muted for reasoning/status body).
+// result lines; every text-bearing kind renders to one line per physical line
+// its content contains (see [styledMarkerLines]) — exactly one for the common
+// single-line case. Every kind is marker-only styled: the leading glyph
+// carries the state color, the text after it keeps its own styling (plain, or
+// muted for reasoning/status body).
 func (m Model) renderItemLines(it item) []string {
 	switch it.kind {
 	case itemAssistantReasoning:
-		return []string{markerLine(m.theme.WarnStyle(), m.theme.GlyphAgent, m.theme.MutedStyle().Render(it.text))}
+		// Some providers (Claude included) emit a reasoning/thinking block
+		// with no content at all — nothing worth rendering, and rendering it
+		// anyway would leave a bare marker glyph with no text after it,
+		// floating alone between the user's prompt and the reply. Suppress
+		// the line entirely rather than show an empty state marker.
+		if strings.TrimSpace(it.text) == "" {
+			return nil
+		}
+		muted := m.theme.MutedStyle()
+		return styledMarkerLines(m.theme.WarnStyle(), m.theme.GlyphAgent, it.text, func(s string) string { return muted.Render(s) })
 
 	case itemUser:
-		return []string{markerLine(m.theme.InkStyle(), m.theme.GlyphHuman, it.text)}
+		return styledMarkerLines(m.theme.InkStyle(), m.theme.GlyphHuman, it.text, plainRender)
 
 	case itemTool:
 		return m.renderToolLines(it)
 
 	case itemError:
-		return []string{markerLine(m.theme.DangerStyle(), m.theme.GlyphAgent, it.text)}
+		return styledMarkerLines(m.theme.DangerStyle(), m.theme.GlyphAgent, it.text, plainRender)
 
 	case itemApproval:
 		return []string{markerLine(m.theme.WarnStyle(), m.theme.GlyphAgent, it.text)}
@@ -505,11 +669,17 @@ func (m Model) renderItemLines(it item) []string {
 		return []string{markerLine(style, m.theme.GlyphAgent, "permission "+it.approvalVerdict)}
 
 	default: // itemAssistantText
+		// Same empty-guard as itemAssistantReasoning above: an assistant-text
+		// item with no content yet (or that resolved empty) renders nothing
+		// rather than a bare marker.
+		if strings.TrimSpace(it.text) == "" {
+			return nil
+		}
 		style := m.theme.WarnStyle()
 		if it.done {
 			style = m.theme.OKStyle()
 		}
-		return []string{markerLine(style, m.theme.GlyphAgent, it.text)}
+		return styledMarkerLines(style, m.theme.GlyphAgent, it.text, plainRender)
 	}
 }
 
@@ -534,7 +704,12 @@ func (m Model) renderToolLines(it item) []string {
 	if summary := summarizeToolInput(it.toolInput); summary != "" {
 		header = fmt.Sprintf("%s(%s)", it.toolName, summary)
 	}
-	lines := []string{markerLine(style, m.theme.GlyphAgent, header)}
+	// A multi-line command (a heredoc, an inline multi-statement script) is a
+	// literal "\n" inside summary, not a rare shape for a bash tool call —
+	// styledMarkerLines splits it the same way the transcript's own text
+	// items are split above, for the same avail/scrollTail height-accounting
+	// reason (see its doc).
+	lines := styledMarkerLines(style, m.theme.GlyphAgent, header, plainRender)
 
 	if !it.done || it.toolResult == "" {
 		return lines
@@ -580,9 +755,11 @@ func (m Model) statusLine() string {
 	return m.theme.MutedStyle().Render(line)
 }
 
-// inputLine renders the input buffer with a trailing cursor marker.
+// inputLine renders the input buffer with the cursor marker spliced in at
+// its actual position — mid-text when the cursor sits mid-buffer, not
+// always at the end.
 func (m Model) inputLine() string {
-	return "> " + m.input + "▏"
+	return "> " + m.input.Render("▏")
 }
 
 // FullTranscript renders every transcript item unclipped by height, followed

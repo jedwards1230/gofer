@@ -1,4 +1,22 @@
-<yellow>●</yellow> bash · cmd=rm -rf /tmp/x
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+<yellow>bash command</yellow>
+
+  cmd=rm -rf /tmp/x
 
 Allow this tool call?
   [a] allow   [d] deny   [r] remember: off

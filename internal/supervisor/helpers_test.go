@@ -42,6 +42,12 @@ type fakeSession struct {
 	// channel — the seam the approval tests use to exercise the real gate.
 	permReq string
 
+	// setModelCalls records every model argument SetModel was called with, in
+	// order — the seam TestSetModel-family tests use to assert the
+	// supervisor actually reaches the SDK setter (and, for the
+	// cross-provider case, that it does NOT).
+	setModelCalls []string
+
 	// started delivers the prompt text each time Prompt is entered — one
 	// receive per dispatched turn. Buffered generously; a test only ever
 	// needs to drain it in step with its own submissions.
@@ -177,6 +183,35 @@ func (f *fakeSession) callCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.calls)
+}
+
+// SetModel records model onto setModelCalls and always succeeds — this fake
+// never second-guesses a model swap itself; [supervisor.Supervisor.SetModel]'s
+// own cross-provider pre-check is what tests exercise, and this records
+// whether the call reached the SDK seam at all.
+func (f *fakeSession) SetModel(model string) error {
+	f.mu.Lock()
+	f.setModelCalls = append(f.setModelCalls, model)
+	f.mu.Unlock()
+	return nil
+}
+
+// setModelCallCount returns how many times SetModel was called.
+func (f *fakeSession) setModelCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.setModelCalls)
+}
+
+// lastSetModel returns the most recent SetModel argument, or "" if it was
+// never called.
+func (f *fakeSession) lastSetModel() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.setModelCalls) == 0 {
+		return ""
+	}
+	return f.setModelCalls[len(f.setModelCalls)-1]
 }
 
 // harness wires a *supervisor.Supervisor to fakeSession construction, so

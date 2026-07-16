@@ -1,5 +1,5 @@
 gofer v0.3.0
-fable-5 · ~/orchestration
+claude-sonnet-5 · ~/orchestration
 2 awaiting input · 1 working · 2 completed
 
 ~/orchestration
@@ -18,7 +18,7 @@ fable-5 · ~/orchestration
 
 ────────────────────────────────────────────────────────────────────────────────
 wire the websocket ACP listener
-  waiting just now
+  fable-5 · waiting just now
 ❯ status?▏
 ────────────────────────────────────────────────────────────────────────────────
 enter to open · space to close · ctrl+x to delete

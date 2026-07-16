@@ -31,7 +31,7 @@ import (
 func newColorAppWithApproval(t *testing.T, th theme.Theme) App {
 	t.Helper()
 	sup := newInternalFakeSup(GoldenRoster())
-	a := NewApp(th, sup, GoldenMeta())
+	a := NewApp(th, sup, GoldenMeta(), GoldenCommandEnv())
 
 	mdl, _ := a.Update(tea.WindowSizeMsg{Width: testkit.Width, Height: testkit.Height})
 	a = mdl.(App)
@@ -83,7 +83,8 @@ func TestColorApprovalDialogComposite(t *testing.T) {
 	// display-width bug.
 	stripped := ansi.Strip(colored)
 	for _, want := range []string{
-		"bash · cmd=rm -rf /tmp/x",
+		"bash command",
+		"cmd=rm -rf /tmp/x",
 		"Allow this tool call?",
 		"[a] allow   [d] deny   [r] remember: off",
 		"esc cancel · session ",

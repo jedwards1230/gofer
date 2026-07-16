@@ -1,6 +1,7 @@
 package tui_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/jedwards1230/gofer/internal/tui"
@@ -53,5 +54,42 @@ func TestPeekSessionSwitch(t *testing.T) {
 	next := p.NextSession().SelectedID()
 	if next == first {
 		t.Error("NextSession did not move the selection")
+	}
+}
+
+// TestPeekShowsSessionModelOverride verifies the peeked session's own model
+// — "current model should be visible in the peek menu" per the redesign
+// brief — rides the card's waiting line when the session carries an
+// explicit override (SessionInfo.Model), covering the case app_peek.golden's
+// fixture (GoldenRoster, no per-session override) can't: that golden's
+// session resolves to the header's own meta.Model, already visible one line
+// up, so showing it a second time on the card would only repeat it (see
+// Peek.View's doc).
+func TestPeekShowsSessionModelOverride(t *testing.T) {
+	roster := tui.GoldenRoster()
+	roster[0].Model = "claude-opus-4-8"
+	over := tui.NewOverview(theme.Test(), tui.GoldenMeta()).WithSessions(roster)
+	p := tui.NewPeek(theme.Test(), over, "")
+
+	got := testkit.Render(p, testkit.Width, testkit.Height)
+	if !strings.Contains(got, "claude-opus-4-8 · working") {
+		t.Errorf("peek card missing the session's model override on the waiting line:\n%s", got)
+	}
+}
+
+// TestPeekHidesModelWhenSessionHasNoOverride verifies the waiting line stays
+// exactly as it was pre-redesign when the peeked session carries no
+// override (SessionInfo.Model == "") — the byte-for-byte guarantee
+// app_peek.golden depends on: GoldenRoster's fixture sessions set no
+// per-session Model (unlike overview_test.go's rosterFixture, which sets one
+// on every session for its own, unrelated golden coverage).
+func TestPeekHidesModelWhenSessionHasNoOverride(t *testing.T) {
+	over := tui.NewOverview(theme.Test(), tui.GoldenMeta()).WithSessions(tui.GoldenRoster())
+	got := testkit.Render(tui.NewPeek(theme.Test(), over, ""), testkit.Width, testkit.Height)
+	// The unprefixed waiting line's own leading two spaces rule out a model
+	// prefix sneaking in before "working" — "  claude-x · working …" would
+	// not contain this exact substring.
+	if !strings.Contains(got, "  working 2 minutes") {
+		t.Errorf("peek card's waiting line changed shape for a session with no override:\n%s", got)
 	}
 }

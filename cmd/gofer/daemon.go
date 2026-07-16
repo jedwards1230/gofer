@@ -18,6 +18,15 @@ import (
 	"github.com/jedwards1230/gofer/internal/telemetry"
 )
 
+// telemetryShutdownTimeout bounds the deferred telemetry flush at daemon exit.
+// On the enabled path tel.Shutdown flushes the OTLP exporter to the configured
+// collector; with an unbounded context (context.Background()) an unreachable or
+// slow collector would wedge the whole process AFTER the listener has already
+// closed — a graceful shutdown that never returns. Bounding it means the flush
+// gets a best effort and then the process exits regardless. Mirrors the
+// daemon's own graceful HTTP shutdownTimeout (internal/daemon).
+const telemetryShutdownTimeout = 5 * time.Second
+
 // runDaemon implements `gofer daemon` (alias `serve`): it builds a supervisor,
 // hosts it behind an ACP-over-WebSocket listener, and blocks in the
 // foreground until interrupted (SIGINT) or ctx is otherwise cancelled, then
@@ -147,7 +156,9 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		return fmt.Errorf("build telemetry: %w", err)
 	}
 	defer func() {
-		if err := tel.Shutdown(context.Background()); err != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), telemetryShutdownTimeout)
+		defer cancel()
+		if err := tel.Shutdown(shutdownCtx); err != nil {
 			wrappedLogger.Warn("telemetry shutdown", "err", err)
 		}
 	}()

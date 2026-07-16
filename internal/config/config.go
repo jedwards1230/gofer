@@ -1,8 +1,11 @@
-// Package config is gofer's native on-disk configuration. M3 defines only the
+// Package config is gofer's native on-disk configuration. M3 defined the
 // permissions block — the ruleset gofer's guard consults before it runs a tool
-// call. A vendor-format import (Claude Code settings.json) is deliberately NOT
-// here: that lands in M4/M5 (see the SDK's permission package doc). More config
-// sections (models, plugins, …) join this type in later milestones.
+// call. M4 step 3 adds Session/TUI (new-session and UI defaults) plus [Save],
+// and the parallel settings registry in internal/tui that the /config command
+// panel view reads and writes through. A vendor-format import (Claude Code
+// settings.json) is deliberately NOT here: that lands in M4/M5 (see the SDK's
+// permission package doc). More config sections (plugins, …) join this type in
+// later milestones.
 //
 // The file format is JSON, read from <root>/config.json (see [DefaultPath]).
 // A missing file is not an error — an unconfigured gofer runs the default
@@ -34,6 +37,76 @@ type Config struct {
 	// Telemetry is gofer's OpenTelemetry configuration block. The zero value
 	// is disabled — see [Telemetry.ToTelemetry].
 	Telemetry Telemetry `json:"telemetry,omitempty"`
+	// Session holds defaults for new sessions (model, permission mode). The
+	// zero value means "unset" — the TUI's settings registry resolves each
+	// field's own default (see internal/tui's settings registry).
+	Session Session `json:"session,omitempty"`
+	// TUI holds gofer's own UI preferences, as opposed to Session's
+	// new-session defaults.
+	TUI TUI `json:"tui,omitempty"`
+}
+
+// Session holds the defaults a new session is created with. The zero value
+// means "unset" — Model resolves to the credential-driven default
+// ([runner.DefaultModel]) and PermissionMode to "ask", the same contain-or-ask
+// posture [Config.Engine] already defaults to.
+type Session struct {
+	// Model is the default model id for new sessions. Empty means
+	// credential-driven (see runner.DefaultModel) rather than a fixed model.
+	Model string `json:"model,omitempty"`
+	// PermissionMode is the default guardrail mode for new sessions: "ask"
+	// (contain-or-ask, the default) or "yolo". Not yet consumed by
+	// [Config.Engine] — it is a settings-registry knob today; wiring it into
+	// session creation lands with /yolo (see docs/TUI.md).
+	PermissionMode string `json:"permission_mode,omitempty"`
+}
+
+// TUI holds gofer's own interface preferences, distinct from Session's
+// new-session defaults.
+type TUI struct {
+	// RosterView selects the overview's default row ordering: "flat"
+	// (recency across the whole roster, the default) or "grouped" (by
+	// status). Mirrors the `tab` key's [Overview.ToggleView] toggle.
+	RosterView string `json:"roster_view,omitempty"`
+
+	// Autoscroll controls whether the attach screen's transcript auto-tails
+	// new streaming content: nil (unset) or true is the default — the
+	// transcript stays pinned to the latest message as it streams in,
+	// scrolling the header/oldest messages away exactly like before this
+	// setting existed. An explicit false is "manual": new events never move
+	// the view — it stays wherever the operator last left it (wheel/PgUp/
+	// PgDn) — until they scroll back down themselves. A *bool, not a plain
+	// bool, is required: JSON can't distinguish "field absent" from "field
+	// explicitly false" on a plain bool (both marshal from, and unmarshal
+	// to, the zero value), so an explicit false would silently come back as
+	// the default true on the next Load. See [TUI.AutoscrollEnabled] for the
+	// resolved value every caller should read instead of this field
+	// directly.
+	Autoscroll *bool `json:"autoscroll,omitempty"`
+
+	// Mouse controls whether the TUI enables mouse capture (cell-motion
+	// reporting) at all: nil (unset) or true is the default — mouse-wheel
+	// scroll and app-owned click-drag text selection with OSC 52 copy are
+	// both live. An explicit false disables mouse capture altogether
+	// (App.View sets tea.MouseModeNone instead of tea.MouseModeCellMotion),
+	// handing control back to the terminal's own native click-to-select and
+	// native scroll — the escape hatch for a terminal where OSC 52 or SGR
+	// mouse reporting misbehaves. Same *bool rationale as [TUI.Autoscroll]:
+	// a plain bool can't distinguish "unset" from "explicitly false". See
+	// [TUI.MouseEnabled] for the resolved value every caller should read.
+	Mouse *bool `json:"mouse,omitempty"`
+}
+
+// AutoscrollEnabled resolves [TUI.Autoscroll]'s effective value: true (the
+// default) when unset, else the explicit stored value.
+func (t TUI) AutoscrollEnabled() bool {
+	return t.Autoscroll == nil || *t.Autoscroll
+}
+
+// MouseEnabled resolves [TUI.Mouse]'s effective value: true (the default)
+// when unset, else the explicit stored value.
+func (t TUI) MouseEnabled() bool {
+	return t.Mouse == nil || *t.Mouse
 }
 
 // Telemetry is gofer's native OpenTelemetry configuration block, mirroring
@@ -99,6 +172,51 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("config %s: %w", path, err)
 	}
 	return c, nil
+}
+
+// Save writes c to path as indented JSON, atomically: it marshals to a temp
+// file in the same directory (so the rename below is same-filesystem, hence
+// atomic) with mode 0600 — gofer's config can carry a session.model default
+// and other operator preferences, not a secret, but 0600 keeps it consistent
+// with the rest of gofer's on-disk store — then renames it over path. A
+// reader (Load) never observes a partially written file: either the old
+// contents or the new ones, never a half-write. The parent directory is
+// created if missing, matching the store root gofer already creates on first
+// use.
+func Save(path string, c Config) error {
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return fmt.Errorf("config: marshal %s: %w", path, err)
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("config: mkdir %s: %w", dir, err)
+	}
+	tmp, err := os.CreateTemp(dir, ".config-*.json.tmp")
+	if err != nil {
+		return fmt.Errorf("config: create temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	// Clean up the temp file on any early return; a successful Rename below
+	// moves it into place first, so this Remove after a clean run is a no-op
+	// (the path no longer exists under tmpPath).
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("config: chmod %s: %w", tmpPath, err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("config: write %s: %w", tmpPath, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("config: close %s: %w", tmpPath, err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("config: rename %s to %s: %w", tmpPath, path, err)
+	}
+	return nil
 }
 
 // validate rejects a rule with an unrecognized verdict, so a typo ("den")

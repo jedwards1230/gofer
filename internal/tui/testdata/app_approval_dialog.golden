@@ -1,5 +1,22 @@
 
-● bash · cmd=rm -rf /tmp/x
+gofer v0.3.0
+claude-sonnet-5 · ~/orchestration
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+bash command
+
+  cmd=rm -rf /tmp/x
 
 Allow this tool call?
   [a] allow   [d] deny   [r] remember: off
