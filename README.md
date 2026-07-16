@@ -6,18 +6,20 @@ navigation, and phone-driven sessions over ACP — built in Go on
 [`agent-sdk-go`](https://github.com/jedwards1230/agent-sdk-go). (Tool-call
 approvals reach your phone over ACP; see the [roadmap](#roadmap).)
 
-> **Status: M3 — guardrails.** On top of the M2 daemon (a session supervisor
-> behind an ACP-over-WebSocket listener, so an ACP client — e.g. a phone over
-> your tailnet — drives a session live in the laptop TUI roster), M3 adds the
-> permission engine and approvals relay: a tool-call approval fans out to every
-> attached client and can be answered from your phone, with sandboxed
-> containment (seatbelt / bwrap+seccomp) narrowing what needs a human. `gofer
-> exec` runs headless one-shots; `gofer daemon install` runs it as a service;
-> OpenTelemetry export is off by default. `gofer run`/`resume` route through a
-> daemon or fall back in-process; `gofer ps`/`kill`/`archive` manage the roster;
-> `gofer demo` streams a faux-provider session with no network. See
-> [`docs/M3-PLAN.md`](docs/M3-PLAN.md) and [`docs/PRD.md`](docs/PRD.md) (proofs:
-> [M2](docs/M2-PROOF.md), [M1](docs/M1-PROOF.md)) and the [roadmap](#roadmap).
+> **Status: M4 — command views.** On top of M3's daemon + permission engine +
+> approvals relay (sandboxed containment narrowing what needs a human, a
+> tool-call approval fanning out to every attached client), M4 adds a slash
+> dispatcher and command panel: `/status` (per-provider auth), `/config` (a
+> settings registry backed by `config.Save`), and `/model` (a picker that
+> hot-swaps a live session's model), with autocomplete and a chat-style
+> redesign — bottom-anchored layout, mouse-wheel scroll, cursor-aware input,
+> click-drag selection with OSC 52 copy. `gofer exec` runs headless one-shots;
+> `gofer daemon install` runs it as a service; OpenTelemetry export is off by
+> default. `gofer run`/`resume` route through a daemon or fall back
+> in-process; `gofer ps`/`kill`/`archive` manage the roster; `gofer demo`
+> streams a faux-provider session with no network. See
+> [`docs/PRD.md`](docs/PRD.md) and [`docs/TUI.md`](docs/TUI.md) and the
+> [roadmap](#roadmap).
 
 ## What it is
 
@@ -39,6 +41,9 @@ approvals reach your phone over ACP; see the [roadmap](#roadmap).)
 - **Structural permissions** — allow/ask/deny rules; approvals are protocol
   messages that render in the TUI or on your phone (Claude Code
   settings-format import lands later).
+- **Slash commands** — a dispatcher with autocomplete opens a command panel:
+  `/status` (per-provider auth), `/config` (live settings), `/model` (pick and
+  hot-swap a session's model).
 - **Session lifecycle you can trust** — event-sourced JSONL journals; kill or
   archive from the roster, resume after a crash, fork at any point. Journals
   are never deleted.
@@ -87,8 +92,7 @@ gofer resume <id>                 # no prompt: print the transcript and exit
 
 A real provider streams through the builtin tools (`bash`, `read`, `edit`,
 `write`, `grep`, `glob`, `ls`) into a durable JSONL journal — kill it and the
-settled prefix survives; resume folds it back into context. See
-[`docs/M1-PROOF.md`](docs/M1-PROOF.md) for the full walkthrough.
+settled prefix survives; resume folds it back into context.
 
 Run interactively (a prompt given as an argument, in a real terminal, no
 `--json`) and the stream renders through gofer's minimal attach TUI instead
@@ -105,8 +109,9 @@ stream, so scripts and CI never hit the TUI.
 | **M1 · one good session** ✅ | real provider, builtin tools, resumable sessions, cost accounting |
 | **M2 · the daemon** ✅ | supervisor, roster, overview⇄peek⇄attach TUI, native ACP over WebSocket, bearer auth |
 | **M3 · guardrails** ✅ | permission engine + approvals UX, sandboxed exec, headless mode |
-| M4 · ecosystem | MCP servers, SKILL.md skills, out-of-process plugins |
-| M5 · auto + polish | auto mode with reviewer pipeline, multi-machine discovery |
+| **M4 · command views** ✅ | slash dispatcher, `/status`/`/config`/`/model` panels, autocomplete, TUI redesign |
+| M5 · ecosystem | MCP servers, SKILL.md skills, out-of-process plugins, subagents first-class |
+| M6 · auto + polish | auto mode with reviewer pipeline, CC-asset import, multi-machine discovery |
 
 ## License
 

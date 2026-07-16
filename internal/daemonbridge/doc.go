@@ -3,8 +3,7 @@
 // [tui.Supervisor] consumer interface, so the same roster/peek/attach TUI
 // that renders a local in-process supervisor (see internal/tuibridge) can
 // instead render a daemon's live roster: a session created from a phone or
-// editor ACP client appears in the laptop TUI (M2's bar; see
-// docs/M2-PROOF.md §4).
+// editor ACP client appears in the laptop TUI too.
 //
 // # Why this is not a thin pass-through
 //

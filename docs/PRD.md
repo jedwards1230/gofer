@@ -78,8 +78,8 @@ gofer acp serve             # ACP over stdio (editors, stdio→ws bridges)
 gofer ps [--all]            # roster (--all includes archived; later: fleet)
 gofer kill|archive <id>     # stop running / clear finished (journal kept)
 gofer skills|plugins        # list what's composed; `plugins install <module>` (M5)
-gofer import claude         # idempotent import of CC skills/commands (M5)
-                            #   (settings.json permissions via the vendor-format adapter, M4/M5)
+gofer import claude         # idempotent import of CC skills/commands (M6)
+                            #   (settings.json permissions via the vendor-format adapter, M6)
 gofer doctor                # providers, LSP servers on PATH, daemon, sandbox
 gofer config get|set …      # global or project config
 ```
@@ -122,7 +122,7 @@ Event-sourced JSONL journals (SDK). `kill` = interrupt + terminate a running
 session; `archive` = drop a finished one from the roster. **Journals are never
 deleted** — both emit must-deliver events (`session.killed` / `.archived`).
 
-## Auto mode pipeline (M3 → M5)
+## Auto mode pipeline (M3 → M6)
 
 Contain before you classify · fail closed · no local SLM.
 
@@ -145,17 +145,17 @@ fallback shipped in M3** (`internal/sandbox` + the `RuleGuard`/`Gate` relay): an
 allow-matched call runs contained when the host can contain it, and a call the
 host cannot contain (no sandbox runtime, or a non-containable tool) escalates to
 a human approval that reaches every attached client — never silently blocked,
-never run uncontained (decided 2026-07-13). The ③ LLM reviewer is M4/M5. The reviewer is one
+never run uncontained (decided 2026-07-13). The ③ LLM reviewer is M6. The reviewer is one
 more SDK loop invocation with a different system prompt. Stage ① is a
 format-agnostic rule engine over typed rules; vendor rule formats (Claude Code
 `settings.json`, native YAML) are import adapters that land with the
-vendor-format work (M4/M5).
+vendor-format work (M6).
 
 ## On-disk layout & config precedence
 
 ```
 ~/.gofer/                          project: <repo>/.gofer/
-  config.yaml   global defaults      config.yaml   project overrides
+  config.json   global defaults      config.json   project overrides
   agents/*.yaml manifests            agents/*.yaml
   skills/       SKILL.md dirs        skills/
   grants.json   TTL'd grants         commands/     user slash commands
@@ -208,8 +208,9 @@ phone-home.
 | **M1 · one good session** ✅ shipped 2026-07-12 | real provider + tools via SDK, minimal attach TUI | a real coding task, streaming, resumable after kill |
 | **M2 · the daemon** ✅ shipped 2026-07-13 | supervisor + roster + overview⇄peek⇄attach + native ACP | an ACP client on a phone drives a session on a laptop |
 | **M3 · guardrails** ✅ shipped 2026-07-14 | **① daemon session→peers fan-out registry** (every registered peer gets every `session/update`; echo/dedup so prompts don't double-render) → **② sandbox** (seatbelt / bwrap+seccomp) → **③ approvals relay + phone approval UX**; then headless exec, daemon-as-service ([#42](https://github.com/jedwards1230/gofer/issues/42), first-use install prompt), lossless attach (daemonbridge reconstruction → lossless path), OTel | a phone approves a laptop tool call; a TUI attached to the same session watches the turn stream live |
-| M4 · ecosystem | MCP on by default (tool-search index-first) + subagents first-class (roster tree, peek/attach into children, linked journals) + skills + plugin UX | a third-party plugin adds a tool with one config line |
-| M5 · auto + polish | auto mode (reviewer pipeline), CC-asset import, mDNS pairing | auto mode survives a week of real ops without a bad allow |
+| **M4 · command views** ✅ shipped 2026-07-15 | slash dispatcher + command panel (`/status`, `/config`, `/model`) + autocomplete + settings registry (`config.Save`) + a TUI redesign wave (global header, bottom-anchored layout, mouse-wheel scroll, cursor-aware input, click-drag selection + OSC 52 copy) | an operator opens `/status`/`/config`/`/model` from the dispatcher and swaps a session's model without leaving the TUI |
+| M5 · ecosystem | MCP on by default (tool-search index-first) + subagents first-class (roster tree, peek/attach into children, linked journals) + skills + plugin UX | a third-party plugin adds a tool with one config line |
+| M6 · auto + polish | auto mode (reviewer pipeline), CC-asset import, mDNS pairing | auto mode survives a week of real ops without a bad allow |
 
 ## Fleet & multi-machine (design-ahead)
 
@@ -220,7 +221,7 @@ rosters; attach is transparent because the Event/Op stream is the same bytes
 locally or remote. Remote transport carries identity (TLS fingerprint in the
 beacon, rendezvous-issued tokens) from day one.
 
-*Open question (decide at M5)*: rendezvous protocol — leaning native-contract
+*Open question (decide at M6)*: rendezvous protocol — leaning native-contract
 passthrough, terminating ACP at each daemon (ACP is a projection; tunneling it
 would double-encode).
 

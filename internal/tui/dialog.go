@@ -5,9 +5,8 @@ package tui
 // approval.go); this file is just the App-level routing that captures input
 // while one is active and turns a decision into a [Supervisor.Reply] call.
 // It replaces gofer's first interactive TUI dialog — a centered overlay box
-// (docs/M3-PLAN.md's "approvals relay + phone approval UX" item) — with key
-// handling for the inline prompt now rendered in-flow by
-// [Model.View].
+// for the "approvals relay + phone approval UX" item — with key handling for
+// the inline prompt now rendered in-flow by [Model.View].
 
 import (
 	"context"

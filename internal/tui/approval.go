@@ -5,10 +5,10 @@ package tui
 // commandeers the whole footer (see Model.View) — status line, rules, and
 // input box included — while an event.PermissionRequested is awaiting a
 // decision, returning the footer once the request is answered. It replaces
-// the M3 centered-overlay modal (docs/M3-PLAN.md's "approvals relay + phone
-// approval UX" item) — the transcript's own ● badge (itemApproval) and
-// resolution line (itemApprovalResolved) are unrelated permanent records
-// that render elsewhere in model.go and are unaffected by this file.
+// the M3 centered-overlay modal for the "approvals relay + phone approval
+// UX" item — the transcript's own ● badge (itemApproval) and resolution line
+// (itemApprovalResolved) are unrelated permanent records that render
+// elsewhere in model.go and are unaffected by this file.
 
 import (
 	"fmt"

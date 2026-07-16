@@ -101,11 +101,11 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 
 	// Fail fast, before building a supervisor or resolving a model: a
 	// non-loopback bind with no bearer token is a misconfiguration that
-	// leaves the daemon open to unauthenticated, unattended tool execution
-	// (see docs/M2-PROOF.md). daemon.Serve enforces this too (it's the
-	// authoritative check — see its doc); this call exists purely so the CLI
-	// error is clean and immediate rather than surfacing after a supervisor
-	// and model resolution have already run.
+	// leaves the daemon open to unauthenticated, unattended tool execution.
+	// daemon.Serve enforces this too (it's the authoritative check — see its
+	// doc); this call exists purely so the CLI error is clean and immediate
+	// rather than surfacing after a supervisor and model resolution have
+	// already run.
 	if err := daemon.ValidateListen(*listen, bearerToken); err != nil {
 		return err
 	}
@@ -207,7 +207,7 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 
 	// The listen address is operationally useful (an operator watching a log,
 	// or copy-pasting it into an ACP client); the token, configured or not, is
-	// never printed — see docs/M2-PROOF.md for how to mint and pass one.
+	// never printed — pass one with --token or GOFER_TOKEN.
 	logger.Info("daemon listening", "addr", *listen)
 
 	// Advertise our endpoint so a same-host client (ps/kill/archive/attach/
