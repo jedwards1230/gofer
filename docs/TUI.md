@@ -245,8 +245,18 @@ its own, and a command panel/menu/approval overlay composes *over* the
 screen without stopping selection on it either, matching wheel scroll).
 
 `App.render` overlays the selection's span as reverse video after every
-other overlay, cutting each covered line via `ansi.Cut` so a colored line's
-existing styling around the selection survives untouched. On release,
+other overlay, cutting each covered line via `ansi.Cut` into its
+unselected-before/selected/unselected-after runs. The unselected runs keep
+their original styling untouched; the selected run is stripped of whatever
+ANSI it already carries (`ansi.Strip`) before the reverse-video style wraps
+it, so the highlight is a solid, uniform block immune to a reset embedded
+inside the run — a transcript row built from more than one styled
+sub-render (a marker glyph's own color, reset right before the text that
+follows it) would otherwise nest that reset inside the reverse wrap and
+have it terminate the reverse video partway through the row instead of at
+its end. Losing inner styling within the selection (a marker's glyph color)
+in exchange for full-width, embedded-reset-proof reverse video is the
+tradeoff. On release,
 `App.selectedText` extracts the plain (ANSI-stripped) text the span covers
 straight out of `App.render`'s own output — the *same* fully composed frame
 the terminal shows, so the scroll offset and the identity header are already

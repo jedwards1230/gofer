@@ -302,8 +302,23 @@ func (a App) selectedText() string {
 // already including layout.TopPadding) with th's reverse-video selection
 // style, cutting each covered line into its unselected-before/
 // selected/unselected-after runs via ansi.Cut (grapheme/ANSI-aware, so a
-// colored line's existing styling around the selection survives untouched)
-// and re-joining them. A span with no covered cells on a given line (e.g.
+// colored line's existing styling around the selection survives untouched
+// OUTSIDE the selected run) and re-joining them. The selected run itself is
+// stripped of any ANSI it already carries (ansi.Strip) before th's style
+// wraps it — transcript rows built from more than one styled sub-render
+// (e.g. [markerLine]'s `style.Render(glyph) + " " + rest`) embed their own
+// SGR reset right after the glyph, and reverse-video is itself just another
+// SGR: wrapping the raw run in style.Render without stripping first nests
+// that reset INSIDE the reverse wrap, so it terminates the reverse video
+// (and anything else style.Render opened) partway through the run instead
+// of at its end — the marker glyph reverses but the text after it renders
+// unstyled, on any row whose text trails a styling boundary. Selection is a
+// uniform highlight, not a syntax-preserving one, so losing whatever inner
+// styling a run had (glyph color, muted body) in exchange for a solid,
+// fully-reversed block — immune to embedded resets — is the correct
+// tradeoff; the unselected before/after runs keep their original styling
+// untouched, only the selected run itself is affected. A span with no
+// covered cells on a given line (e.g.
 // every row outside [y0,y1]) leaves that line untouched. regionTop/
 // regionBottom (App.transcriptRegion, inclusive, in the same absolute row
 // coordinates as content) clamp the painted rows to the active screen's own
@@ -343,7 +358,7 @@ func highlightSelection(content string, sel selectionState, th theme.Theme, regi
 		if left >= right {
 			continue
 		}
-		lines[y] = ansi.Cut(line, 0, left) + style.Render(ansi.Cut(line, left, right)) + ansi.Cut(line, right, width)
+		lines[y] = ansi.Cut(line, 0, left) + style.Render(ansi.Strip(ansi.Cut(line, left, right))) + ansi.Cut(line, right, width)
 	}
 	return strings.Join(lines, "\n")
 }
