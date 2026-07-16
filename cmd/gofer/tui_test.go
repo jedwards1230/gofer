@@ -36,9 +36,9 @@ func TestInteractiveTTY(t *testing.T) {
 	}
 
 	// The true case — an *os.File that IS a char device — is the real-TTY
-	// path exercised manually per docs/M1-PROOF.md: go test's own stdio is
-	// not guaranteed to be a terminal (CI never is), so it can't be
-	// asserted true here without flaking.
+	// path, exercised manually: go test's own stdio is not guaranteed to be
+	// a terminal (CI never is), so it can't be asserted true here without
+	// flaking.
 }
 
 // TestStdinIsTTY documents that stdinIsTTY delegates to isTerminal(os.Stdin)

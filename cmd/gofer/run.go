@@ -105,9 +105,9 @@ func resolveRunModel(ctx context.Context, root string) (string, error) {
 // output to stdout. When a `gofer daemon` is reachable at --daemon (default
 // 127.0.0.1:7333), the session is driven THROUGH it as an ACP client
 // (driveDaemonSession) — no privileged path, the same surface a phone or
-// editor client uses (docs/M2-PROOF.md). With no daemon reachable, it falls
-// back unchanged to the in-process path: a real provider and the builtin tool
-// set via runner.New.
+// editor client uses. With no daemon reachable, it falls back unchanged to
+// the in-process path: a real provider and the builtin tool set via
+// runner.New.
 //
 // Known daemon-path differences from the in-process path — inherent to M2's
 // ACP surface, not oversights (each prints a one-line stderr notice when the

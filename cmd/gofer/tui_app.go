@@ -22,9 +22,9 @@ import (
 
 // runTUI implements bare `gofer` on an interactive terminal: it PREFERS a
 // reachable `gofer daemon`'s live roster — a session created from a phone or
-// editor ACP client pointed at that daemon appears here too, per
-// docs/M2-PROOF.md §4 — and falls back to the local in-process supervisor
-// (an in-process store this process itself owns, no daemon involved) only
+// editor ACP client pointed at that daemon appears here too — and falls back
+// to the local in-process supervisor (an in-process store this process
+// itself owns, no daemon involved) only
 // when no daemon is reachable at all at the default address. An empty
 // roster (no sessions yet, or no provider credentials at all, on the local
 // path) is a valid, fully usable starting state either way: the dispatch bar

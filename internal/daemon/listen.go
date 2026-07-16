@@ -8,11 +8,12 @@ import (
 // ValidateListen reports an error when addr is a non-loopback bind with no
 // bearer token configured.
 //
-// This matters because the M2 daemon runs tool calls — including bash —
-// completely unattended: the loop's permission-hook seam is unwired until
-// M3, so a session/prompt over the wire proceeds through every tool call
-// with no approval gate (see docs/M2-PROOF.md). Reaching the daemon is
-// therefore equivalent to running arbitrary code as the daemon's user.
+// This matters because a reachable daemon runs tool calls — including
+// bash — against whatever permission mode the caller's session is
+// configured with; a network-reachable daemon with no bearer token lets
+// anyone who can route a packet to it drive tool calls as if they were an
+// authenticated client. Reaching the daemon without a token is therefore
+// equivalent to running arbitrary code as the daemon's user.
 // Binding a non-loopback address (a tailnet IP, a LAN IP, or a bind-all
 // address like "0.0.0.0"/"::") with no bearer token would leave that RCE
 // surface open to anyone who can route a packet to it.

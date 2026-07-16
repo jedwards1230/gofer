@@ -64,15 +64,17 @@ go run ./cmd/gofer demo                            # offline faux-provider strea
 - `internal/supervisor/` — session registry over the shared store + runner
   seams; see its package doc for the full contract.
 - `internal/daemon/` — ACP-over-WebSocket listener hosting the supervisor
-  (`gofer daemon`); see its package doc and `docs/M2-PROOF.md`.
-- `internal/tui/` (bubbletea) — the attach/peek/overview frontend.
+  (`gofer daemon`); see its package doc.
+- `internal/tui/` (bubbletea) — the attach/peek/overview frontend, plus the
+  slash-command dispatcher and command panel (`/status`, `/config`, `/model`).
 - `internal/tuibridge/` — adapts the daemon supervisor to the TUI's narrow
   `Supervisor` interface (the single seam importing both).
 - `internal/render/` — turns a session's typed event stream into terminal
   output (the `gofer demo`/line renderer); dependency-light and stateless.
 - `internal/config/` — gofer's native on-disk config (JSON at
-  `<root>/config.json`); M3 defines the permissions ruleset the guard consults,
-  with more sections to follow. See its package doc.
+  `<root>/config.json`, written via `config.Save` — indented, mode 0600,
+  atomic); sections are the permissions ruleset (M3) plus `Session`/`TUI`
+  (M4). See its package doc.
 - `internal/sandbox/` — OS containment backends (seatbelt / bwrap+seccomp)
   behind the SDK's permission guard.
 - `internal/telemetry/` — OpenTelemetry (traces/metrics/log-correlation) off

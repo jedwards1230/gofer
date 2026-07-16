@@ -12,9 +12,9 @@ import (
 )
 
 // driveDaemonSession drives one turn through a running daemon as its own ACP
-// client — dogfooding the same surface a phone or editor client uses (see
-// docs/M2-PROOF.md), so run/resume get no privileged path once a daemon is
-// present (CLAUDE.md invariant 2). It performs the handshake, opens the
+// client — dogfooding the same surface a phone or editor client uses, so
+// run/resume get no privileged path once a daemon is present (CLAUDE.md
+// invariant 2). It performs the handshake, opens the
 // session (session/new for a fresh run, session/load for resumeID != ""),
 // sends the prompt, and renders every streamed session/update until the
 // turn's terminal PromptResponse. cmd is the invoking command's label
