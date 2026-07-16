@@ -19,6 +19,7 @@ import (
 
 	"github.com/jedwards1230/agent-sdk-go/event"
 
+	"github.com/jedwards1230/gofer/internal/tui/layout"
 	"github.com/jedwards1230/gofer/internal/tui/testkit"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
@@ -480,5 +481,248 @@ func TestHighlightSelectionOutOfRangeIsNoOp(t *testing.T) {
 	sel := selectionState{startX: 0, startY: 100, curX: 5, curY: 200}
 	if got := highlightSelection(content, sel, testkit.ColorTheme(), 0, 2); got != content {
 		t.Errorf("highlightSelection with an out-of-range span = %q, want unchanged %q", got, content)
+	}
+}
+
+// countResets reports how many bare SGR-reset sequences ("\x1b[m" or
+// "\x1b[0m") appear in row. th.SelectionStyle() (mouse.go) only ever sets
+// Reverse — lipgloss renders that as exactly one opening escape and one
+// closing reset around whatever it wraps — so a FULLY selected row (the
+// whole visible width covered, the shape every non-edge row of a multi-row
+// drag has) must carry exactly one reset: style.Render's own closing one.
+// More than one means something inside the selected run closed the SGR
+// state early — [markerLine]'s embedded reset right after the glyph, if
+// [highlightSelection] wrapped the raw (unstripped) run — which silently
+// un-reverses everything after it for the rest of the row.
+func countResets(row string) int {
+	return strings.Count(row, "\x1b[m") + strings.Count(row, "\x1b[0m")
+}
+
+// TestHighlightSelectionMarkerLineFullWidth reproduces BUG 1 directly
+// against highlightSelection: content built from the real [markerLine]
+// helper (the same `style.Render(glyph) + " " + rest` shape every marker
+// row in the transcript renders through — a tool header, a resolved
+// approval, an error, etc.) embeds its own SGR reset right after the glyph.
+// Wrapping that raw run in the reverse-video selection style without first
+// stripping its existing ANSI nests the embedded reset INSIDE the reverse
+// wrap, so it closes the reverse video (and everything else) partway
+// through the row: the glyph reverses, the text after it — "bash" here —
+// does not. This is exactly the bug report's "● bash"/"● permission deny"
+// rows reading as skipped.
+//
+// This fails against the pre-fix highlightSelection (ansi.Cut without
+// ansi.Strip on the selected run): countResets would be 2 (the glyph's own
+// embedded reset plus style.Render's closing one), and the text after the
+// glyph would carry no reverse-video SGR at all.
+func TestHighlightSelectionMarkerLineFullWidth(t *testing.T) {
+	th := testkit.ColorTheme()
+	line := markerLine(th.DangerStyle(), "●", "bash")
+	width := ansi.StringWidth(line)
+
+	sel := selectionState{startX: 0, startY: 0, curX: width - 1, curY: 0}
+	got := highlightSelection(line, sel, th, 0, 0)
+
+	const reverseOn = "\x1b[7m"
+	if !strings.Contains(got, reverseOn) {
+		t.Fatalf("highlightSelection output missing the reverse-video SGR, got %q", got)
+	}
+	if resets := countResets(got); resets != 1 {
+		t.Errorf("highlightSelection on a fully selected marker row produced %d resets, want exactly 1 (the embedded reset after the glyph broke reverse video mid-row): %q", resets, got)
+	}
+	if plain := ansi.Strip(got); plain != "● bash" {
+		t.Errorf("highlightSelection changed the visible text: got %q, want \"● bash\"", plain)
+	}
+}
+
+// buildOverflowingMixedTranscript builds an attach [App] whose transcript
+// mixes every shape the bug report's screenshot showed, in one scrollable
+// region: a tool-call marker ("● bash") and a resolved-permission marker
+// ("● permission deny…"), each rendered through [markerLine] so their first
+// line embeds its own ANSI reset right after the glyph; a plain
+// multi-paragraph error item whose text embeds "\n"s, so its continuation
+// lines ("1" through "7") carry no ANSI at all ([plainRender] — see
+// [styledMarkerLines]); and a further run of one-line user turns ("8"
+// through "20"), each its OWN item and so each its own marker-line embedded
+// reset, standing in for the tail of a long conversation. height is small
+// enough, relative to this content, to force real overflow: naturalHeight
+// (the header+transcript row count this content needs unclipped) minus
+// exactly headerLines, so the identity header scrolls fully out of view —
+// the shape a real long-running attach session is in — while every
+// transcript row from "● bash" down to "20" stays inside the window.
+func buildOverflowingMixedTranscript(t *testing.T) App {
+	t.Helper()
+	meta := GoldenMeta()
+	meta.AttachSessionID = "sess-x"
+	a := NewApp(testkit.ColorTheme(), &internalFakeSup{}, meta, GoldenCommandEnv())
+	mdl, _ := a.Update(tea.WindowSizeMsg{Width: testkit.Width, Height: 1000})
+	a = mdl.(App)
+
+	mdl, _ = a.Update(sessEventMsg{id: "sess-x", ev: event.NewToolCallStarted("sess-x", "call-1", "bash", nil)})
+	a = mdl.(App)
+	mdl, _ = a.Update(sessEventMsg{id: "sess-x", ev: event.NewToolCallFinished("sess-x", "call-1", nil, "", true, nil)})
+	a = mdl.(App)
+	mdl, _ = a.Update(sessEventMsg{id: "sess-x", ev: event.NewPermissionResolved("sess-x", "req-1", event.VerdictDeny, "")})
+	a = mdl.(App)
+
+	var errText strings.Builder
+	errText.WriteString("permission denied: denied by user")
+	for i := 1; i <= 7; i++ {
+		fmt.Fprintf(&errText, "\n%d", i)
+	}
+	mdl, _ = a.Update(sessEventMsg{id: "sess-x", ev: event.NewSessionError("sess-x", errText.String(), false)})
+	a = mdl.(App)
+
+	for i := 8; i <= 20; i++ {
+		mdl, _ = a.Update(sessEventMsg{id: "sess-x", ev: event.NewMessageFinished("sess-x", event.MessageUser, fmt.Sprintf("%d", i))})
+		a = mdl.(App)
+	}
+
+	// naturalHeight: the exact row count header+transcript occupies at a
+	// generous height (1000, above), where none of it is tailed away. See
+	// the doc above for why the real test height is derived from this
+	// rather than a hardcoded constant — it stays correct however the
+	// marker/gap/continuation line counts above change.
+	naturalHeight := headerLines + len(a.sess.transcriptLines(a.width))
+	avail := naturalHeight - headerLines // trims exactly the identity header
+	const footerLen = 3                  // rule, input line, rule — no status/menu here
+	height := avail + footerLen + layout.TopPadding
+
+	mdl, _ = a.Update(tea.WindowSizeMsg{Width: testkit.Width, Height: height})
+	a = mdl.(App)
+	return a
+}
+
+// TestSelectionHighlightContiguousAcrossMarkerAndTailRows is the full
+// reproduction of both reported bugs: a single continuous top-to-bottom
+// click-drag over an overflowing, mixed attach transcript (marker rows +
+// a plain multi-line block + further marker rows tailing off the bottom)
+// must highlight — and copy — every row in the drag's span, contiguously,
+// with no row skipped partway through and no early cutoff before the
+// transcript's real bottom row.
+//
+// This fails against the pre-fix highlightSelection on the marker rows
+// ("● bash", "● permission deny…", and each of the "8".."20" turns, which
+// are ALSO one-line marker rows — see buildOverflowingMixedTranscript):
+// each reads back with the embedded-reset defect (glyph reverses, trailing
+// text doesn't) — exactly the "● bash"/"● permission deny" skipped and,
+// since "8".."20" are shaped the same way, the "8"-"20" skipped-looking
+// pattern the bug report described, even though [App.transcriptRegion]'s
+// own bottom clamp was never wrong (investigation — see mouse.go's
+// highlightSelection doc — found no separate off-by-one there: a drag
+// spanning the whole region always reached the transcript's real last row,
+// in every height/content-length combination tried; the "cutoff" was this
+// same embedded-reset defect landing on the tail's marker rows).
+func TestSelectionHighlightContiguousAcrossMarkerAndTailRows(t *testing.T) {
+	a := buildOverflowingMixedTranscript(t)
+
+	top, bottom, ok := a.transcriptRegion()
+	if !ok {
+		t.Fatalf("precondition failed: transcriptRegion reported no selectable region")
+	}
+
+	rendered := a.render()
+	preLines := strings.Split(rendered, "\n")
+	// Precondition: the header scrolled fully away and every row from the
+	// tool marker down through "20" is inside the window — otherwise this
+	// isn't testing the shape the bug report showed.
+	if strings.Contains(rendered, "gofer v") {
+		t.Fatalf("precondition failed: identity header still visible; buildOverflowingMixedTranscript's overflow math is off:\n%s", rendered)
+	}
+
+	// want holds the EXACT plain (ANSI-stripped) text of every real content
+	// row this drag must cover, top to bottom: the two marker rows built
+	// through [markerLine] ("● bash", "● permission deny"), the error
+	// item's own marker line plus its plain "\n"-continuation lines ("1"
+	// through "7", no glyph — [plainRender]), then the thirteen further
+	// one-line marker rows ("○ 8" through "○ 20", [itemUser]'s
+	// [theme.Theme.GlyphHuman]) standing in for the tail. Exact-line
+	// matching (not a substring like "1", which "10"-"19" would also
+	// contain) is what keeps row lookup unambiguous.
+	th := testkit.ColorTheme()
+	want := []string{
+		markerLine(th.DangerStyle(), th.GlyphAgent, "bash"),
+		markerLine(th.DangerStyle(), th.GlyphAgent, "permission deny"),
+		markerLine(th.DangerStyle(), th.GlyphAgent, "permission denied: denied by user"),
+	}
+	// styledMarkerLines indents every continuation line under the marker
+	// glyph rather than repeating it (model.go) — two spaces here, glyph
+	// width (1) + 1.
+	indent := strings.Repeat(" ", ansi.StringWidth(th.GlyphAgent)+1)
+	for i := 1; i <= 7; i++ {
+		want = append(want, indent+fmt.Sprintf("%d", i))
+	}
+	for i := 8; i <= 20; i++ {
+		want = append(want, markerLine(th.InkStyle(), th.GlyphHuman, fmt.Sprintf("%d", i)))
+	}
+
+	rows := make(map[string]int, len(want))
+	for _, w := range want {
+		plainWant := ansi.Strip(w)
+		row := -1
+		for i := top; i <= bottom; i++ {
+			if ansi.Strip(preLines[i]) == plainWant {
+				row = i
+				break
+			}
+		}
+		if row < 0 {
+			t.Fatalf("precondition failed: %q not found in [%d,%d]:\n%s", plainWant, top, bottom, rendered)
+		}
+		rows[w] = row
+	}
+	if rows[want[0]] != top {
+		t.Fatalf("precondition failed: expected the tool marker row to be the region's first row (%d), got row %d", top, rows[want[0]])
+	}
+	if rows[want[len(want)-1]] != bottom {
+		t.Fatalf("precondition failed: expected \"20\" to be the region's last row (%d), got row %d", bottom, rows[want[len(want)-1]])
+	}
+
+	// One continuous top-to-bottom drag over the whole region — the exact
+	// shape the bug report described.
+	a.sel = &selectionState{dragging: true, startX: 0, startY: top, curX: testkit.Width - 1, curY: bottom}
+
+	highlighted := a.render()
+	hLines := strings.Split(highlighted, "\n")
+	const reverseOn = "\x1b[7m"
+	for _, w := range want {
+		plainWant := ansi.Strip(w)
+		row := rows[w]
+		line := hLines[row]
+		if !strings.Contains(line, reverseOn) {
+			t.Errorf("row %d (%q) never entered reverse video: %q", row, plainWant, line)
+			continue
+		}
+		if resets := countResets(line); resets != 1 {
+			t.Errorf("row %d (%q) has %d resets, want exactly 1 — reverse video breaks mid-row: %q", row, plainWant, resets, line)
+		}
+		if plain := ansi.Strip(line); plain != plainWant {
+			t.Errorf("row %d text changed by highlighting: got %q, want %q", row, plain, plainWant)
+		}
+	}
+
+	// No early bottom cutoff: every row down to the region's own bottom —
+	// not just the rows carrying text this test already knows about —
+	// entered reverse video.
+	for y := top; y <= bottom; y++ {
+		if strings.TrimSpace(ansi.Strip(preLines[y])) == "" {
+			continue // blank gap row between items — nothing to highlight
+		}
+		if !strings.Contains(hLines[y], reverseOn) {
+			t.Errorf("row %d not highlighted despite being inside the drag span [%d,%d]: %q", y, top, bottom, hLines[y])
+		}
+	}
+
+	// selectedText and the highlight must agree on exactly the same rows:
+	// its ANSI-stripped text carries every row's content, contiguously, in
+	// the same top-to-bottom order.
+	text := a.selectedText()
+	for _, w := range want {
+		plainWant := ansi.Strip(w)
+		if !strings.Contains(text, plainWant) {
+			t.Errorf("selectedText() missing %q, which the highlight covers: %q", plainWant, text)
+		}
+	}
+	if idx := strings.Index(text, "20"); idx < 0 || idx < strings.Index(text, "bash") {
+		t.Errorf("selectedText() out of order: %q (want \"bash\" before \"20\", matching the top-to-bottom drag)", text)
 	}
 }
