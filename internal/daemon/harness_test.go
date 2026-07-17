@@ -42,6 +42,17 @@ func newTestSupervisor(t *testing.T, newProvider func() provider.Provider) *supe
 // is closed.
 func newTestSupervisorAtRoot(t *testing.T, root string, newProvider func() provider.Provider) *supervisor.Supervisor {
 	t.Helper()
+	return newTestSupervisorModelAtRoot(t, root, "faux", newProvider)
+}
+
+// newTestSupervisorModelAtRoot is [newTestSupervisorAtRoot] with the session
+// model pinned to a caller-chosen id instead of the unregistered "faux" — the
+// seam a test needs when it must exercise the SDK's registered-model paths
+// (context-window sizing + usage pricing), which the faux model can't reach
+// (faux is not in the provider registry, so [provider.Lookup]/[provider.CostOf]
+// miss and TurnFinished carries ContextWindow 0). See TestSessionPromptUsageUpdate.
+func newTestSupervisorModelAtRoot(t *testing.T, root, model string, newProvider func() provider.Provider) *supervisor.Supervisor {
+	t.Helper()
 	store, err := session.NewFileStore(session.WithRoot(root))
 	if err != nil {
 		t.Fatalf("session.NewFileStore: %v", err)
@@ -53,13 +64,13 @@ func newTestSupervisorAtRoot(t *testing.T, root string, newProvider func() provi
 		Store: store,
 		NewSession: func(ctx context.Context, opts runner.Options) (supervisor.Session, error) {
 			opts.Store = store
-			opts.Model = "faux"
+			opts.Model = model
 			opts.Provider = newProvider()
 			return runner.New(ctx, opts)
 		},
 		ResumeSession: func(ctx context.Context, id string, opts runner.Options) (supervisor.Session, error) {
 			opts.Store = store
-			opts.Model = "faux"
+			opts.Model = model
 			opts.Provider = newProvider()
 			return runner.Resume(ctx, id, opts)
 		},
