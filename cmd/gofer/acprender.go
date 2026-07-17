@@ -22,9 +22,10 @@ const (
 // decoder for it (it is written for gofer to play the agent role, not the
 // client role — see internal/daemon/prompt_test.go's sessionUpdateParams,
 // which takes the same approach for the same reason), so this decodes the
-// small, closed set of variants the M2 daemon ever emits: agent_message_chunk,
-// agent_thought_chunk, tool_call, and tool_call_update (see
-// [acp.ToSessionUpdate]'s doc for the exhaustive list).
+// small, closed set of variants the daemon emits: agent_message_chunk,
+// agent_thought_chunk, tool_call, tool_call_update, and usage_update (see
+// [acp.ToSessionUpdate]'s doc for the exhaustive list). Any variant this
+// renderer doesn't case on still renders as a bare marker line.
 type acpUpdateWire struct {
 	Update json.RawMessage `json:"update"`
 }
@@ -48,6 +49,17 @@ type acpToolCallWire struct {
 	ToolCallID string `json:"toolCallId"`
 	Title      string `json:"title"`
 	Status     string `json:"status"`
+}
+
+// acpUsageUpdateWire decodes the usage_update shape:
+// {"sessionUpdate":"usage_update","used":...,"size":...,"cost"?:{"amount":...,"currency":...}}.
+type acpUsageUpdateWire struct {
+	Used uint64 `json:"used"`
+	Size uint64 `json:"size"`
+	Cost *struct {
+		Amount   float64 `json:"amount"`
+		Currency string  `json:"currency"`
+	} `json:"cost"`
 }
 
 // acpRenderer renders session/update notification params as a legible
@@ -102,6 +114,14 @@ func (r *acpRenderer) render(params json.RawMessage) error {
 			detail = fmt.Sprintf("%s → %s", tc.ToolCallID, tc.Status)
 		}
 		r.marker("tool_call_update", detail)
+	case "usage_update":
+		var u acpUsageUpdateWire
+		_ = json.Unmarshal(n.Update, &u)
+		detail := fmt.Sprintf("%d/%d tokens", u.Used, u.Size)
+		if u.Cost != nil {
+			detail = fmt.Sprintf("%s ($%.4f %s)", detail, u.Cost.Amount, u.Cost.Currency)
+		}
+		r.marker("usage", detail)
 	default:
 		r.marker(disc.SessionUpdate, "")
 	}
