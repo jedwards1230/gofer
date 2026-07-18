@@ -82,6 +82,13 @@
 //     watcher fans the gofer-native notification (serving the TUI/daemonbridge)
 //     and records the route so ANY client's routed reply resolves, but does not
 //     itself issue the spec-ACP request.
+//   - The adoption watcher relays PERMISSION events only; a general session-event
+//     relay to attached clients is deferred to Slice 3. This slice needs only the
+//     §7 permission round-trip (and the Phase 2 idle-reattach demo has no in-flight
+//     turn to stream), but Slice 3's mid-turn-finish-across-upgrade demo — a turn
+//     streaming to attached clients while it finishes on an old-binary worker —
+//     will need the watcher (or an equivalent standing subscription) to re-fan the
+//     adopted session's full gofer/event stream, not just its permission events.
 //   - [Supervisor.EmitConfigOptions] returns [ErrEmitConfigUnsupported]: there is
 //     no wire method for a client to make a daemon emit config options, and it is
 //     off the crash-isolation critical path. The live config_option_update a model

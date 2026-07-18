@@ -102,6 +102,8 @@ The gate stays with the turn — **in the worker.** The round trip:
 
 **Survives a router restart mid-approval:** the worker keeps holding its gate and blocking the turn; the new router adopts the worker, re-subscribes, and the still-open `PermissionRequested` re-surfaces via must-deliver **replay**; it re-fans to peers; the reply routes through. Nothing is lost because the gate never left the worker and the backlog never left the worker's broker.
 
+> **Adoption-time pure-ACP exception (through Phase 2):** the standing per-adopted-session watcher re-fans a re-surfaced permission only as the gofer-native `gofer/permission_requested` notification (and records its call-id→session route, so *any* client's routed `permission.reply` resolves it). It does **not** re-issue the spec-ACP `session/request_permission` request, so a pure-ACP peer (a phone) cannot *answer* a re-surfaced permission on an adopted session until Phase 3 wires the ACP ask into the adoption path. gofer clients (TUI/daemonbridge) are unaffected.
+
 ## 8. Lifecycle deltas
 
 | Op | Today (in-process) | With workers |

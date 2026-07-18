@@ -221,6 +221,11 @@ func (s *Supervisor) watchPermissions(h *workerHandle, relay daemon.PermissionRe
 			}
 			switch pe := ev.(type) {
 			case event.PermissionRequested:
+				// Idempotent under duplicate delivery: even if the replay re-emits
+				// a request a concurrent prompt handler also observed, the relay's
+				// route-first / pending-presence gates broadcast it exactly once,
+				// and a client answers by call id regardless — a double delivery is
+				// harmless.
 				relay.RequestPermission(h.id, pe)
 			case event.PermissionResolved:
 				relay.ResolvePermission(h.id, pe)
