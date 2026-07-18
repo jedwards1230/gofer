@@ -1,17 +1,17 @@
-package daemonbridge
+package wirestream
 
 // reconstruct_internal_test.go covers handleNotification's
 // gofer/permission_requested and gofer/permission_resolved reconstruction
 // (see reconstruct.go) directly, without a real *daemon.Client or a live
-// daemon: neither branch touches s.client (registerFresh pre-populates the
-// session's reconstruction state so handleNotification's s.session lookup
+// daemon: neither branch touches r.client (RegisterFresh pre-populates the
+// session's reconstruction state so handleNotification's r.session lookup
 // never falls to the loadHistory path that would need one), so a bare
-// Supervisor value wired up the same way [New] does — minus the client and
+// Reconstructor value wired up the same way [New] does — minus the client and
 // the demux goroutine — is enough to drive them synchronously.
-// permission_test.go's (package daemonbridge_test)
-// TestReplySendsPermissionReplyNotification is this package's other half of
-// the M3 approvals-relay contract: the outbound "permission.reply"
-// notification, over a real (if minimal) WebSocket connection.
+// internal/daemonbridge's permission_test.go (package daemonbridge_test)
+// covers the outbound half of the M3 approvals-relay contract: the
+// "permission.reply" notification, over a real (if minimal) WebSocket
+// connection.
 
 import (
 	"context"
@@ -26,11 +26,12 @@ import (
 	"github.com/jedwards1230/gofer/internal/daemon"
 )
 
-// newReconstructTestSupervisor returns a Supervisor with just enough state
-// for handleNotification's permission branches: a session map and a closed
-// channel selectable in [Supervisor.session]'s guard, no *daemon.Client.
-func newReconstructTestSupervisor() *Supervisor {
-	return &Supervisor{
+// newReconstructTestReconstructor returns a Reconstructor with just enough
+// state for handleNotification's permission branches: a session map and a
+// closed channel selectable in [Reconstructor.session]'s guard, no
+// *daemon.Client.
+func newReconstructTestReconstructor() *Reconstructor {
+	return &Reconstructor{
 		sessions: make(map[string]*sessionState),
 		closed:   make(chan struct{}),
 	}
@@ -41,18 +42,18 @@ func newReconstructTestSupervisor() *Supervisor {
 // MarshalJSON shape, reconstructs into an event.PermissionRequested on the
 // named session's broker.
 func TestHandleNotificationReconstructsPermissionRequested(t *testing.T) {
-	s := newReconstructTestSupervisor()
+	r := newReconstructTestReconstructor()
 	const sid = "sess-1"
-	s.registerFresh(sid)
+	r.RegisterFresh(sid)
 
-	sub, err := s.Subscribe(context.Background(), sid)
+	sub, err := r.Subscribe(context.Background(), sid)
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
 	defer sub.Close()
 
 	params := json.RawMessage(`{"sessionId":"sess-1","id":"perm-1","tool":"bash","spec":{"cmd":"rm -rf /tmp/x"},"trace":["no rule"]}`)
-	s.handleNotification(daemon.Notification{Method: methodGoferPermissionRequested, Params: params})
+	r.handleNotification(daemon.Notification{Method: methodGoferPermissionRequested, Params: params})
 
 	select {
 	case ev := <-sub.C:
@@ -81,18 +82,18 @@ func TestHandleNotificationReconstructsPermissionRequested(t *testing.T) {
 // "permission.resolved" notification reconstructs into an
 // event.PermissionResolved.
 func TestHandleNotificationReconstructsPermissionResolved(t *testing.T) {
-	s := newReconstructTestSupervisor()
+	r := newReconstructTestReconstructor()
 	const sid = "sess-1"
-	s.registerFresh(sid)
+	r.RegisterFresh(sid)
 
-	sub, err := s.Subscribe(context.Background(), sid)
+	sub, err := r.Subscribe(context.Background(), sid)
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
 	defer sub.Close()
 
 	params := json.RawMessage(`{"sessionId":"sess-1","id":"perm-1","verdict":"deny","rule":"deny bash rm"}`)
-	s.handleNotification(daemon.Notification{Method: methodGoferPermissionResolved, Params: params})
+	r.handleNotification(daemon.Notification{Method: methodGoferPermissionResolved, Params: params})
 
 	select {
 	case ev := <-sub.C:
@@ -134,7 +135,7 @@ func stripSeqTime(t *testing.T, e event.Event) map[string]any {
 // proof for handleGoferEvent's dispatch table: for every non-permission
 // [event.Event] kind, marshal a source event built with event.New* (its own
 // MarshalJSON — the exact bytes the daemon's broadcastGoferEvent sends),
-// push it through s.handleNotification as a gofer/event notification (the
+// push it through r.handleNotification as a gofer/event notification (the
 // SAME internal seam TestHandleNotificationReconstructsPermissionRequested
 // uses — no real daemon.Client needed), and assert the event the broker
 // actually publishes is field-for-field equal to the source, ignoring
@@ -176,9 +177,9 @@ func TestHandleNotificationReplaysGoferEventKinds(t *testing.T) {
 
 	for _, src := range cases {
 		t.Run(src.Kind(), func(t *testing.T) {
-			s := newReconstructTestSupervisor()
-			s.registerFresh(sid)
-			sub, err := s.Subscribe(context.Background(), sid)
+			r := newReconstructTestReconstructor()
+			r.RegisterFresh(sid)
+			sub, err := r.Subscribe(context.Background(), sid)
 			if err != nil {
 				t.Fatalf("Subscribe: %v", err)
 			}
@@ -188,7 +189,7 @@ func TestHandleNotificationReplaysGoferEventKinds(t *testing.T) {
 			if err != nil {
 				t.Fatalf("marshal source %T: %v", src, err)
 			}
-			s.handleNotification(daemon.Notification{Method: methodGoferEvent, Params: raw})
+			r.handleNotification(daemon.Notification{Method: methodGoferEvent, Params: raw})
 
 			select {
 			case dst := <-sub.C:
@@ -218,9 +219,9 @@ func TestHandleNotificationReplaysGoferEventKinds(t *testing.T) {
 // to the default branch and returns without publishing anything.
 func TestHandleNotificationIgnoresPermissionKindsViaGoferEvent(t *testing.T) {
 	const sid = "sess-1"
-	s := newReconstructTestSupervisor()
-	s.registerFresh(sid)
-	sub, err := s.Subscribe(context.Background(), sid)
+	r := newReconstructTestReconstructor()
+	r.RegisterFresh(sid)
+	sub, err := r.Subscribe(context.Background(), sid)
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
@@ -230,7 +231,7 @@ func TestHandleNotificationIgnoresPermissionKindsViaGoferEvent(t *testing.T) {
 		[]byte(`{"type":"permission.requested","session_id":"sess-1","id":"perm-1","tool":"bash"}`),
 		[]byte(`{"type":"permission.resolved","session_id":"sess-1","id":"perm-1","verdict":"allow"}`),
 	} {
-		s.handleNotification(daemon.Notification{Method: methodGoferEvent, Params: raw})
+		r.handleNotification(daemon.Notification{Method: methodGoferEvent, Params: raw})
 	}
 
 	select {
@@ -246,13 +247,13 @@ func TestHandleNotificationIgnoresPermissionKindsViaGoferEvent(t *testing.T) {
 // tolerance handleNotification's ACP session/update path already has for a
 // protocol drift.
 func TestHandleNotificationDropsMalformedPermissionRequested(t *testing.T) {
-	s := newReconstructTestSupervisor()
-	s.handleNotification(daemon.Notification{Method: methodGoferPermissionRequested, Params: json.RawMessage(`{}`)})
-	s.handleNotification(daemon.Notification{Method: methodGoferPermissionRequested, Params: json.RawMessage(`not json`)})
+	r := newReconstructTestReconstructor()
+	r.handleNotification(daemon.Notification{Method: methodGoferPermissionRequested, Params: json.RawMessage(`{}`)})
+	r.handleNotification(daemon.Notification{Method: methodGoferPermissionRequested, Params: json.RawMessage(`not json`)})
 
-	s.mu.Lock()
-	n := len(s.sessions)
-	s.mu.Unlock()
+	r.mu.Lock()
+	n := len(r.sessions)
+	r.mu.Unlock()
 	if n != 0 {
 		t.Errorf("sessions = %d, want 0 (malformed notification should not register a session)", n)
 	}
