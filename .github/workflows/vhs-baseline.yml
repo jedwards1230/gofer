@@ -5,10 +5,15 @@
 # so a feature PR's capture branch (vhs-capture.yml) diffs against an accurate
 # baseline and merging a feature advances the baseline.
 #
-# The commit is authored by GITHUB_TOKEN, whose pushes do NOT trigger further
-# workflow runs — so this never re-triggers itself (nor release/CI). The path
-# filter also excludes vhs/snapshots/** as a second guard. Not a required
-# check; run it by hand (workflow_dispatch) to seed the baseline the first time.
+# The main ruleset requires changes via pull request, so the refresh lands as
+# a bot PR that is merged immediately by the workflow: the ruleset needs zero
+# approvals and only thread resolution (a fresh bot PR has none), and PRs
+# created/merged with GITHUB_TOKEN trigger no further workflow runs — so this
+# never re-triggers itself (nor release/CI/the PR review bot). The path filter
+# also excludes vhs/snapshots/** as a second guard. Not a required check; run
+# it by hand (workflow_dispatch) to seed the baseline the first time. If a
+# future ruleset change blocks the instant merge (e.g. required checks), the
+# PR is left open for a human and the run still succeeds.
 name: VHS baseline
 run-name: VHS baseline · ${{ github.sha }}
 
@@ -29,7 +34,8 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: write # commit the refreshed snapshot baseline to main
+  contents: write # push the refresh branch
+  pull-requests: write # open + merge the refresh PR
 
 jobs:
   refresh:
@@ -46,7 +52,9 @@ jobs:
       # Install VHS, render every tape to vhs/out/, sync PNGs to vhs/snapshots/.
       - uses: ./.github/actions/render-vhs
 
-      - name: Commit baseline if changed
+      - name: Open and merge refresh PR if changed
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           git add -A vhs/snapshots
@@ -59,21 +67,28 @@ jobs:
             -c user.name="github-actions[bot]" \
             -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
             commit -q -m "vhs: refresh snapshot baseline @ ${GITHUB_SHA:0:7}"
-          # main may have advanced since checkout (a merge racing this render):
-          # rebase the one snapshot commit onto the current tip and retry. The
-          # rebase is content-safe — only this bot touches vhs/snapshots.
+          # The main ruleset forbids direct pushes, so land the refresh via a
+          # bot PR merged on the spot. Force-push the bot-only branch: each
+          # refresh supersedes any stale leftover wholesale.
+          branch="vhs-baseline-refresh"
+          git push -q -f origin "HEAD:refs/heads/${branch}"
+          pr="$(gh pr list --head "$branch" --state open --json number -q '.[0].number // empty')"
+          if [ -z "$pr" ]; then
+            pr="$(gh pr create --base main --head "$branch" \
+              --title "vhs: refresh snapshot baseline @ ${GITHUB_SHA:0:7}" \
+              --body "Automated TUI snapshot-baseline refresh (vhs-baseline.yml). CI-rendered PNGs only.")"
+            pr="${pr##*/}"
+          fi
+          # Mergeability takes a moment to compute after the push; retry briefly.
           n=0
-          until git push -q origin HEAD:main; do
+          until gh pr merge "$pr" --squash --delete-branch 2>/dev/null; do
             n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "failed to push baseline after ${n} rebase retries" >&2
-              exit 1
+            if [ "$n" -ge 5 ]; then
+              echo "could not merge refresh PR #${pr} automatically — leaving it open" >&2
+              echo "Baseline refresh PR [#${pr}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/pull/${pr}) could not be auto-merged — needs a human." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
             fi
-            echo "push rejected (main advanced) — rebasing and retrying"
-            git fetch -q origin main
-            git -c user.name="github-actions[bot]" \
-              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-              rebase -q origin/main
+            sleep 5
           done
-          echo "Refreshed TUI snapshot baseline on \`main\`." >> "$GITHUB_STEP_SUMMARY"
+          echo "Refreshed TUI snapshot baseline on \`main\` via PR #${pr}." >> "$GITHUB_STEP_SUMMARY"
           git show --stat --format= >> "$GITHUB_STEP_SUMMARY"
