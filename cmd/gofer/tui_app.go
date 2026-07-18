@@ -50,7 +50,7 @@ func runTUI(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer) erro
 	// non-discoverable address still uses `gofer attach` instead, which does
 	// parse --daemon/--token.
 	df := &daemonFlags{}
-	backend, err := selectTUIBackend(ctx, df, cwd, "")
+	backend, err := selectTUIBackend(ctx, df, cwd, "", stderr)
 	if err != nil {
 		return err
 	}
@@ -103,7 +103,7 @@ type tuiBackend struct {
 // session stores (the daemon's own, versus this process's ~/.gofer) — so
 // exactly one backend renders per invocation, and its label is always
 // printed so the operator knows which one they're looking at.
-func selectTUIBackend(ctx context.Context, df *daemonFlags, cwd, root string) (tuiBackend, error) {
+func selectTUIBackend(ctx context.Context, df *daemonFlags, cwd, root string, stderr io.Writer) (tuiBackend, error) {
 	// Resolve --root through gofer's own default (~/.gofer, never any SDK
 	// default) once, up front, and reuse it everywhere a store root is
 	// needed below: the local supervisor's session store, the overview
@@ -116,7 +116,7 @@ func selectTUIBackend(ctx context.Context, df *daemonFlags, cwd, root string) (t
 	}
 	env := buildCommandEnv(rootDir, cwd)
 
-	c, dialErr := dialDaemon(ctx, df, "")
+	c, dialErr := dialDaemon(ctx, df, "", stderr)
 	switch {
 	case dialErr == nil:
 		b := daemonbridge.New(c)

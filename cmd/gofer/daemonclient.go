@@ -26,6 +26,14 @@ const daemonDialTimeout = 2 * time.Second
 type daemonFlags struct {
 	addr  string
 	token string
+	// epVersion is the build version the discovered endpoint file advertised
+	// (daemon.Endpoint.Version), cached by [daemonFlags.resolve] ONLY when addr
+	// was settled from that same file — the same trust guard resolve uses for
+	// the file's token. It stays "" when addr came from a flag/env/default (a
+	// remote daemon's version isn't locally knowable without a round-trip) or
+	// when an older daemon never wrote one; [dialDaemon] then skips the skew
+	// warning rather than warning against an unknown version.
+	epVersion string
 }
 
 // addDaemonFlags registers --daemon and --token on fs and returns the flags
@@ -89,6 +97,12 @@ func (f *daemonFlags) resolve(root string) (addr, token string) {
 			if token == "" {
 				token = ep.Token
 			}
+			// Trust the file's advertised version only when we actually settled
+			// on its address (the same guard as the token above): we're truly
+			// connecting to the daemon that advertised it, so its version is the
+			// one to compare against ours. A flag/env override to a different
+			// address leaves epVersion "" (unknown → no warning).
+			f.epVersion = ep.Version
 		}
 	}
 
@@ -143,11 +157,39 @@ func noteDaemonDeviations(stderr io.Writer, cmd, model, root string, asJSON bool
 // so a caller can tell "nothing is listening — fall back" (run/resume) apart
 // from "something is listening but rejected us — that's a real problem"
 // (every daemon-aware command); see [daemonUnreachable] and [daemonDialErr].
-func dialDaemon(ctx context.Context, f *daemonFlags, root string) (*daemon.Client, error) {
+func dialDaemon(ctx context.Context, f *daemonFlags, root string, stderr io.Writer) (*daemon.Client, error) {
 	addr, token := f.resolve(root)
 	dctx, cancel := context.WithTimeout(ctx, daemonDialTimeout)
 	defer cancel()
-	return daemon.Dial(dctx, addr, token)
+	c, err := daemon.Dial(dctx, addr, token)
+	if err != nil {
+		// A failed dial means no daemon answered (or rejected us) — there's
+		// nothing running to compare versions against, so don't warn.
+		return nil, err
+	}
+	// Only after a successful dial: if the daemon we discovered advertised a
+	// build version (f.epVersion, set by resolve ONLY when addr came from the
+	// endpoint file) and it differs from ours, warn loudly. This is warn-only —
+	// we never refuse the connection or restart the daemon on skew.
+	if f.epVersion != "" && f.epVersion != version {
+		warnVersionSkew(stderr, version, f.epVersion)
+	}
+	return c, nil
+}
+
+// warnVersionSkew prints a loud, unmistakable stderr warning when the CLI's
+// build version (cliVersion) differs from the running daemon's (daemonVersion,
+// read from the endpoint file — see [daemonFlags.epVersion]). It names both
+// versions and how to restart the daemon, then leaves the caller to proceed:
+// gofer never auto-restarts the daemon (that would kill live sessions and can't
+// touch a manually-run foreground daemon) — it warns and continues.
+func warnVersionSkew(stderr io.Writer, cliVersion, daemonVersion string) {
+	_, _ = fmt.Fprintf(stderr, `gofer: WARNING: version skew — CLI is %s but the daemon is %s.
+The running daemon is out of date; restart it to pick up the new build:
+  • foreground daemon: stop it (Ctrl-C) and re-run `+"`gofer daemon`"+`
+  • service-managed:   `+"`gofer daemon uninstall && gofer daemon install`"+`
+Continuing with the running daemon.
+`, cliVersion, daemonVersion)
 }
 
 // daemonUnreachable reports whether err is [dialDaemon] reporting no daemon at

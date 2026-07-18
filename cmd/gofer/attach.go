@@ -56,7 +56,7 @@ func runAttach(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 		return &usageError{msg: "usage: gofer attach [<session>]"}
 	}
 
-	c, err := dialDaemon(ctx, df, "")
+	c, err := dialDaemon(ctx, df, "", stderr)
 	if err != nil {
 		// attach never falls back to the local path: no daemon reachable is
 		// always the caller's problem to fix (start one, or fix --daemon /

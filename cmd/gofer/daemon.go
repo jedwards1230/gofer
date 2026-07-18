@@ -244,6 +244,7 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		Token:     bearerToken,
 		PID:       ourPID,
 		StartedAt: time.Now(),
+		Version:   version,
 	}); err != nil {
 		return fmt.Errorf("write daemon endpoint: %w", err)
 	}

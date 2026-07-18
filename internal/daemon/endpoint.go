@@ -38,6 +38,14 @@ type Endpoint struct {
 	// StartedAt is when the daemon wrote this file. Informational only; no
 	// code currently branches on it.
 	StartedAt time.Time `json:"started_at"`
+	// Version is the daemon's build version (cmd/gofer's `version`), advertised
+	// so a same-host CLI can detect version skew — a CLI newer or older than the
+	// running daemon it discovered here — and warn, without an extra round-trip
+	// (the ACP handshake carries no daemon version today). Informational only:
+	// the CLI never refuses to connect on a mismatch, it only warns. omitempty
+	// so an older daemon that never wrote it round-trips as "" (unknown → the
+	// CLI skips the skew check rather than warning against a phantom version).
+	Version string `json:"version,omitempty"`
 }
 
 // EndpointPath returns the path [WriteEndpoint]/[ReadEndpoint]/[RemoveEndpoint]
