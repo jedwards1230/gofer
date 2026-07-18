@@ -2,7 +2,7 @@
 
 Integration branch: `milestone/m5-acp-featureset`. Slice PRs target **this branch** (not `main`); the branch merges to `main` when M5 lands. Tracking PR is the draft opened from this branch.
 
-Cross-repo vertical: **agent-sdk-go** models/projects → **gofer** emits → **Agmente** decodes. Driven by the [ACP Conformance Matrix](https://wiki.lilbro.cloud/home/projects/acp-conformance-matrix).
+Cross-repo vertical: **agent-sdk-go** models/projects → **gofer** emits → **Agmente** decodes. Tracked against an internal ACP v1 conformance matrix (spec ↔ SDK ↔ gofer ↔ Agmente).
 
 **Policies** (decided): *promote-if-stable* — a capability goes on the standard ACP surface when a stable `schema/v1` variant exists; stays gofer-native only when the spec surface is unstable/absent (`set_model`, `gofer/event` stay native). Model discovery via a *gofer-native list-models* endpoint until `providers/*` stabilizes.
 
