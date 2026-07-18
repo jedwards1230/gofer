@@ -1,0 +1,60 @@
+package daemon
+
+import (
+	"context"
+
+	"github.com/jedwards1230/agent-sdk-go/event"
+	"github.com/jedwards1230/agent-sdk-go/provider"
+
+	"github.com/jedwards1230/gofer/internal/supervisor"
+)
+
+// Supervisor is the exact set of methods [Daemon] drives on the session
+// registry it hosts (every call site is in handlers.go). It was extracted from
+// the concrete *[supervisor.Supervisor] the daemon took directly so the same
+// ACP-over-WebSocket surface can front an alternate implementation — chiefly a
+// remote proxy that forwards these calls over the daemon wire to another
+// process, the router→worker relationship M6 introduces (see
+// docs/milestones/M6-process-isolation.md). The in-process
+// *[supervisor.Supervisor] satisfies it unchanged.
+//
+// The signatures are quoted verbatim from the supervisor's own methods,
+// including its DTO types ([supervisor.SessionInfo], [supervisor.CreateOptions],
+// [supervisor.ResumeOptions]): this is a seam for *hosting* the registry behind
+// the daemon, not a reshaping of it. A proxy implementation reconstitutes those
+// DTOs from the wire.
+type Supervisor interface {
+	// Create starts a new session. handleSessionNew uses only the returned
+	// SessionInfo.ID.
+	Create(ctx context.Context, prompt string, opts supervisor.CreateOptions) (supervisor.SessionInfo, error)
+	// Resume reopens a persisted session as a live one.
+	Resume(ctx context.Context, id string, opts supervisor.ResumeOptions) (supervisor.SessionInfo, error)
+	// History returns a session's folded conversation for replay on attach.
+	History(ctx context.Context, id string) ([]provider.Message, error)
+	// Interrupt cancels a session's in-flight turn.
+	Interrupt(ctx context.Context, sessionID string) error
+	// List enumerates every session, live and disk-only.
+	List(ctx context.Context) ([]supervisor.SessionInfo, error)
+	// Roster returns just the live sessions' snapshots.
+	Roster(ctx context.Context) ([]supervisor.SessionInfo, error)
+	// SetModel changes a session's model for its next turn.
+	SetModel(ctx context.Context, sessionID, model string) error
+	// SubscribeLive returns a session's event stream without the retained
+	// must-deliver backlog, for a caller about to drive a fresh turn.
+	SubscribeLive(ctx context.Context, sessionID string) (*event.Subscription, error)
+	// Send drives one turn (enqueuing if a turn is already in flight).
+	Send(ctx context.Context, sessionID, prompt string) error
+	// Reply answers a pending permission request by call id.
+	Reply(sessionID string, op event.PermissionReply) error
+	// EmitConfigOptions publishes a session's available config options.
+	EmitConfigOptions(sessionID string, options []event.ConfigOption) error
+	// Kill interrupts and terminates a session (keeping its journal).
+	Kill(ctx context.Context, sessionID string) error
+	// Archive drops a session from the roster (keeping its journal).
+	Archive(ctx context.Context, sessionID string) error
+}
+
+// The in-process supervisor satisfies the daemon's hosting interface unchanged
+// — a signature drift in either package fails the build here rather than at a
+// call site.
+var _ Supervisor = (*supervisor.Supervisor)(nil)
