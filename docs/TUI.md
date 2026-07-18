@@ -550,9 +550,34 @@ human-eye check of real rendered frames, `vhs/` holds on-demand
 
 Run `scripts/tui-vhs.sh [slug...]` (no arg = all tapes). It prebuilds
 `vhs/.bin/harness`, then renders each tape to `vhs/out/` (GIF of the whole turn
-+ PNG of the key frame); both are gitignored. If VHS isn't installed the script
-prints an install hint and exits. This is **not** a CI gate — VHS complements,
-never replaces, the golden tests.
++ PNG of the key frame); both are gitignored. Pass `--snapshot` to also mirror
+the PNG key-frames into the tracked `vhs/snapshots/` baseline (what CI commits;
+see below). If VHS isn't installed the script prints an install hint and exits.
+This is **not** a CI gate — VHS complements, never replaces, the golden tests.
+
+### Committed baseline + per-PR image diffs
+
+So TUI changes are reviewable as a native GitHub image diff without pulling the
+branch, the PNG key-frames are **committed** — CI is the sole author, so every
+frame comes from the same ubuntu-latest render environment:
+
+- **Baseline on `main`** — `vhs/snapshots/*.png`, kept current by
+  `.github/workflows/vhs-baseline.yml` (renders on any push to `main` that
+  touches the TUI, a tape, the harness, or the renderer). Seed it once with
+  `gh workflow run vhs-baseline.yml`.
+- **Per-PR captures** — `.github/workflows/vhs-capture.yml` renders on PRs and
+  appends the frames to an append-only `vhs-captures-pr-<n>` branch, branched
+  from `main` so `main...vhs-captures-pr-<n>` is a clean image-only diff. A
+  single sticky PR comment indexes the renders (a "latest" diff link, a
+  per-commit table with frame-change counts, and a collapsed preview of the
+  latest frames served from the capture branch) — the PR branch itself stays
+  free of image blobs. The branch is deleted when the PR closes
+  (`vhs-capture-cleanup.yml`); fork PRs degrade to a `vhs-frames` artifact.
+
+The shared render step (install VHS → render → sync `vhs/snapshots/`) lives in
+the `.github/actions/render-vhs` composite action. A bit of pixel jitter
+between renders is expected and tolerated — this lane is an advisory helper,
+never a merge gate.
 
 ## Slash commands
 

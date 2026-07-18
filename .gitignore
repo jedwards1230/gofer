@@ -12,6 +12,10 @@ dist/
 .DS_Store
 
 # VHS TUI capture artifacts (see vhs/, scripts/tui-vhs.sh)
+# vhs/out/ holds per-run renders (GIF + PNG) and the built harness — both
+# transient. The PNG key-frames are mirrored (CI-authoritative) into the
+# tracked vhs/snapshots/ baseline, which is intentionally NOT ignored so
+# main<->feature image diffs work.
 vhs/.bin/
 vhs/out/
 

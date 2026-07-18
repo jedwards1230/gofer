@@ -1,31 +1,40 @@
 # Advisory visual-capture lane: on PRs that touch the TUI or its VHS tapes,
-# render every vhs/*.tape headlessly and surface the frames INLINE in the PR —
-# so TUI changes can be reviewed by eye without pulling the branch.
+# render every vhs/*.tape headlessly and commit the PNG key-frames so TUI
+# changes are reviewable as a native GitHub image diff against main — without
+# pulling the branch.
 #
-# Frames are published to an orphan `vhs-captures` branch under pr-<n>/<sha>/,
-# embedded via raw.githubusercontent URLs in the job summary and a sticky PR
-# comment. This is NOT a required check (own file, never gates merge). Fork PRs
-# get a read-only token, so they degrade to an artifact upload instead of a
-# push+comment.
+# Rendered PNGs are committed to a per-PR, append-only capture branch
+# `vhs-captures-pr-<n>`, branched from `main` so `main...vhs-captures-pr-<n>`
+# is a clean image-only diff. One commit is appended per render (stable SHAs),
+# and a single sticky PR comment indexes them: a "latest" image-diff link, a
+# per-commit table with frame-change counts, and a collapsed <details> preview
+# of the latest frames (served from the capture branch). The human PR branch
+# stays clean — no image blobs committed to it.
+#
+# This is NOT a required check (own file, never gates merge). Fork PRs get a
+# read-only token, so they degrade to an artifact upload instead of a
+# push+comment. The tracked `main` baseline is maintained by vhs-baseline.yml.
 name: VHS capture
 run-name: VHS capture · PR #${{ github.event.pull_request.number }}
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened]
     paths:
       - internal/tui/**
       - vhs/**
       - scripts/tui-vhs.sh
       - .github/workflows/vhs-capture.yml
+      - .github/actions/render-vhs/**
 
-# One run per PR; a newer push cancels the older render so orphan-branch pushes
+# One run per PR; a newer push cancels the older render so capture-branch pushes
 # for the same PR never race each other.
 concurrency:
   group: vhs-capture-pr-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 permissions:
-  contents: write # push rendered frames to the vhs-captures orphan branch
+  contents: write # append rendered frames to the per-PR capture branch
   pull-requests: write # maintain the sticky capture comment
 
 jobs:
@@ -35,54 +44,21 @@ jobs:
       PR: ${{ github.event.pull_request.number }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+      CAP_BRANCH: vhs-captures-pr-${{ github.event.pull_request.number }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
-        with:
-          go-version-file: go.mod
+      # Drop the baseline PNGs inherited from the checkout so the publish step
+      # ships exactly what THIS render produced — a tape deleted by the PR
+      # must not resurface via its stale checked-out frame.
+      - name: Clear inherited baseline frames
+        run: rm -f vhs/snapshots/*.png
 
-      # Install the VHS toolchain directly rather than via charmbracelet/vhs-action:
-      # the action's dependency install is unconditional and its bundled ffmpeg
-      # installer is currently broken (dead download URL), so it fails install-only
-      # too. apt carries ttyd/ffmpeg/the font; vhs is pinned by release tag. Unset
-      # CI and force truecolor so termenv emits real ANSI colors in the frames.
-      - name: Install VHS and render deps
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ffmpeg ttyd fonts-jetbrains-mono
-          # setup-go pins GOTOOLCHAIN=local at the repo's go.mod version; vhs needs a
-          # newer toolchain than that, so let this one build fetch it (auto). The
-          # later harness build still uses the repo's pinned toolchain.
-          GOTOOLCHAIN=auto go install github.com/charmbracelet/vhs@v0.11.0
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-          {
-            echo "CI="
-            echo "COLORTERM=truecolor"
-          } >> "$GITHUB_ENV"
-
-      # Glob the tapes (no hardcoded list) and reuse the repo's own renderer,
-      # which prebuilds vhs/.bin/harness then renders each tape to vhs/out/.
-      - name: Render VHS tapes
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          tapes=()
-          for tape in vhs/*.tape; do
-            tapes+=("$(basename "$tape" .tape)")
-          done
-          if [ ${#tapes[@]} -eq 0 ]; then
-            echo "no vhs/*.tape files found" >&2
-            exit 1
-          fi
-          echo "rendering tapes: ${tapes[*]}"
-          scripts/tui-vhs.sh "${tapes[@]}"
-          echo "--- rendered ---"
-          ls -1 vhs/out/
+      # Install VHS, render every tape to vhs/out/, sync PNGs to vhs/snapshots/.
+      - uses: ./.github/actions/render-vhs
 
       # Always upload the raw frames+gifs: the only way fork PRs can see them,
-      # and a backup for same-repo runs.
+      # and a backup (incl. the motion GIFs) for same-repo runs.
       - name: Upload frames artifact
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
@@ -90,59 +66,59 @@ jobs:
           path: vhs/out/
           if-no-files-found: error
 
-      # Publish PNG frames to the orphan vhs-captures branch under a per-PR dir,
-      # overwriting the dir each run so it stays bounded. Same-repo PRs only
+      # Append this render's PNGs to the per-PR capture branch (branched from
+      # main on first render, appended to thereafter), then build the sticky
+      # comment body from the branch's commit history. Same-repo PRs only
       # (fork tokens are read-only). Retries to tolerate cross-PR push races.
-      - name: Publish frames to vhs-captures branch
+      - name: Maintain capture branch and compose comment
         if: env.SAME_REPO == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           shopt -s nullglob
-          pngs=(vhs/out/*.png)
+          pngs=("$GITHUB_WORKSPACE"/vhs/snapshots/*.png)
           if [ ${#pngs[@]} -eq 0 ]; then
-            echo "no PNG frames to publish" >&2
+            echo "no snapshot PNGs to publish" >&2
             exit 1
           fi
+
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          git -C "$work" init -q
+          git -C "$work" remote add origin \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          # Explicit refspec so refs/remotes/origin/main exists for the base
+          # checkout and the origin/main..cap rev-list below.
+          git -C "$work" fetch -q origin '+refs/heads/main:refs/remotes/origin/main'
+
           n=0
           until [ "$n" -ge 5 ]; do
-            work="$(mktemp -d)"
-            # Guarantee cleanup on ANY exit path (a git failure under set -e
-            # would otherwise leak the temp dir); re-armed each iteration to
-            # point at the current dir. The explicit rm -rf below still runs on
-            # the normal retry/success paths.
-            trap 'rm -rf "$work"' EXIT
-            git -C "$work" init -q
-            git -C "$work" remote add origin \
-              "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-            if git -C "$work" fetch -q origin vhs-captures; then
-              git -C "$work" checkout -q -B vhs-captures FETCH_HEAD
+            # Base on the existing capture-branch tip (append), else branch from
+            # main so the branch carries the committed baseline as its parent.
+            if git -C "$work" fetch -q origin "$CAP_BRANCH"; then
+              git -C "$work" checkout -q -B cap FETCH_HEAD
             else
-              echo "vhs-captures branch absent — bootstrapping orphan"
-              git -C "$work" checkout -q --orphan vhs-captures
+              git -C "$work" checkout -q -B cap origin/main
             fi
-            # Replace this PR's dir wholesale (drops stale per-sha subdirs).
-            rm -rf "${work:?}/pr-${PR}"
-            mkdir -p "$work/pr-${PR}/${HEAD_SHA}"
-            cp "${pngs[@]}" "$work/pr-${PR}/${HEAD_SHA}/"
-            git -C "$work" add -A "pr-${PR}"
+            # Replace the snapshot dir wholesale so a removed tape drops its PNG.
+            rm -rf "${work:?}/vhs/snapshots"
+            mkdir -p "$work/vhs/snapshots"
+            cp "${pngs[@]}" "$work/vhs/snapshots/"
+            git -C "$work" add -A vhs/snapshots
             if git -C "$work" diff --cached --quiet; then
-              echo "no frame changes to commit"
-              rm -rf "$work"
+              echo "no frame changes vs capture-branch tip"
               break
             fi
             git -C "$work" \
               -c user.name="github-actions[bot]" \
               -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-              commit -q -m "vhs: PR #${PR} @ ${HEAD_SHA}"
-            if git -C "$work" push -q origin vhs-captures; then
-              echo "pushed frames for PR #${PR} @ ${HEAD_SHA}"
-              rm -rf "$work"
+              commit -q -m "vhs: PR #${PR} render @ ${HEAD_SHA:0:7}"
+            if git -C "$work" push -q origin "cap:refs/heads/${CAP_BRANCH}"; then
+              echo "appended frames for PR #${PR} @ ${HEAD_SHA:0:7}"
               break
             fi
             echo "push rejected (concurrent update?) — retrying"
-            rm -rf "$work"
             n=$((n + 1))
             sleep $(((RANDOM % 4) + 2))
           done
@@ -151,39 +127,66 @@ jobs:
             exit 1
           fi
 
-      # Build the shared markdown (step summary + sticky comment) from whatever
-      # PNGs were rendered — no hardcoded frame names.
-      - name: Compose capture markdown
-        if: env.SAME_REPO == 'true'
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          raw_base="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/vhs-captures/pr-${PR}/${HEAD_SHA}"
-          short="${HEAD_SHA:0:7}"
-          frames=(vhs/out/*.png)
-          count=${#frames[@]}
-          # Collapse the frames behind a default-closed <details> so the PR reads
-          # compact for humans, while the images stay as raw ![](url) markdown
-          # INSIDE it — an agent fetching the comment body still loads them.
-          {
-            echo "### TUI visual capture"
-            echo
-            echo "TUI captures for \`${short}\` — ${count} frame(s). Advisory only — this lane is **not** a required check."
-            echo
-            echo "<details>"
-            echo "<summary>🎞️ TUI visual captures — ${count} frames</summary>"
-            echo
-            for f in "${frames[@]}"; do
-              name="$(basename "$f")"
-              echo "**${name}**"
+          # Compose the sticky comment from the capture branch's history: the
+          # snapshot commits are exactly those in cap but not in main.
+          repo_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          compare_url="${repo_url}/compare/main...${CAP_BRANCH}"
+          mapfile -t commits < <(git -C "$work" rev-list origin/main..cap)
+
+          if [ ${#commits[@]} -eq 0 ]; then
+            {
+              echo "### TUI visual capture"
               echo
-              echo "![${name}](${raw_base}/${name})"
+              echo "No TUI visual changes detected versus the \`main\` snapshot baseline for \`${HEAD_SHA:0:7}\`. Advisory lane — nothing to review here."
+            } > body.md
+          else
+            latest="${commits[0]}"
+            tree_url="${repo_url}/tree/${latest}/vhs/snapshots"
+            {
+              echo "### TUI visual capture"
               echo
-            done
-            echo "</details>"
-            echo
-            echo "<sub>Frames live on the \`vhs-captures\` branch under \`pr-${PR}/${HEAD_SHA}/\`. Regenerated on each push to this PR.</sub>"
-          } > body.md
+              echo "${#commits[@]} render(s) on \`${CAP_BRANCH}\` (branched from \`main\`). Advisory only — this lane is **not** a required check."
+              echo
+              echo "**Latest:** [🖼️ image diff vs \`main\`](${compare_url}) · [browse frames](${tree_url})"
+              echo
+              echo "| Render | When (UTC) | Frames |"
+              echo "| --- | --- | --- |"
+              for sha in "${commits[@]}"; do
+                short="${sha:0:7}"
+                when="$(TZ=UTC git -C "$work" show -s --format='%cd' --date=format-local:'%Y-%m-%d %H:%M' "$sha")"
+                stats="$(git -C "$work" show --name-status --format= "$sha" -- vhs/snapshots || true)"
+                a="$(grep -c '^A' <<<"$stats" || true)"
+                m="$(grep -c '^M' <<<"$stats" || true)"
+                d="$(grep -c '^D' <<<"$stats" || true)"
+                parts=()
+                [ "$m" -gt 0 ] && parts+=("${m} changed")
+                [ "$a" -gt 0 ] && parts+=("${a} added")
+                [ "$d" -gt 0 ] && parts+=("${d} removed")
+                [ ${#parts[@]} -eq 0 ] && parts+=("no frame changes")
+                frames="$(printf '%s, ' "${parts[@]}")"; frames="${frames%, }"
+                echo "| [\`${short}\`](${repo_url}/commit/${sha}) | ${when} | ${frames} |"
+              done
+              echo
+              # Inline preview of the latest batch, collapsed by default so the
+              # PR stays compact. Images render from the committed PNGs on the
+              # capture branch (raw.githubusercontent at the latest commit SHA)
+              # — nothing lands on the PR branch itself. An agent fetching the
+              # comment body still loads the ![](…) images inside the details.
+              raw_base="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${latest}/vhs/snapshots"
+              echo "<details>"
+              echo "<summary>🎞️ Latest frames — <code>${latest:0:7}</code> (${#pngs[@]})</summary>"
+              echo
+              while IFS= read -r name; do
+                echo "**${name}**"
+                echo
+                echo "![${name}](${raw_base}/${name})"
+                echo
+              done < <(printf '%s\n' "${pngs[@]##*/}" | sort)
+              echo "</details>"
+              echo
+              echo "<sub>Frames are committed PNGs on \`${CAP_BRANCH}\` (motion GIFs stay CI artifacts). Diff any commit against \`main\` for a side-by-side. Regenerated on each push; the branch is deleted when the PR closes.</sub>"
+            } > body.md
+          fi
           cat body.md >> "$GITHUB_STEP_SUMMARY"
 
       # Find-and-update a single marker comment; never spam a new one per push.
@@ -216,7 +219,7 @@ jobs:
             echo "### TUI visual capture"
             echo
             echo "This PR is from a fork, so the token is read-only — frames can't be"
-            echo "pushed to the capture branch or posted as a comment."
+            echo "committed to a capture branch or posted as a comment."
             echo
             echo "Rendered frames are attached to this run as the **vhs-frames** artifact."
           } >> "$GITHUB_STEP_SUMMARY"
