@@ -167,16 +167,18 @@ func TestFidelityToolCallDeltaAndSpill(t *testing.T) {
 		t.Fatalf("Send: %v", err)
 	}
 
+	// session.info (the title the supervisor derives from this first prompt at
+	// enqueue, before the turn's own events — see supervisor/managed.go),
 	// message.started(user), message.finished(user), turn.started,
 	// message.started(text), message.delta, message.finished(text),
 	// tool.call.started, tool.call.delta, tool.call.delta,
 	// turn.finished(tool_use), tool.call.finished, turn.started,
 	// message.started(text), message.delta, message.finished(text),
-	// turn.finished(end_turn) = 16 events. See TestToolCallReconstruction's
+	// turn.finished(end_turn) = 17 events. See TestToolCallReconstruction's
 	// doc for why a round's turn.finished(tool_use) precedes its
 	// tool.call.finished (the tool executes AFTER the requesting model-call
 	// round settles, not during it).
-	const wantEvents = 16
+	const wantEvents = 17
 	sourceEvents := drainEvents(t, sourceSub, wantEvents)
 	bridgeEvents := drainEvents(t, bridgeSub, wantEvents)
 

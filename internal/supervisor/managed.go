@@ -172,19 +172,36 @@ func (m *managed) info() SessionInfo {
 }
 
 // enqueue appends text to the pump's queue and wakes it. It captures the
-// session title from the first prompt. It returns ErrNotLive if the session
-// has already begun closing.
+// session title from the first prompt that yields a non-empty snippet, set once
+// and never overwritten thereafter, and — on that first capture only — emits a
+// [event.SessionInfoUpdated] onto the session's stream so ACP peers observe the
+// derived title live (it projects to an ACP session_info_update for free). A
+// re-prompt with the same or different text never re-emits: the title is
+// already set, so newTitle stays "". It returns ErrNotLive if the session has
+// already begun closing.
 func (m *managed) enqueue(text string) error {
 	m.mu.Lock()
 	if m.closing {
 		m.mu.Unlock()
 		return ErrNotLive
 	}
+	var newTitle string
 	if m.title == "" {
-		m.title = snippet(text)
+		if t := snippet(text); t != "" {
+			m.title = t
+			newTitle = t
+		}
 	}
 	m.queue = append(m.queue, text)
 	m.mu.Unlock()
+
+	// Emit outside m.mu: a must-deliver publish can block on backpressure, and
+	// the lock discipline in this file's doc forbids blocking Session calls
+	// under m.mu. Guarded by newTitle != "" so a whitespace-only first prompt
+	// (empty snippet) and every subsequent prompt emit nothing.
+	if newTitle != "" {
+		m.sess.Emit(event.NewSessionInfoUpdated(m.id, newTitle))
+	}
 
 	select {
 	case m.submitCh <- struct{}{}:
@@ -307,16 +324,43 @@ func (m *managed) stop() {
 	}
 }
 
-// snippet renders a one-line, bounded title from a prompt: leading/trailing
-// space trimmed, truncated at the first newline, and capped at maxTitle runes.
+// snippet derives a one-line, bounded title from a prompt: the first non-empty
+// line, with internal runs of whitespace collapsed to single spaces, trimmed,
+// and truncated to maxTitle runes on a word boundary with an ellipsis when cut.
+// A whitespace-only prompt yields "" (the caller treats that as "no title").
 func snippet(s string) string {
-	s = strings.TrimSpace(s)
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = strings.TrimSpace(s[:i])
+	// First non-empty line: strings.Fields on the whole string would flatten a
+	// multi-line prompt into its first line's worth plus the rest, so scan for
+	// the first line with visible content first, then collapse within it.
+	line := ""
+	for _, l := range strings.Split(s, "\n") {
+		if strings.TrimSpace(l) != "" {
+			line = l
+			break
+		}
 	}
-	const maxTitle = 80
-	if r := []rune(s); len(r) > maxTitle {
-		return strings.TrimSpace(string(r[:maxTitle]))
+	// strings.Fields splits on any whitespace and drops empty fields, so the
+	// join collapses internal whitespace to single spaces and trims the ends.
+	line = strings.Join(strings.Fields(line), " ")
+	if line == "" {
+		return ""
 	}
-	return s
+
+	const maxTitle = 60
+	r := []rune(line)
+	if len(r) <= maxTitle {
+		return line
+	}
+	// Over budget: keep the first maxTitle runes, then avoid severing a word.
+	// If the first dropped rune is a space, the cut already lands on a word
+	// boundary; otherwise back off to the last space within the cut (or keep the
+	// hard cut when the head is a single unbroken word). Fields collapsed
+	// whitespace to single ASCII spaces, so IndexByte over the head is safe.
+	head := string(r[:maxTitle])
+	if r[maxTitle] != ' ' {
+		if i := strings.LastIndexByte(head, ' '); i > 0 {
+			head = head[:i]
+		}
+	}
+	return strings.TrimRight(head, " ") + "…"
 }

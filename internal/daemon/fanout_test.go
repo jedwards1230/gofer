@@ -78,7 +78,7 @@ func assertNoMoreUpdates(t *testing.T, c *wsClient) {
 			if !ok {
 				return
 			}
-			if n.Method == "gofer/event" {
+			if n.Method == "gofer/event" || isSessionInfoUpdate(n) {
 				continue
 			}
 			t.Errorf("unexpected extra notification: method=%q params=%s", n.Method, n.Params)
@@ -373,6 +373,10 @@ func TestPromptFanOutGoferEventFullFidelity(t *testing.T) {
 	}()
 
 	wantKinds := []string{
+		// session.info leads the stream: the supervisor derives the session's
+		// title from its first prompt and emits it at enqueue, before the turn's
+		// own events (see supervisor/managed.go's enqueue).
+		"session.info",
 		"turn.started",
 		"message.started", "message.finished",
 		"tool.call.started", "tool.call.delta", "tool.call.delta", "tool.call.finished",
