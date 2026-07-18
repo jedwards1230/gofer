@@ -249,8 +249,14 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		ListenAddr:   *listen,
 		BearerToken:  bearerToken,
 		DefaultModel: modelID,
-		Version:      version,
-		Logger:       logger,
+		// effectiveVersion(), NOT the raw ldflags `version`: this value is what
+		// gofer/hello reports as binaryVersion, and every worker stamps its own
+		// with effectiveVersion() (see runSessionWorker). Stamping the raw
+		// sentinel here would report "dev" for any local build while its own
+		// workers report "dev-<sha>", making every locally-built worker look
+		// version-skewed to the router that spawned it (M6 §6).
+		Version: effectiveVersion(),
+		Logger:  logger,
 		// Under --workers, an adopted session's still-open permission is
 		// re-surfaced into the router by its standing watcher (recordPendingPerm);
 		// replaying it on session/load lets a client that attaches AFTER the
@@ -314,7 +320,11 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		Token:     bearerToken,
 		PID:       ourPID,
 		StartedAt: time.Now(),
-		Version:   version,
+		// Same normalization as daemon.Config.Version above: the endpoint file is
+		// the cheap pre-dial version hint, so it must advertise the SAME string
+		// the in-protocol handshake reports, or the hint and the handshake would
+		// disagree on every local build.
+		Version: effectiveVersion(),
 	}); err != nil {
 		return fmt.Errorf("write daemon endpoint: %w", err)
 	}

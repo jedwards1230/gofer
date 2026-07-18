@@ -171,8 +171,12 @@ func dialDaemon(ctx context.Context, f *daemonFlags, root string, stderr io.Writ
 	// build version (f.epVersion, set by resolve ONLY when addr came from the
 	// endpoint file) and it differs from ours, warn loudly. This is warn-only —
 	// we never refuse the connection or restart the daemon on skew.
-	if f.epVersion != "" && f.epVersion != version {
-		warnVersionSkew(stderr, version, f.epVersion)
+	// Compare effectiveVersion() against effectiveVersion(): the daemon stamps
+	// its endpoint file with the SAME derived identifier (see runDaemon), so
+	// comparing against the raw ldflags sentinel would report skew ("dev" vs
+	// "dev-<sha>") on every local build.
+	if cliVersion := effectiveVersion(); f.epVersion != "" && f.epVersion != cliVersion {
+		warnVersionSkew(stderr, cliVersion, f.epVersion)
 	}
 	return c, nil
 }
