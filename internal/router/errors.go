@@ -10,6 +10,18 @@ import "errors"
 // application error, so the concrete type need not match.
 var ErrNotLive = errors.New("router: session not live")
 
+// ErrAtCapacity is the typed error [Supervisor.Create] returns when the router
+// already hosts its [Config.MaxWorkers] limit of live workers (counting in-flight
+// spawns): the request is REFUSED before anything is forked, dialed, or written
+// to disk, so a capacity refusal leaves no artifact and no half-started process.
+// The wrapping error carries the observed count and the configured cap.
+//
+// The daemon's session/new handler wraps any Create error with its application
+// error code (see internal/daemon's handleSessionNew → appError), so a client
+// sees a clean JSON-RPC application error it can surface and retry after a
+// session ends — not a transport failure or a dropped connection.
+var ErrAtCapacity = errors.New("router: worker capacity reached")
+
 // ErrResumeUnsupported is the typed error [Supervisor.Resume] returns: spawning a
 // fresh worker for an offline (or old-binary) session is Phase 4 of M6, not this
 // slice. The daemon's session/load handler surfaces it as a clean application

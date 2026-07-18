@@ -31,6 +31,25 @@
 // STOPS signalling workers (it only stops the reapers), so detached workers
 // reparent to pid 1 and keep pumping their turns.
 //
+// # Spawn admission and discovery
+//
+// Because every session is a whole OS process (~10–20 MB RSS baseline plus its
+// loop's working set — design §10), [Supervisor.Create] runs an admission gate
+// BEFORE it forks anything: [Config.MaxWorkers] optionally caps how many workers
+// this router hosts, and a Create over that cap is refused with the typed
+// [ErrAtCapacity] — which the daemon's session/new handler surfaces to the
+// client as an ordinary JSON-RPC application error — having forked nothing,
+// dialed nothing, and written nothing to disk. The cap counts live handles
+// (spawned and adopted) plus in-flight spawns, so concurrent session/new calls
+// cannot overshoot it; ending a session (Kill/Archive/crash) frees the slot.
+// [DefaultMaxWorkers] — the zero value — is unlimited, so an unconfigured router
+// admits every Create exactly as before.
+//
+// Past admission, the router discovers the new worker by reading its endpoint
+// file on a tight-then-backoff cadence (see waitForWorkerEndpoint), which trades
+// a few extra stat() calls for most of the fork/exec discovery latency M6 §10
+// calls out as a per-session cost.
+//
 // # Startup adoption: re-attaching to a prior router's live workers
 //
 // [New] runs [Supervisor.adoptExistingWorkers] (see adopt.go) before the router

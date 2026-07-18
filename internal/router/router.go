@@ -71,7 +71,34 @@ type Config struct {
 	// uuid so the faux worker can key its socket/endpoint/lock and pin its
 	// session id to the same value the router expects (design Option A).
 	NewWorkerCmd func(ctx context.Context, sessionID, model, cwd string) *exec.Cmd
+
+	// MaxWorkers, when > 0, caps how many LIVE workers this router hosts: once
+	// that many sessions are live (or being spawned), [Supervisor.Create] is
+	// refused with [ErrAtCapacity] BEFORE it forks anything, instead of adding
+	// another process. [DefaultMaxWorkers] — the zero value — means unlimited,
+	// the historical behavior, byte-for-byte unchanged. A negative value is
+	// normalized to the default by [New].
+	//
+	// The knob exists because a worker is a whole OS process (~10–20 MB RSS
+	// baseline plus its loop's working set — design §10), so an unbounded
+	// session/new fan-out is a machine-resource risk in a way the in-process
+	// supervisor's goroutine-per-session never was. It mirrors
+	// [daemon.Config.MaxSessions] one tier up. Operators set it with
+	// `gofer daemon --workers --max-workers N`; embedders set this field
+	// directly. Both default to uncapped.
+	//
+	// The cap gates SPAWNS only. Startup adoption
+	// ([Supervisor.adoptExistingWorkers]) re-attaches to workers that are ALREADY
+	// running detached, where refusing would orphan a live session without
+	// freeing anything — so a router can start over its cap and simply admits no
+	// new Create until sessions end.
+	MaxWorkers int
 }
+
+// DefaultMaxWorkers is [Config.MaxWorkers]' default: unlimited. Zero is the
+// "no cap" sentinel as well as the zero value, so a Config that never mentions
+// MaxWorkers admits every Create — see [Supervisor.admit].
+const DefaultMaxWorkers = 0
 
 // workerHandle is one live session's worker: its OS process, the client
 // connection to it, and the reconstruction core rebuilding its event stream.
@@ -129,9 +156,22 @@ type Supervisor struct {
 	// newWorkerCmd is Config.NewWorkerCmd; nil uses buildWorkerCmd's default.
 	newWorkerCmd func(ctx context.Context, sessionID, model, cwd string) *exec.Cmd
 
+	// maxWorkers is Config.MaxWorkers, normalized ([DefaultMaxWorkers] = no cap).
+	maxWorkers int
+
 	mu      sync.Mutex
 	workers map[string]*workerHandle
 	closed  bool
+
+	// pending counts admitted-but-not-yet-registered spawns, so the MaxWorkers
+	// cap covers workers that are mid-fork/handshake and not yet in workers.
+	// Without it the cap would be a plain TOCTOU check — and unlike the daemon's
+	// MaxSessions (driven by ONE router, serially — see handleSessionNew), a
+	// router fields session/new concurrently from many clients, so overshoot
+	// would be routine rather than theoretical. Every admitted Create releases
+	// its reservation exactly once: registration converts it into a live handle
+	// under this same lock, and every failure path drops it. Guarded by mu.
+	pending int
 
 	// permRelay bridges an adopted session's reconstructed permission stream back
 	// into the OUTER daemon's fan-out (route + broadcast), set once via
@@ -195,6 +235,13 @@ func New(cfg Config) (*Supervisor, error) {
 		logger = slog.New(slog.DiscardHandler)
 	}
 
+	maxWorkers := cfg.MaxWorkers
+	if maxWorkers < 0 {
+		// A negative cap is meaningless (it would refuse every Create); treat it
+		// as unset rather than bricking the router.
+		maxWorkers = DefaultMaxWorkers
+	}
+
 	s := &Supervisor{
 		root:         root,
 		model:        cfg.Model,
@@ -202,6 +249,7 @@ func New(cfg Config) (*Supervisor, error) {
 		log:          logger,
 		store:        store,
 		newWorkerCmd: cfg.NewWorkerCmd,
+		maxWorkers:   maxWorkers,
 		workers:      make(map[string]*workerHandle),
 		reaperStop:   make(chan struct{}),
 	}
@@ -232,9 +280,20 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts supervisor.
 	if err := ctx.Err(); err != nil {
 		return supervisor.SessionInfo{}, err
 	}
-	if s.isClosed() {
-		return supervisor.SessionInfo{}, fmt.Errorf("router: create: %w", ErrNotLive)
+	// Admission control: refuse a closed router, and enforce the optional
+	// MaxWorkers cap BEFORE anything is forked, dialed, or written to disk — a
+	// refused Create must leave no artifact behind. Admission reserves a slot;
+	// releaseSlot below returns it on every failure path, and registration
+	// consumes it.
+	if err := s.admit(); err != nil {
+		return supervisor.SessionInfo{}, err
 	}
+	reserved := true
+	defer func() {
+		if reserved {
+			s.releaseSlot()
+		}
+	}()
 
 	model := opts.Model
 	if model == "" {
@@ -342,6 +401,11 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts supervisor.
 		return supervisor.SessionInfo{}, fmt.Errorf("router: create: %w", ErrNotLive)
 	}
 	s.workers[sessionID] = h
+	// The reservation becomes a live handle under the SAME lock it was taken
+	// under, so a concurrent admit never sees the slot double-counted (pending +
+	// workers) nor momentarily free.
+	s.pending--
+	reserved = false
 	s.reapWG.Add(1)
 	s.mu.Unlock()
 	go s.reap(h)
@@ -389,9 +453,68 @@ func (s *Supervisor) buildWorkerCmd(ctx context.Context, sessionID, model, cwd s
 	return cmd
 }
 
-// endpointPollInterval bounds how often waitForWorkerEndpoint re-reads the
-// worker's endpoint file while the worker is starting.
-const endpointPollInterval = 15 * time.Millisecond
+// Poll cadence for [waitForWorkerEndpoint]'s endpoint-file discovery: a TIGHT
+// first interval that backs off geometrically to a ceiling.
+//
+// Why polling and not an fsnotify watch on the workers dir: the wait is bounded
+// (tens of ms — fork/exec + Go runtime init + listener bind, design §10) and
+// happens once per session/new, so the win over a sub-millisecond-accurate watch
+// is a fraction of a millisecond, while a watch costs a third-party dependency
+// in a lean module, a per-spawn inotify/kqueue watch descriptor, a
+// watch-before-spawn ordering constraint (register the watcher BEFORE fork or
+// miss the create event), AND a poll fallback anyway for the platforms and
+// filesystems where the watcher fails to arm — i.e. this exact loop, kept as
+// untested-in-practice backup code. Tight-then-backoff polling gets nearly all
+// of the latency win at zero dependency and one code path.
+//
+// The first interval dominates the common case (the worker usually advertises
+// within the first few reads); the ceiling keeps a slow-starting worker from
+// spinning a stat() storm for the rest of the 30s spawn budget.
+const (
+	// endpointPollInitial is the first sleep between endpoint-file reads.
+	endpointPollInitial = 1 * time.Millisecond
+	// endpointPollMax caps the backed-off interval. It is deliberately the
+	// PREVIOUS fixed cadence (15ms), not something larger: the ceiling bounds
+	// worst-case discovery lag for a SLOW-starting worker, so raising it would
+	// trade a tail-latency regression for a stat() saving that is already
+	// negligible (a 15ms floor is ~2k stats across the whole 30s spawn budget).
+	// At 15ms this change is never slower than the cadence it replaces — only
+	// faster, by up to an order of magnitude, in the common fast-start case.
+	endpointPollMax = 15 * time.Millisecond
+	// endpointPollFactor is the per-iteration geometric backoff multiplier.
+	endpointPollFactor = 2
+)
+
+// endpointPoll is [waitForWorkerEndpoint]'s read cadence, extracted from the
+// loop so the schedule it produces is assertable on its own — a test can pin
+// "1ms, 2ms, 4ms, 8ms, 15ms, 15ms…" exactly, instead of timing the loop against
+// a wall clock and measuring the Go scheduler.
+type endpointPoll struct {
+	// initial is the first sleep between reads; max caps the backed-off
+	// interval; factor is the per-iteration geometric multiplier.
+	initial time.Duration
+	max     time.Duration
+	factor  int
+
+	// onRead, when non-nil, is called after each endpoint read attempt with the
+	// 1-based read count. Production leaves it nil: it is the seam a test uses
+	// to drive discovery by READS (publish the endpoint on read 3, assert it is
+	// returned on read 4) rather than by elapsed milliseconds.
+	onRead func(reads int)
+}
+
+// defaultEndpointPoll is the production cadence: tight first interval, geometric
+// backoff, ceiling at the previous fixed tick.
+var defaultEndpointPoll = endpointPoll{
+	initial: endpointPollInitial,
+	max:     endpointPollMax,
+	factor:  endpointPollFactor,
+}
+
+// next returns the interval that follows d, saturating at the ceiling.
+func (p endpointPoll) next(d time.Duration) time.Duration {
+	return min(d*time.Duration(p.factor), p.max)
+}
 
 // waitForWorkerEndpoint polls for sessionID's endpoint file — written
 // atomically by the worker just before it serves ([daemon.WriteWorkerEndpoint])
@@ -403,17 +526,42 @@ const endpointPollInterval = 15 * time.Millisecond
 //
 // The returned bool reports whether the worker already exited: in that case its
 // wait result was CONSUMED here, so the caller must not drain waitCh again.
+//
+// The first read happens before any sleep, so an endpoint already on disk
+// returns immediately; subsequent reads back off from [endpointPollInitial] to
+// [endpointPollMax].
 func waitForWorkerEndpoint(ctx context.Context, sessionID string, wait <-chan error) (daemon.WorkerEndpoint, bool, error) {
-	ticker := time.NewTicker(endpointPollInterval)
-	defer ticker.Stop()
+	return pollWorkerEndpoint(ctx, sessionID, wait, defaultEndpointPoll)
+}
+
+// pollWorkerEndpoint is [waitForWorkerEndpoint] with an injectable cadence.
+func pollWorkerEndpoint(ctx context.Context, sessionID string, wait <-chan error, poll endpointPoll) (daemon.WorkerEndpoint, bool, error) {
+	delay := poll.initial
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	reads := 0
 	for {
 		ep, err := daemon.ReadWorkerEndpoint(sessionID)
+		reads++
+		if poll.onRead != nil {
+			poll.onRead(reads)
+		}
 		if err == nil {
 			return ep, false, nil
 		}
 		if !errors.Is(err, os.ErrNotExist) {
 			// A genuine read/parse error, not just "not written yet".
 			return daemon.WorkerEndpoint{}, false, fmt.Errorf("read worker endpoint: %w", err)
+		}
+		// Expiry is checked HERE rather than left to the select below because
+		// select picks uniformly at random among ready cases: with a 1ms first
+		// interval both timer.C and ctx.Done() are routinely ready together, so
+		// without this an expired ctx could be skipped for another iteration.
+		// It sits AFTER the read, not at the top of the body, to preserve the
+		// fast path — an endpoint already on disk is returned by the first read
+		// even under an already-cancelled ctx.
+		if err := ctx.Err(); err != nil {
+			return daemon.WorkerEndpoint{}, false, err
 		}
 		select {
 		case werr := <-wait:
@@ -423,7 +571,10 @@ func waitForWorkerEndpoint(ctx context.Context, sessionID string, wait <-chan er
 			return daemon.WorkerEndpoint{}, true, errors.New("worker exited before advertising its endpoint")
 		case <-ctx.Done():
 			return daemon.WorkerEndpoint{}, false, ctx.Err()
-		case <-ticker.C:
+		case <-timer.C:
+			// Drained by the receive, so Reset is safe here.
+			delay = poll.next(delay)
+			timer.Reset(delay)
 		}
 	}
 }
@@ -544,11 +695,36 @@ func (s *Supervisor) snapshotHandles() []*workerHandle {
 	return out
 }
 
-// isClosed reports whether the supervisor has been closed.
-func (s *Supervisor) isClosed() bool {
+// admit is [Supervisor.Create]'s spawn-admission gate, run before any process is
+// forked: it refuses a closed router ([ErrNotLive]) and enforces the optional
+// MaxWorkers cap ([ErrAtCapacity]), and on success RESERVES a worker slot that
+// the caller must either register (converting it into a live handle) or return
+// via [Supervisor.releaseSlot]. Occupancy counts live handles — spawned AND
+// adopted — plus in-flight spawns, so the cap bounds worker PROCESSES, which is
+// the resource it exists to protect.
+func (s *Supervisor) admit() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.closed
+	if s.closed {
+		return fmt.Errorf("router: create: %w", ErrNotLive)
+	}
+	// > 0 rather than != DefaultMaxWorkers: locally correct for ANY maxWorkers
+	// value, so a future second constructor that forgets New's normalization
+	// cannot turn a nonsensical negative cap into a router that refuses
+	// everything.
+	if live := len(s.workers) + s.pending; s.maxWorkers > 0 && live >= s.maxWorkers {
+		return fmt.Errorf("router: create: %w (%d live, max %d)", ErrAtCapacity, live, s.maxWorkers)
+	}
+	s.pending++
+	return nil
+}
+
+// releaseSlot returns an admitted-but-unregistered worker slot, freeing capacity
+// for the next Create. Called exactly once per failed [Supervisor.Create].
+func (s *Supervisor) releaseSlot() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pending--
 }
 
 // terminate kills a spawned worker whose registration failed before a reaper

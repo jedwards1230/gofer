@@ -69,6 +69,16 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	// experimental slice: it is an operator-level launch mode, not a persisted
 	// session default; it graduates to config once the feature is past Phase 1.
 	workers := fs.Bool("workers", false, "run each session in its own worker process (M6 process isolation; experimental)")
+	// --max-workers bounds the process fan-out --workers introduces: each worker
+	// is a whole OS process (~10-20 MB RSS baseline plus its loop's working set
+	// — M6 §10), so an unbounded session/new fan-out is a machine-resource risk
+	// the in-process supervisor never had. At the cap, session/new is refused
+	// with router.ErrAtCapacity before anything is forked. A flag rather than a
+	// config.json field for the same reason as --workers above: it is an
+	// operator-level launch mode sized to the host, not a persisted session
+	// default. Ignored without --workers (the in-process supervisor forks
+	// nothing).
+	maxWorkers := fs.Int("max-workers", router.DefaultMaxWorkers, "under --workers, cap live worker processes (0 = unlimited)")
 	// Same explicit-fallback pattern as token/GOFER_TOKEN above: the flag's own
 	// default is "", not os.Getenv("GOFER_LOG_LEVEL"), purely for symmetry
 	// (there's no leak risk here, but one env-fallback convention in this
@@ -188,10 +198,11 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 			return fmt.Errorf("build router: resolve gofer executable: %w", exeErr)
 		}
 		rsup, rerr := router.New(router.Config{
-			Root:    rootDir,
-			Model:   modelID,
-			SelfExe: selfExe,
-			Logger:  logger,
+			Root:       rootDir,
+			Model:      modelID,
+			SelfExe:    selfExe,
+			Logger:     logger,
+			MaxWorkers: *maxWorkers,
 		})
 		if rerr != nil {
 			return fmt.Errorf("build router: %w", rerr)
@@ -202,7 +213,7 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		// here. tel is still built above and flushed on exit (a no-op with no
 		// spans), keeping the shared startup path uniform.
 		sup, closeSup = rsup, rsup.Close
-		logger.Info("session process isolation enabled (M6 workers)")
+		logger.Info("session process isolation enabled (M6 workers)", "max_workers", *maxWorkers)
 	} else {
 		isup, serr := supervisor.New(supervisor.Config{
 			Root:        rootDir,

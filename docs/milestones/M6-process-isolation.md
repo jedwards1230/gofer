@@ -125,7 +125,7 @@ The gate stays with the turn — **in the worker.** The round trip:
 
 ## 10. Costs & risks (stated honestly)
 
-- **Memory: N processes, not N goroutines.** Each worker is a full Go runtime (~10–20 MB RSS baseline) + the loop's working set, vs a goroutine's KB. 20 sessions ≈ 20 processes. Acceptable for the target ("an operator running N agents" — tens, not thousands); the isolation is the product.
+- **Memory: N processes, not N goroutines.** Each worker is a full Go runtime (~10–20 MB RSS baseline) + the loop's working set, vs a goroutine's KB. 20 sessions ≈ 20 processes. Acceptable for the target ("an operator running N agents" — tens, not thousands); the isolation is the product. Mitigated by `router.Config.MaxWorkers` (`gofer daemon --workers --max-workers N`, uncapped by default), which refuses `session/new` with `ErrAtCapacity` before forking once N workers are live.
 - **Startup latency per session.** fork/exec + runtime init + `runner.New` + journal open (tens of ms) vs a goroutine (µs). Fine for human-initiated `session/new`; would matter only for rapid programmatic fan-out.
 - **Per-event IPC tax.** The second hop doubles the per-event encode/socket cost already paid at the client hop. µs-scale, sub-perceptual for interactive use.
 - **Compat-surface maintenance.** A supported internal wire with a version window. Mitigated because it is the *same* surface as the public client wire (already maintained), and the in-flight-only compat simplification (§6) shrinks the forward-support obligation to the additive event subset.
