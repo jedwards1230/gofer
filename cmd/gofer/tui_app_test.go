@@ -63,7 +63,7 @@ func TestRunTUI_ConstructionOnly(t *testing.T) {
 
 	app := tui.NewApp(theme.Default(), tuibridge.New(sup), tui.OverviewMeta{
 		App:     "gofer",
-		Version: version,
+		Version: effectiveVersion(),
 		Model:   resolveOverviewModel(context.Background(), root),
 		Cwd:     "/tmp/example",
 	}, buildCommandEnv(root, "/tmp/example"))
