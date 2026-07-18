@@ -14,6 +14,7 @@ func TestContainableTool(t *testing.T) {
 		{"ls", true},
 		{"glob", true},
 		{"grep", true},
+		{"update_plan", true},
 		{"unknown_tool", false},
 		{"", false},
 	}

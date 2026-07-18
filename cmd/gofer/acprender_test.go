@@ -45,6 +45,54 @@ func TestACPRenderUsageUpdate(t *testing.T) {
 	}
 }
 
+// TestACPRenderPlan covers the plan session/update variant the SDK v0.9.0
+// update_plan builtin emits (and gofer forwards) — the client-side counterpart
+// to the daemon-wire proof in internal/daemon/plan_passthrough_test.go. It
+// asserts the renderer shows a compact step summary (not the full checklist).
+func TestACPRenderPlan(t *testing.T) {
+	tests := []struct {
+		name    string
+		update  string
+		want    []string
+		notWant []string
+	}{
+		{
+			name:   "plan renders a step count with completed tally",
+			update: `{"sessionUpdate":"plan","entries":[{"content":"Explore","priority":"high","status":"completed"},{"content":"Write test","priority":"medium","status":"in_progress"},{"content":"Run gates","priority":"low","status":"pending"}]}`,
+			want:   []string{"plan", "3 steps (1 done)"},
+			// The entry content is never surfaced in the one-line marker.
+			notWant: []string{"Explore", "Write test", "Run gates"},
+		},
+		{
+			name:    "empty plan renders as cleared",
+			update:  `{"sessionUpdate":"plan","entries":[]}`,
+			want:    []string{"plan", "cleared"},
+			notWant: []string{"steps"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf strings.Builder
+			r := newACPRenderer(&buf, false)
+			params, _ := json.Marshal(map[string]json.RawMessage{"update": json.RawMessage(tt.update)})
+			if err := r.render(params); err != nil {
+				t.Fatalf("render: %v", err)
+			}
+			got := buf.String()
+			for _, w := range tt.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("render output %q missing %q", got, w)
+				}
+			}
+			for _, w := range tt.notWant {
+				if strings.Contains(got, w) {
+					t.Errorf("render output %q unexpectedly contains %q", got, w)
+				}
+			}
+		})
+	}
+}
+
 // TestACPRenderToolCallUpdateDiff covers the tool_call_update variant carrying
 // "diff" content blocks (the SDK v0.7.0 edit/write tools now produce them): the
 // renderer appends a compact "edited <paths>" summary and never leaks the
