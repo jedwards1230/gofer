@@ -197,6 +197,27 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		BearerToken:  bearerToken,
 		DefaultModel: modelID,
 		Logger:       logger,
+		// Let gofer/models report per-model availability to remote clients: a
+		// phone ACP client can't see the daemon host's auth state, so the daemon
+		// resolves the logged-in providers here (the same store `gofer auth`
+		// reads) and stamps each model's Available flag. Non-fatal by contract —
+		// a store/Status error degrades to "none authenticated" (see
+		// daemon.Config.AuthedProviders), never a failed model discovery.
+		AuthedProviders: func() (map[string]bool, error) {
+			store, err := newAuthStore(rootDir)
+			if err != nil {
+				return nil, err
+			}
+			entries, err := store.Status()
+			if err != nil {
+				return nil, err
+			}
+			authed := make(map[string]bool, len(entries))
+			for _, e := range entries {
+				authed[e.Provider] = true
+			}
+			return authed, nil
+		},
 	})
 
 	// Install the interrupt handler around the whole serve loop: the daemon
