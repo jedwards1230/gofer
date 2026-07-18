@@ -24,7 +24,7 @@ const (
 // client role — see internal/daemon/prompt_test.go's sessionUpdateParams,
 // which takes the same approach for the same reason), so this decodes the
 // small, closed set of variants the daemon emits: agent_message_chunk,
-// agent_thought_chunk, tool_call, tool_call_update, and usage_update (see
+// agent_thought_chunk, tool_call, tool_call_update, plan, and usage_update (see
 // [acp.ToSessionUpdate]'s doc for the exhaustive list). Any variant this
 // renderer doesn't case on still renders as a bare marker line.
 type acpUpdateWire struct {
@@ -68,6 +68,31 @@ func (t acpToolCallWire) diffPaths() []string {
 		}
 	}
 	return paths
+}
+
+// acpPlanUpdateWire decodes the plan shape:
+// {"sessionUpdate":"plan","entries":[{"content":...,"status":...},...]}. Only
+// status is read — the renderer shows a compact "N steps (M done)" summary, not
+// the full checklist (which can be long and re-arrives in full on every update).
+type acpPlanUpdateWire struct {
+	Entries []struct {
+		Status string `json:"status"`
+	} `json:"entries"`
+}
+
+// summary returns the plan's compact marker detail: "cleared" for an empty
+// plan, else "N steps (M done)" counting completed entries.
+func (p acpPlanUpdateWire) summary() string {
+	if len(p.Entries) == 0 {
+		return "cleared"
+	}
+	done := 0
+	for _, e := range p.Entries {
+		if e.Status == "completed" {
+			done++
+		}
+	}
+	return fmt.Sprintf("%d steps (%d done)", len(p.Entries), done)
 }
 
 // acpUsageUpdateWire decodes the usage_update shape:
@@ -136,6 +161,10 @@ func (r *acpRenderer) render(params json.RawMessage) error {
 			detail = fmt.Sprintf("%s  edited %s", detail, strings.Join(paths, ", "))
 		}
 		r.marker("tool_call_update", detail)
+	case "plan":
+		var p acpPlanUpdateWire
+		_ = json.Unmarshal(n.Update, &p)
+		r.marker("plan", p.summary())
 	case "usage_update":
 		var u acpUsageUpdateWire
 		_ = json.Unmarshal(n.Update, &u)

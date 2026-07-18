@@ -437,6 +437,8 @@ func (s *Supervisor) handleGoferEvent(raw json.RawMessage) {
 		ev = event.NewSessionArchived(w.SessionID)
 	case event.KindSessionError:
 		ev = event.NewSessionError(w.SessionID, w.Err, w.Fatal)
+	case event.KindSessionInfo:
+		ev = event.NewSessionInfoUpdated(w.SessionID, w.Title)
 	case event.KindTurnStarted:
 		rec.turnTerminated = false
 		ev = event.NewTurnStarted(w.SessionID)
@@ -481,6 +483,9 @@ type goferEventWire struct {
 	// session.error
 	Err   string `json:"error"`
 	Fatal bool   `json:"fatal"`
+
+	// session.info
+	Title string `json:"title"`
 
 	// turn.finished
 	StopReason string         `json:"stop_reason"`
