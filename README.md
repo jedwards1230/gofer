@@ -110,8 +110,9 @@ stream, so scripts and CI never hit the TUI.
 | **M2 · the daemon** ✅ | supervisor, roster, overview⇄peek⇄attach TUI, native ACP over WebSocket, bearer auth |
 | **M3 · guardrails** ✅ | permission engine + approvals UX, sandboxed exec, headless mode |
 | **M4 · command views** ✅ | slash dispatcher, `/status`/`/config`/`/model` panels, autocomplete, TUI redesign |
-| M5 · ecosystem | MCP servers, SKILL.md skills, out-of-process plugins, subagents first-class |
-| M6 · auto + polish | auto mode with reviewer pipeline, CC-asset import, multi-machine discovery |
+| **M5 · ACP v1 featureset expansion** ⏳ next | cross-repo ACP conformance push — `usage_update` on `session/update` (shipped), rich content/tool-call blocks, session methods, model discovery + `set_model`, capability stretch (titles, plan, commands/mode) |
+| M6 · ecosystem | MCP servers, SKILL.md skills, out-of-process plugins, subagents first-class |
+| M7 · auto + polish | auto mode with reviewer pipeline, CC-asset import, multi-machine discovery |
 
 ## License
 
