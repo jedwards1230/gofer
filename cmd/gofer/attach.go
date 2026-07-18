@@ -97,7 +97,7 @@ func runAttach(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 	_, _ = fmt.Fprintf(stderr, "gofer attach: connected to daemon at %s\n", df.addr)
 	app := tui.NewApp(theme.Default(), b, tui.OverviewMeta{
 		App:             "gofer",
-		Version:         version,
+		Version:         effectiveVersion(),
 		Cwd:             cwd,
 		Now:             time.Now(),
 		AttachSessionID: attachID,
