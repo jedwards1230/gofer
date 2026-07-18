@@ -1,10 +1,13 @@
 package router
 
 import (
+	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/jedwards1230/gofer/internal/daemon"
+	"github.com/jedwards1230/gofer/internal/supervisor"
 )
 
 // TestClassifySkew pins the M6 §6 version decision branch by branch. It is the
@@ -173,6 +176,110 @@ func TestClassifyWorkerUsesTheRoutersOwnVersions(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := sup.classifyWorker("session", tc.hello); got != tc.want {
 				t.Errorf("classifyWorker(%+v) = %v, want %v", tc.hello, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCreateRecordsWorkerVersionAndSurfacesItOnTheRoster drives the version
+// policy through REAL spawned worker processes, end to end: the router's own
+// Create path performs the gofer/hello handshake, records the worker's versions
+// on its handle, classifies them, and surfaces the owning binary on the roster —
+// the assertion the mixed-version upgrade demo makes through the EXISTING
+// gofer/roster RPC.
+//
+// All three rows must stay fully routable: only a WIRE mismatch refuses new
+// work, and a real worker always speaks the router's own wire version.
+func TestCreateRecordsWorkerVersionAndSurfacesItOnTheRoster(t *testing.T) {
+	const routerVersion = "router-under-test"
+	tests := []struct {
+		name          string
+		workerVersion string
+		wantSkew      skewClass
+	}{
+		{
+			name:          "same build is not skew",
+			workerVersion: routerVersion,
+			wantSkew:      skewNone,
+		},
+		{
+			name:          "older worker binary is recorded as binary skew",
+			workerVersion: "older-worker-build",
+			wantSkew:      skewBinary,
+		},
+		{
+			// A worker built before the version wiring reports nothing. It must
+			// still be routable — refusing would brick every pre-slice worker.
+			name:          "worker that reports no version is unknown, not refused",
+			workerVersion: "",
+			wantSkew:      skewUnknown,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			shortRuntimeDir(t)
+			root := t.TempDir()
+			sup, err := New(Config{
+				Root:         root,
+				Version:      routerVersion,
+				NewWorkerCmd: fauxWorkerSeamOpts(root, fauxWorkerOptions{Version: tc.workerVersion}),
+			})
+			if err != nil {
+				t.Fatalf("router.New: %v", err)
+			}
+			t.Cleanup(func() {
+				killWorkers(sup)
+				_ = sup.Close()
+			})
+
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			info, err := sup.Create(ctx, "", supervisor.CreateOptions{Cwd: t.TempDir()})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+
+			h, ok := sup.get(info.ID)
+			if !ok {
+				t.Fatalf("no live handle for created session %s", info.ID)
+			}
+			if h.binaryVersion != tc.workerVersion {
+				t.Errorf("handle binaryVersion = %q, want %q (from gofer/hello)", h.binaryVersion, tc.workerVersion)
+			}
+			if h.wireVersion != daemon.WireVersion {
+				t.Errorf("handle wireVersion = %d, want %d", h.wireVersion, daemon.WireVersion)
+			}
+			if h.skew != tc.wantSkew {
+				t.Errorf("handle skew = %v, want %v", h.skew, tc.wantSkew)
+			}
+			if info.BinaryVersion != tc.workerVersion {
+				t.Errorf("Create SessionInfo BinaryVersion = %q, want %q", info.BinaryVersion, tc.workerVersion)
+			}
+
+			// The roster carries the OWNING WORKER's binary version, stamped by
+			// the router from the handle — a `session/list` can therefore show
+			// mixed binary versions while an upgrade drains old workers.
+			rows, err := sup.Roster(ctx)
+			if err != nil {
+				t.Fatalf("Roster: %v", err)
+			}
+			var found bool
+			for _, r := range rows {
+				if r.ID != info.ID {
+					continue
+				}
+				found = true
+				if r.BinaryVersion != tc.workerVersion {
+					t.Errorf("roster row BinaryVersion = %q, want %q", r.BinaryVersion, tc.workerVersion)
+				}
+			}
+			if !found {
+				t.Fatalf("created session %s missing from the roster", info.ID)
+			}
+
+			// None of these classes refuses new work.
+			if err := sup.Send(ctx, info.ID, "a turn"); err != nil {
+				t.Errorf("Send on a %v worker: err = %v, want nil (only wire skew refuses)", tc.wantSkew, err)
 			}
 		})
 	}

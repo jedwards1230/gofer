@@ -15,6 +15,8 @@ import (
 	"github.com/coder/websocket/wsjson"
 	"github.com/google/uuid"
 
+	"github.com/jedwards1230/agent-sdk-go/event"
+
 	"github.com/jedwards1230/gofer/internal/daemon"
 	"github.com/jedwards1230/gofer/internal/supervisor"
 )
@@ -67,9 +69,14 @@ func deadPID(t *testing.T) int {
 }
 
 // TestAdoptStaleFailureMatrix covers the §4 adopt/stale decisions that need no
-// live worker: a dead pid and a live-pid-but-dead-socket both GC the endpoint;
-// a wire-version skew leaves it in place (the worker is presumed alive, just
-// unroutable by this slice).
+// live worker: a dead pid and a live-pid-but-dead-socket both GC the endpoint.
+//
+// The wire-skew row INVERTS the pre-Phase-3 expectation on purpose. The endpoint
+// file's version fields used to short-circuit the scan — a skewed hint meant
+// "leave it alone, do not even dial" — so a skewed endpoint over a dead socket
+// survived the scan. Under the Phase-3 policy no skew class refuses adoption, so
+// the hint is advisory only and the scan proceeds to the dial, which is refused,
+// which makes this exactly the stale-socket case: GC'd like any other.
 func TestAdoptStaleFailureMatrix(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -93,11 +100,13 @@ func TestAdoptStaleFailureMatrix(t *testing.T) {
 			wantExists: false,
 		},
 		{
-			name:       "version skew is left unadopted (not GC'd)",
+			// Inverted in Phase 3: the skewed HINT no longer short-circuits the
+			// dial, so a dead socket behind it is plain stale residue.
+			name:       "wire-skew hint over a dead socket is GC'd (the hint no longer gates the dial)",
 			pid:        func(t *testing.T) int { return os.Getpid() },
 			wire:       daemon.WireVersion + 1,
 			addr:       func(id string) string { return "unix:///nonexistent/" + id + ".sock" },
-			wantExists: true,
+			wantExists: false,
 		},
 	}
 	for _, tc := range tests {
@@ -205,10 +214,18 @@ func startFakeWorker(t *testing.T, id string, respond fakeHelloResponder) {
 			if err := wsjson.Read(r.Context(), c, &env); err != nil {
 				return
 			}
-			if env.Method == "gofer/hello" {
+			switch {
+			case env.Method == "gofer/hello":
 				if resp := respond(env.ID); resp != nil {
 					_ = wsjson.Write(r.Context(), c, resp)
 				}
+			case len(env.ID) > 0:
+				// Every OTHER request gets a prompt application error. A fake
+				// worker that simply ignored them would wedge an adopting router
+				// on its bounded session/load Call for the full wireCallTimeout;
+				// erroring keeps the "adopting live-only" path fast. Notifications
+				// (no id) are dropped, as a real peer would.
+				_ = wsjson.Write(r.Context(), c, jsonRPCError(env.ID, -32000, "fake worker: "+env.Method+" unimplemented"))
 			}
 		}
 	})}
@@ -228,58 +245,133 @@ func jsonRPCError(reqID json.RawMessage, code int, msg string) any {
 	return map[string]any{"jsonrpc": "2.0", "id": reqID, "error": map[string]any{"code": code, "message": msg}}
 }
 
-// TestAdoptPostDialFailureMatrix covers the §4 rows that need a LIVE, dialable
-// worker socket whose handshake misbehaves: gofer/hello returning an error
-// (unresponsive/degraded), and gofer/hello reporting a skewed wire version. Both
-// are LEFT unadopted and — unlike the stale/dead cases — their artifacts are NOT
-// GC'd: the pid is live and the worker holds a real session, so a future
-// skew-aware router (Phase 3) can still reach it.
-func TestAdoptPostDialFailureMatrix(t *testing.T) {
-	tests := []struct {
-		name    string
-		respond fakeHelloResponder
-	}{
-		{
-			name: "gofer/hello error leaves the worker unadopted",
-			respond: func(reqID json.RawMessage) any {
-				return jsonRPCError(reqID, -32000, "worker degraded")
-			},
-		},
-		{
-			name: "post-dial wire-version skew leaves the worker unadopted",
-			respond: func(reqID json.RawMessage) any {
-				return jsonRPCResult(reqID, daemon.HelloResult{
-					BinaryVersion:      "future",
-					WireVersion:        daemon.WireVersion + 1,
-					ACPProtocolVersion: 1,
-				})
-			},
-		},
+// TestAdoptHelloFailureLeavesWorkerUnadopted covers the §4 row that needs a
+// LIVE, dialable worker socket whose handshake FAILS: the router learned nothing
+// about the worker at all (which is not the same as learning it is old), so it
+// does not route to it — and, unlike the stale/dead cases, does NOT GC its
+// artifacts: the pid is live and the worker holds a real session.
+//
+// This is the ONLY post-dial row that still refuses adoption. Its former
+// companion — a handshake reporting a skewed wire version — now adopts; see
+// TestAdoptWireSkewedWorkerRefusesNewWork.
+func TestAdoptHelloFailureLeavesWorkerUnadopted(t *testing.T) {
+	shortRuntimeDir(t)
+	root := t.TempDir()
+	id := uuid.Must(uuid.NewV7()).String()
+	startFakeWorker(t, id, func(reqID json.RawMessage) any {
+		return jsonRPCError(reqID, -32000, "worker degraded")
+	})
+
+	sup, err := New(Config{Root: root, NewWorkerCmd: fauxWorkerSeam(root)})
+	if err != nil {
+		t.Fatalf("router.New: %v", err)
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			shortRuntimeDir(t)
-			root := t.TempDir()
-			id := uuid.Must(uuid.NewV7()).String()
-			startFakeWorker(t, id, tc.respond)
+	t.Cleanup(func() { _ = sup.Close() })
 
-			sup, err := New(Config{Root: root, NewWorkerCmd: fauxWorkerSeam(root)})
-			if err != nil {
-				t.Fatalf("router.New: %v", err)
-			}
-			t.Cleanup(func() {
-				killWorkers(sup)
-				_ = sup.Close()
-			})
+	if _, ok := sup.get(id); ok {
+		t.Errorf("session %s adopted despite a failing handshake", id)
+	}
+	// LEAVE, do NOT GC: the live worker keeps its endpoint for a future router.
+	if !endpointExists(t, id) {
+		t.Errorf("endpoint for %s was GC'd; a live-but-unadoptable worker must be left in place", id)
+	}
+}
 
-			if _, ok := sup.get(id); ok {
-				t.Errorf("session %s adopted despite a failing/skewed handshake", id)
-			}
-			// LEAVE, do NOT GC: the live worker keeps its endpoint for a future router.
-			if !endpointExists(t, id) {
-				t.Errorf("endpoint for %s was GC'd; a live-but-unadoptable worker must be left in place", id)
-			}
+// TestAdoptWireSkewedWorkerRefusesNewWork is the INVERSION this slice ships, and
+// the reason the old "post-dial wire skew leaves the worker unadopted" row is
+// gone: a wire-skewed worker is now ADOPTED — it holds a live session that must
+// stay observable, replyable, and finishable (design §6's compat window) — and
+// the router instead refuses to give it NEW work.
+//
+// So the assertion moves from "is it in the roster" to "what will the router ask
+// of it": adopted and classified skewWire, with Send and SetModel refused as a
+// typed ErrWorkerSkewed.
+func TestAdoptWireSkewedWorkerRefusesNewWork(t *testing.T) {
+	shortRuntimeDir(t)
+	root := t.TempDir()
+	id := uuid.Must(uuid.NewV7()).String()
+	startFakeWorker(t, id, func(reqID json.RawMessage) any {
+		return jsonRPCResult(reqID, daemon.HelloResult{
+			BinaryVersion:      "future",
+			WireVersion:        daemon.WireVersion + 1,
+			ACPProtocolVersion: 1,
 		})
+	})
+
+	sup, err := New(Config{Root: root, Version: "router-build", NewWorkerCmd: fauxWorkerSeam(root)})
+	if err != nil {
+		t.Fatalf("router.New: %v", err)
+	}
+	// NOT killWorkers: the fake worker advertises THIS process's pid, so the
+	// adopted handle's best-effort SIGKILL would take the test binary down.
+	t.Cleanup(func() { _ = sup.Close() })
+
+	h, ok := sup.get(id)
+	if !ok {
+		t.Fatalf("wire-skewed worker %s was not adopted; a skewed worker must stay observable and finishable", id)
+	}
+	if h.skew != skewWire {
+		t.Errorf("adopted handle skew = %v, want skewWire", h.skew)
+	}
+	if h.wireVersion != daemon.WireVersion+1 {
+		t.Errorf("adopted handle wireVersion = %d, want %d", h.wireVersion, daemon.WireVersion+1)
+	}
+	if h.binaryVersion != "future" {
+		t.Errorf("adopted handle binaryVersion = %q, want %q", h.binaryVersion, "future")
+	}
+	// Its endpoint is left in place — it is a live worker, not stale residue.
+	if !endpointExists(t, id) {
+		t.Errorf("endpoint for adopted worker %s was GC'd", id)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := sup.Send(ctx, id, "another turn"); !errors.Is(err, ErrWorkerSkewed) {
+		t.Errorf("Send to a wire-skewed worker: err = %v, want errors.Is ErrWorkerSkewed", err)
+	}
+	// A model change is NEW WORK, refused identically.
+	if err := sup.SetModel(ctx, id, "faux"); !errors.Is(err, ErrWorkerSkewed) {
+		t.Errorf("SetModel on a wire-skewed worker: err = %v, want errors.Is ErrWorkerSkewed", err)
+	}
+	// Permission replies are part of the observe/reply/finish subset the compat
+	// window guarantees, so they must NOT be refused: the fake worker takes the
+	// notification without complaint.
+	if err := sup.Reply(id, event.PermissionReply{ID: "call-1", Verdict: event.VerdictAllow}); err != nil {
+		t.Errorf("Reply on a wire-skewed worker: err = %v, want nil (replies stay routable)", err)
+	}
+}
+
+// TestAdoptBinarySkewedWorkerIsFullyRoutable is the other half of the policy
+// split: a worker whose BINARY differs but whose wire matches is adopted AND
+// keeps taking new work. Refusing here would strand every live session on every
+// daemon upgrade, because Resume cannot yet spawn a replacement worker (Phase 4).
+func TestAdoptBinarySkewedWorkerIsFullyRoutable(t *testing.T) {
+	shortRuntimeDir(t)
+	root := t.TempDir()
+	id := uuid.Must(uuid.NewV7()).String()
+	startFakeWorker(t, id, func(reqID json.RawMessage) any {
+		return jsonRPCResult(reqID, daemon.HelloResult{
+			BinaryVersion:      "older-build",
+			WireVersion:        daemon.WireVersion,
+			ACPProtocolVersion: 1,
+		})
+	})
+
+	sup, err := New(Config{Root: root, Version: "router-build", NewWorkerCmd: fauxWorkerSeam(root)})
+	if err != nil {
+		t.Fatalf("router.New: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Close() })
+
+	h, ok := sup.get(id)
+	if !ok {
+		t.Fatalf("binary-skewed worker %s was not adopted", id)
+	}
+	if h.skew != skewBinary {
+		t.Errorf("adopted handle skew = %v, want skewBinary", h.skew)
+	}
+	if err := h.refuseNewWork("send"); err != nil {
+		t.Errorf("binary skew refused new work (%v); it must stay fully routable — session pinning, not a hazard", err)
 	}
 }
 

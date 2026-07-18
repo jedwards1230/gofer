@@ -22,12 +22,25 @@ import (
 	"github.com/jedwards1230/gofer/internal/worker"
 )
 
+// Env keys the faux-worker re-exec seam passes to its child. They stand in for
+// the real `gofer session-worker` flags (--session/--root/--version): a re-exec
+// of the test binary cannot take flags without colliding with `go test`'s own.
+const (
+	envWorkerMode    = "GOFER_ROUTER_TEST_WORKER"
+	envWorkerRoot    = "GOFER_ROUTER_TEST_ROOT"
+	envWorkerSession = "GOFER_ROUTER_TEST_SESSION"
+	// envWorkerVersion stamps the build version the faux worker reports over
+	// gofer/hello and its endpoint file — the seam a version-skew test uses to
+	// make a worker look like it came from a different build.
+	envWorkerVersion = "GOFER_ROUTER_TEST_VERSION"
+)
+
 // TestMain re-execs the test binary as a faux-provider worker when
 // GOFER_ROUTER_TEST_WORKER is set, so the router's spawn seam can start REAL,
 // killable worker processes (an in-process goroutine could not be `kill -9`'d,
 // which crash isolation must prove). Any other invocation runs the tests.
 func TestMain(m *testing.M) {
-	if os.Getenv("GOFER_ROUTER_TEST_WORKER") == "1" {
+	if os.Getenv(envWorkerMode) == "1" {
 		runFauxWorker()
 		return
 	}
@@ -42,8 +55,8 @@ func TestMain(m *testing.M) {
 // supplied GOFER_ROUTER_TEST_SESSION uuid so the worker's socket/endpoint/lock
 // keying matches what the router expects (design Option A).
 func runFauxWorker() {
-	root := os.Getenv("GOFER_ROUTER_TEST_ROOT")
-	sessionID := os.Getenv("GOFER_ROUTER_TEST_SESSION")
+	root := os.Getenv(envWorkerRoot)
+	sessionID := os.Getenv(envWorkerSession)
 	if sessionID == "" {
 		os.Exit(2) // the router must pass --session (via env in this seam)
 	}
@@ -66,7 +79,10 @@ func runFauxWorker() {
 		Supervisor:   sup,
 		Session:      sessionID,
 		DefaultModel: "faux",
-		Stdout:       os.Stdout,
+		// Empty unless the seam stamped one; worker.Serve then reports an empty
+		// binaryVersion, exactly like a worker predating version reporting.
+		Version: os.Getenv(envWorkerVersion),
+		Stdout:  os.Stdout,
 	}); err != nil {
 		os.Exit(1)
 	}
@@ -84,16 +100,34 @@ func multiTurnScript() faux.Script {
 	return faux.Script{Turns: turns}
 }
 
+// fauxWorkerOptions shapes what a spawned faux worker reports about itself. It
+// is a struct rather than positional arguments so the seam stays general as
+// later slices need more knobs (the 3b mixed-version demo shares this helper).
+type fauxWorkerOptions struct {
+	// Version is the build version the worker reports over gofer/hello and its
+	// endpoint file. Empty leaves the worker unidentified, which is what a
+	// worker built before version reporting looks like.
+	Version string
+}
+
 // fauxWorkerSeam returns a Config.NewWorkerCmd that re-execs this test binary as
 // a faux worker rooted at root, forwarding the router-pinned session uuid so the
-// worker pins its session id and keys its runtime files to the same value.
+// worker pins its session id and keys its runtime files to the same value. The
+// worker reports no build version; use fauxWorkerSeamOpts to stamp one.
 func fauxWorkerSeam(root string) func(ctx context.Context, sessionID, model, cwd string) *exec.Cmd {
+	return fauxWorkerSeamOpts(root, fauxWorkerOptions{})
+}
+
+// fauxWorkerSeamOpts is fauxWorkerSeam with the worker's self-reported identity
+// under the test's control — the injection point for binary-version skew.
+func fauxWorkerSeamOpts(root string, opts fauxWorkerOptions) func(ctx context.Context, sessionID, model, cwd string) *exec.Cmd {
 	return func(ctx context.Context, sessionID, _, _ string) *exec.Cmd {
 		cmd := exec.CommandContext(ctx, os.Args[0])
 		cmd.Env = append(os.Environ(),
-			"GOFER_ROUTER_TEST_WORKER=1",
-			"GOFER_ROUTER_TEST_ROOT="+root,
-			"GOFER_ROUTER_TEST_SESSION="+sessionID,
+			envWorkerMode+"=1",
+			envWorkerRoot+"="+root,
+			envWorkerSession+"="+sessionID,
+			envWorkerVersion+"="+opts.Version,
 		)
 		// Stdio is left unset here — daemon.SpawnDetached redirects the worker's
 		// stdout+stderr (including the handshake line) to its per-worker log file.

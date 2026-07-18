@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -34,7 +35,7 @@ func countingSeam(inner func(ctx context.Context, sessionID, model, cwd string) 
 func exitingWorkerSeam() func(ctx context.Context, sessionID, model, cwd string) *exec.Cmd {
 	return func(ctx context.Context, _, _, _ string) *exec.Cmd {
 		cmd := exec.CommandContext(ctx, os.Args[0])
-		cmd.Env = append(os.Environ(), "GOFER_ROUTER_TEST_WORKER=1")
+		cmd.Env = append(os.Environ(), envWorkerMode+"=1")
 		return cmd
 	}
 }
@@ -341,4 +342,69 @@ func TestAdmitRefusesClosedRouter(t *testing.T) {
 	if _, err := sup.Create(ctx, "", supervisor.CreateOptions{}); !errors.Is(err, ErrNotLive) {
 		t.Fatalf("Create on a closed router: err = %v, want errors.Is ErrNotLive", err)
 	}
+}
+
+// TestCreateHelloFailureReleasesReservation guards the reservation invariant
+// around the gofer/hello handshake Create performs between admit() and handle
+// registration: EXACTLY ONE release per admit.
+//
+// The Hello call added a new early return in that window. If it released the
+// slot manually (on top of Create's central deferred release) the counter would
+// go negative and the router would over-admit past MaxWorkers forever; if it
+// released nothing the counter would leak upward and eventually refuse every
+// spawn with a spurious ErrAtCapacity. Both bugs pass build/vet/test/lint/race
+// and only surface after hours of uptime, so the counter is asserted directly.
+//
+// The failure is injected by planting a fake worker that answers gofer/hello
+// with an application error at the endpoint the router is about to poll for, so
+// Create gets past admission, spawn, discovery and dial, and fails at exactly
+// the handshake step.
+func TestCreateHelloFailureReleasesReservation(t *testing.T) {
+	shortRuntimeDir(t)
+	root := t.TempDir()
+
+	var spawns atomic.Int64
+	inner := exitingWorkerSeam()
+	// The seam runs INSIDE Create, after admission and with the router-pinned
+	// session uuid in hand — the only place a test can bind that uuid's socket
+	// before the endpoint poll reads it.
+	seam := func(ctx context.Context, sessionID, model, cwd string) *exec.Cmd {
+		startFakeWorker(t, sessionID, func(reqID json.RawMessage) any {
+			return jsonRPCError(reqID, -32000, "worker refuses to say hello")
+		})
+		return inner(ctx, sessionID, model, cwd)
+	}
+
+	sup, err := New(Config{Root: root, MaxWorkers: 1, NewWorkerCmd: countingSeam(seam, &spawns)})
+	if err != nil {
+		t.Fatalf("router.New: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Close() })
+
+	before := pendingCount(sup)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if _, err := sup.Create(ctx, "", supervisor.CreateOptions{}); err == nil {
+		t.Fatal("Create succeeded against a worker whose gofer/hello errors; want a handshake failure")
+	} else if !strings.Contains(err.Error(), "gofer/hello") {
+		t.Fatalf("Create failed at the wrong step: %v (want a gofer/hello failure)", err)
+	}
+	if got := spawns.Load(); got != 1 {
+		t.Fatalf("worker spawns = %d, want 1 (the Create must reach the spawn)", got)
+	}
+
+	// The invariant: the admission counter is exactly where it started.
+	if got := pendingCount(sup); got != before {
+		t.Fatalf("pending reservations = %d after a Create that failed at gofer/hello, want %d", got, before)
+	}
+	if got := liveWorkerCount(sup); got != 0 {
+		t.Fatalf("live workers = %d after a failed Create, want 0", got)
+	}
+	// And capacity is genuinely reusable: a leaked reservation against MaxWorkers
+	// 1 would refuse this admit with ErrAtCapacity.
+	if err := sup.admit(); err != nil {
+		t.Fatalf("admit after a failed Create: %v (a leaked reservation would refuse it)", err)
+	}
+	sup.releaseSlot()
 }
