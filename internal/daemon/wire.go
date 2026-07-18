@@ -57,6 +57,34 @@ func modelConfigOption(currentModel string, authed map[string]bool) acp.ConfigOp
 	}
 }
 
+// modelConfigOptionEvent builds the neutral, transport-only [event.ConfigOption]
+// snapshot of the "model" selector — the event-contract twin of
+// modelConfigOption (which builds the ACP shape a session/set_config_option
+// response carries). It maps the SAME modelSelectOptions catalog into
+// [event.ConfigSelectValue] and marks the session's current model as
+// SelectedValue, so an emitted [event.ConfigOptionsUpdated] carrying it projects
+// (via acp.ToSessionUpdate) to exactly the config_option_update the response
+// advertises — a pass-through projection with no gofer-side ACP synthesis.
+func modelConfigOptionEvent(currentModel string, authed map[string]bool) event.ConfigOption {
+	sel := modelSelectOptions(authed)
+	values := make([]event.ConfigSelectValue, 0, len(sel))
+	for _, o := range sel {
+		values = append(values, event.ConfigSelectValue{
+			Value:       o.Value,
+			Name:        o.Name,
+			Description: o.Description,
+		})
+	}
+	return event.ConfigOption{
+		ID:            configIDModel,
+		Name:          "Model",
+		Category:      string(acp.ConfigCategoryModel),
+		Kind:          event.ConfigOptionSelect,
+		SelectedValue: currentModel,
+		Values:        values,
+	}
+}
+
 // sessionInfoDTO is the wire shape for the gofer-native roster/ps methods. It
 // is a deliberate subset of [supervisor.SessionInfo]: Summary, Pending, and
 // Artifacts are reserved-and-always-zero in M2 (see the SessionInfo doc) and

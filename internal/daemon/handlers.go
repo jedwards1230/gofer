@@ -481,6 +481,7 @@ func handleSessionSetConfigOption(d *Daemon, ctx context.Context, _ *peer, param
 	if err != nil {
 		return nil, invalidParams(err)
 	}
+	var prevModel string
 	switch req.ConfigID {
 	case configIDModel:
 		sel, ok := req.Value.(acp.SelectValue)
@@ -490,6 +491,10 @@ func handleSessionSetConfigOption(d *Daemon, ctx context.Context, _ *peer, param
 		if sel.Value == "" {
 			return nil, invalidParamsMsg(fmt.Sprintf("%s: config option %q value is required", acp.MethodSessionSetConfigOption, req.ConfigID))
 		}
+		// Snapshot the pre-change model (best-effort — an unknown session yields
+		// "" and SetModel below surfaces the real error) so advertiseModelChange
+		// can suppress an advertisement when the set is a no-op.
+		prevModel, _ = d.sessionModel(ctx, req.SessionID)
 		if err := d.sup.SetModel(ctx, req.SessionID, sel.Value); err != nil {
 			return nil, appError(err)
 		}
@@ -502,6 +507,11 @@ func handleSessionSetConfigOption(d *Daemon, ctx context.Context, _ *peer, param
 	if rerr != nil {
 		return nil, rerr
 	}
+	// Advertise the change to attached peers (config_option_update) when the
+	// model actually changed — the same snapshot this response returns to the
+	// caller, so a second attached client (a phone changing what a laptop sees)
+	// tracks the new model live.
+	d.advertiseModelChange(ctx, req.SessionID, prevModel, current)
 	return acp.SetConfigOptionResponse{
 		ConfigOptions: []acp.ConfigOption{modelConfigOption(current, d.authedProviders())},
 	}, nil
@@ -905,6 +915,72 @@ func (d *Daemon) broadcastGoferEvent(ctx context.Context, sessionID string, e ev
 	}
 }
 
+// advertiseModelChange emits + fans out a config_option_update snapshot when
+// sessionID's model actually changed from prev to current — the live-config
+// counterpart to the model value a session/set_config_option response already
+// returns to its caller. It is the shared tail of both model-swap routes
+// (session/set_config_option and gofer/set_model), so both advertise the change
+// identically.
+//
+// Emit-on-change guard: a no-op set (current == prev) or an unreadable
+// post-change model (current == "", e.g. the session was killed in the race
+// window) advertises nothing — a client must not be stormed with a
+// config_option_update that changed nothing.
+//
+// Delivery is two-pronged, mirroring handleSessionPrompt's per-event fan-out:
+//   - EmitConfigOptions publishes the event.ConfigOptionsUpdated onto the
+//     session's own stream via the runner Emit seam (journals/retains it, so a
+//     later peek's retained-backlog replay and any concurrent-turn drain observe
+//     it too).
+//   - broadcastGoferEvent + the acp.ToSessionUpdate projection fan it out LIVE to
+//     every currently-attached peer. This direct fan-out is necessary because
+//     there is no continuous broker drain outside a session/prompt (see doc.go):
+//     a model change between turns reaches clients ONLY via this broadcast. The
+//     projection is acp.ToSessionUpdate's pass-through (config_option_update);
+//     gofer clients get the verbatim event on gofer/event.
+//
+// If a set_config_option ever races a live turn on the same session (the M2
+// one-prompt-per-session contract makes this rare), the turn's drain and this
+// direct fan-out both deliver the snapshot; a config_option_update is an
+// authoritative, idempotent full snapshot (not a delta), so a duplicate is a
+// harmless re-render.
+func (d *Daemon) advertiseModelChange(ctx context.Context, sessionID, prev, current string) {
+	if current == "" || current == prev {
+		return
+	}
+	opts := []event.ConfigOption{modelConfigOptionEvent(current, d.authedProviders())}
+	if err := d.sup.EmitConfigOptions(sessionID, opts); err != nil {
+		// DEBUG, not WARN: the only expected error is the session going away
+		// between the model set and here — routine, not a daemon fault.
+		d.log.Debug("config option update: emit failed", "session", sessionID, "err", err)
+	}
+	ev := event.NewConfigOptionsUpdated(sessionID, opts)
+	d.broadcastGoferEvent(ctx, sessionID, ev)
+	if notif, ok := acp.ToSessionUpdate(sessionID, ev); ok {
+		d.broadcastConfigOptionUpdate(ctx, sessionID, notif)
+	}
+}
+
+// broadcastConfigOptionUpdate fans a projected config_option_update session/update
+// out to EVERY peer attached to sessionID (including the peer that drove the
+// model change — a config snapshot is not an echo it already has on the
+// session/update surface; its set_config_option response carries the value, but
+// a gofer client tracks its own model off the event stream). Modeled on
+// broadcastGoferEvent, not broadcastUpdate: no origin special-casing or
+// user-echo suppression, and a write failure to any single peer is non-fatal and
+// only logged — a wedged observer must never fail the model-change RPC. The peer
+// set is snapshotted under the registry RLock and released before any notify runs
+// (see peersForSession).
+func (d *Daemon) broadcastConfigOptionUpdate(ctx context.Context, sessionID string, notif any) {
+	for _, pr := range d.peersForSession(sessionID) {
+		if werr := pr.notify(ctx, acp.MethodSessionUpdate, notif); werr != nil {
+			// Session id only — never the notif (carries no message content here,
+			// but the redaction rule is uniform); see handleFrame's redaction rule.
+			d.log.Debug("config option update broadcast: peer notify failed", "session", sessionID, "err", werr)
+		}
+	}
+}
+
 // handlePermissionReply answers a client's "permission.reply" op: it routes the
 // verdict to the awaiting session's gate. The op carries only the call id (no
 // session id — see event.PermissionReply), so the session is resolved from the
@@ -1006,9 +1082,16 @@ func handleGoferSetModel(d *Daemon, ctx context.Context, _ *peer, params json.Ra
 	if rerr != nil {
 		return nil, rerr
 	}
+	prevModel, _ := d.sessionModel(ctx, req.SessionID)
 	if err := d.sup.SetModel(ctx, req.SessionID, req.Model); err != nil {
 		return nil, appError(err)
 	}
 	d.log.Info("session model set", "session", req.SessionID, "model", req.Model)
+	// Advertise the change to attached peers (config_option_update) on an actual
+	// change, so the gofer/set_model route surfaces it identically to the ACP
+	// session/set_config_option route. Best-effort post-change read: an
+	// unreadable model just suppresses the advertisement (see advertiseModelChange).
+	current, _ := d.sessionModel(ctx, req.SessionID)
+	d.advertiseModelChange(ctx, req.SessionID, prevModel, current)
 	return struct{}{}, nil
 }
