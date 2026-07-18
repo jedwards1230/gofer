@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +14,7 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
 	"github.com/jedwards1230/gofer/internal/daemon"
+	"github.com/jedwards1230/gofer/internal/supervisor"
 )
 
 // TestClientRosterKillArchive drives [daemon.Client] against a real Handler
@@ -248,6 +251,150 @@ func TestClientDialNoDaemon(t *testing.T) {
 	if daemon.Probe(ctx, "127.0.0.1:1", "") {
 		t.Error("Probe(closed port) = true, want false")
 	}
+}
+
+// serveUnix mounts a [daemon.Daemon] built over sup on an http.Server listening
+// on an AF_UNIX socket named sockName, returning the "unix://<sockName>" address
+// [daemon.Dial] takes. The caller must have already chdir'd into a fresh temp
+// dir (t.Chdir): the socket is bound by its RELATIVE name so the kernel stores a
+// short bind path, keeping it well under the ~104-byte sun_path limit
+// (runtimedir.go) no matter how deep t.TempDir() nests on the host. The server
+// is closed on cleanup.
+func serveUnix(t *testing.T, sup *supervisor.Supervisor, cfg daemon.Config, sockName string) string {
+	t.Helper()
+	ln, err := net.Listen("unix", sockName)
+	if err != nil {
+		t.Fatalf("net.Listen unix %s: %v", sockName, err)
+	}
+	d := daemon.New(sup, cfg)
+	srv := &http.Server{Handler: d.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return "unix://" + sockName
+}
+
+// TestClientDialUnixSocket proves the full JSON-RPC/WebSocket round trip works
+// over the unix transport M6 session-workers listen on (design §3/§4): Probe
+// reports a live socket reachable and a dead one not, Dial of a dead socket
+// surfaces ErrNoDaemon (the same no-listener signal as a refused TCP port), and
+// a live socket drives a real session/new + session/prompt turn end to end.
+func TestClientDialUnixSocket(t *testing.T) {
+	sup := newTestSupervisor(t, fauxProvider)
+	t.Chdir(t.TempDir())
+	addr := serveUnix(t, sup, daemon.Config{DefaultModel: "faux"}, "t.sock")
+
+	if !daemon.Probe(context.Background(), addr, "") {
+		t.Fatal("Probe(live unix socket) = false, want true")
+	}
+
+	// A path with no listener: connection refused at the socket, indistinguishable
+	// from a closed TCP port — ErrNoDaemon, and Probe false.
+	deadErr := func() error {
+		_, err := daemon.Dial(context.Background(), "unix://dead.sock", "")
+		return err
+	}()
+	if deadErr == nil {
+		t.Fatal("Dial(dead unix socket): want an error, got nil")
+	}
+	if !errors.Is(deadErr, daemon.ErrNoDaemon) {
+		t.Errorf("Dial(dead unix socket) err = %v, want it to wrap daemon.ErrNoDaemon", deadErr)
+	}
+	if errors.Is(deadErr, daemon.ErrUnauthorized) {
+		t.Errorf("Dial(dead unix socket) err = %v, want it NOT to be ErrUnauthorized", deadErr)
+	}
+	if daemon.Probe(context.Background(), "unix://dead.sock", "") {
+		t.Error("Probe(dead unix socket) = true, want false")
+	}
+
+	c, err := daemon.Dial(context.Background(), addr, "")
+	if err != nil {
+		t.Fatalf("Dial(unix): %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	newResult, err := c.Call(context.Background(), acp.MethodSessionNew, acp.NewSessionRequest{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatalf("session/new: %v", err)
+	}
+	var sess acp.NewSessionResponse
+	if err := json.Unmarshal(newResult, &sess); err != nil {
+		t.Fatalf("unmarshal NewSessionResponse: %v", err)
+	}
+
+	promptResult := make(chan json.RawMessage, 1)
+	promptErr := make(chan error, 1)
+	go func() {
+		res, perr := c.Call(context.Background(), acp.MethodSessionPrompt, acp.PromptRequest{
+			SessionID: sess.SessionID,
+			Prompt:    []acp.ContentBlock{acp.TextBlock("hi")},
+		})
+		promptResult <- res
+		promptErr <- perr
+	}()
+
+	var gotUpdates int
+	timeout := time.After(defaultWait)
+drain:
+	for {
+		select {
+		case n, ok := <-c.Notifications():
+			if !ok {
+				t.Fatal("notifications channel closed before PromptResponse arrived")
+			}
+			if n.Method != acp.MethodSessionUpdate {
+				continue // skip the same-connection gofer/event fanout — see TestClientSessionPromptNotifications
+			}
+			gotUpdates++
+			// Originating peer: only faux.Default()'s assistant deltas arrive
+			// (2 reasoning + 3 text), the user echo suppressed — same as the TCP
+			// TestClientSessionPromptNotifications, proving the unix transport is
+			// wire-identical.
+			if gotUpdates == 5 {
+				break drain
+			}
+		case <-timeout:
+			t.Fatalf("timed out after %d notifications over unix, want 5", gotUpdates)
+		}
+	}
+
+	if err := <-promptErr; err != nil {
+		t.Fatalf("session/prompt: %v", err)
+	}
+	var pr acp.PromptResponse
+	if err := json.Unmarshal(<-promptResult, &pr); err != nil {
+		t.Fatalf("unmarshal PromptResponse: %v", err)
+	}
+	if pr.StopReason != acp.StopReasonEndTurn {
+		t.Errorf("StopReason = %q, want %q", pr.StopReason, acp.StopReasonEndTurn)
+	}
+}
+
+// TestClientDialUnixUnauthorized asserts the ErrUnauthorized-vs-ErrNoDaemon
+// distinction Dial draws over TCP holds identically over the unix transport: a
+// live worker socket that rejects the bearer token is reachable-but-unauthorized
+// (Probe true, Dial ErrUnauthorized), NOT mistaken for an absent worker — the
+// 401 rides the HTTP upgrade over the fixed unix conn exactly as over TCP.
+func TestClientDialUnixUnauthorized(t *testing.T) {
+	sup := newTestSupervisor(t, fauxProvider)
+	t.Chdir(t.TempDir())
+	addr := serveUnix(t, sup, daemon.Config{BearerToken: "the-real-token", DefaultModel: "faux"}, "t.sock")
+
+	_, err := daemon.Dial(context.Background(), addr, "wrong-token")
+	if err == nil {
+		t.Fatal("Dial(unix) with wrong token: want an error, got nil")
+	}
+	if !errors.Is(err, daemon.ErrUnauthorized) {
+		t.Errorf("Dial(unix) err = %v, want it to wrap daemon.ErrUnauthorized", err)
+	}
+	if !daemon.Probe(context.Background(), addr, "wrong-token") {
+		t.Error("Probe(unix) with wrong token = false, want true (a worker IS listening, it just rejected the token)")
+	}
+
+	c, err := daemon.Dial(context.Background(), addr, "the-real-token")
+	if err != nil {
+		t.Fatalf("Dial(unix) with correct token: %v", err)
+	}
+	defer func() { _ = c.Close() }()
 }
 
 // TestClientUnauthorized asserts a token-protected daemon rejects a
