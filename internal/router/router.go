@@ -83,8 +83,9 @@ type Config struct {
 	// baseline plus its loop's working set — design §10), so an unbounded
 	// session/new fan-out is a machine-resource risk in a way the in-process
 	// supervisor's goroutine-per-session never was. It mirrors
-	// [daemon.Config.MaxSessions] one tier up: a programmatic knob an embedder
-	// sets, defaulting to uncapped for `gofer daemon --workers`.
+	// [daemon.Config.MaxSessions] one tier up. Operators set it with
+	// `gofer daemon --workers --max-workers N`; embedders set this field
+	// directly. Both default to uncapped.
 	//
 	// The cap gates SPAWNS only. Startup adoption
 	// ([Supervisor.adoptExistingWorkers]) re-attaches to workers that are ALREADY
@@ -484,6 +485,37 @@ const (
 	endpointPollFactor = 2
 )
 
+// endpointPoll is [waitForWorkerEndpoint]'s read cadence, extracted from the
+// loop so the schedule it produces is assertable on its own — a test can pin
+// "1ms, 2ms, 4ms, 8ms, 15ms, 15ms…" exactly, instead of timing the loop against
+// a wall clock and measuring the Go scheduler.
+type endpointPoll struct {
+	// initial is the first sleep between reads; max caps the backed-off
+	// interval; factor is the per-iteration geometric multiplier.
+	initial time.Duration
+	max     time.Duration
+	factor  int
+
+	// onRead, when non-nil, is called after each endpoint read attempt with the
+	// 1-based read count. Production leaves it nil: it is the seam a test uses
+	// to drive discovery by READS (publish the endpoint on read 3, assert it is
+	// returned on read 4) rather than by elapsed milliseconds.
+	onRead func(reads int)
+}
+
+// defaultEndpointPoll is the production cadence: tight first interval, geometric
+// backoff, ceiling at the previous fixed tick.
+var defaultEndpointPoll = endpointPoll{
+	initial: endpointPollInitial,
+	max:     endpointPollMax,
+	factor:  endpointPollFactor,
+}
+
+// next returns the interval that follows d, saturating at the ceiling.
+func (p endpointPoll) next(d time.Duration) time.Duration {
+	return min(d*time.Duration(p.factor), p.max)
+}
+
 // waitForWorkerEndpoint polls for sessionID's endpoint file — written
 // atomically by the worker just before it serves ([daemon.WriteWorkerEndpoint])
 // — and returns it once it appears. This is the router's fresh-spawn discovery
@@ -499,17 +531,37 @@ const (
 // returns immediately; subsequent reads back off from [endpointPollInitial] to
 // [endpointPollMax].
 func waitForWorkerEndpoint(ctx context.Context, sessionID string, wait <-chan error) (daemon.WorkerEndpoint, bool, error) {
-	delay := endpointPollInitial
+	return pollWorkerEndpoint(ctx, sessionID, wait, defaultEndpointPoll)
+}
+
+// pollWorkerEndpoint is [waitForWorkerEndpoint] with an injectable cadence.
+func pollWorkerEndpoint(ctx context.Context, sessionID string, wait <-chan error, poll endpointPoll) (daemon.WorkerEndpoint, bool, error) {
+	delay := poll.initial
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
+	reads := 0
 	for {
 		ep, err := daemon.ReadWorkerEndpoint(sessionID)
+		reads++
+		if poll.onRead != nil {
+			poll.onRead(reads)
+		}
 		if err == nil {
 			return ep, false, nil
 		}
 		if !errors.Is(err, os.ErrNotExist) {
 			// A genuine read/parse error, not just "not written yet".
 			return daemon.WorkerEndpoint{}, false, fmt.Errorf("read worker endpoint: %w", err)
+		}
+		// Expiry is checked HERE rather than left to the select below because
+		// select picks uniformly at random among ready cases: with a 1ms first
+		// interval both timer.C and ctx.Done() are routinely ready together, so
+		// without this an expired ctx could be skipped for another iteration.
+		// It sits AFTER the read, not at the top of the body, to preserve the
+		// fast path — an endpoint already on disk is returned by the first read
+		// even under an already-cancelled ctx.
+		if err := ctx.Err(); err != nil {
+			return daemon.WorkerEndpoint{}, false, err
 		}
 		select {
 		case werr := <-wait:
@@ -521,7 +573,7 @@ func waitForWorkerEndpoint(ctx context.Context, sessionID string, wait <-chan er
 			return daemon.WorkerEndpoint{}, false, ctx.Err()
 		case <-timer.C:
 			// Drained by the receive, so Reset is safe here.
-			delay = min(delay*endpointPollFactor, endpointPollMax)
+			delay = poll.next(delay)
 			timer.Reset(delay)
 		}
 	}
@@ -656,7 +708,11 @@ func (s *Supervisor) admit() error {
 	if s.closed {
 		return fmt.Errorf("router: create: %w", ErrNotLive)
 	}
-	if live := len(s.workers) + s.pending; s.maxWorkers != DefaultMaxWorkers && live >= s.maxWorkers {
+	// > 0 rather than != DefaultMaxWorkers: locally correct for ANY maxWorkers
+	// value, so a future second constructor that forgets New's normalization
+	// cannot turn a nonsensical negative cap into a router that refuses
+	// everything.
+	if live := len(s.workers) + s.pending; s.maxWorkers > 0 && live >= s.maxWorkers {
 		return fmt.Errorf("router: create: %w (%d live, max %d)", ErrAtCapacity, live, s.maxWorkers)
 	}
 	s.pending++

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -66,6 +67,13 @@ func pendingCount(s *Supervisor) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.pending
+}
+
+// liveWorkerCount reads the registered live-handle count.
+func liveWorkerCount(s *Supervisor) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.workers)
 }
 
 // endpointFileCount reports how many worker endpoint files exist — the "did a
@@ -212,7 +220,8 @@ func TestMaxWorkersNegativeNormalizesToDefault(t *testing.T) {
 // room for an N+1th — the overshoot a plain live-handle count would allow.
 func TestAdmitReservesSlotsForInFlightSpawns(t *testing.T) {
 	shortRuntimeDir(t)
-	sup, err := New(Config{Root: t.TempDir(), MaxWorkers: 2, NewWorkerCmd: fauxWorkerSeam(t.TempDir())})
+	root := t.TempDir()
+	sup, err := New(Config{Root: root, MaxWorkers: 2, NewWorkerCmd: fauxWorkerSeam(root)})
 	if err != nil {
 		t.Fatalf("router.New: %v", err)
 	}
@@ -236,11 +245,91 @@ func TestAdmitReservesSlotsForInFlightSpawns(t *testing.T) {
 	sup.releaseSlot()
 }
 
+// TestMaxWorkersAdmitsExactlyTheCapConcurrently is the headline claim under
+// contention: N clients calling session/new at once against a cap of k admit
+// EXACTLY k, refuse the other N-k with ErrAtCapacity, and quiesce with no
+// leaked reservations. It is the test that catches the reservation pair
+// (pending-- and workers[id] = h) drifting out from under a single lock —
+// admission would then either overshoot the cap or strand a slot forever. Run
+// it under -race.
+func TestMaxWorkersAdmitsExactlyTheCapConcurrently(t *testing.T) {
+	shortRuntimeDir(t)
+	root := t.TempDir()
+
+	const (
+		limit    = 3
+		contend  = 12
+		spawnBud = 90 * time.Second
+	)
+
+	var spawns atomic.Int64
+	sup, err := New(Config{
+		Root:         root,
+		MaxWorkers:   limit,
+		NewWorkerCmd: countingSeam(fauxWorkerSeam(root), &spawns),
+	})
+	if err != nil {
+		t.Fatalf("router.New: %v", err)
+	}
+	t.Cleanup(func() {
+		killWorkers(sup)
+		_ = sup.Close()
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), spawnBud)
+	defer cancel()
+
+	// Release every goroutine from one barrier so the Creates genuinely race
+	// through admit rather than trickling in as the goroutines are scheduled.
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make([]error, contend)
+	for i := range contend {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, cerr := sup.Create(ctx, "", supervisor.CreateOptions{})
+			errs[i] = cerr
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	var admitted, refused int
+	for i, cerr := range errs {
+		switch {
+		case cerr == nil:
+			admitted++
+		case errors.Is(cerr, ErrAtCapacity):
+			refused++
+		default:
+			t.Fatalf("Create %d: unexpected error %v (want nil or ErrAtCapacity)", i, cerr)
+		}
+	}
+	if admitted != limit {
+		t.Fatalf("successful Creates = %d, want exactly %d (the cap)", admitted, limit)
+	}
+	if refused != contend-limit {
+		t.Fatalf("ErrAtCapacity refusals = %d, want %d", refused, contend-limit)
+	}
+	if got := spawns.Load(); got != int64(limit) {
+		t.Fatalf("worker spawns = %d, want %d (a refused Create must fork nothing)", got, limit)
+	}
+	if got := pendingCount(sup); got != 0 {
+		t.Fatalf("pending reservations = %d once quiesced, want 0", got)
+	}
+	if got := liveWorkerCount(sup); got != limit {
+		t.Fatalf("live workers = %d, want %d", got, limit)
+	}
+}
+
 // TestAdmitRefusesClosedRouter keeps the pre-existing closed-router contract
 // intact now that the closed check lives inside admit.
 func TestAdmitRefusesClosedRouter(t *testing.T) {
 	shortRuntimeDir(t)
-	sup, err := New(Config{Root: t.TempDir(), NewWorkerCmd: fauxWorkerSeam(t.TempDir())})
+	root := t.TempDir()
+	sup, err := New(Config{Root: root, NewWorkerCmd: fauxWorkerSeam(root)})
 	if err != nil {
 		t.Fatalf("router.New: %v", err)
 	}

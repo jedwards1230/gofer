@@ -95,14 +95,56 @@ func TestWaitForWorkerEndpointFastPath(t *testing.T) {
 	}
 }
 
-// TestWaitForWorkerEndpointAppearsQuickly is the latency assertion for the
-// tight-then-backoff cadence (M6 §10's startup-latency cost): an endpoint
-// published ~1ms after the spawn — the common fast-start case — is discovered in
-// single-digit milliseconds. The cadence this replaces (a fixed 15ms ticker)
-// could not pass it: its first read misses, and the next one is a full 15ms
-// later, so it always returned at ≥15ms. That gap is exactly what the bound
-// below guards.
-func TestWaitForWorkerEndpointAppearsQuickly(t *testing.T) {
+// TestEndpointPollScheduleIsTightThenBackedOff pins the production cadence as a
+// SEQUENCE — 1ms, 2ms, 4ms, 8ms, 15ms, 15ms… — rather than as an elapsed-time
+// budget. This is the assertion that rules out the fixed 15ms ticker this
+// cadence replaced (M6 §10's startup-latency cost): that ticker's first read
+// misses and its second is a full 15ms later, so it can never produce this
+// schedule. Asserting the schedule instead of the wall clock is deliberate — a
+// millisecond-scale elapsed-time bound measures the Go scheduler, not the
+// cadence, and fails on a busy machine for reasons that have nothing to do with
+// this code.
+func TestEndpointPollScheduleIsTightThenBackedOff(t *testing.T) {
+	want := []time.Duration{
+		1 * time.Millisecond,
+		2 * time.Millisecond,
+		4 * time.Millisecond,
+		8 * time.Millisecond,
+		15 * time.Millisecond,
+		15 * time.Millisecond,
+		15 * time.Millisecond,
+	}
+
+	got := make([]time.Duration, 0, len(want))
+	d := defaultEndpointPoll.initial
+	for range want {
+		got = append(got, d)
+		d = defaultEndpointPoll.next(d)
+	}
+
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("poll interval %d = %v, want %v (full schedule %v, want %v)", i, got[i], want[i], got, want)
+		}
+	}
+	// The property the schedule exists for, asserted independently of the exact
+	// numbers above: the FIRST wait is an order of magnitude under the ceiling,
+	// so a regression to any fixed interval (the old 15ms ticker included) fails
+	// here even if the constants are retuned.
+	if defaultEndpointPoll.initial >= defaultEndpointPoll.max {
+		t.Fatalf("initial interval %v is not tighter than the ceiling %v", defaultEndpointPoll.initial, defaultEndpointPoll.max)
+	}
+}
+
+// TestWaitForWorkerEndpointDiscoversAfterRetries proves the LOOP applies that
+// schedule and returns the endpoint on the first read that finds it. It is
+// driven by READS, not by the clock: the publisher fires from the poll's onRead
+// seam after the third read, so "found on read 4" is deterministic on any
+// machine under any load. The wall-clock check that remains is a deliberately
+// loose smoke bound — it says nothing about the cadence's shape (the schedule
+// test above owns that), only that discovery has not regressed to some fixed
+// long interval.
+func TestWaitForWorkerEndpointDiscoversAfterRetries(t *testing.T) {
 	shortRuntimeDir(t)
 	sessionID := uuid.Must(uuid.NewV7()).String()
 	publish := endpointPublisher(t, sessionID)
@@ -111,16 +153,23 @@ func TestWaitForWorkerEndpointAppearsQuickly(t *testing.T) {
 	defer cancel()
 	wait := make(chan error, 1)
 
-	go func() {
-		time.Sleep(endpointPollInitial)
-		publish()
-	}()
+	// The real cadence, plus the read seam. publishAfter reads must MISS, so the
+	// loop is forced through publishAfter-1 backoff steps before it succeeds.
+	const publishAfter = 3
+	poll := defaultEndpointPoll
+	var reads int
+	poll.onRead = func(n int) {
+		reads = n
+		if n == publishAfter {
+			publish()
+		}
+	}
 
 	start := time.Now()
-	ep, exited, err := waitForWorkerEndpoint(ctx, sessionID, wait)
+	ep, exited, err := pollWorkerEndpoint(ctx, sessionID, wait, poll)
 	elapsed := time.Since(start)
 	if err != nil {
-		t.Fatalf("waitForWorkerEndpoint: %v", err)
+		t.Fatalf("pollWorkerEndpoint: %v", err)
 	}
 	if exited {
 		t.Fatal("exited = true, want false")
@@ -128,10 +177,16 @@ func TestWaitForWorkerEndpointAppearsQuickly(t *testing.T) {
 	if ep.Addr == "" {
 		t.Fatal("endpoint has no addr")
 	}
-	// 12ms: under the old 15ms first tick, well over the ~3ms the backoff
-	// schedule (1ms, 2ms, 4ms…) actually needs for a 1ms publish.
-	if limit := 12 * time.Millisecond; elapsed > limit {
-		t.Fatalf("discovery took %v, want < %v (backoff cadence regressed to a fixed interval?)", elapsed, limit)
+	if want := publishAfter + 1; reads != want {
+		t.Fatalf("endpoint found on read %d, want %d (published after read %d)", reads, want, publishAfter)
+	}
+	if len(wait) != 0 || cap(wait) != 1 {
+		t.Fatal("the worker's wait channel was disturbed")
+	}
+	// Loose by design: the schedule's own three sleeps total ~7ms, so this only
+	// trips if the loop starts sleeping on a fixed long interval.
+	if limit := 200 * time.Millisecond; elapsed > limit {
+		t.Fatalf("discovery took %v, want < %v (poll cadence regressed to a fixed long interval?)", elapsed, limit)
 	}
 }
 
