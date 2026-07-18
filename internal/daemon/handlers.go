@@ -89,6 +89,8 @@ var methodTable = map[string]methodHandler{
 	acp.MethodSessionCancel: handleSessionCancel,
 	acp.MethodSessionList:   handleSessionList,
 
+	acp.MethodSessionSetConfigOption: handleSessionSetConfigOption,
+
 	methodGoferRoster:   handleGoferRoster,
 	methodGoferPS:       handleGoferPS,
 	methodGoferKill:     handleGoferKill,
@@ -461,6 +463,65 @@ func handleSessionList(d *Daemon, ctx context.Context, _ *peer, params json.RawM
 		resp.NextCursor = encodeSessionCursor(end)
 	}
 	return resp, nil
+}
+
+// handleSessionSetConfigOption answers the ACP session/set_config_option
+// request — the stable spec surface for a client's model/mode selectors. gofer
+// exposes exactly one config option today, "model", and maps it to its
+// gofer-native model swap ([supervisor.Supervisor.SetModel], the same path
+// gofer/set_model drives): model-setting stays gofer-native per the PRD, and
+// this is only the ACP entry point to it. The reply lists every config option
+// gofer supports, each with its post-change current value (see
+// modelConfigOption), read back from the live roster so it reflects real state.
+// A wrong value type, an empty value, or an unknown configId is a clear
+// invalid-params error; an unknown model / unknown session / cross-provider
+// swap surface as [supervisor.Supervisor.SetModel]'s application errors.
+func handleSessionSetConfigOption(d *Daemon, ctx context.Context, _ *peer, params json.RawMessage) (any, *rpcError) {
+	req, err := acp.DecodeSetConfigOption(params)
+	if err != nil {
+		return nil, invalidParams(err)
+	}
+	switch req.ConfigID {
+	case configIDModel:
+		sel, ok := req.Value.(acp.SelectValue)
+		if !ok {
+			return nil, invalidParamsMsg(fmt.Sprintf("%s: config option %q takes a select value id, got %T", acp.MethodSessionSetConfigOption, req.ConfigID, req.Value))
+		}
+		if sel.Value == "" {
+			return nil, invalidParamsMsg(fmt.Sprintf("%s: config option %q value is required", acp.MethodSessionSetConfigOption, req.ConfigID))
+		}
+		if err := d.sup.SetModel(ctx, req.SessionID, sel.Value); err != nil {
+			return nil, appError(err)
+		}
+		d.log.Info("session config option set", "session", req.SessionID, "config", req.ConfigID, "model", sel.Value)
+	default:
+		return nil, invalidParamsMsg(fmt.Sprintf("%s: unknown configId %q (gofer supports %q)", acp.MethodSessionSetConfigOption, req.ConfigID, configIDModel))
+	}
+
+	current, rerr := d.sessionModel(ctx, req.SessionID)
+	if rerr != nil {
+		return nil, rerr
+	}
+	return acp.SetConfigOptionResponse{
+		ConfigOptions: []acp.ConfigOption{modelConfigOption(current, d.authedProviders())},
+	}, nil
+}
+
+// sessionModel returns sessionID's current model, read from the live roster —
+// the authoritative post-change value a session/set_config_option response
+// reports. A session absent from the roster (never created, killed, or
+// archived) is an application error rather than a silent empty value.
+func (d *Daemon) sessionModel(ctx context.Context, sessionID string) (string, *rpcError) {
+	infos, err := d.sup.Roster(ctx)
+	if err != nil {
+		return "", appError(err)
+	}
+	for _, info := range infos {
+		if info.ID == sessionID {
+			return info.Model, nil
+		}
+	}
+	return "", appError(fmt.Errorf("session %s: not found in roster", sessionID))
 }
 
 // handleSessionPrompt is the streaming heart of the daemon. It subscribes to
