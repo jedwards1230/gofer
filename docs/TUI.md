@@ -566,8 +566,8 @@ frame comes from the same ubuntu-latest render environment:
   touches the TUI, a tape, the harness, or the renderer). Seed it once with
   `gh workflow run vhs-baseline.yml`.
 - **Per-PR captures** — `.github/workflows/vhs-capture.yml` renders on PRs and
-  appends the frames to an append-only `vhs-captures/pr-<n>` branch, branched
-  from `main` so `main...vhs-captures/pr-<n>` is a clean image-only diff. A
+  appends the frames to an append-only `vhs-captures-pr-<n>` branch, branched
+  from `main` so `main...vhs-captures-pr-<n>` is a clean image-only diff. A
   single sticky PR comment indexes the renders (a "latest" diff link plus a
   per-commit table with frame-change counts) — the PR branch itself stays free
   of image blobs. The branch is deleted when the PR closes

@@ -4,7 +4,7 @@
 # pulling the branch.
 #
 # Rendered PNGs are committed to a per-PR, append-only capture branch
-# `vhs-captures/pr-<n>`, branched from `main` so `main...vhs-captures/pr-<n>`
+# `vhs-captures-pr-<n>`, branched from `main` so `main...vhs-captures-pr-<n>`
 # is a clean image-only diff. One commit is appended per render (stable SHAs),
 # and a single sticky PR comment indexes them: a "latest" image-diff link plus
 # a per-commit table with frame-change counts. The human PR branch stays clean
@@ -43,7 +43,7 @@ jobs:
       PR: ${{ github.event.pull_request.number }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
-      CAP_BRANCH: vhs-captures/pr-${{ github.event.pull_request.number }}
+      CAP_BRANCH: vhs-captures-pr-${{ github.event.pull_request.number }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 

@@ -1,4 +1,4 @@
-# Deletes a PR's per-PR VHS capture branch (vhs-captures/pr-<n>) when the PR
+# Deletes a PR's per-PR VHS capture branch (vhs-captures-pr-<n>) when the PR
 # closes (merged or not), so capture branches don't accumulate. Pairs with
 # vhs-capture.yml, which creates and appends to the branch while the PR is open.
 # No path filter — it must fire on every close, and deleting a missing branch
@@ -20,7 +20,7 @@ jobs:
       - name: Delete capture branch
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BRANCH: vhs-captures/pr-${{ github.event.pull_request.number }}
+          BRANCH: vhs-captures-pr-${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
           if gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${BRANCH}" >/dev/null 2>&1; then

@@ -43,7 +43,7 @@ Run: `scripts/tui-vhs.sh [slug...]` (no arg = all tapes, e.g.
 `--snapshot` to mirror the key-frames into it locally. CI commits it so TUI
 changes show as native GitHub image diffs: `vhs-baseline.yml` keeps `main`
 current, and `vhs-capture.yml` appends each PR's renders to a per-PR
-`vhs-captures/pr-<n>` branch for a `main`-vs-feature diff. Advisory only — never
+`vhs-captures-pr-<n>` branch for a `main`-vs-feature diff. Advisory only — never
 a merge gate.
 
 Full workflow notes: [`docs/TUI.md`](../docs/TUI.md) → "Visual capture with VHS".
