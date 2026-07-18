@@ -63,7 +63,11 @@
 // [wirestream.Reconstructor.Load] (which settles history and re-surfaces any
 // still-open PermissionRequested into the broker, §7), and registers an ADOPTED
 // handle (cmd==nil; its reaper watches [daemon.Client.Done] rather than a
-// *exec.Cmd; pid comes from the endpoint file). This is the whole point of M6
+// *exec.Cmd; pid comes from the endpoint file — except when that file names the
+// ROUTER'S OWN pid, which is recorded as 0 so a later Kill/Archive cannot SIGKILL
+// the daemon itself; see killHandleProcess). A worker that predates gofer/hello
+// (method-not-found ⇒ [daemon.ErrHelloUnsupported]) is adopted too, as an
+// unidentified worker on the strict side of the policy below. This is the whole point of M6
 // process isolation: a router restart re-attaches to its in-flight sessions —
 // including a turn blocked mid-approval — instead of orphaning them. Adoption is
 // best-effort: a scan or per-worker failure never fails construction (an empty
@@ -75,8 +79,11 @@
 // The router records every worker's versions from the AUTHORITATIVE gofer/hello
 // handshake — on both paths a handle can come into existence, Create and adopt —
 // and classifies them against its own into a skewClass (see skew.go). The
-// endpoint file's version fields remain the cheap pre-dial hint, logged but never
-// decisive: it can be stale, and no class refuses adoption anyway.
+// endpoint file's version fields remain the cheap pre-dial hint, never decisive:
+// it can be stale, and no class refuses adoption anyway. It is logged only when
+// the hint's class DISAGREES with the handshake's — that disagreement is the
+// stale-endpoint-file condition worth an operator's attention; agreement is the
+// normal case and stays silent.
 //
 // The class governs only what the router subsequently ASKS of that worker:
 //
@@ -109,6 +116,9 @@
 // (a worker's own roster does not know it is being proxied) and carried through
 // the existing roster/ps wire as an additive, omitempty "binaryVersion". It is
 // LIVE-ONLY: the journal does not record it, so an offline row leaves it empty.
+// It reaches the WIRE only — no client RENDERS it yet (not `gofer ps`, not the
+// TUI roster), so §11's "session/list shows mixed binaryVersions" criterion holds
+// at raw-wire level; the rendering is slice 3b.
 //
 // # Permissions across a router restart (§7)
 //
