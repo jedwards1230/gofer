@@ -7,7 +7,15 @@ import (
 	"testing"
 
 	"github.com/jedwards1230/agent-sdk-go/acp"
+	"github.com/jedwards1230/agent-sdk-go/event"
+	"github.com/jedwards1230/agent-sdk-go/loop"
+	"github.com/jedwards1230/agent-sdk-go/permission"
 	"github.com/jedwards1230/agent-sdk-go/provider"
+	"github.com/jedwards1230/agent-sdk-go/runner"
+	"github.com/jedwards1230/agent-sdk-go/session"
+
+	"github.com/jedwards1230/gofer/internal/sandbox"
+	"github.com/jedwards1230/gofer/internal/supervisor"
 )
 
 // planProvider is a scripted [provider.Provider] whose first turn calls the
@@ -86,6 +94,70 @@ func (s *planStream) Next() (provider.StreamEvent, error) {
 
 func (s *planStream) Close() error { return nil }
 
+// alwaysContainer is a [sandbox.Container] test double: a usable runtime that
+// contains every call. It is the deterministic stand-in for a host with a
+// working sandbox, so the daemon's RuleGuard resolves an allow-matched
+// update_plan to DecisionRunContained (auto-allow) rather than escalating to an
+// "ask". Without it the test would hinge on whether the host has a sandbox
+// runtime — CI's ubuntu-latest ships none, so the real sandbox.New() fails
+// closed to ask for every tool. capability_test.go is the separate, precise
+// guard that update_plan is a member of the containable set in the first place;
+// this double proves the end-to-end projection given that membership.
+type alwaysContainer struct{}
+
+func (alwaysContainer) CanContain(context.Context, loop.ToolCall) (bool, error) { return true, nil }
+func (alwaysContainer) Available() bool                                         { return true }
+func (alwaysContainer) WrapCommand(command, _ string) ([]string, bool) {
+	return []string{"/bin/sh", "-c", command}, true
+}
+
+// newPlanSupervisor builds a Supervisor whose sessions run through the real
+// [loop.RuleGuard] over an [alwaysContainer], so a containable tool
+// (update_plan) auto-allows deterministically on any host. It mirrors
+// newTestSupervisorModelAtRoot but injects the guard/approver/tools itself
+// instead of taking the daemon supervisor's ambient sandbox.New() wiring, whose
+// availability varies by host.
+func newPlanSupervisor(t *testing.T, newProvider func() provider.Provider) *supervisor.Supervisor {
+	t.Helper()
+	root := t.TempDir()
+	store, err := session.NewFileStore(session.WithRoot(root))
+	if err != nil {
+		t.Fatalf("session.NewFileStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	container := alwaysContainer{}
+	guarded := func(opts runner.Options) runner.Options {
+		opts.Store = store
+		opts.Model = "faux"
+		opts.Provider = newProvider()
+		opts.Guard = loop.RuleGuard{
+			Engine:    permission.New(permission.Rule{Verdict: event.VerdictAllow, Tool: "*", Specifier: "*", Source: "test"}),
+			Container: container,
+			Target:    sandbox.ToolTarget,
+		}
+		opts.Approver = loop.NewGate()
+		opts.Tools = sandbox.WrapRegistry(opts.Cwd, container)
+		return opts
+	}
+	cfg := supervisor.Config{
+		Root:  root,
+		Store: store,
+		NewSession: func(ctx context.Context, opts runner.Options) (supervisor.Session, error) {
+			return runner.New(ctx, guarded(opts))
+		},
+		ResumeSession: func(ctx context.Context, id string, opts runner.Options) (supervisor.Session, error) {
+			return runner.Resume(ctx, id, guarded(opts))
+		},
+	}
+	sup, err := supervisor.New(cfg)
+	if err != nil {
+		t.Fatalf("supervisor.New: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Close() })
+	return sup
+}
+
 // planUpdateParams is the wire decode of a `plan` session/update: the
 // discriminator plus the full ordered entries the peer receives. acp has no
 // client-direction decode helper (it is written for gofer to play the agent),
@@ -104,17 +176,16 @@ type planUpdateParams struct {
 // acp.ToSessionUpdate after the v0.9.0 re-pin. gofer builds no projection and
 // synthesizes nothing; it forwards whatever ToSessionUpdate returns ok=true for.
 //
-// update_plan is not a sandbox-containable tool (it mutates nothing but is not
-// in sandbox.containableTools), so the daemon gates it to an "ask": the driver
-// answers the session/request_permission with allow-once, exactly as a real ACP
-// client would, and the plan snapshot follows once the tool runs.
+// update_plan is a containable builtin (see capability.go), so the daemon's
+// guard auto-allows it: the plan snapshot arrives with NO session/request_permission
+// — a plan revision must not storm the client with an approval prompt.
 func TestSessionPromptSurfacesPlan(t *testing.T) {
 	entries := []planCallEntry{
 		{Content: "Explore the codebase", Priority: "high", Status: "in_progress"},
 		{Content: "Write the pass-through test", Priority: "medium", Status: "pending"},
 		{Content: "Run the quality gates", Priority: "low", Status: "pending"},
 	}
-	sup := newTestSupervisor(t, func() provider.Provider {
+	sup := newPlanSupervisor(t, func() provider.Provider {
 		return &planProvider{entries: entries}
 	})
 	_, url := newTestDaemon(t, sup, "")
@@ -130,23 +201,14 @@ func TestSessionPromptSurfacesPlan(t *testing.T) {
 		})
 	}()
 
-	// The update_plan call gates to an ask: answer the session/request_permission
-	// with allow-once so the tool runs and emits its plan. Answering runs in the
-	// background so the main goroutine keeps draining notifications concurrently.
-	go func() {
-		id, _ := awaitPermissionRequest(t, c)
-		c.respond(id, selectedResponse(string(acp.PermissionAllowOnce)))
-	}()
-
-	// Scan the notification stream for the `plan` update, skipping every
-	// orthogonal frame that interleaves (the gofer/permission_requested
-	// notification, tool_call / tool_call_update updates for the call itself,
-	// message chunks). The plan snapshot is what we assert on.
+	// Scan the notification stream for the `plan` update, skipping the
+	// orthogonal frames that interleave (tool_call / tool_call_update for the
+	// call itself, message chunks). The plan snapshot is what we assert on.
 	var plan *planUpdateParams
 	for plan == nil {
 		n := c.waitNotification()
 		if n.Method != acp.MethodSessionUpdate {
-			continue // e.g. gofer/permission_requested — not a session/update
+			continue
 		}
 		var up planUpdateParams
 		if err := json.Unmarshal(n.Params, &up); err != nil {
@@ -155,6 +217,16 @@ func TestSessionPromptSurfacesPlan(t *testing.T) {
 		if up.Update.SessionUpdate == "plan" {
 			plan = &up
 		}
+	}
+
+	// update_plan auto-allowed: no session/request_permission was ever sent. An
+	// ask is emitted before the tool runs (so before the plan event), so by the
+	// time the plan arrived any request would already be queued — a non-blocking
+	// check is sufficient.
+	select {
+	case req := <-c.inboundRequests:
+		t.Fatalf("unexpected daemon request %q — update_plan should auto-allow, not ask", req.Method)
+	default:
 	}
 
 	if plan.SessionID != sid {
