@@ -563,8 +563,9 @@ frame comes from the same ubuntu-latest render environment:
 
 - **Baseline on `main`** — `vhs/snapshots/*.png`, kept current by
   `.github/workflows/vhs-baseline.yml` (renders on any push to `main` that
-  touches the TUI, a tape, the harness, or the renderer). Seed it once with
-  `gh workflow run vhs-baseline.yml`.
+  touches the TUI, a tape, the harness, or the renderer; lands via a bot PR
+  merged on the spot, since the main ruleset requires changes through a PR).
+  Seed it once with `gh workflow run vhs-baseline.yml`.
 - **Per-PR captures** — `.github/workflows/vhs-capture.yml` renders on PRs and
   appends the frames to an append-only `vhs-captures-pr-<n>` branch, branched
   from `main` so `main...vhs-captures-pr-<n>` is a clean image-only diff. A
