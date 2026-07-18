@@ -444,8 +444,9 @@ func (m *Model) TakeSubmitted() (string, bool) {
 // transcript blocks (items), for visual breathing room.
 const transcriptGap = 1
 
-// transcriptLines renders every item's lines, truncated to width, with
-// transcriptGap blank line(s) between consecutive items — no leading gap
+// transcriptLines renders every item's lines, word-wrapped to width (see
+// wrap — a chat body reflows across rows rather than clipping at the edge),
+// with transcriptGap blank line(s) between consecutive items — no leading gap
 // before the first item, no trailing gap after the last. Shared by View and
 // FullTranscript so both surfaces render the transcript body identically. A
 // pending approval's badge is skipped — it is shown by the prompt block
@@ -464,7 +465,7 @@ func (m Model) transcriptLines(width int) []string {
 		}
 		first = false
 		for _, line := range m.renderItemLines(it) {
-			lines = append(lines, truncate(line, width))
+			lines = append(lines, wrap(line, width)...)
 		}
 	}
 	return lines
@@ -797,4 +798,25 @@ func truncate(s string, w int) string {
 		return ansi.Truncate(s, w, "")
 	}
 	return ansi.Truncate(s, w, "…")
+}
+
+// wrap word-wraps s to at most w terminal cells per line (display width, not
+// rune count — so ANSI styling is measured correctly and wide chars count as
+// two), hard-breaking any single token longer than w. It returns one slice
+// entry per resulting terminal row, preserving transcriptLines' "one slice
+// entry == one terminal row" invariant (see styledMarkerLines) that view's
+// height math budgets against — unlike truncate, which clips an over-width
+// line to a single row, wrap reflows it across as many rows as it needs.
+//
+// An empty input yields a single empty line (not zero lines), so a transcript
+// gap row stays exactly one blank row. w is floored at 1 (mirroring view):
+// ansi.Wrap leaves the string unwrapped for limit < 1, so the guard is ours.
+func wrap(s string, w int) []string {
+	if w < 1 {
+		w = 1
+	}
+	if s == "" {
+		return []string{""}
+	}
+	return strings.Split(ansi.Wrap(s, w, ""), "\n")
 }
