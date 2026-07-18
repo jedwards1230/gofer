@@ -126,7 +126,7 @@ func selectTUIBackend(ctx context.Context, df *daemonFlags, cwd, root string) (t
 			label: fmt.Sprintf("daemon at %s", df.addr),
 			meta: tui.OverviewMeta{
 				App:     "gofer",
-				Version: version,
+				Version: effectiveVersion(),
 				Cwd:     cwd,
 				Now:     time.Now(),
 			},
@@ -146,7 +146,7 @@ func selectTUIBackend(ctx context.Context, df *daemonFlags, cwd, root string) (t
 		label: "local in-process supervisor (no daemon reachable)",
 		meta: tui.OverviewMeta{
 			App:     "gofer",
-			Version: version,
+			Version: effectiveVersion(),
 			Model:   resolveOverviewModel(ctx, rootDir),
 			Cwd:     cwd,
 			Now:     time.Now(),
@@ -162,7 +162,7 @@ func selectTUIBackend(ctx context.Context, df *daemonFlags, cwd, root string) (t
 // auth`/`gofer login` drive) rather than opening auth.json a second way.
 func buildCommandEnv(root, cwd string) tui.CommandEnv {
 	return tui.CommandEnv{
-		Version: version,
+		Version: effectiveVersion(),
 		Cwd:     cwd,
 		Root:    root,
 		Auth: func() ([]tui.ProviderAuth, error) {
