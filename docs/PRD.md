@@ -120,8 +120,11 @@ no daemon reachable) a one-line first-use prompt offers to install it; it is a
 complete no-op in every other case.
 
 Daemon lifecycle: the client auto-spawns the daemon on launch (health probe →
-detached spawn); a version/build mismatch triggers graceful shutdown →
-respawn, so upgrades "just work". Prompts sent to a busy session **queue**
+detached spawn); a version/build mismatch **warns** (see daemon discovery
+above) — never auto-restarts, since that would kill live sessions. The real
+"upgrades just work" story is M6 process isolation: in-flight turns finish on
+their worker's old binary while new sessions pick up the new one
+([design](milestones/M6-process-isolation.md)). Prompts sent to a busy session **queue**
 (accept/dispatch state machine, inspectable and clearable by any client) —
 real steering, not reject-if-busy. Worktree isolation per session is opt-in.
 
@@ -131,7 +134,7 @@ Event-sourced JSONL journals (SDK). `kill` = interrupt + terminate a running
 session; `archive` = drop a finished one from the roster. **Journals are never
 deleted** — both emit must-deliver events (`session.killed` / `.archived`).
 
-## Auto mode pipeline (M3 → M7)
+## Auto mode pipeline (M3 → M8)
 
 Contain before you classify · fail closed · no local SLM.
 
