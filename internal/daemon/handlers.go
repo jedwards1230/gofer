@@ -29,6 +29,14 @@ const (
 	methodGoferArchive  = "gofer/archive"
 	methodGoferSetModel = "gofer/set_model"
 
+	// methodGoferModels is gofer-native model discovery over the SDK provider
+	// registry: the full registered-model catalog, each entry stamped with the
+	// host's per-provider availability (see handleGoferModels). Deliberately
+	// gofer-namespaced, NOT the unstable ACP providers/* surface — a remote
+	// client (e.g. an iOS ACP client populating a model picker) reads it to
+	// learn which models it may pass to session/new's model param. Read-only.
+	methodGoferModels = "gofer/models"
+
 	// methodGoferPermissionRequested / methodGoferPermissionResolved are the
 	// gofer-native notifications the daemon fans a session's permission events
 	// out to every attached peer with. ACP deliberately keeps permission.*
@@ -86,6 +94,7 @@ var methodTable = map[string]methodHandler{
 	methodGoferKill:     handleGoferKill,
 	methodGoferArchive:  handleGoferArchive,
 	methodGoferSetModel: handleGoferSetModel,
+	methodGoferModels:   handleGoferModels,
 
 	methodPermissionReply: handlePermissionReply,
 }
@@ -875,6 +884,13 @@ func handleGoferRoster(d *Daemon, ctx context.Context, _ *peer, _ json.RawMessag
 		return nil, appError(err)
 	}
 	return toSessionInfoDTOs(infos), nil
+}
+
+// handleGoferModels answers gofer/models: the full SDK provider registry
+// projected to the wire, sorted (provider, id), each entry stamped Available
+// per the daemon host's current auth (see Config.AuthedProviders). Read-only.
+func handleGoferModels(d *Daemon, _ context.Context, _ *peer, _ json.RawMessage) (any, *rpcError) {
+	return toModelInfoDTOs(d.authedProviders()), nil
 }
 
 // handleGoferPS answers gofer/ps: every session on disk, live or archived

@@ -83,6 +83,14 @@ type Config struct {
 	// tests that pass no logger stay silent rather than hitting a nil
 	// dereference.
 	Logger *slog.Logger
+	// AuthedProviders reports the set of provider ids the daemon host currently
+	// has a usable credential for, so gofer/models can stamp each model's
+	// Available flag (a remote client cannot observe the host's auth state
+	// itself). Nil, or a non-nil error, is treated as "no provider
+	// authenticated" — gofer/models still returns the full model list, every
+	// entry Available:false — never a reason to fail model discovery. Mirrors
+	// the TUI CommandEnv.Auth non-fatal contract (internal/tui/modelpicker.go).
+	AuthedProviders func() (map[string]bool, error)
 }
 
 // Daemon hosts a [supervisor.Supervisor] behind an ACP-over-WebSocket
@@ -163,6 +171,21 @@ func New(sup *supervisor.Supervisor, cfg Config) *Daemon {
 		permRoutes:     make(map[string]string),
 		permReqCancels: make(map[string]context.CancelFunc),
 	}
+}
+
+// authedProviders resolves [Config.AuthedProviders] non-fatally: a nil closure
+// or a non-nil error both yield a nil map, which [toModelInfoDTOs] treats as
+// "no provider authenticated" (a nil-map index is false). Model discovery must
+// never fail on the host's auth state being unreadable — see the field doc.
+func (d *Daemon) authedProviders() map[string]bool {
+	if d.cfg.AuthedProviders == nil {
+		return nil
+	}
+	authed, err := d.cfg.AuthedProviders()
+	if err != nil {
+		return nil
+	}
+	return authed
 }
 
 // attachPeer records that p is interested in sessionID's session/update

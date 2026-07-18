@@ -84,10 +84,21 @@ func newTestSupervisorModelAtRoot(t *testing.T, root, model string, newProvider 
 }
 
 // newTestDaemon wires sup behind an in-process httptest.Server, returning the
-// Daemon and its ws:// base URL. The server is closed on test cleanup.
+// Daemon and its ws:// base URL. The server is closed on test cleanup. It is a
+// thin wrapper over [newTestDaemonWithConfig] with the default token/model
+// config every non-auth test uses.
 func newTestDaemon(t *testing.T, sup *supervisor.Supervisor, token string) (*daemon.Daemon, string) {
 	t.Helper()
-	d := daemon.New(sup, daemon.Config{BearerToken: token, DefaultModel: "faux"})
+	return newTestDaemonWithConfig(t, sup, daemon.Config{BearerToken: token, DefaultModel: "faux"})
+}
+
+// newTestDaemonWithConfig wires sup behind an in-process httptest.Server using
+// the caller-supplied cfg, so a test can exercise Config fields (e.g.
+// AuthedProviders) the common newTestDaemon path doesn't set. The server is
+// closed on test cleanup.
+func newTestDaemonWithConfig(t *testing.T, sup *supervisor.Supervisor, cfg daemon.Config) (*daemon.Daemon, string) {
+	t.Helper()
+	d := daemon.New(sup, cfg)
 	srv := httptest.NewServer(d.Handler())
 	t.Cleanup(srv.Close)
 	return d, "ws" + srv.URL[len("http"):]

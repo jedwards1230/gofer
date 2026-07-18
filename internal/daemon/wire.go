@@ -4,12 +4,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"time"
 
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
+	"github.com/jedwards1230/gofer/internal/modelmeta"
 	"github.com/jedwards1230/gofer/internal/supervisor"
 )
 
@@ -69,6 +71,77 @@ func toSessionInfoDTOs(infos []supervisor.SessionInfo) []sessionInfoDTO {
 	for i, info := range infos {
 		out[i] = toSessionInfoDTO(info)
 	}
+	return out
+}
+
+// modelInfoDTO is the wire shape for the gofer-native gofer/models method: a
+// projection of [provider.ModelInfo] (the SDK provider registry's per-model
+// metadata) plus the gofer-side DisplayName (see [modelmeta.DisplayName], which
+// the SDK doesn't carry) and the daemon-computed Available flag. Its json tags
+// are camelCase, mirroring [sessionInfoDTO]; [provider.Pricing] is projected
+// through the tagged [modelPricingDTO] rather than embedded raw, since
+// provider.Pricing has no json tags and would otherwise serialize its fields
+// capitalized.
+type modelInfoDTO struct {
+	ID            string          `json:"id"`
+	Provider      string          `json:"provider"`
+	DisplayName   string          `json:"displayName"`
+	ContextWindow int             `json:"contextWindow,omitempty"`
+	MaxOutput     int             `json:"maxOutput,omitempty"`
+	Pricing       modelPricingDTO `json:"pricing"`
+	Reasoning     bool            `json:"reasoning,omitempty"`
+	// Available reports whether the daemon host currently has a usable
+	// credential for this model's provider. A remote client cannot see the
+	// host's auth state itself, so the daemon stamps it (see handleGoferModels).
+	Available bool `json:"available"`
+}
+
+// modelPricingDTO is the tagged wire projection of [provider.Pricing] (per-Mtok
+// USD rates). provider.Pricing carries no json tags, so it is copied field by
+// field here rather than embedded, keeping the wire keys camelCase.
+type modelPricingDTO struct {
+	Input      float64 `json:"input"`
+	Output     float64 `json:"output"`
+	CacheRead  float64 `json:"cacheRead,omitempty"`
+	CacheWrite float64 `json:"cacheWrite,omitempty"`
+}
+
+// toModelInfoDTOs projects the SDK provider registry into the gofer/models
+// wire shape, sorted by (provider, id) for a stable client-facing order
+// (provider.Models() is unordered). authed reports which provider ids the
+// daemon host is authenticated for; a model whose provider is absent is
+// marked Available:false. A registry id whose Lookup fails is skipped
+// defensively (provider.Models() only ever yields registered ids).
+func toModelInfoDTOs(authed map[string]bool) []modelInfoDTO {
+	ids := provider.Models()
+	out := make([]modelInfoDTO, 0, len(ids))
+	for _, id := range ids {
+		info, ok := provider.Lookup(id)
+		if !ok {
+			continue
+		}
+		out = append(out, modelInfoDTO{
+			ID:            info.ID,
+			Provider:      info.Provider,
+			DisplayName:   modelmeta.DisplayName(id),
+			ContextWindow: info.ContextWindow,
+			MaxOutput:     info.MaxOutput,
+			Pricing: modelPricingDTO{
+				Input:      info.Pricing.Input,
+				Output:     info.Pricing.Output,
+				CacheRead:  info.Pricing.CacheRead,
+				CacheWrite: info.Pricing.CacheWrite,
+			},
+			Reasoning: info.Reasoning,
+			Available: authed[info.Provider],
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Provider != out[j].Provider {
+			return out[i].Provider < out[j].Provider
+		}
+		return out[i].ID < out[j].ID
+	})
 	return out
 }
 
