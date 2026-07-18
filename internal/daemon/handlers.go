@@ -689,7 +689,6 @@ func handleSessionPrompt(d *Daemon, ctx context.Context, p *peer, params json.Ra
 			// carries only the call id, find this session's gate.
 			switch pe := e.(type) {
 			case event.PermissionRequested:
-				d.recordPermRoute(pe.ID, op.SessionID)
 				reqParams := permissionRequestedParams{
 					SessionID: op.SessionID,
 					ID:        pe.ID,
@@ -697,34 +696,51 @@ func handleSessionPrompt(d *Daemon, ctx context.Context, p *peer, params json.Ra
 					Spec:      pe.Spec,
 					Trace:     pe.Trace,
 				}
-				// Retain the full request so it can be re-broadcast to a peer that
-				// attaches while this gate is still held — the M6 adoption
-				// re-surface (see [Daemon.pendingPermsForSession] and
+				// Record the route + retain the full request, and fan the
+				// gofer-native notification out, exactly once — recordPermRoute
+				// reports whether this observer is the FIRST to see the request, so
+				// an adopted session's standing permission watcher (see
+				// [Daemon.RequestPermission]) and this handler never double-fan when
+				// both observe the same event. For every non-adopted turn this
+				// handler is the sole observer, so first is always true and the
+				// behavior is unchanged. Retaining the request lets it re-broadcast
+				// to a peer that attaches while this gate is still held — the M6
+				// adoption re-surface (see [Daemon.pendingPermsForSession] and
 				// handleSessionLoad's replay).
-				d.recordPendingPerm(pe.ID, reqParams)
-				d.broadcastPermission(ctx, op.SessionID, methodGoferPermissionRequested, reqParams)
+				if d.recordPermRoute(pe.ID, op.SessionID) {
+					d.recordPendingPerm(pe.ID, reqParams)
+					d.broadcastPermission(ctx, op.SessionID, methodGoferPermissionRequested, reqParams)
+				}
 				// ALSO ask every attached ACP peer via the spec-ACP
 				// session/request_permission REQUEST, so a pure ACP client (a
 				// phone) can answer — the gofer-native notification above only
 				// serves gofer clients (the TUI/daemonbridge). First answer from
-				// EITHER surface wins at the session's gate.
+				// EITHER surface wins at the session's gate. Ungated: only this
+				// handler ever issues ACP requests (the standing watcher does not),
+				// so there is nothing to double.
 				pendingPermIDs = append(pendingPermIDs, pe.ID)
 				d.requestPermissionFromPeers(handlerCtx, op.SessionID, pe)
 				continue
 			case event.PermissionResolved:
 				d.clearPermRoute(pe.ID)
-				d.clearPendingPerm(pe.ID)
 				// Cancel the outstanding session/request_permission requests at
 				// every other peer now that the gate is resolved (by whichever
 				// surface answered first), so no daemon-side waiter dangles —
 				// mirroring this gofer/permission_resolved fanout's timing.
 				d.cancelPermRequest(pe.ID)
-				d.broadcastPermission(ctx, op.SessionID, methodGoferPermissionResolved, permissionResolvedParams{
-					SessionID: op.SessionID,
-					ID:        pe.ID,
-					Verdict:   string(pe.Verdict),
-					Rule:      pe.Rule,
-				})
+				// Fan the resolution out exactly once — clearPendingPerm reports
+				// whether the retained request was still present (the route is
+				// cleared eagerly in handlePermissionReply, so it is not a reliable
+				// dedup signal; the pending entry is dropped only here). For a
+				// single-observer turn this is always true, so behavior is unchanged.
+				if d.clearPendingPerm(pe.ID) {
+					d.broadcastPermission(ctx, op.SessionID, methodGoferPermissionResolved, permissionResolvedParams{
+						SessionID: op.SessionID,
+						ID:        pe.ID,
+						Verdict:   string(pe.Verdict),
+						Rule:      pe.Rule,
+					})
+				}
 				continue
 			}
 

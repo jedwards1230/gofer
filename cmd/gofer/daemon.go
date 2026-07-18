@@ -179,6 +179,7 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	// its own worker process. closeSup releases whichever was built.
 	var sup daemon.Supervisor
 	var closeSup func() error
+	var routerSup *router.Supervisor
 	if *workers {
 		// Each worker is spawned from THIS gofer binary (`gofer session-worker`),
 		// so the router needs its own executable path.
@@ -195,6 +196,7 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		if rerr != nil {
 			return fmt.Errorf("build router: %w", rerr)
 		}
+		routerSup = rsup
 		// The router links no SDK runner/loop and instruments no sessions itself
 		// — each worker owns its own telemetry — so there is no OnRegister hook
 		// here. tel is still built above and flushed on exit (a no-op with no
@@ -238,6 +240,12 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		DefaultModel: modelID,
 		Version:      version,
 		Logger:       logger,
+		// Under --workers, an adopted session's still-open permission is
+		// re-surfaced into the router by its standing watcher (recordPendingPerm);
+		// replaying it on session/load lets a client that attaches AFTER the
+		// re-surface still see and answer it (design §7). The in-process daemon
+		// leaves this false — its session/load is byte-for-byte unchanged.
+		ReplayPendingPermissionsOnAttach: *workers,
 		// Let gofer/models report per-model availability to remote clients: a
 		// phone ACP client can't see the daemon host's auth state, so the daemon
 		// resolves the logged-in providers here (the same store `gofer auth`
@@ -260,6 +268,16 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 			return authed, nil
 		},
 	})
+
+	// Bridge the router's adopted sessions into the daemon's permission fan-out
+	// (design §7): the daemon did not exist when router.New ran its adoption scan,
+	// so inject it now — this starts a standing permission watcher per adopted
+	// session that records call→session routes (so handlePermissionReply resolves
+	// for adopted sessions) and re-broadcasts their re-surfaced requests. In-process
+	// mode has no router and needs none.
+	if routerSup != nil {
+		routerSup.SetPermissionRelay(d)
+	}
 
 	// Install the interrupt handler around the whole serve loop: the daemon
 	// reads no interactive stdin, so there is no blocking-read-before-signal

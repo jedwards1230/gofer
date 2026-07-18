@@ -50,18 +50,38 @@
 // roster is still a usable router). Stale residue from crashed workers (dead pid,
 // or a dialed-refused socket) is garbage-collected in the same scan.
 //
+// # Permissions across a router restart (§7)
+//
+// An adopted session's turn runs on its worker, so — unlike a session a client
+// drives via session/prompt — no daemon prompt handler is watching its event
+// stream to record permission routes and fan requests out. The router bridges
+// that gap: after the daemon is constructed it injects a [daemon.PermissionRelay]
+// via [Supervisor.SetPermissionRelay], which starts a STANDING permission watcher
+// per adopted session. Each watcher subscribes to its reconstructed broker with
+// replay (so a request re-surfaced by Load is delivered) and drives the relay, so
+// the daemon records the call→session route (making handlePermissionReply resolve
+// for adopted sessions) and broadcasts the request to attached clients. A client
+// of the restarted router then attaches via session/load ([Supervisor.Resume]
+// returns the live snapshot for a session this router already hosts), sees the
+// re-surfaced request, and answers it — the reply routes through the daemon to
+// [Supervisor.Reply] and the worker's gate. So a turn blocked mid-approval
+// survives a router restart end to end.
+//
 // # Deliberate cuts for this slice (documented, not oversights)
 //
 //   - Wire-version SKEW routing — adopting an old-binary worker for the
 //     observe/reply/finish subset only (design §6) — is Phase 3. This slice
 //     leaves a version-skewed worker running detached but unadopted (it is not
 //     GC'd — it holds a live session — merely not routed to).
-//   - [Supervisor.Resume] returns [ErrResumeUnsupported]; spawning a fresh worker
-//     for an offline/old-binary session is Phase 4. A consequence for THIS slice:
-//     ACP session/load (which the daemon routes through Resume) fails cleanly for
-//     every session, so attach-via-load is unavailable — the working path is
-//     session/new + session/prompt (Create + Send), which is all crash isolation
-//     needs.
+//   - [Supervisor.Resume] attaches to a session this router already hosts LIVE
+//     (returning its snapshot, the §7 attach path above) but returns
+//     [ErrResumeUnsupported] for an OFFLINE id: spawning a fresh worker for an
+//     offline/old-binary session is Phase 4.
+//   - Asking a pure-ACP peer (a phone, via session/request_permission) to answer
+//     a RE-SURFACED permission on an adopted session is Phase 3: the standing
+//     watcher fans the gofer-native notification (serving the TUI/daemonbridge)
+//     and records the route so ANY client's routed reply resolves, but does not
+//     itself issue the spec-ACP request.
 //   - [Supervisor.EmitConfigOptions] returns [ErrEmitConfigUnsupported]: there is
 //     no wire method for a client to make a daemon emit config options, and it is
 //     off the crash-isolation critical path. The live config_option_update a model

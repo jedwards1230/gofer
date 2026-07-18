@@ -12,6 +12,8 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -169,13 +171,13 @@ func TestRestartMidApprovalSurvives(t *testing.T) {
 		t.Fatalf("worker session id %q != pinned %q", created.SessionID, pinnedID)
 	}
 
-	promptDone := make(chan error, 1)
 	go func() {
-		_, perr := clientA.Call(ctx, acp.MethodSessionPrompt, acp.PromptRequest{
+		// The driving prompt Call is severed below (clientA.Close) before it can
+		// return; its result is irrelevant — the turn survives on the worker.
+		_, _ = clientA.Call(ctx, acp.MethodSessionPrompt, acp.PromptRequest{
 			SessionID: pinnedID,
 			Prompt:    []acp.ContentBlock{acp.TextBlock("rm -rf /")},
 		})
-		promptDone <- perr
 	}()
 
 	select {
@@ -183,15 +185,31 @@ func TestRestartMidApprovalSurvives(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("worker never emitted the permission ask (turn not blocked on its gate)")
 	}
+	fake := <-fakeCh // the gatedSession the worker built for this turn
+
+	// SEVER the driving connection BEFORE adoption — the whole point of §7 is that
+	// the gate lives in the worker, not in any client connection.
+	_ = clientA.Close()
+
+	// Assert the gate SURVIVES the severance: the worker's pump still holds
+	// gatedSession.Prompt blocked on its gate, so no verdict has been delivered.
+	// (A turn tied to the client connection would have unwound to a cancelled
+	// resolution here.)
+	select {
+	case v := <-fake.verdicts:
+		t.Fatalf("gate resolved with %v after the driving connection was severed; it should still be held", v)
+	case <-time.After(300 * time.Millisecond):
+		// Still blocked — the gate survived the disconnect, as §7 requires.
+	}
 
 	// THE RESTART: a fresh router adopts the still-blocked worker by scan.
-	router, err := New(Config{Root: root, NewWorkerCmd: fauxWorkerSeam(root)})
+	rtr, err := New(Config{Root: root, NewWorkerCmd: fauxWorkerSeam(root)})
 	if err != nil {
 		t.Fatalf("router.New (adopting): %v", err)
 	}
-	t.Cleanup(func() { _ = router.Close() })
+	t.Cleanup(func() { _ = rtr.Close() })
 
-	h, ok := router.get(pinnedID)
+	h, ok := rtr.get(pinnedID)
 	if !ok {
 		t.Fatalf("adopting router did not adopt the blocked worker %s", pinnedID)
 	}
@@ -199,60 +217,69 @@ func TestRestartMidApprovalSurvives(t *testing.T) {
 		t.Errorf("adopted handle cmd = non-nil, want nil")
 	}
 
-	// The open request re-surfaces into the adopted handle's reconstructed broker
-	// (Load settled it; Subscribe replays the retained backlog).
-	sub, err := h.rec.Subscribe(ctx, pinnedID)
+	// Stand up the NEW router's OWN daemon (the router as its Supervisor) — a real
+	// ACP-over-WebSocket surface a real client connects to, exactly as production.
+	d := daemon.New(rtr, daemon.Config{
+		DefaultModel:                     "faux",
+		ReplayPendingPermissionsOnAttach: true,
+	})
+	srv := httptest.NewServer(d.Handler())
+	t.Cleanup(srv.Close)
+	newRouterAddr := strings.TrimPrefix(srv.URL, "http://")
+
+	// Client B is a REAL client of the NEW router's daemon. It attaches to the
+	// adopted session via session/load (the live attach path — Resume returns the
+	// live snapshot, so the peer joins the fan-out set) BEFORE the permission
+	// relay is wired, so the standing watcher's live broadcast reaches it.
+	clientB, err := daemon.Dial(ctx, newRouterAddr, "")
 	if err != nil {
-		t.Fatalf("subscribe adopted rec: %v", err)
+		t.Fatalf("dial new router daemon: %v", err)
 	}
-	defer sub.Close()
-
-	if !waitForResurfacedAsk(t, sub, pinnedID, callID) {
-		t.Fatal("open PermissionRequested did not re-surface into the adopted broker")
+	t.Cleanup(func() { _ = clientB.Close() })
+	askB := make(chan string, 4)
+	go func() {
+		for n := range clientB.Notifications() {
+			if n.Method == "gofer/permission_requested" {
+				var p struct {
+					ID string `json:"id"`
+				}
+				_ = json.Unmarshal(n.Params, &p)
+				askB <- p.ID
+			}
+		}
+	}()
+	if _, err := clientB.Call(ctx, acp.MethodSessionLoad, acp.LoadSessionRequest{SessionID: pinnedID, Cwd: t.TempDir()}); err != nil {
+		t.Fatalf("clientB session/load (attach to adopted session): %v", err)
 	}
 
-	// Reply through the NEW router — it forwards permission.reply to the worker,
-	// whose gate resolves and unblocks the turn.
-	if err := router.Reply(pinnedID, event.PermissionReply{ID: callID, Verdict: event.VerdictAllow}); err != nil {
-		t.Fatalf("router.Reply: %v", err)
+	// Wire the permission relay (F1): this starts the adopted session's standing
+	// watcher, which re-surfaces the open request into the daemon's route table +
+	// pending map and broadcasts it to attached peers — reaching clientB LIVE.
+	rtr.SetPermissionRelay(d)
+
+	select {
+	case id := <-askB:
+		if id != callID {
+			t.Errorf("clientB received re-surfaced ask for call %q, want %q", id, callID)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("F1 gap: the re-surfaced permission never reached a real client of the new router's daemon")
 	}
 
-	// The worker's gate must have acted on the allow, and the driving turn returns.
-	fake := <-fakeCh
+	// Answer through the DAEMON's handlePermissionReply — NOT router.Reply directly
+	// — proving the standing watcher recorded the call→session route so the reply
+	// resolves for an ADOPTED session.
+	if err := clientB.Notify(ctx, "permission.reply", map[string]any{"id": callID, "verdict": string(event.VerdictAllow)}); err != nil {
+		t.Fatalf("clientB permission.reply: %v", err)
+	}
+
+	// The reply must reach the worker's gate: gatedSession.Prompt acts on the allow.
 	select {
 	case v := <-fake.verdicts:
 		if v != event.VerdictAllow {
 			t.Errorf("gate resolved with verdict %v, want allow", v)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("reply routed through the new router never reached the worker's gate")
-	}
-	select {
-	case err := <-promptDone:
-		if err != nil {
-			t.Fatalf("driving session/prompt returned error after reply: %v", err)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("driving session/prompt did not return after the gate resolved")
-	}
-}
-
-// waitForResurfacedAsk drains sub until it observes the re-surfaced
-// PermissionRequested for sessionID/callID, or fails after a deadline.
-func waitForResurfacedAsk(t *testing.T, sub *event.Subscription, sessionID, callID string) bool {
-	t.Helper()
-	deadline := time.After(10 * time.Second)
-	for {
-		select {
-		case ev, ok := <-sub.C:
-			if !ok {
-				return false
-			}
-			if pr, isReq := ev.(event.PermissionRequested); isReq && pr.SessionID() == sessionID && pr.ID == callID {
-				return true
-			}
-		case <-deadline:
-			return false
-		}
+		t.Fatal("reply routed through the new router's daemon never reached the worker's gate")
 	}
 }

@@ -307,14 +307,25 @@ func (d *Daemon) peersForSession(sessionID string) []*peer {
 // recordPermRoute remembers that permission call id belongs to sessionID, so a
 // later permission.reply carrying only that id can be routed to the right
 // session's gate (see handlePermissionReply). Called as a permission.requested
-// is broadcast.
-func (d *Daemon) recordPermRoute(id, sessionID string) {
+// is broadcast. It returns whether this was the FIRST time id was routed (the
+// route was absent): a caller that ALSO broadcasts uses the bool to broadcast a
+// given request exactly once even when two observers see the same
+// PermissionRequested — the ordinary prompt handler AND an adopted session's
+// standing permission watcher (see [Daemon.RequestPermission]). Every existing
+// (single-observer) caller sees each call id exactly once, so first is always
+// true for them and their behavior is unchanged.
+func (d *Daemon) recordPermRoute(id, sessionID string) (first bool) {
 	d.permMu.Lock()
+	_, existed := d.permRoutes[id]
 	d.permRoutes[id] = sessionID
 	d.permMu.Unlock()
+	return !existed
 }
 
-// clearPermRoute drops id's route once its request has resolved.
+// clearPermRoute drops id's route. Idempotent: it runs both eagerly in
+// handlePermissionReply (to close the reply→resolved window) and again on the
+// PermissionResolved event, and may run from two observers of an adopted
+// session, so it must tolerate an already-absent route.
 func (d *Daemon) clearPermRoute(id string) {
 	d.permMu.Lock()
 	delete(d.permRoutes, id)
@@ -340,12 +351,19 @@ func (d *Daemon) recordPendingPerm(id string, params permissionRequestedParams) 
 	d.pendingPermsMu.Unlock()
 }
 
-// clearPendingPerm drops id's retained request once it has resolved. Called
-// alongside clearPermRoute.
-func (d *Daemon) clearPendingPerm(id string) {
+// clearPendingPerm drops id's retained request once it has resolved and reports
+// whether an entry was actually present. Unlike the route (cleared eagerly in
+// handlePermissionReply), the retained request is dropped ONLY on the
+// PermissionResolved event, so its presence is the reliable signal for
+// broadcasting a resolution exactly once across two observers of an adopted
+// session (the standing watcher and a concurrent prompt handler) — the
+// resolve-side counterpart of recordPermRoute's first bool.
+func (d *Daemon) clearPendingPerm(id string) (cleared bool) {
 	d.pendingPermsMu.Lock()
+	_, existed := d.pendingPerms[id]
 	delete(d.pendingPerms, id)
 	d.pendingPermsMu.Unlock()
+	return existed
 }
 
 // pendingPermsForSession snapshots every outstanding permission request for

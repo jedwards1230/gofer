@@ -133,6 +133,17 @@ type Supervisor struct {
 	workers map[string]*workerHandle
 	closed  bool
 
+	// permRelay bridges an adopted session's reconstructed permission stream back
+	// into the OUTER daemon's fan-out (route + broadcast), set once via
+	// [Supervisor.SetPermissionRelay] after the daemon is constructed (design §7).
+	// Nil until set — a router used without a daemon (some tests) simply runs no
+	// permission watchers. Guarded by mu.
+	permRelay daemon.PermissionRelay
+	// watcherWG joins every adopted-session permission watcher goroutine so Close
+	// returns leak-free (F4). Watchers exit when their broker closes (reap /
+	// Close) or reaperStop fires.
+	watcherWG sync.WaitGroup
+
 	// reaperStop is closed once by Close to wake every per-worker reaper WITHOUT
 	// killing its (detached) worker: a router shutdown deliberately abandons its
 	// workers, which reparent to pid 1 and keep running (design §3). A reaper
@@ -483,16 +494,19 @@ func (s *Supervisor) Close() error {
 	s.workers = make(map[string]*workerHandle)
 	s.mu.Unlock()
 
-	// Wake every reaper without killing its worker; a reaper blocked on a live
-	// worker's exit takes the reaperStop branch and returns, so reapWG.Wait never
-	// hangs on a detached worker that outlives us.
+	// Wake every reaper and permission watcher without killing any worker; a
+	// reaper blocked on a live worker's exit takes the reaperStop branch and
+	// returns, so reapWG.Wait never hangs on a detached worker that outlives us.
 	close(s.reaperStop)
 	s.reapWG.Wait()
 
 	// Release the router's own client connections (does NOT stop the workers).
+	// Closing each rec closes its broker, which closes every permission watcher's
+	// subscription so watcherWG.Wait below cannot hang.
 	for _, h := range handles {
 		_ = h.rec.Close()
 	}
+	s.watcherWG.Wait()
 	return s.store.Close()
 }
 

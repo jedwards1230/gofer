@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 
+	"github.com/jedwards1230/agent-sdk-go/event"
+
 	"github.com/jedwards1230/gofer/internal/daemon"
 	"github.com/jedwards1230/gofer/internal/wirestream"
 )
@@ -152,6 +154,83 @@ func (s *Supervisor) adoptWorker(entry daemon.WorkerEndpointEntry) bool {
 	return true
 }
 
+// SetPermissionRelay wires the OUTER daemon's permission fan-out into the router
+// and starts a STANDING permission watcher for every already-adopted session
+// (design §7, F1). It must be called once, after the daemon that hosts this
+// router is constructed and BEFORE it serves — the daemon does not exist yet at
+// [New] time (it takes this router as its Supervisor), so the bridge is injected
+// here rather than in the constructor.
+//
+// The gap it closes: an adopted session's turn runs on its worker, so no
+// [daemon] session/prompt handler is observing its event stream to record
+// permission routes and broadcast requests. Without a standing watcher a
+// re-surfaced (or newly asked) permission on an adopted session would never
+// reach the daemon's route table or its attached clients — invisible and
+// unanswerable. Each watcher subscribes to its session's reconstructed broker
+// WITH replay (so a still-open request re-surfaced by adoption's
+// [wirestream.Reconstructor.Load] is delivered) and drives the relay, so the
+// daemon records the call→session route (making handlePermissionReply resolve
+// for adopted sessions) and fans the request out exactly as the prompt handler
+// would.
+//
+// Only ADOPTED sessions get a watcher: a session this router CREATES has its
+// turns driven by a client's session/prompt, whose handler already performs the
+// fan-out. At the one call site (right after daemon construction, before serve)
+// every live handle is an adopted one, so iterating the roster here covers
+// exactly them. A nil relay, or a closed router, is a no-op.
+func (s *Supervisor) SetPermissionRelay(relay daemon.PermissionRelay) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if relay == nil || s.closed {
+		return
+	}
+	s.permRelay = relay
+	for _, h := range s.workers {
+		s.watcherWG.Add(1)
+		go s.watchPermissions(h, relay)
+	}
+}
+
+// watchPermissions is the standing per-adopted-session permission watcher
+// SetPermissionRelay starts. It subscribes to h's reconstructed broker WITH
+// replay and, for every permission event, drives the relay so the outer daemon's
+// route table and client fan-out track the worker's live gate state. It exits
+// when the broker closes (the handle was reaped, or the router shut down and
+// closed every rec) or reaperStop fires — so it never outlives its session and
+// is joined by [Supervisor.Close] via watcherWG.
+//
+// Using the replaying Subscribe is deliberate: a request re-surfaced by
+// adoption's Load is retained on the broker, and Subscribe replays it so the
+// watcher relays it even though it was published before the watcher existed. A
+// retained request that ALSO has a retained resolution replays as
+// requested-then-resolved, netting to a no-op (recorded then cleared) — only a
+// still-OPEN request stays routed, which is exactly the mid-approval state §7
+// must survive.
+func (s *Supervisor) watchPermissions(h *workerHandle, relay daemon.PermissionRelay) {
+	defer s.watcherWG.Done()
+	sub, err := h.rec.Subscribe(context.Background(), h.id)
+	if err != nil {
+		return // reconstructor already closed (handle reaped before the watcher started)
+	}
+	defer sub.Close()
+	for {
+		select {
+		case ev, ok := <-sub.C:
+			if !ok {
+				return // broker closed: session gone or router shutting down
+			}
+			switch pe := ev.(type) {
+			case event.PermissionRequested:
+				relay.RequestPermission(h.id, pe)
+			case event.PermissionResolved:
+				relay.ResolvePermission(h.id, pe)
+			}
+		case <-s.reaperStop:
+			return
+		}
+	}
+}
+
 // wireVersionCompatible reports whether the router can adopt a worker
 // advertising router↔worker wire version workerWire. This slice supports only
 // the router's OWN wire version ([daemon.WireVersion]) — N-0 full; the
@@ -168,8 +247,17 @@ func wireVersionCompatible(workerWire int) bool {
 // The returned channel mirrors daemon.Reap's contract ([Supervisor.reap] selects
 // on it identically for spawned and adopted handles): buffered cap 1 so the send
 // completes even after the router has stopped caring at shutdown, exactly one
-// value ever sent. The goroutine always exits — client.Done is closed at most
-// once, on connection drop or Close — so it never leaks.
+// value ever sent.
+//
+// F4 — goroutine lifetime: the spawned goroutine blocks only on client.Done,
+// which the [daemon.Client] read loop closes exactly once and unconditionally
+// when the connection ends — either the worker died, or teardown ([Supervisor.reap]
+// or [Supervisor.Close]) called rec.Close, which closes the client. So it always
+// terminates; it is deliberately NOT joined by a WaitGroup (unlike the permission
+// watchers) because its single blocking receive on an always-closed channel
+// cannot outlive the handle's client, and the buffered send never blocks — there
+// is nothing for a join to wait on that closing the client does not already
+// guarantee.
 func adoptedWait(client *daemon.Client) <-chan error {
 	ch := make(chan error, 1)
 	go func() {
@@ -187,6 +275,14 @@ func adoptedWait(client *daemon.Client) <-chan error {
 // already exited is not an error (the reaper reconciles the handle regardless).
 // The single kill seam both [Supervisor.Kill] and [Supervisor.Archive] use so
 // neither nil-derefs an adopted handle's absent cmd.
+//
+// F3 — pid-reuse caveat: the adopted path signals a pid the router did not
+// spawn, so if that worker already exited and the OS recycled its pid, the
+// SIGKILL could land on an unrelated process. This is the inherent, accepted
+// hazard of holding a worker only by its advertised pid; it is bounded in
+// practice (the router still holds a live socket to the worker, and Kill/Archive
+// first ask the worker over that socket to wind down, so a recycled pid means
+// the socket was already dead and the handle about to be reaped anyway).
 func killHandleProcess(h *workerHandle) {
 	if h.cmd != nil {
 		if h.cmd.Process != nil {

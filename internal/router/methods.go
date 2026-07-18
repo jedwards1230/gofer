@@ -112,11 +112,24 @@ func (s *Supervisor) EmitConfigOptions(string, []event.ConfigOption) error {
 	return ErrEmitConfigUnsupported
 }
 
-// Resume is unsupported in worker mode: spawning a fresh worker for an offline or
-// old-binary session is Phase 4 of M6 (see [ErrResumeUnsupported]). The daemon's
-// session/load handler surfaces this as a clean application error rather than
-// panicking.
-func (s *Supervisor) Resume(context.Context, string, supervisor.ResumeOptions) (supervisor.SessionInfo, error) {
+// Resume attaches to a session this router already hosts LIVE (adopted or
+// created): it returns a minimal live snapshot so the daemon's session/load
+// handler succeeds and registers the calling peer in the session's fan-out set.
+// That attach path is what lets a client of a restarted router SEE and answer an
+// adopted session's re-surfaced permission (design §7): handleSessionLoad only
+// needs Resume to succeed (it reads History and replays pending permissions
+// separately), so a snapshot carrying just the id + Live is sufficient.
+//
+// Spawning a FRESH worker for an OFFLINE (or old-binary) session — the other
+// meaning of resume — remains Phase 4: an id with no live handle returns
+// [ErrResumeUnsupported], which the daemon surfaces as a clean application error.
+func (s *Supervisor) Resume(ctx context.Context, id string, _ supervisor.ResumeOptions) (supervisor.SessionInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return supervisor.SessionInfo{}, err
+	}
+	if _, ok := s.get(id); ok {
+		return supervisor.SessionInfo{ID: id, Live: true}, nil
+	}
 	return supervisor.SessionInfo{}, ErrResumeUnsupported
 }
 
@@ -218,6 +231,15 @@ func (s *Supervisor) History(ctx context.Context, id string) ([]provider.Message
 
 	j, err := store.Open(ctx, id)
 	if err != nil {
+		// A LIVE session whose journal is not on disk yet (a just-adopted or
+		// just-spawned worker that has not written its first entry) has no folded
+		// history to replay — return empty rather than failing session/load's
+		// attach, which §7 needs to succeed for an adopted session so a client can
+		// see and answer its re-surfaced permission. An OFFLINE id with no journal
+		// is a genuine not-found and still errors.
+		if _, live := s.get(id); live && errors.Is(err, session.ErrSessionNotFound) {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("router: history %s: %w", id, err)
 	}
 	return j.Fold(), nil

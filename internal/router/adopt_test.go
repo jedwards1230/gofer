@@ -2,12 +2,17 @@ package router
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 	"github.com/google/uuid"
 
 	"github.com/jedwards1230/gofer/internal/daemon"
@@ -158,6 +163,123 @@ func TestAdoptGCsStaleArtifacts(t *testing.T) {
 	}
 	if _, statErr := os.Stat(sockPath); !errors.Is(statErr, os.ErrNotExist) {
 		t.Errorf("stale socket %s not GC'd during the scan (stat err = %v)", sockPath, statErr)
+	}
+}
+
+// fakeHelloResponder handles a single gofer/hello request and returns the
+// response object to send back (a JSON-RPC result or error keyed by reqID), or
+// nil to send nothing (simulating an unresponsive worker).
+type fakeHelloResponder func(reqID json.RawMessage) any
+
+// startFakeWorker binds a worker unix socket for id, writes a WIRE-COMPATIBLE
+// endpoint file (so the pre-dial hint passes and the decision reaches the
+// post-dial gofer/hello check), and serves a minimal JSON-RPC-over-WebSocket
+// endpoint that answers gofer/hello via respond. It is the seam for the §4
+// post-dial matrix rows (a live pid + dialable socket whose handshake fails or
+// skews), which a real worker — always speaking the router's own wire — cannot
+// reproduce.
+func startFakeWorker(t *testing.T, id string, respond fakeHelloResponder) {
+	t.Helper()
+	sockPath, err := daemon.WorkerSocketPath(id)
+	if err != nil {
+		t.Fatalf("WorkerSocketPath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
+		t.Fatalf("mkdir workers dir: %v", err)
+	}
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen unix %s: %v", sockPath, err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = c.CloseNow() }()
+		for {
+			var env struct {
+				Method string          `json:"method"`
+				ID     json.RawMessage `json:"id"`
+			}
+			if err := wsjson.Read(r.Context(), c, &env); err != nil {
+				return
+			}
+			if env.Method == "gofer/hello" {
+				if resp := respond(env.ID); resp != nil {
+					_ = wsjson.Write(r.Context(), c, resp)
+				}
+			}
+		}
+	})}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close(); _ = ln.Close() })
+
+	writeEndpoint(t, id, os.Getpid(), daemon.WireVersion, "unix://"+sockPath)
+}
+
+// jsonRPCResult builds a JSON-RPC success response object for reqID.
+func jsonRPCResult(reqID json.RawMessage, result any) any {
+	return map[string]any{"jsonrpc": "2.0", "id": reqID, "result": result}
+}
+
+// jsonRPCError builds a JSON-RPC error response object for reqID.
+func jsonRPCError(reqID json.RawMessage, code int, msg string) any {
+	return map[string]any{"jsonrpc": "2.0", "id": reqID, "error": map[string]any{"code": code, "message": msg}}
+}
+
+// TestAdoptPostDialFailureMatrix covers the §4 rows that need a LIVE, dialable
+// worker socket whose handshake misbehaves: gofer/hello returning an error
+// (unresponsive/degraded), and gofer/hello reporting a skewed wire version. Both
+// are LEFT unadopted and — unlike the stale/dead cases — their artifacts are NOT
+// GC'd: the pid is live and the worker holds a real session, so a future
+// skew-aware router (Phase 3) can still reach it.
+func TestAdoptPostDialFailureMatrix(t *testing.T) {
+	tests := []struct {
+		name    string
+		respond fakeHelloResponder
+	}{
+		{
+			name: "gofer/hello error leaves the worker unadopted",
+			respond: func(reqID json.RawMessage) any {
+				return jsonRPCError(reqID, -32000, "worker degraded")
+			},
+		},
+		{
+			name: "post-dial wire-version skew leaves the worker unadopted",
+			respond: func(reqID json.RawMessage) any {
+				return jsonRPCResult(reqID, daemon.HelloResult{
+					BinaryVersion:      "future",
+					WireVersion:        daemon.WireVersion + 1,
+					ACPProtocolVersion: 1,
+				})
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			shortRuntimeDir(t)
+			root := t.TempDir()
+			id := uuid.Must(uuid.NewV7()).String()
+			startFakeWorker(t, id, tc.respond)
+
+			sup, err := New(Config{Root: root, NewWorkerCmd: fauxWorkerSeam(root)})
+			if err != nil {
+				t.Fatalf("router.New: %v", err)
+			}
+			t.Cleanup(func() {
+				killWorkers(sup)
+				_ = sup.Close()
+			})
+
+			if _, ok := sup.get(id); ok {
+				t.Errorf("session %s adopted despite a failing/skewed handshake", id)
+			}
+			// LEAVE, do NOT GC: the live worker keeps its endpoint for a future router.
+			if !endpointExists(t, id) {
+				t.Errorf("endpoint for %s was GC'd; a live-but-unadoptable worker must be left in place", id)
+			}
+		})
 	}
 }
 
