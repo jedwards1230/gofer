@@ -257,6 +257,24 @@ func handleSessionNew(d *Daemon, ctx context.Context, _ *peer, params json.RawMe
 	if req.Model != "" {
 		model = req.Model
 	}
+	// Enforce the optional live-session cap (0 = unlimited, the default — so
+	// this whole block is skipped for an ordinary `gofer daemon` and every
+	// existing test). A worker (M6) runs MaxSessions=1 to be a single-session
+	// daemon. The count is the live roster length.
+	//
+	// Benign TOCTOU: two concurrent session/new calls could each read a count
+	// below the cap and both Create, briefly exceeding it. Acceptable for the
+	// single-worker use — a worker is driven by one router serially and never
+	// races its own session/new — so no lock is taken across the check+Create.
+	if d.cfg.MaxSessions > 0 {
+		live, err := d.sup.Roster(ctx)
+		if err != nil {
+			return nil, appError(err)
+		}
+		if len(live) >= d.cfg.MaxSessions {
+			return nil, appError(fmt.Errorf("session limit reached (max %d)", d.cfg.MaxSessions))
+		}
+	}
 	info, err := d.sup.Create(ctx, "", supervisor.CreateOptions{Cwd: cwd, Model: model})
 	if err != nil {
 		return nil, appError(err)
