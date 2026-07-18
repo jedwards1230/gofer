@@ -12,8 +12,6 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-
-	"github.com/jedwards1230/gofer/internal/supervisor"
 )
 
 // DefaultListenAddr is the loopback address [Daemon] binds when
@@ -93,10 +91,12 @@ type Config struct {
 	AuthedProviders func() (map[string]bool, error)
 }
 
-// Daemon hosts a [supervisor.Supervisor] behind an ACP-over-WebSocket
-// listener. See the package doc for the transport and streaming contract.
+// Daemon hosts a [Supervisor] behind an ACP-over-WebSocket listener. See the
+// package doc for the transport and streaming contract. The hosted registry is
+// the interface, not the concrete *[supervisor.Supervisor], so the same surface
+// can front a remote proxy (the M6 router→worker relationship).
 type Daemon struct {
-	sup *supervisor.Supervisor
+	sup Supervisor
 	cfg Config
 	log *slog.Logger
 
@@ -150,8 +150,9 @@ type Daemon struct {
 
 // New builds a Daemon around sup. It does not start listening — call Serve
 // (or mount Handler on a caller-owned server, e.g. httptest.NewServer for
-// tests).
-func New(sup *supervisor.Supervisor, cfg Config) *Daemon {
+// tests). sup is any [Supervisor]; the in-process *[supervisor.Supervisor] is
+// the usual one.
+func New(sup Supervisor, cfg Config) *Daemon {
 	if cfg.ListenAddr == "" {
 		cfg.ListenAddr = DefaultListenAddr
 	}
