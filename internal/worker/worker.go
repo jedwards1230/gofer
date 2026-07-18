@@ -118,8 +118,14 @@ type Options struct {
 	// DefaultModel is the model a session/new resolves to when the client
 	// supplies none — forwarded verbatim into daemon.Config.DefaultModel.
 	DefaultModel string
-	// Version stamps the handshake's Version field (see [Handshake]). Empty
-	// omits it.
+	// Version is the worker's build version (cmd/gofer's effectiveVersion). It
+	// stamps all three of the worker's version advertisements: the handshake
+	// line's Version (see [Handshake]), the endpoint file's BinaryVersion (the
+	// router's cheap pre-dial hint), and gofer/hello's binaryVersion (the
+	// authoritative in-protocol handshake the router classifies skew from,
+	// design §6). Empty omits it from the handshake and reports an empty
+	// binaryVersion — which a router classifies as unknown-but-adoptable rather
+	// than failing.
 	Version string
 	// Logger receives the worker's structured logs. Nil discards them. Logs go
 	// to stderr in the cmd wiring; they must never reach Stdout, which carries
@@ -245,7 +251,13 @@ func Serve(ctx context.Context, opts Options) error {
 		ListenAddr:   socketPath,
 		DefaultModel: opts.DefaultModel,
 		MaxSessions:  1, // a worker IS a single-session daemon (M6)
-		Logger:       logger,
+		// The worker's build version, reported verbatim as gofer/hello's
+		// binaryVersion — the AUTHORITATIVE half of the M6 §6 version exchange
+		// (the endpoint file above is only the cheap pre-dial hint). Without it
+		// the handshake would report an empty binaryVersion and the router could
+		// never tell an old-binary worker from its own.
+		Version: opts.Version,
+		Logger:  logger,
 		// Re-surface a still-open permission request to a router that adopts this
 		// worker mid-approval: the adopting router attaches via session/load, and
 		// the outstanding gate (live in-flight state, not journaled) reaches it

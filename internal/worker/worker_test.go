@@ -177,6 +177,27 @@ func TestWorkerServeHandshakeAndSingleSession(t *testing.T) {
 		}
 	}()
 
+	// gofer/hello is the AUTHORITATIVE version exchange (design §6): it must
+	// echo the worker's own build version, not an empty string — the router
+	// classifies binary skew from exactly this field.
+	helloCtx, helloCancel := context.WithTimeout(ctx, 5*time.Second)
+	hello, err := c.Hello(helloCtx)
+	helloCancel()
+	if err != nil {
+		t.Fatalf("gofer/hello: %v", err)
+	}
+	if hello.BinaryVersion != "test-version" {
+		t.Errorf("hello BinaryVersion = %q, want %q (Options.Version must reach daemon.Config.Version)", hello.BinaryVersion, "test-version")
+	}
+	if hello.WireVersion != daemon.WireVersion {
+		t.Errorf("hello WireVersion = %d, want %d", hello.WireVersion, daemon.WireVersion)
+	}
+	// The endpoint file's pre-dial hint must agree with the authoritative
+	// handshake, or a router's cheap check and its real check would disagree.
+	if ep.BinaryVersion != hello.BinaryVersion {
+		t.Errorf("endpoint BinaryVersion = %q, want the handshake's %q", ep.BinaryVersion, hello.BinaryVersion)
+	}
+
 	newRes, err := c.Call(ctx, acp.MethodSessionNew, acp.NewSessionRequest{Cwd: t.TempDir()})
 	if err != nil {
 		t.Fatalf("session/new: %v", err)
