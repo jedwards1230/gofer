@@ -49,7 +49,9 @@ would need it unchanged.
 - **Daemon ACP surface stays spec-general.** Clients are many — phone app,
   editor, web later — so the daemon speaks generic ACP with no client-specific
   behavior, ever. A client identifies itself for display, never to unlock a
-  code path.
+  code path. M5 operationalizes this by pushing the emitted surface up to ACP
+  v1 conformance under a promote-if-stable policy — see
+  [ACP v1 featureset expansion](#acp-v1-featureset-expansion-m5).
 - **Approvals are the thesis; containment complements them.** Supervision —
   approvals reaching your phone — is the product; the sandbox reduces how often
   a human is asked, it never replaces the human gate.
@@ -77,9 +79,9 @@ gofer daemon install|uninstall|status   # launchd/systemd unit for the daemon (M
 gofer acp serve             # ACP over stdio (editors, stdio→ws bridges)
 gofer ps [--all]            # roster (--all includes archived; later: fleet)
 gofer kill|archive <id>     # stop running / clear finished (journal kept)
-gofer skills|plugins        # list what's composed; `plugins install <module>` (M5)
-gofer import claude         # idempotent import of CC skills/commands (M6)
-                            #   (settings.json permissions via the vendor-format adapter, M6)
+gofer skills|plugins        # list what's composed; `plugins install <module>` (M6)
+gofer import claude         # idempotent import of CC skills/commands (M7)
+                            #   (settings.json permissions via the vendor-format adapter, M7)
 gofer doctor                # providers, LSP servers on PATH, daemon, sandbox
 gofer config get|set …      # global or project config
 ```
@@ -122,7 +124,7 @@ Event-sourced JSONL journals (SDK). `kill` = interrupt + terminate a running
 session; `archive` = drop a finished one from the roster. **Journals are never
 deleted** — both emit must-deliver events (`session.killed` / `.archived`).
 
-## Auto mode pipeline (M3 → M6)
+## Auto mode pipeline (M3 → M7)
 
 Contain before you classify · fail closed · no local SLM.
 
@@ -145,11 +147,11 @@ fallback shipped in M3** (`internal/sandbox` + the `RuleGuard`/`Gate` relay): an
 allow-matched call runs contained when the host can contain it, and a call the
 host cannot contain (no sandbox runtime, or a non-containable tool) escalates to
 a human approval that reaches every attached client — never silently blocked,
-never run uncontained (decided 2026-07-13). The ③ LLM reviewer is M6. The reviewer is one
+never run uncontained (decided 2026-07-13). The ③ LLM reviewer is M7. The reviewer is one
 more SDK loop invocation with a different system prompt. Stage ① is a
 format-agnostic rule engine over typed rules; vendor rule formats (Claude Code
 `settings.json`, native YAML) are import adapters that land with the
-vendor-format work (M6).
+vendor-format work (M7).
 
 ## On-disk layout & config precedence
 
@@ -209,8 +211,51 @@ phone-home.
 | **M2 · the daemon** ✅ shipped 2026-07-13 | supervisor + roster + overview⇄peek⇄attach + native ACP | an ACP client on a phone drives a session on a laptop |
 | **M3 · guardrails** ✅ shipped 2026-07-14 | **① daemon session→peers fan-out registry** (every registered peer gets every `session/update`; echo/dedup so prompts don't double-render) → **② sandbox** (seatbelt / bwrap+seccomp) → **③ approvals relay + phone approval UX**; then headless exec, daemon-as-service ([#42](https://github.com/jedwards1230/gofer/issues/42), first-use install prompt), lossless attach (daemonbridge reconstruction → lossless path), OTel | a phone approves a laptop tool call; a TUI attached to the same session watches the turn stream live |
 | **M4 · command views** ✅ shipped 2026-07-15 | slash dispatcher + command panel (`/status`, `/config`, `/model`) + autocomplete + settings registry (`config.Save`) + a TUI redesign wave (global header, bottom-anchored layout, mouse-wheel scroll, cursor-aware input, click-drag selection + OSC 52 copy) | an operator opens `/status`/`/config`/`/model` from the dispatcher and swaps a session's model without leaving the TUI |
-| M5 · ecosystem | MCP on by default (tool-search index-first) + subagents first-class (roster tree, peek/attach into children, linked journals) + skills + plugin UX | a third-party plugin adds a tool with one config line |
-| M6 · auto + polish | auto mode (reviewer pipeline), CC-asset import, mDNS pairing | auto mode survives a week of real ops without a bad allow |
+| **M5 · ACP v1 featureset expansion** ⏳ next | cross-repo ACP conformance push (SDK models the blocks, gofer emits them, Agmente decodes) driven by the [conformance matrix](https://wiki.lilbro.cloud/home/projects/acp-conformance-matrix): `usage_update` on `session/update` (SDK v0.6.0 pass-through, [#97](https://github.com/jedwards1230/gofer/pull/97), merged) → rich content/tool-call blocks (plumbed, dormant) → session methods (`session/list`, resume, `set_config_option`, `cwd`) → model discovery + `set_model` → capability stretch (`session_info_update`, `plan`, `available_commands_update`/`current_mode_update`/`config_option_update`). Detail: [ACP v1 featureset expansion](#acp-v1-featureset-expansion-m5) | an ACP client renders live token cost, tool-call blocks, and a model picker — all off the daemon's spec-general `session/update` surface, no client-specific path |
+| M6 · ecosystem | MCP on by default (tool-search index-first) + subagents first-class (roster tree, peek/attach into children, linked journals) + skills + plugin UX | a third-party plugin adds a tool with one config line |
+| M7 · auto + polish | auto mode (reviewer pipeline), CC-asset import, mDNS pairing | auto mode survives a week of real ops without a bad allow |
+
+## ACP v1 featureset expansion (M5)
+
+M5 operationalizes the **"daemon ACP surface stays spec-general"** tenet: rather
+than growing a bespoke gofer dialect, it pushes the daemon's emitted surface up
+to ACP v1 conformance wherever the spec is stable, and keeps only what the spec
+can't yet express as gofer-native. The work is cross-repo and matrix-driven —
+the SDK models the blocks, gofer emits them, Agmente decodes — tracked in the
+[ACP conformance matrix](https://wiki.lilbro.cloud/home/projects/acp-conformance-matrix).
+
+**Promote-if-stable policy.** A capability rides the *standard* ACP surface the
+moment a STABLE spec variant exists (`schema/v1/schema.json`); until then it
+stays gofer-native, and it migrates on its own schedule when the spec surface
+stabilizes. Applied:
+
+- `usage_update` — **promoted.** Now flows on gofer's ACP `session/update`
+  surface as a straight **pass-through** of the SDK's `acp.ToSessionUpdate`
+  (agent-sdk-go v0.6.0). No gofer-side shaping — the daemon relays the SDK's
+  spec-shaped update verbatim.
+- `set_model` — **stays gofer-native.** The real spec surface (`providers/*`)
+  is unstable, so model selection remains a gofer-native op rather than a
+  half-baked spec method.
+- Model discovery — **gofer-native list-models endpoint** feeds the
+  `session/new` model picker; migrates to the unstable `providers/list` only
+  once that stabilizes.
+- `gofer/event` — **permanently native.** gofer-internal telemetry that has no
+  spec analogue and isn't meant to have one.
+
+**Vertical slices, by state:**
+
+1. **`usage_update`** — SDK ✅ + gofer ✅ ([#97](https://github.com/jedwards1230/gofer/pull/97),
+   merged; agent-sdk-go v0.6.0). Agmente decode is the remaining leg.
+2. **Rich content / tool-call blocks** — **plumbed but dormant.** The types are
+   modeled in the SDK and pass through gofer untouched, but no producer emits
+   them yet, so no client renders them. M5 adds the producers (gofer emits) and
+   the client render.
+3. **Session methods** — `session/list`, resume, `set_config_option`, `cwd`.
+4. **Model discovery + `set_model`** — the native list-models endpoint + the
+   picker; `set_model` stays gofer-native per the policy above.
+5. **Capability stretch** (net-new) — `session_info_update` (session titles),
+   `plan`, and the `available_commands_update` / `current_mode_update` /
+   `config_option_update` surface.
 
 ## Fleet & multi-machine (design-ahead)
 
@@ -221,7 +266,7 @@ rosters; attach is transparent because the Event/Op stream is the same bytes
 locally or remote. Remote transport carries identity (TLS fingerprint in the
 beacon, rendezvous-issued tokens) from day one.
 
-*Open question (decide at M6)*: rendezvous protocol — leaning native-contract
+*Open question (decide at M7)*: rendezvous protocol — leaning native-contract
 passthrough, terminating ACP at each daemon (ACP is a projection; tunneling it
 would double-encode).
 

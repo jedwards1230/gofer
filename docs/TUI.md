@@ -386,9 +386,9 @@ compaction entries, HEAD) share a single row renderer. Fork/branch/compact
 are first-class: the session is an append-only tree and context is
 fold(root→head), so a "what if" fork costs nothing.
 
-## Subagent sessions (M5, not yet built)
+## Subagent sessions (M6, not yet built)
 
-Design intent only — lands with M5's subagents-first-class work. A subagent
+Design intent only — lands with M6's subagents-first-class work. A subagent
 is **not a black box within a turn** — it is a real child session
 with its own journal, cost, and transcript, linked to its parent
 (`session.spawned` event + `parent_id`; depth ≤ 5). The overview renders the
@@ -618,7 +618,7 @@ Config)` — indented JSON, mode 0600,
 atomic (temp file + rename). `settings.go` adds the setting registry: a
 `[]Setting{Key, Label, Kind, Options, Get(Config), Set(Config, val) Config}`
 table parallel to the command registry, namespaced (`session.*`, `tui.*`,
-`telemetry.*`, and — once plugin loading lands in M5 — `plugin.<name>.*`
+`telemetry.*`, and — once plugin loading lands in M6 — `plugin.<name>.*`
 without a schema change) so adding a setting is one row; `Kind` picks the edit
 affordance (bool/enum/string). `config_view.go` is the real `/config` body: a
 search list (`Search settings…` filter box, `Label … value` rows) where ↓/Enter
