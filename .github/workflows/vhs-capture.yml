@@ -6,9 +6,10 @@
 # Rendered PNGs are committed to a per-PR, append-only capture branch
 # `vhs-captures-pr-<n>`, branched from `main` so `main...vhs-captures-pr-<n>`
 # is a clean image-only diff. One commit is appended per render (stable SHAs),
-# and a single sticky PR comment indexes them: a "latest" image-diff link plus
-# a per-commit table with frame-change counts. The human PR branch stays clean
-# — no image blobs, no embedded screenshots.
+# and a single sticky PR comment indexes them: a "latest" image-diff link, a
+# per-commit table with frame-change counts, and a collapsed <details> preview
+# of the latest frames (served from the capture branch). The human PR branch
+# stays clean — no image blobs committed to it.
 #
 # This is NOT a required check (own file, never gates merge). Fork PRs get a
 # read-only token, so they degrade to an artifact upload instead of a
@@ -159,6 +160,23 @@ jobs:
                 frames="$(printf '%s, ' "${parts[@]}")"; frames="${frames%, }"
                 echo "| [\`${short}\`](${repo_url}/commit/${sha}) | ${when} | ${frames} |"
               done
+              echo
+              # Inline preview of the latest batch, collapsed by default so the
+              # PR stays compact. Images render from the committed PNGs on the
+              # capture branch (raw.githubusercontent at the latest commit SHA)
+              # — nothing lands on the PR branch itself. An agent fetching the
+              # comment body still loads the ![](…) images inside the details.
+              raw_base="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${latest}/vhs/snapshots"
+              echo "<details>"
+              echo "<summary>🎞️ Latest frames — <code>${latest:0:7}</code> (${#pngs[@]})</summary>"
+              echo
+              while IFS= read -r name; do
+                echo "**${name}**"
+                echo
+                echo "![${name}](${raw_base}/${name})"
+                echo
+              done < <(printf '%s\n' "${pngs[@]##*/}" | sort)
+              echo "</details>"
               echo
               echo "<sub>Frames are committed PNGs on \`${CAP_BRANCH}\` (motion GIFs stay CI artifacts). Diff any commit against \`main\` for a side-by-side. Regenerated on each push; the branch is deleted when the PR closes.</sub>"
             } > body.md

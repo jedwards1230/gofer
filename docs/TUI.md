@@ -568,9 +568,10 @@ frame comes from the same ubuntu-latest render environment:
 - **Per-PR captures** — `.github/workflows/vhs-capture.yml` renders on PRs and
   appends the frames to an append-only `vhs-captures-pr-<n>` branch, branched
   from `main` so `main...vhs-captures-pr-<n>` is a clean image-only diff. A
-  single sticky PR comment indexes the renders (a "latest" diff link plus a
-  per-commit table with frame-change counts) — the PR branch itself stays free
-  of image blobs. The branch is deleted when the PR closes
+  single sticky PR comment indexes the renders (a "latest" diff link, a
+  per-commit table with frame-change counts, and a collapsed preview of the
+  latest frames served from the capture branch) — the PR branch itself stays
+  free of image blobs. The branch is deleted when the PR closes
   (`vhs-capture-cleanup.yml`); fork PRs degrade to a `vhs-frames` artifact.
 
 The shared render step (install VHS → render → sync `vhs/snapshots/`) lives in
