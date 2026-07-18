@@ -75,6 +75,12 @@ type Config struct {
 	// provider's model) before constructing Config; the daemon does not
 	// re-derive it.
 	DefaultModel string
+	// Version is the daemon's build version (cmd/gofer's effectiveVersion()),
+	// surfaced verbatim as gofer/hello's binaryVersion so a router/peer can
+	// detect version skew in-band (design §6). Empty ("") when a caller does not
+	// set it — hello then reports an empty binaryVersion rather than failing, the
+	// same "unknown → skip" posture the Endpoint.Version skew check takes.
+	Version string
 	// Logger receives the daemon's structured logs (connection lifecycle,
 	// per-request outcome, session lifecycle — see the package doc's Logging
 	// section). Nil defaults to a discarding logger in [New], so embedders and

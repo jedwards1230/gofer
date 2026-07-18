@@ -196,6 +196,7 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		ListenAddr:   *listen,
 		BearerToken:  bearerToken,
 		DefaultModel: modelID,
+		Version:      version,
 		Logger:       logger,
 		// Let gofer/models report per-model availability to remote clients: a
 		// phone ACP client can't see the daemon host's auth state, so the daemon
