@@ -250,12 +250,3 @@ func TestModelDescriptionLineFormat(t *testing.T) {
 		t.Fatalf("modelDescriptionLine(%q) = %q, want %q", "claude-sonnet-5", got, want)
 	}
 }
-
-// TestModelDisplayNameFallsBackToID covers a model id absent from
-// modelDisplayNames (a newly registered SDK model gofer hasn't labeled yet):
-// it falls back to the raw id rather than an empty name.
-func TestModelDisplayNameFallsBackToID(t *testing.T) {
-	if got := modelDisplayName("some-future-model"); got != "some-future-model" {
-		t.Fatalf("modelDisplayName(unregistered) = %q, want the raw id", got)
-	}
-}

@@ -30,33 +30,9 @@ import (
 
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
+	"github.com/jedwards1230/gofer/internal/modelmeta"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
-
-// modelDisplayNames is gofer's own short display name per model id, keyed by
-// the SDK catalog's id — provider.Lookup carries limits/pricing but no
-// friendly name (docs/projects/gofer-m4-command-views-plan.md §4a). A model
-// id absent from this table (a newly registered SDK model gofer hasn't
-// labeled yet) falls back to the raw id, never a blank name.
-var modelDisplayNames = map[string]string{
-	"claude-fable-5":   "Fable 5",
-	"claude-opus-4-8":  "Opus 4.8",
-	"claude-sonnet-5":  "Sonnet 5",
-	"claude-haiku-4-5": "Haiku 4.5",
-	"gpt-5":            "GPT-5",
-	"gpt-5-mini":       "GPT-5 mini",
-	"gpt-5-nano":       "GPT-5 nano",
-	"o4-mini":          "o4-mini",
-}
-
-// modelDisplayName returns id's short display name, falling back to id
-// itself when the model isn't in [modelDisplayNames].
-func modelDisplayName(id string) string {
-	if name, ok := modelDisplayNames[id]; ok {
-		return name
-	}
-	return id
-}
 
 // modelRow is one flattened row in the picker's provider-grouped list.
 type modelRow struct {
@@ -142,13 +118,13 @@ func (v modelPickerView) rowLine(i int, r modelRow, isActive bool) string {
 }
 
 // modelDescriptionLine renders one model's display line: its short name (or
-// raw id, see [modelDisplayName]) plus context window and per-Mtok pricing
+// raw id, see [modelmeta.DisplayName]) plus context window and per-Mtok pricing
 // derived from provider.Lookup, e.g. "Sonnet 5 (claude-sonnet-5) · 1M
 // context · $3/$15 per Mtok". A model id the catalog doesn't recognize (not
 // reachable via rows(), which only ever lists provider.Models() ids, but
 // defensive regardless) renders as the bare display name.
 func modelDescriptionLine(id string) string {
-	name := modelDisplayName(id)
+	name := modelmeta.DisplayName(id)
 	info, ok := provider.Lookup(id)
 	if !ok {
 		return fmt.Sprintf("%s (%s)", name, id)

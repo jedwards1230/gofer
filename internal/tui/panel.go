@@ -20,6 +20,7 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
 	"github.com/jedwards1230/gofer/internal/config"
+	"github.com/jedwards1230/gofer/internal/modelmeta"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
 
@@ -352,7 +353,7 @@ func (a App) handleModelSelect() (tea.Model, tea.Cmd) {
 	sess := a.panel.model.sess
 	if sess == nil {
 		// The overview: no running session to swap, only the default.
-		a.status = "Default model set to " + modelDisplayName(selected) + "."
+		a.status = "Default model set to " + modelmeta.DisplayName(selected) + "."
 		a.panel = nil
 		return a, nil
 	}
@@ -363,7 +364,7 @@ func (a App) handleModelSelect() (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
-	a.status = "Model set to " + modelDisplayName(selected) + "."
+	a.status = "Model set to " + modelmeta.DisplayName(selected) + "."
 	a.panel = nil
 	sessionID, sup := sess.ID, a.sup
 	return a, func() tea.Msg {

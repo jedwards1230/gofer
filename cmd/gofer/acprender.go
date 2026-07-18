@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/jedwards1230/agent-sdk-go/acp"
 )
@@ -43,12 +44,30 @@ type acpContentChunkWire struct {
 }
 
 // acpToolCallWire decodes the subset of tool_call / tool_call_update fields
-// this renderer shows as a one-line status marker — title, kind, status —
-// deliberately not the (possibly large) raw input/output.
+// this renderer shows as a one-line status marker — title, kind, status, plus
+// the path of any "diff" content block — deliberately not the (possibly large)
+// raw input/output or the diffs' before/after text.
 type acpToolCallWire struct {
 	ToolCallID string `json:"toolCallId"`
 	Title      string `json:"title"`
 	Status     string `json:"status"`
+	Content    []struct {
+		Type string `json:"type"`
+		Path string `json:"path"`
+	} `json:"content"`
+}
+
+// diffPaths returns the paths of the tool call's "diff" content blocks, in
+// order — the compact "edited <path>" summary the renderer appends to a
+// tool_call_update marker (see render). Empty when the call carried no diff.
+func (t acpToolCallWire) diffPaths() []string {
+	var paths []string
+	for _, c := range t.Content {
+		if c.Type == "diff" && c.Path != "" {
+			paths = append(paths, c.Path)
+		}
+	}
+	return paths
 }
 
 // acpUsageUpdateWire decodes the usage_update shape:
@@ -112,6 +131,9 @@ func (r *acpRenderer) render(params json.RawMessage) error {
 		detail := tc.ToolCallID
 		if tc.Status != "" {
 			detail = fmt.Sprintf("%s → %s", tc.ToolCallID, tc.Status)
+		}
+		if paths := tc.diffPaths(); len(paths) > 0 {
+			detail = fmt.Sprintf("%s  edited %s", detail, strings.Join(paths, ", "))
 		}
 		r.marker("tool_call_update", detail)
 	case "usage_update":
