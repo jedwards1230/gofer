@@ -8,12 +8,54 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/jedwards1230/agent-sdk-go/acp"
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
 	"github.com/jedwards1230/gofer/internal/modelmeta"
 	"github.com/jedwards1230/gofer/internal/supervisor"
 )
+
+// configIDModel is the ACP session/set_config_option configId gofer maps to its
+// gofer-native model swap (see handleSessionSetConfigOption). Model-setting
+// stays gofer-native — gofer/set_model over [supervisor.Supervisor.SetModel] —
+// per the PRD; this is only the stable ACP spec-surface entry point to it.
+const configIDModel = "model"
+
+// modelSelectOptions projects the SDK provider registry into the ACP select
+// options for the "model" config option: the same catalog gofer/models exposes
+// (see toModelInfoDTOs), sorted (provider, id), each labeled with its gofer
+// display name. A model whose provider the daemon host has no credential for
+// carries a description noting it is unavailable, so a client can still list it
+// (grayed out) rather than silently dropping it.
+func modelSelectOptions(authed map[string]bool) []acp.SelectOption {
+	infos := toModelInfoDTOs(authed)
+	opts := make([]acp.SelectOption, 0, len(infos))
+	for _, m := range infos {
+		opt := acp.SelectOption{Value: m.ID, Name: m.DisplayName}
+		if !m.Available {
+			opt.Description = "no " + m.Provider + " credential on this host"
+		}
+		opts = append(opts, opt)
+	}
+	return opts
+}
+
+// modelConfigOption builds the ACP "model" [acp.ConfigOption]: a select over the
+// provider registry (see modelSelectOptions) whose CurrentValue is the session's
+// current model. It is the single option gofer's session/set_config_option
+// response advertises today (see handleSessionSetConfigOption).
+func modelConfigOption(currentModel string, authed map[string]bool) acp.ConfigOption {
+	return acp.ConfigOption{
+		ID:       configIDModel,
+		Name:     "Model",
+		Category: acp.ConfigCategoryModel,
+		Kind: acp.SelectKind{
+			CurrentValue: currentModel,
+			Options:      modelSelectOptions(authed),
+		},
+	}
+}
 
 // sessionInfoDTO is the wire shape for the gofer-native roster/ps methods. It
 // is a deliberate subset of [supervisor.SessionInfo]: Summary, Pending, and
