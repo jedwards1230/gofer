@@ -72,20 +72,28 @@ jobs:
           # refresh supersedes any stale leftover wholesale.
           branch="vhs-baseline-refresh"
           git push -q -f origin "HEAD:refs/heads/${branch}"
+          # set -e makes a gh failure here abort the run (the assignment
+          # propagates the substitution's exit code) — an API error can't fall
+          # through into creating a duplicate PR.
           pr="$(gh pr list --head "$branch" --state open --json number -q '.[0].number // empty')"
           if [ -z "$pr" ]; then
-            pr="$(gh pr create --base main --head "$branch" \
+            gh pr create --base main --head "$branch" \
               --title "vhs: refresh snapshot baseline @ ${GITHUB_SHA:0:7}" \
-              --body "Automated TUI snapshot-baseline refresh (vhs-baseline.yml). CI-rendered PNGs only.")"
-            pr="${pr##*/}"
+              --body "Automated TUI snapshot-baseline refresh (vhs-baseline.yml). CI-rendered PNGs only." \
+              >/dev/null
+            # gh pr create has no --json output; resolve the number robustly
+            # instead of string-parsing the printed URL.
+            pr="$(gh pr view "$branch" --json number -q .number)"
           fi
-          # Mergeability takes a moment to compute after the push; retry briefly.
+          # Mergeability takes a moment to compute after the push; retry
+          # briefly, keeping the last error for the failure report.
           n=0
-          until gh pr merge "$pr" --squash --delete-branch 2>/dev/null; do
+          until merge_err="$(gh pr merge "$pr" --squash --delete-branch 2>&1)"; do
             n=$((n + 1))
             if [ "$n" -ge 5 ]; then
               echo "could not merge refresh PR #${pr} automatically — leaving it open" >&2
-              echo "Baseline refresh PR [#${pr}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/pull/${pr}) could not be auto-merged — needs a human." >> "$GITHUB_STEP_SUMMARY"
+              echo "last merge error: ${merge_err}" >&2
+              echo "Baseline refresh PR [#${pr}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/pull/${pr}) could not be auto-merged — needs a human. Last error: \`${merge_err}\`" >> "$GITHUB_STEP_SUMMARY"
               exit 0
             fi
             sleep 5
