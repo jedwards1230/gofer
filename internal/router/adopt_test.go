@@ -187,7 +187,14 @@ type fakeHelloResponder func(reqID json.RawMessage) any
 // post-dial matrix rows (a live pid + dialable socket whose handshake fails or
 // skews), which a real worker — always speaking the router's own wire — cannot
 // reproduce.
-func startFakeWorker(t *testing.T, id string, respond fakeHelloResponder) {
+//
+// pid is optional and defaults to the TEST BINARY's own pid, which is fine for a
+// test that never exercises the kill path. A test that DOES kill its adopted
+// handles must pass a [parkedPID] instead: killHandleProcess SIGKILLs an adopted
+// handle's endpoint pid, so the default would have the test kill itself — and
+// with adoptWorker's self-pid guard it would instead be silently recorded as pid
+// 0, leaving the kill path untested.
+func startFakeWorker(t *testing.T, id string, respond fakeHelloResponder, pid ...int) {
 	t.Helper()
 	sockPath, err := daemon.WorkerSocketPath(id)
 	if err != nil {
@@ -232,7 +239,11 @@ func startFakeWorker(t *testing.T, id string, respond fakeHelloResponder) {
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close(); _ = ln.Close() })
 
-	writeEndpoint(t, id, os.Getpid(), daemon.WireVersion, "unix://"+sockPath)
+	advertisedPID := os.Getpid()
+	if len(pid) > 0 {
+		advertisedPID = pid[0]
+	}
+	writeEndpoint(t, id, advertisedPID, daemon.WireVersion, "unix://"+sockPath)
 }
 
 // jsonRPCResult builds a JSON-RPC success response object for reqID.
@@ -277,6 +288,102 @@ func TestAdoptHelloFailureLeavesWorkerUnadopted(t *testing.T) {
 	}
 }
 
+// TestAdoptPreHelloWorkerIsAdoptedUnidentified covers the ONE handshake error
+// that is not "unresponsive": a worker built BEFORE gofer/hello existed replies
+// method-not-found, which [daemon.Client.Hello] maps to
+// daemon.ErrHelloUnsupported.
+//
+// Leaving it unadopted would brick every pre-handshake worker forever — the very
+// outcome this slice's skewUnknown policy exists to avoid — so the router
+// synthesizes a zero HelloResult and adopts it. Its absent wire version puts it
+// on the STRICT side of the policy (skewWire): the session is observable and can
+// finish, but takes no new work.
+func TestAdoptPreHelloWorkerIsAdoptedUnidentified(t *testing.T) {
+	shortRuntimeDir(t)
+	root := t.TempDir()
+	id := uuid.Must(uuid.NewV7()).String()
+	pid, waitKilled := parkedPID(t)
+	startFakeWorker(t, id, func(reqID json.RawMessage) any {
+		// -32601 method-not-found: exactly what a worker with no gofer/hello
+		// handler replies.
+		return jsonRPCError(reqID, -32601, "method not found: gofer/hello")
+	}, pid)
+
+	sup, err := New(Config{Root: root, Version: "router-build", NewWorkerCmd: fauxWorkerSeam(root)})
+	if err != nil {
+		t.Fatalf("router.New: %v", err)
+	}
+	t.Cleanup(func() {
+		killWorkers(sup)
+		_ = sup.Close()
+	})
+
+	h, ok := sup.get(id)
+	if !ok {
+		t.Fatalf("pre-hello worker %s was not adopted; adopting it is the whole point of ErrHelloUnsupported", id)
+	}
+	if h.binaryVersion != "" || h.wireVersion != 0 {
+		t.Errorf("adopted handle versions = (%q, %d), want the zero HelloResult (%q, 0)", h.binaryVersion, h.wireVersion, "")
+	}
+	if h.skew != skewWire {
+		t.Errorf("adopted handle skew = %v, want skewWire (an unidentifiable wire is the strict side)", h.skew)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := sup.Send(ctx, id, "another turn"); !errors.Is(err, ErrWorkerSkewed) {
+		t.Errorf("Send to a pre-hello worker: err = %v, want errors.Is ErrWorkerSkewed", err)
+	}
+	// Adopted, so it is still killable — the endpoint is NOT stale residue.
+	if !endpointExists(t, id) {
+		t.Errorf("endpoint for adopted pre-hello worker %s was GC'd", id)
+	}
+	killWorkers(sup)
+	waitKilled()
+}
+
+// TestAdoptRefusesToRecordItsOwnPIDForKill is the daemon-suicide guard.
+//
+// An adopted handle has no *exec.Cmd, so Kill/Archive best-effort SIGKILL the pid
+// its ENDPOINT FILE advertised. If a file ever names the ROUTER'S OWN pid, one
+// `gofer kill <session>` would SIGKILL the daemon and take routing down for every
+// session. Adoption therefore records pid 0 for that case, which
+// killHandleProcess's `h.pid > 0` check turns into a no-op.
+//
+// The test proves the no-op the only way that is safe: if the guard regressed,
+// killWorkers here would SIGKILL the test binary and the run would die.
+func TestAdoptRefusesToRecordItsOwnPIDForKill(t *testing.T) {
+	shortRuntimeDir(t)
+	root := t.TempDir()
+	id := uuid.Must(uuid.NewV7()).String()
+	// No pid argument: startFakeWorker defaults to advertising THIS process's
+	// pid, which is precisely the hazard under test.
+	startFakeWorker(t, id, func(reqID json.RawMessage) any {
+		return jsonRPCResult(reqID, daemon.HelloResult{
+			BinaryVersion:      "router-build",
+			WireVersion:        daemon.WireVersion,
+			ACPProtocolVersion: 1,
+		})
+	})
+
+	sup, err := New(Config{Root: root, Version: "router-build", NewWorkerCmd: fauxWorkerSeam(root)})
+	if err != nil {
+		t.Fatalf("router.New: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Close() })
+
+	h, ok := sup.get(id)
+	if !ok {
+		t.Fatalf("worker %s was not adopted", id)
+	}
+	if h.pid != 0 {
+		t.Fatalf("adopted handle pid = %d, want 0: the endpoint advertised the router's own pid (%d), which must never be signalled", h.pid, os.Getpid())
+	}
+	// Survives the kill path: with pid 0 this is a no-op, and reaching the next
+	// line at all is the assertion.
+	killWorkers(sup)
+	killHandleProcess(h)
+}
+
 // TestAdoptWireSkewedWorkerRefusesNewWork is the INVERSION this slice ships, and
 // the reason the old "post-dial wire skew leaves the worker unadopted" row is
 // gone: a wire-skewed worker is now ADOPTED — it holds a live session that must
@@ -290,21 +397,25 @@ func TestAdoptWireSkewedWorkerRefusesNewWork(t *testing.T) {
 	shortRuntimeDir(t)
 	root := t.TempDir()
 	id := uuid.Must(uuid.NewV7()).String()
+	// A REAL parked pid, not the test binary's own: the adopted kill path at the
+	// end of this test SIGKILLs whatever the endpoint file advertised.
+	pid, waitKilled := parkedPID(t)
 	startFakeWorker(t, id, func(reqID json.RawMessage) any {
 		return jsonRPCResult(reqID, daemon.HelloResult{
 			BinaryVersion:      "future",
 			WireVersion:        daemon.WireVersion + 1,
 			ACPProtocolVersion: 1,
 		})
-	})
+	}, pid)
 
 	sup, err := New(Config{Root: root, Version: "router-build", NewWorkerCmd: fauxWorkerSeam(root)})
 	if err != nil {
 		t.Fatalf("router.New: %v", err)
 	}
-	// NOT killWorkers: the fake worker advertises THIS process's pid, so the
-	// adopted handle's best-effort SIGKILL would take the test binary down.
-	t.Cleanup(func() { _ = sup.Close() })
+	t.Cleanup(func() {
+		killWorkers(sup)
+		_ = sup.Close()
+	})
 
 	h, ok := sup.get(id)
 	if !ok {
@@ -339,6 +450,15 @@ func TestAdoptWireSkewedWorkerRefusesNewWork(t *testing.T) {
 	if err := sup.Reply(id, event.PermissionReply{ID: "call-1", Verdict: event.VerdictAllow}); err != nil {
 		t.Errorf("Reply on a wire-skewed worker: err = %v, want nil (replies stay routable)", err)
 	}
+
+	// The ADOPTED kill path, end to end: killHandleProcess's cmd==nil branch must
+	// SIGKILL the pid the endpoint file advertised. A skewed worker still gets
+	// killed — refusing NEW work never means refusing to shut it down.
+	if h.pid != pid {
+		t.Fatalf("adopted handle pid = %d, want the endpoint-advertised %d", h.pid, pid)
+	}
+	killWorkers(sup)
+	waitKilled()
 }
 
 // TestAdoptBinarySkewedWorkerIsFullyRoutable is the other half of the policy
@@ -349,19 +469,23 @@ func TestAdoptBinarySkewedWorkerIsFullyRoutable(t *testing.T) {
 	shortRuntimeDir(t)
 	root := t.TempDir()
 	id := uuid.Must(uuid.NewV7()).String()
+	pid, waitKilled := parkedPID(t)
 	startFakeWorker(t, id, func(reqID json.RawMessage) any {
 		return jsonRPCResult(reqID, daemon.HelloResult{
 			BinaryVersion:      "older-build",
 			WireVersion:        daemon.WireVersion,
 			ACPProtocolVersion: 1,
 		})
-	})
+	}, pid)
 
 	sup, err := New(Config{Root: root, Version: "router-build", NewWorkerCmd: fauxWorkerSeam(root)})
 	if err != nil {
 		t.Fatalf("router.New: %v", err)
 	}
-	t.Cleanup(func() { _ = sup.Close() })
+	t.Cleanup(func() {
+		killWorkers(sup)
+		_ = sup.Close()
+	})
 
 	h, ok := sup.get(id)
 	if !ok {
@@ -373,6 +497,13 @@ func TestAdoptBinarySkewedWorkerIsFullyRoutable(t *testing.T) {
 	if err := h.refuseNewWork("send"); err != nil {
 		t.Errorf("binary skew refused new work (%v); it must stay fully routable — session pinning, not a hazard", err)
 	}
+
+	// The adopted kill path again, on the fully-routable class this time.
+	if h.pid != pid {
+		t.Fatalf("adopted handle pid = %d, want the endpoint-advertised %d", h.pid, pid)
+	}
+	killWorkers(sup)
+	waitKilled()
 }
 
 // TestAdoptLiveWorker is the startup-adoption happy path plus the adopted-handle
@@ -474,11 +605,15 @@ func TestAdoptClosedRouterIsSafe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("router2.New: %v", err)
 	}
-	// The worker is real and detached; kill it via the adopted handle before Close.
-	t.Cleanup(func() { killWorkers(sup2) })
-	if _, ok := sup2.get(info.ID); !ok {
+	h, ok := sup2.get(info.ID)
+	if !ok {
 		t.Fatalf("router2 did not adopt %s", info.ID)
 	}
+	// The worker is real and DETACHED, so this test must reap it itself. Grab the
+	// handle up front and kill by handle: Close abandons the worker (design §3)
+	// AND drains the roster, so a killWorkers() cleanup running after Close finds
+	// no handles left and silently leaks the process to pid 1.
+	t.Cleanup(func() { killHandleProcess(h) })
 	if err := sup2.Close(); err != nil {
 		t.Fatalf("router2.Close: %v", err)
 	}
