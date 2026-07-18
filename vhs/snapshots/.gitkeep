@@ -1,0 +1,9 @@
+# Tracked TUI snapshot baseline — CI-authoritative PNG key-frames.
+#
+# Populated and kept current by .github/workflows/vhs-baseline.yml (renders on
+# ubuntu-latest so every committed frame comes from the same environment).
+# Seed it after this lands by running that workflow once: `gh workflow run
+# vhs-baseline.yml`. Feature PRs diff their renders against these via a per-PR
+# vhs-captures/pr-<n> branch (.github/workflows/vhs-capture.yml).
+#
+# Regenerate locally (frames will differ from CI by platform): scripts/tui-vhs.sh --snapshot

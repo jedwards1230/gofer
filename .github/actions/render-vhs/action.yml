@@ -1,0 +1,59 @@
+# Shared render step for the VHS capture lanes (vhs-capture.yml on PRs,
+# vhs-baseline.yml on main). Installs the VHS toolchain, renders every
+# vhs/*.tape headlessly via the repo's own renderer, and syncs the resulting
+# PNG key-frames into the tracked vhs/snapshots/ baseline. The caller checks
+# out the repo first; this leaves vhs/out/ (GIF+PNG, gitignored) and an updated
+# vhs/snapshots/ (PNG only, tracked) in the workspace.
+name: Render VHS tapes
+description: Install VHS and render every vhs/*.tape to PNG, syncing vhs/snapshots/.
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+      with:
+        go-version-file: go.mod
+
+    # Install the VHS toolchain directly rather than via charmbracelet/vhs-action:
+    # the action's dependency install is unconditional and its bundled ffmpeg
+    # installer is currently broken (dead download URL), so it fails install-only
+    # too. apt carries ttyd/ffmpeg/the font; vhs is pinned by release tag. Unset
+    # CI and force truecolor so termenv emits real ANSI colors in the frames.
+    - name: Install VHS and render deps
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends ffmpeg ttyd fonts-jetbrains-mono
+        # setup-go pins GOTOOLCHAIN=local at the repo's go.mod version; vhs needs a
+        # newer toolchain than that, so let this one build fetch it (auto). The
+        # later harness build still uses the repo's pinned toolchain.
+        GOTOOLCHAIN=auto go install github.com/charmbracelet/vhs@v0.11.0
+        echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+        {
+          echo "CI="
+          echo "COLORTERM=truecolor"
+        } >> "$GITHUB_ENV"
+
+    # Glob the tapes (no hardcoded list) and reuse the repo's own renderer via
+    # its --snapshot flag, which prebuilds vhs/.bin/harness, renders each tape to
+    # vhs/out/, then mirrors the PNG key-frames into vhs/snapshots/.
+    - name: Render VHS tapes
+      shell: bash
+      run: |
+        set -euo pipefail
+        shopt -s nullglob
+        tapes=()
+        for tape in vhs/*.tape; do
+          tapes+=("$(basename "$tape" .tape)")
+        done
+        if [ ${#tapes[@]} -eq 0 ]; then
+          echo "no vhs/*.tape files found" >&2
+          exit 1
+        fi
+        echo "rendering tapes: ${tapes[*]}"
+        scripts/tui-vhs.sh --snapshot "${tapes[@]}"
+        echo "--- rendered (out/) ---"
+        ls -1 vhs/out/
+        echo "--- baseline (snapshots/) ---"
+        ls -1 vhs/snapshots/

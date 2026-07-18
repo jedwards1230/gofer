@@ -1,0 +1,58 @@
+# Maintains the tracked TUI snapshot baseline on `main`. On any push to main
+# that changes the TUI render inputs (the TUI itself, a tape, the harness, or
+# the renderer), this re-renders every vhs/*.tape and commits the updated PNG
+# key-frames to vhs/snapshots/. That keeps `main` carrying the current frames,
+# so a feature PR's capture branch (vhs-capture.yml) diffs against an accurate
+# baseline and merging a feature advances the baseline.
+#
+# The commit is authored by GITHUB_TOKEN, whose pushes do NOT trigger further
+# workflow runs — so this never re-triggers itself (nor release/CI). The path
+# filter also excludes vhs/snapshots/** as a second guard. Not a required
+# check; run it by hand (workflow_dispatch) to seed the baseline the first time.
+name: VHS baseline
+run-name: VHS baseline · ${{ github.sha }}
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - internal/tui/**
+      - vhs/*.tape
+      - vhs/harness/**
+      - scripts/tui-vhs.sh
+      - .github/workflows/vhs-baseline.yml
+      - .github/actions/render-vhs/**
+  workflow_dispatch:
+
+concurrency:
+  group: vhs-baseline
+  cancel-in-progress: true
+
+permissions:
+  contents: write # commit the refreshed snapshot baseline to main
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # Install VHS, render every tape to vhs/out/, sync PNGs to vhs/snapshots/.
+      - uses: ./.github/actions/render-vhs
+
+      - name: Commit baseline if changed
+        run: |
+          set -euo pipefail
+          git add -A vhs/snapshots
+          if git diff --cached --quiet; then
+            echo "baseline already current — nothing to commit"
+            echo "TUI snapshot baseline already current." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git \
+            -c user.name="github-actions[bot]" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "vhs: refresh snapshot baseline @ ${GITHUB_SHA:0:7}"
+          git push -q origin HEAD:main
+          echo "Refreshed TUI snapshot baseline on \`main\`." >> "$GITHUB_STEP_SUMMARY"
+          git show --stat --format= >> "$GITHUB_STEP_SUMMARY"
