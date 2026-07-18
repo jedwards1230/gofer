@@ -10,7 +10,7 @@
 // the pump, the approval gate, the journal writer, the event broker) living one
 // tier down in a worker.
 //
-// # What ships in this slice: crash isolation + detachment
+// # What ships in this slice: crash isolation + detachment + adoption
 //
 // A worker is a single-session daemon (see internal/worker). The router spawns
 // one per [Supervisor.Create] via [daemon.SpawnDetached] (Setsid, stdio to a
@@ -31,25 +31,31 @@
 // STOPS signalling workers (it only stops the reapers), so detached workers
 // reparent to pid 1 and keep pumping their turns.
 //
-// # Intermediate-state window: detach-without-adopt (this slice)
+// # Startup adoption: re-attaching to a prior router's live workers
 //
-// This slice detaches workers but does NOT yet re-adopt them. A restarted router
-// performs no startup endpoint scan and reconnects to no live worker, so a router
-// restart ORPHANS every live worker: each keeps running, keeps holding its unix
-// socket + <uuid>.lock + <uuid>.json endpoint file, but is unreachable through the
-// new router until the adoption slice lands. Orphans are benign to a fresh router:
-//   - [Supervisor.Create] always draws a FRESH uuid, so its socket/endpoint/lock
-//     paths never collide with an orphan's — the worker lock only blocks a
-//     duplicate worker for the SAME session id, which a new uuid can never be.
-//   - [Supervisor.List] enumerates live handles ∪ on-disk journals only; it does
-//     NOT read endpoint files (that is the adoption slice), so an orphan's
-//     endpoint file is inert here — never surfaced as a phantom live session (its
-//     journal still lists it offline, correctly).
+// [New] runs [Supervisor.adoptExistingWorkers] (see adopt.go) before the router
+// serves anything: it scans the per-worker endpoint files a prior router's
+// detached workers left ([daemon.ListWorkerEndpoints]) and, for each, runs the
+// §4 adopt/stale decision — pid-liveness probe, wire-version check (endpoint
+// hint then authoritative gofer/hello), and dial. A still-alive, version-matched,
+// responsive worker is ADOPTED: the router opens a fresh [*daemon.Client] to its
+// socket, wraps it in a Reconstructor, re-attaches via
+// [wirestream.Reconstructor.Load] (which settles history and re-surfaces any
+// still-open PermissionRequested into the broker, §7), and registers an ADOPTED
+// handle (cmd==nil; its reaper watches [daemon.Client.Done] rather than a
+// *exec.Cmd; pid comes from the endpoint file). This is the whole point of M6
+// process isolation: a router restart re-attaches to its in-flight sessions —
+// including a turn blocked mid-approval — instead of orphaning them. Adoption is
+// best-effort: a scan or per-worker failure never fails construction (an empty
+// roster is still a usable router). Stale residue from crashed workers (dead pid,
+// or a dialed-refused socket) is garbage-collected in the same scan.
 //
 // # Deliberate cuts for this slice (documented, not oversights)
 //
-//   - Startup endpoint scan + [wirestream] adoption of live workers — the second
-//     half of Phase 2 — is a follow-up slice; hence the orphan window above.
+//   - Wire-version SKEW routing — adopting an old-binary worker for the
+//     observe/reply/finish subset only (design §6) — is Phase 3. This slice
+//     leaves a version-skewed worker running detached but unadopted (it is not
+//     GC'd — it holds a live session — merely not routed to).
 //   - [Supervisor.Resume] returns [ErrResumeUnsupported]; spawning a fresh worker
 //     for an offline/old-binary session is Phase 4. A consequence for THIS slice:
 //     ACP session/load (which the daemon routes through Resume) fails cleanly for

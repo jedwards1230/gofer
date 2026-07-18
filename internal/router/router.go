@@ -78,15 +78,32 @@ type Config struct {
 // A worker hosts exactly one session, so there is exactly one handle per session
 // id and one reconstructed broker per handle — closing the handle's rec isolates
 // that session's teardown from every sibling worker.
+//
+// A handle is either SPAWNED (this router forked/execed the worker: cmd is set,
+// and wait is its [daemon.Reap] channel) or ADOPTED (this router discovered an
+// already-running detached worker on startup: cmd is NIL — there is no
+// *exec.Cmd to Wait on for a process we did not start — and wait instead fires
+// when the client connection closes, the only crash signal a router has for a
+// worker it holds by socket alone). Every field access that differs between the
+// two is guarded on cmd (kill signals the pid for an adopted worker) — see
+// killHandleProcess.
 type workerHandle struct {
 	id     string
 	cmd    *exec.Cmd
 	client *daemon.Client
 	rec    *wirestream.Reconstructor
 
-	// wait delivers the detached worker's exit (from [daemon.Reap], the sole
-	// owner of cmd.Wait — the reaper must never call cmd.Wait directly). Buffered
-	// cap 1, so it delivers even after the router stops caring at shutdown.
+	// pid is the worker process id: cmd.Process.Pid for a spawned worker, or the
+	// endpoint file's advertised PID for an adopted one. It is the only handle a
+	// router has on an ADOPTED worker's process (no *exec.Cmd), used for a
+	// best-effort SIGKILL on Kill/Archive (see killHandleProcess).
+	pid int
+
+	// wait delivers the worker's exit: for a SPAWNED worker, [daemon.Reap]'s
+	// cmd.Wait result (the sole owner of cmd.Wait — the reaper must never call
+	// cmd.Wait directly); for an ADOPTED worker, a nil sent when the client
+	// connection closes (its process died or we closed it). Buffered cap 1 in
+	// both cases, so it delivers even after the router stops caring at shutdown.
 	wait <-chan error
 
 	// stopped marks an intentional teardown (Kill/Archive) so the reaper
@@ -167,7 +184,7 @@ func New(cfg Config) (*Supervisor, error) {
 		logger = slog.New(slog.DiscardHandler)
 	}
 
-	return &Supervisor{
+	s := &Supervisor{
 		root:         root,
 		model:        cfg.Model,
 		selfExe:      selfExe,
@@ -176,7 +193,17 @@ func New(cfg Config) (*Supervisor, error) {
 		newWorkerCmd: cfg.NewWorkerCmd,
 		workers:      make(map[string]*workerHandle),
 		reaperStop:   make(chan struct{}),
-	}, nil
+	}
+
+	// Adopt any still-alive detached workers left by a PRIOR router (design §4):
+	// a router restart re-attaches to in-flight sessions rather than orphaning
+	// them, which is the whole point of M6 process isolation. Stale leftovers
+	// from crashed workers are garbage-collected in the same scan. Best-effort:
+	// a scan failure never fails construction — a router with an empty roster is
+	// still a usable router (every Create spawns fresh).
+	s.adoptExistingWorkers()
+
+	return s, nil
 }
 
 // Create spawns a DETACHED worker for a new session, dials it, creates the
@@ -241,9 +268,12 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts supervisor.
 	readyCancel()
 	if err != nil {
 		// If the worker already exited, waitForWorkerEndpoint consumed its wait
-		// result — do NOT terminate (a second drain would block forever).
-		if !exited {
-			terminate(cmd, waitCh)
+		// result — do NOT terminate (a second drain would block forever) — but
+		// still sweep any endpoint/socket a wedged-then-dead worker left behind.
+		if exited {
+			removeWorkerArtifacts(sessionID)
+		} else {
+			cleanupSpawnedWorker(sessionID, cmd, waitCh)
 		}
 		return supervisor.SessionInfo{}, fmt.Errorf("router: create: await worker endpoint: %w", err)
 	}
@@ -252,7 +282,7 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts supervisor.
 	client, err := daemon.Dial(dialCtx, ep.Addr, "")
 	dialCancel()
 	if err != nil {
-		terminate(cmd, waitCh)
+		cleanupSpawnedWorker(sessionID, cmd, waitCh)
 		return supervisor.SessionInfo{}, fmt.Errorf("router: create: dial worker %s: %w", ep.Addr, err)
 	}
 	rec := wirestream.New(client)
@@ -267,13 +297,13 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts supervisor.
 	newCancel()
 	if err != nil {
 		_ = rec.Close()
-		terminate(cmd, waitCh)
+		cleanupSpawnedWorker(sessionID, cmd, waitCh)
 		return supervisor.SessionInfo{}, fmt.Errorf("router: create: session/new on worker: %w", err)
 	}
 	var resp acp.NewSessionResponse
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		_ = rec.Close()
-		terminate(cmd, waitCh)
+		cleanupSpawnedWorker(sessionID, cmd, waitCh)
 		return supervisor.SessionInfo{}, fmt.Errorf("router: create: decode %s response: %w", acp.MethodSessionNew, err)
 	}
 	// The worker MUST echo the pinned uuid as its session id (design Option A).
@@ -282,7 +312,7 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts supervisor.
 	// keyed by — fail loudly rather than silently desync.
 	if resp.SessionID != sessionID {
 		_ = rec.Close()
-		terminate(cmd, waitCh)
+		cleanupSpawnedWorker(sessionID, cmd, waitCh)
 		return supervisor.SessionInfo{}, fmt.Errorf("router: create: worker session id %q != pinned %q", resp.SessionID, sessionID)
 	}
 
@@ -292,12 +322,12 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts supervisor.
 	// contract). RegisterFresh keeps the create/prompt path clean.
 	rec.RegisterFresh(sessionID)
 
-	h := &workerHandle{id: sessionID, cmd: cmd, client: client, rec: rec, wait: waitCh}
+	h := &workerHandle{id: sessionID, cmd: cmd, client: client, rec: rec, pid: pid, wait: waitCh}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		_ = rec.Close()
-		terminate(cmd, waitCh)
+		cleanupSpawnedWorker(sessionID, cmd, waitCh)
 		return supervisor.SessionInfo{}, fmt.Errorf("router: create: %w", ErrNotLive)
 	}
 	s.workers[sessionID] = h
@@ -407,8 +437,8 @@ func (s *Supervisor) reap(h *workerHandle) {
 		// The worker process exited.
 	case <-s.reaperStop:
 		// Router shutdown: abandon this DETACHED worker (design §3). It keeps
-		// running, reparents to pid 1, and is reaped there. This slice does not
-		// re-adopt it on the next router start, so the worker is orphaned-but-alive.
+		// running, reparents to pid 1, and is reaped there. The NEXT router start
+		// re-adopts it by socket scan (see [Supervisor.adoptExistingWorkers]).
 		return
 	}
 
@@ -434,12 +464,11 @@ func (s *Supervisor) reap(h *workerHandle) {
 //
 // Detached workers deliberately survive a router shutdown (design §3): they
 // reparent to pid 1 and keep pumping their in-flight turns. This is the whole
-// point of M6 process isolation. NOTE (intermediate-state window): this slice
-// does NOT yet re-adopt those workers on the next router start — the adoption
-// scan is a follow-up slice — so a router restart orphans every live worker
-// (each still holding its unix socket, <uuid>.lock, and <uuid>.json endpoint).
-// Orphans are benign to a fresh router: every Create draws a new uuid and never
-// collides with an orphan's lock.
+// point of M6 process isolation. The NEXT router start re-adopts them by socket
+// scan (see [Supervisor.adoptExistingWorkers]) — each is still holding its unix
+// socket, <uuid>.lock, and <uuid>.json endpoint, which the scan reads to dial and
+// re-attach. Between shutdown and that next start the workers are simply
+// unattached-but-alive.
 func (s *Supervisor) Close() error {
 	s.mu.Lock()
 	if s.closed {

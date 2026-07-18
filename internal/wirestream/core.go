@@ -345,3 +345,40 @@ func (r *Reconstructor) SubscribeLive(_ context.Context, sessionID string) (*eve
 	}
 	return rec.broker.SubscribeLive(event.FilterAll, subBuffer), nil
 }
+
+// Load references sessionID and blocks until its one-shot history load (the
+// session/load replay) has fully settled onto the reconstructed broker —
+// history plus any retained must-deliver backlog the source re-emits on attach,
+// chiefly an OPEN [event.PermissionRequested] for a turn blocked mid-approval
+// (docs/milestones/M6-process-isolation.md §7). It is the safe adoption entry
+// point: the M6 router calls Load FIRST — so history and any still-open
+// permission re-surface into the broker (retained by [event.WithReplay]) — and
+// only THEN [Reconstructor.SubscribeLive] for the live stream. That ordering
+// satisfies the reference-before-SubscribeLive contract (see SubscribeLive's
+// doc) WITHOUT relying on [Reconstructor.Subscribe]'s first-reference replay
+// side effect: a subsequent Subscribe replays whatever Load settled, a
+// subsequent SubscribeLive sees only new events.
+//
+// Mechanically Load reuses the exact history-load path Subscribe/SubscribeLive
+// trigger on first reference: [Reconstructor.session] creates the session's
+// state and starts [Reconstructor.loadHistory] (issuing session/load) at most
+// once per id; Load then waits on rec.loadDone, which the demuxer closes only
+// after it has drained and applied every notification that load replayed (see
+// loadHistory's ordering proof). For an already-referenced or RegisterFresh'd
+// session, loadDone is already closed and Load returns as soon as it observes
+// it. It returns ctx.Err() if ctx is cancelled before the load settles, or
+// [ErrClosed] if the Reconstructor is (or becomes) closed.
+func (r *Reconstructor) Load(ctx context.Context, sessionID string) error {
+	rec := r.session(sessionID)
+	if rec == nil {
+		return ErrClosed
+	}
+	select {
+	case <-rec.loadDone:
+		return nil
+	case <-r.closed:
+		return ErrClosed
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}

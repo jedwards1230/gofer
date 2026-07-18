@@ -243,9 +243,7 @@ func (s *Supervisor) Kill(ctx context.Context, sessionID string) error {
 	// socket-close terminal error instead. Either way peers see a terminal
 	// event; a drain/settle before the kill would tighten it but is not required
 	// for this slice.
-	if h.cmd.Process != nil {
-		_ = h.cmd.Process.Kill()
-	}
+	killHandleProcess(h)
 	return nil
 }
 
@@ -278,8 +276,8 @@ func (s *Supervisor) Archive(ctx context.Context, sessionID string) error {
 	// the handle, so take returns taken=false and this simply skips a
 	// now-pointless Kill. One session maps to one handle for its lifetime, so
 	// take never returns a DIFFERENT worker than get observed.
-	if hh, taken := s.take(sessionID); taken && hh.cmd.Process != nil {
-		_ = hh.cmd.Process.Kill()
+	if hh, taken := s.take(sessionID); taken {
+		killHandleProcess(hh)
 	}
 	return nil
 }
