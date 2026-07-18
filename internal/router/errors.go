@@ -1,0 +1,25 @@
+package router
+
+import "errors"
+
+// ErrNotLive is returned by the router's per-session methods (Send, SubscribeLive,
+// Interrupt, SetModel, Reply, Kill) when no live worker owns the session id — it
+// crashed, was killed, was archived, or never existed. It mirrors
+// [github.com/jedwards1230/gofer/internal/supervisor.ErrNotLive]'s role for the
+// in-process supervisor; the daemon surfaces either as a plain JSON-RPC
+// application error, so the concrete type need not match.
+var ErrNotLive = errors.New("router: session not live")
+
+// ErrResumeUnsupported is the typed error [Supervisor.Resume] returns: spawning a
+// fresh worker for an offline (or old-binary) session is Phase 4 of M6, not this
+// slice. The daemon's session/load handler surfaces it as a clean application
+// error rather than panicking (see the package doc's Phase-1 cuts).
+var ErrResumeUnsupported = errors.New("router: resume not yet supported in worker mode")
+
+// ErrEmitConfigUnsupported is the typed error [Supervisor.EmitConfigOptions]
+// returns: there is no wire method for a client to make a worker emit an
+// arbitrary config-options snapshot, and it is off the crash-isolation critical
+// path. The daemon's advertiseModelChange treats this as a non-fatal, Debug-logged
+// outcome, and the real config_option_update a model swap produces still reaches
+// clients via the worker's own emit (see [Supervisor.SetModel]).
+var ErrEmitConfigUnsupported = errors.New("router: emit config options not supported in worker mode")
