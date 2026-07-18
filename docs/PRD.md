@@ -79,9 +79,9 @@ gofer daemon install|uninstall|status   # launchd/systemd unit for the daemon (M
 gofer acp serve             # ACP over stdio (editors, stdio→ws bridges)
 gofer ps [--all]            # roster (--all includes archived; later: fleet)
 gofer kill|archive <id>     # stop running / clear finished (journal kept)
-gofer skills|plugins        # list what's composed; `plugins install <module>` (M6)
-gofer import claude         # idempotent import of CC skills/commands (M7)
-                            #   (settings.json permissions via the vendor-format adapter, M7)
+gofer skills|plugins        # list what's composed; `plugins install <module>` (M7)
+gofer import claude         # idempotent import of CC skills/commands (M8)
+                            #   (settings.json permissions via the vendor-format adapter, M8)
 gofer doctor                # providers, LSP servers on PATH, daemon, sandbox
 gofer config get|set …      # global or project config
 ```
@@ -158,7 +158,7 @@ never run uncontained (decided 2026-07-13). The ③ LLM reviewer is M7. The revi
 more SDK loop invocation with a different system prompt. Stage ① is a
 format-agnostic rule engine over typed rules; vendor rule formats (Claude Code
 `settings.json`, native YAML) are import adapters that land with the
-vendor-format work (M7).
+vendor-format work (M8).
 
 ## On-disk layout & config precedence
 
