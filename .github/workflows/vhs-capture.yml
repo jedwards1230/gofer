@@ -48,6 +48,12 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
+      # Drop the baseline PNGs inherited from the checkout so the publish step
+      # ships exactly what THIS render produced — a tape deleted by the PR
+      # must not resurface via its stale checked-out frame.
+      - name: Clear inherited baseline frames
+        run: rm -f vhs/snapshots/*.png
+
       # Install VHS, render every tape to vhs/out/, sync PNGs to vhs/snapshots/.
       - uses: ./.github/actions/render-vhs
 

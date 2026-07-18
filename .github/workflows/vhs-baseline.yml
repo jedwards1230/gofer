@@ -37,6 +37,12 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
+      # Start from an empty baseline so a deleted tape's stale PNG becomes a
+      # tracked deletion instead of lingering on main forever (the renderer's
+      # --snapshot only copies frames in, it never removes).
+      - name: Clear stale baseline frames
+        run: rm -f vhs/snapshots/*.png
+
       # Install VHS, render every tape to vhs/out/, sync PNGs to vhs/snapshots/.
       - uses: ./.github/actions/render-vhs
 
@@ -53,6 +59,21 @@ jobs:
             -c user.name="github-actions[bot]" \
             -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
             commit -q -m "vhs: refresh snapshot baseline @ ${GITHUB_SHA:0:7}"
-          git push -q origin HEAD:main
+          # main may have advanced since checkout (a merge racing this render):
+          # rebase the one snapshot commit onto the current tip and retry. The
+          # rebase is content-safe — only this bot touches vhs/snapshots.
+          n=0
+          until git push -q origin HEAD:main; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "failed to push baseline after ${n} rebase retries" >&2
+              exit 1
+            fi
+            echo "push rejected (main advanced) — rebasing and retrying"
+            git fetch -q origin main
+            git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              rebase -q origin/main
+          done
           echo "Refreshed TUI snapshot baseline on \`main\`." >> "$GITHUB_STEP_SUMMARY"
           git show --stat --format= >> "$GITHUB_STEP_SUMMARY"
