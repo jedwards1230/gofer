@@ -465,6 +465,30 @@ func (s *Supervisor) SetModel(ctx context.Context, sessionID, model string) erro
 	return nil
 }
 
+// EmitConfigOptions publishes a session.config event onto sessionID's own event
+// stream via the runner Emit seam — the same seam the session-title emit uses
+// (see managed.go's enqueue) — carrying options as the session's authoritative
+// config-options snapshot. It is how the daemon advertises a model change to
+// clients: the event projects to an ACP config_option_update (see
+// acp.ToSessionUpdate). WHICH options exist and their values is the daemon's
+// business knowledge, so the daemon builds the neutral snapshot and this method
+// only carries it onto the stream (mirroring how title derivation lives above
+// the SDK while the SDK carries the resulting event.SessionInfoUpdated).
+// Returns [ErrNotLive] for an unknown or archived session.
+//
+// Emit is called without m.mu held, per this package's lock discipline (a
+// must-deliver publish can block on broker backpressure — see managed.go's
+// enqueue): lookup takes s.mu only to resolve the managed session, then releases
+// it before the publish.
+func (s *Supervisor) EmitConfigOptions(sessionID string, options []event.ConfigOption) error {
+	m, err := s.lookup(sessionID)
+	if err != nil {
+		return fmt.Errorf("supervisor: emit config options %s: %w", sessionID, err)
+	}
+	m.sess.Emit(event.NewConfigOptionsUpdated(sessionID, options))
+	return nil
+}
+
 // Reply routes a human's permission answer to sessionID's approval gate,
 // unblocking the guard's Await for the matching call id (see [loop.Gate]). It
 // errors with [ErrNotLive] for an unknown session. The reply carries no session
