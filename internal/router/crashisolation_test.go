@@ -212,9 +212,7 @@ func killWorkers(s *Supervisor) {
 	}
 	s.mu.Unlock()
 	for _, h := range handles {
-		if h.cmd.Process != nil {
-			_ = h.cmd.Process.Kill()
-		}
+		killHandleProcess(h)
 	}
 }
 

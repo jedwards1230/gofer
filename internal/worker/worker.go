@@ -21,15 +21,14 @@
 // it as its session id via [PinnedIDGen]; see that helper for why the store's
 // first id draw is the session id.
 //
-// # Intermediate-state window (adoption is a follow-up slice)
+// # Router restart survival (adoption)
 //
-// This slice detaches workers but does NOT yet re-adopt them. A restarted
-// router does not scan endpoint files or reconnect to live workers, so a router
-// restart ORPHANS every live worker: each keeps running (detached), keeps
-// holding its unix socket, its <uuid>.lock, and its <uuid>.json endpoint file,
-// but is no longer reachable through the new router until the adoption slice
-// lands. An orphan is benign to a fresh router (it spawns new sessions under
-// fresh uuids, never colliding with an orphan's lock).
+// A detached worker outlives a router restart. The worker keeps running, keeps
+// holding its unix socket, its <uuid>.lock, and its <uuid>.json endpoint file;
+// the NEXT router start scans those endpoint files and re-adopts the still-alive
+// worker by dialing its socket (see internal/router's adoptExistingWorkers).
+// This endpoint file is that scan's advertisement — pid for the liveness probe,
+// addr to dial, wire/binary version for the adopt/skew decision.
 //
 // # Handshake transport contract
 //
@@ -161,8 +160,8 @@ type Options struct {
 // On a CLEAN exit (ctx cancelled) it removes the endpoint file and releases the
 // lock. The lifecycle is deliberately asymmetric: an abnormal listener stop —
 // and a crash, where no deferred code runs at all — leaves the <uuid>.lock,
-// endpoint file, and socket behind; the router's adoption scan (a follow-up
-// slice) garbage-collects these stale artifacts.
+// endpoint file, and socket behind; the router's adoption scan garbage-collects
+// these stale artifacts (dead pid, or a dialed-refused socket).
 func Serve(ctx context.Context, opts Options) error {
 	if opts.Supervisor == nil {
 		return errors.New("worker: nil supervisor")
@@ -247,6 +246,11 @@ func Serve(ctx context.Context, opts Options) error {
 		DefaultModel: opts.DefaultModel,
 		MaxSessions:  1, // a worker IS a single-session daemon (M6)
 		Logger:       logger,
+		// Re-surface a still-open permission request to a router that adopts this
+		// worker mid-approval: the adopting router attaches via session/load, and
+		// the outstanding gate (live in-flight state, not journaled) reaches it
+		// only if this worker re-emits it there (design §7).
+		ReplayPendingPermissionsOnAttach: true,
 	})
 
 	// 6. Handshake, THEN serve. The router treats the handshake as "ready to be

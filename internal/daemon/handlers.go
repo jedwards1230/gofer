@@ -388,6 +388,26 @@ func handleSessionLoad(d *Daemon, ctx context.Context, p *peer, params json.RawM
 			return nil, internalErr(fmt.Errorf("session/load %s: write replay gofer/event: %w", op.SessionID, werr))
 		}
 	}
+
+	// Re-surface any STILL-OPEN permission request for the M6 router adopting a
+	// worker mid-approval (design §7): the folded history above is journaled
+	// conversation only — an outstanding gate is live in-flight state, not in the
+	// journal — so a turn blocked awaiting a decision reaches this newly attached
+	// peer only if the worker re-emits its pending requests here. Gated to worker
+	// mode so the default in-process daemon's session/load is unchanged. Sent as
+	// gofer/permission_requested (the same notification handleSessionPrompt fans a
+	// live ask out on), before the response, so it rides the same
+	// notifications-before-response ordering the replays above rely on and a
+	// gofer client reconstructs it exactly as a live one.
+	if d.cfg.ReplayPendingPermissionsOnAttach {
+		pending := d.pendingPermsForSession(op.SessionID)
+		d.log.Debug("session load pending-permission replay", "session", op.SessionID, "requests", len(pending))
+		for _, req := range pending {
+			if werr := p.notify(ctx, methodGoferPermissionRequested, req); werr != nil {
+				return nil, internalErr(fmt.Errorf("session/load %s: replay pending permission: %w", op.SessionID, werr))
+			}
+		}
+	}
 	return acp.LoadSessionResponse{}, nil
 }
 
@@ -669,19 +689,35 @@ func handleSessionPrompt(d *Daemon, ctx context.Context, p *peer, params json.Ra
 			// carries only the call id, find this session's gate.
 			switch pe := e.(type) {
 			case event.PermissionRequested:
-				d.recordPermRoute(pe.ID, op.SessionID)
-				d.broadcastPermission(ctx, op.SessionID, methodGoferPermissionRequested, permissionRequestedParams{
+				reqParams := permissionRequestedParams{
 					SessionID: op.SessionID,
 					ID:        pe.ID,
 					Tool:      pe.Tool,
 					Spec:      pe.Spec,
 					Trace:     pe.Trace,
-				})
+				}
+				// Record the route + retain the full request, and fan the
+				// gofer-native notification out, exactly once — recordPermRoute
+				// reports whether this observer is the FIRST to see the request, so
+				// an adopted session's standing permission watcher (see
+				// [Daemon.RequestPermission]) and this handler never double-fan when
+				// both observe the same event. For every non-adopted turn this
+				// handler is the sole observer, so first is always true and the
+				// behavior is unchanged. Retaining the request lets it re-broadcast
+				// to a peer that attaches while this gate is still held — the M6
+				// adoption re-surface (see [Daemon.pendingPermsForSession] and
+				// handleSessionLoad's replay).
+				if d.recordPermRoute(pe.ID, op.SessionID) {
+					d.recordPendingPerm(pe.ID, reqParams)
+					d.broadcastPermission(ctx, op.SessionID, methodGoferPermissionRequested, reqParams)
+				}
 				// ALSO ask every attached ACP peer via the spec-ACP
 				// session/request_permission REQUEST, so a pure ACP client (a
 				// phone) can answer — the gofer-native notification above only
 				// serves gofer clients (the TUI/daemonbridge). First answer from
-				// EITHER surface wins at the session's gate.
+				// EITHER surface wins at the session's gate. Ungated: only this
+				// handler ever issues ACP requests (the standing watcher does not),
+				// so there is nothing to double.
 				pendingPermIDs = append(pendingPermIDs, pe.ID)
 				d.requestPermissionFromPeers(handlerCtx, op.SessionID, pe)
 				continue
@@ -692,12 +728,19 @@ func handleSessionPrompt(d *Daemon, ctx context.Context, p *peer, params json.Ra
 				// surface answered first), so no daemon-side waiter dangles —
 				// mirroring this gofer/permission_resolved fanout's timing.
 				d.cancelPermRequest(pe.ID)
-				d.broadcastPermission(ctx, op.SessionID, methodGoferPermissionResolved, permissionResolvedParams{
-					SessionID: op.SessionID,
-					ID:        pe.ID,
-					Verdict:   string(pe.Verdict),
-					Rule:      pe.Rule,
-				})
+				// Fan the resolution out exactly once — clearPendingPerm reports
+				// whether the retained request was still present (the route is
+				// cleared eagerly in handlePermissionReply, so it is not a reliable
+				// dedup signal; the pending entry is dropped only here). For a
+				// single-observer turn this is always true, so behavior is unchanged.
+				if d.clearPendingPerm(pe.ID) {
+					d.broadcastPermission(ctx, op.SessionID, methodGoferPermissionResolved, permissionResolvedParams{
+						SessionID: op.SessionID,
+						ID:        pe.ID,
+						Verdict:   string(pe.Verdict),
+						Rule:      pe.Rule,
+					})
+				}
 				continue
 			}
 

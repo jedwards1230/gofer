@@ -104,6 +104,20 @@ type Config struct {
 	// (docs/milestones/M6-process-isolation.md) sets it to 1 so a worker IS a
 	// single-session daemon; ordinary daemons leave it at 0.
 	MaxSessions int
+
+	// ReplayPendingPermissionsOnAttach makes session/load re-broadcast a
+	// session's still-OUTSTANDING permission requests to the newly attached peer
+	// (as gofer/permission_requested notifications, before the load response),
+	// so a client that attaches AFTER a turn already asked re-surfaces the open
+	// request and can answer it. The one caller that needs it is the M6 router
+	// adopting a worker whose turn is blocked on a gate mid-approval
+	// (docs/milestones/M6-process-isolation.md §7): the turn's original fan-out
+	// died with the previous router's connection, so the retained request only
+	// reaches the new router if the worker re-emits it on the adoption attach.
+	// The single-session worker sets it; the default `gofer daemon` and
+	// daemonless paths leave it false, so their session/load is byte-for-byte
+	// unchanged.
+	ReplayPendingPermissionsOnAttach bool
 }
 
 // Daemon hosts a [Supervisor] behind an ACP-over-WebSocket listener. See the
@@ -150,6 +164,19 @@ type Daemon struct {
 	// bound the SDK Gate's own pending map carries.
 	permRoutes map[string]string
 
+	// pendingPermsMu guards pendingPerms.
+	pendingPermsMu sync.Mutex
+	// pendingPerms maps an OUTSTANDING permission request's call id to its full
+	// requested params (session id + tool/spec/trace) — the payload needed to
+	// re-broadcast it verbatim to a peer that attaches while the gate is still
+	// held. Populated where a permission.requested is first broadcast (alongside
+	// permRoutes), cleared on its permission.resolved: one entry per open gate,
+	// the same lifetime and bound as permRoutes. Read only when
+	// [Config.ReplayPendingPermissionsOnAttach] is set (the M6 worker); an
+	// ordinary daemon populates and clears it but never replays from it, so its
+	// attach path is unchanged.
+	pendingPerms map[string]permissionRequestedParams
+
 	// permReqMu guards permReqCancels.
 	permReqMu sync.Mutex
 	// permReqCancels maps a permission request's call id to the cancel func for
@@ -185,6 +212,7 @@ func New(sup Supervisor, cfg Config) *Daemon {
 		connSem:        make(chan struct{}, maxConns),
 		sessionPeers:   make(map[string]map[*peer]struct{}),
 		permRoutes:     make(map[string]string),
+		pendingPerms:   make(map[string]permissionRequestedParams),
 		permReqCancels: make(map[string]context.CancelFunc),
 	}
 }
@@ -279,14 +307,25 @@ func (d *Daemon) peersForSession(sessionID string) []*peer {
 // recordPermRoute remembers that permission call id belongs to sessionID, so a
 // later permission.reply carrying only that id can be routed to the right
 // session's gate (see handlePermissionReply). Called as a permission.requested
-// is broadcast.
-func (d *Daemon) recordPermRoute(id, sessionID string) {
+// is broadcast. It returns whether this was the FIRST time id was routed (the
+// route was absent): a caller that ALSO broadcasts uses the bool to broadcast a
+// given request exactly once even when two observers see the same
+// PermissionRequested — the ordinary prompt handler AND an adopted session's
+// standing permission watcher (see [Daemon.RequestPermission]). Every existing
+// (single-observer) caller sees each call id exactly once, so first is always
+// true for them and their behavior is unchanged.
+func (d *Daemon) recordPermRoute(id, sessionID string) (first bool) {
 	d.permMu.Lock()
+	_, existed := d.permRoutes[id]
 	d.permRoutes[id] = sessionID
 	d.permMu.Unlock()
+	return !existed
 }
 
-// clearPermRoute drops id's route once its request has resolved.
+// clearPermRoute drops id's route. Idempotent: it runs both eagerly in
+// handlePermissionReply (to close the reply→resolved window) and again on the
+// PermissionResolved event, and may run from two observers of an adopted
+// session, so it must tolerate an already-absent route.
 func (d *Daemon) clearPermRoute(id string) {
 	d.permMu.Lock()
 	delete(d.permRoutes, id)
@@ -300,6 +339,47 @@ func (d *Daemon) lookupPermRoute(id string) (string, bool) {
 	defer d.permMu.Unlock()
 	s, ok := d.permRoutes[id]
 	return s, ok
+}
+
+// recordPendingPerm remembers an outstanding permission request's full params
+// so it can be re-broadcast verbatim to a peer that attaches while the gate is
+// still held (see [Config.ReplayPendingPermissionsOnAttach]). Called alongside
+// recordPermRoute as a permission.requested is first broadcast.
+func (d *Daemon) recordPendingPerm(id string, params permissionRequestedParams) {
+	d.pendingPermsMu.Lock()
+	d.pendingPerms[id] = params
+	d.pendingPermsMu.Unlock()
+}
+
+// clearPendingPerm drops id's retained request once it has resolved and reports
+// whether an entry was actually present. Unlike the route (cleared eagerly in
+// handlePermissionReply), the retained request is dropped ONLY on the
+// PermissionResolved event, so its presence is the reliable signal for
+// broadcasting a resolution exactly once across two observers of an adopted
+// session (the standing watcher and a concurrent prompt handler) — the
+// resolve-side counterpart of recordPermRoute's first bool.
+func (d *Daemon) clearPendingPerm(id string) (cleared bool) {
+	d.pendingPermsMu.Lock()
+	_, existed := d.pendingPerms[id]
+	delete(d.pendingPerms, id)
+	d.pendingPermsMu.Unlock()
+	return existed
+}
+
+// pendingPermsForSession snapshots every outstanding permission request for
+// sessionID — the payloads [handleSessionLoad] replays to a peer that attaches
+// mid-approval when [Config.ReplayPendingPermissionsOnAttach] is set. Order is
+// unspecified (map iteration); a client answers by call id regardless.
+func (d *Daemon) pendingPermsForSession(sessionID string) []permissionRequestedParams {
+	d.pendingPermsMu.Lock()
+	defer d.pendingPermsMu.Unlock()
+	var out []permissionRequestedParams
+	for _, params := range d.pendingPerms {
+		if params.SessionID == sessionID {
+			out = append(out, params)
+		}
+	}
+	return out
 }
 
 // registerPermCancel records the cancel func for the session/request_permission

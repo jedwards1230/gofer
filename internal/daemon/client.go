@@ -287,6 +287,16 @@ func Probe(ctx context.Context, addr, token string) bool {
 // ranging over it until it closes is the idiomatic way to drain it.
 func (c *Client) Notifications() <-chan Notification { return c.notifications }
 
+// Done returns a channel closed once this client's connection has closed — the
+// read loop having exited on a transport error (the peer went away) or an
+// explicit [Client.Close]. The M6 router watches it to learn when an ADOPTED
+// worker has died: an adopted worker is held only by its client connection (the
+// router did not spawn it, so it has no *exec.Cmd to Wait on), and the socket
+// closing when that worker's process exits is the router's crash signal for it.
+// Safe to read from repeatedly and from multiple goroutines; it is closed at
+// most once.
+func (c *Client) Done() <-chan struct{} { return c.done }
+
 // Call sends a JSON-RPC request for method with params and blocks for its
 // matching response, returning the raw result on success or a *[CallError] for
 // a JSON-RPC error reply. ctx cancellation unregisters the pending call and
