@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"strings"
 	"testing"
 
@@ -18,7 +19,7 @@ func TestSelectTUIBackend_NoDaemonFallsBackLocal(t *testing.T) {
 	root := t.TempDir()
 	df := &daemonFlags{addr: "127.0.0.1:1"}
 
-	backend, err := selectTUIBackend(context.Background(), df, t.TempDir(), root)
+	backend, err := selectTUIBackend(context.Background(), df, t.TempDir(), root, io.Discard)
 	if err != nil {
 		t.Fatalf("selectTUIBackend: %v", err)
 	}
@@ -47,7 +48,7 @@ func TestSelectTUIBackend_DaemonReachablePrefersDaemon(t *testing.T) {
 	addr := testDaemon(t, "", fauxProvider)
 	df := &daemonFlags{addr: addr}
 
-	backend, err := selectTUIBackend(context.Background(), df, t.TempDir(), "")
+	backend, err := selectTUIBackend(context.Background(), df, t.TempDir(), "", io.Discard)
 	if err != nil {
 		t.Fatalf("selectTUIBackend: %v", err)
 	}
@@ -71,7 +72,7 @@ func TestSelectTUIBackend_UnauthorizedIsHardError(t *testing.T) {
 	addr := testDaemon(t, "the-real-token", fauxProvider)
 	df := &daemonFlags{addr: addr, token: "wrong"}
 
-	_, err := selectTUIBackend(context.Background(), df, t.TempDir(), "")
+	_, err := selectTUIBackend(context.Background(), df, t.TempDir(), "", io.Discard)
 	if err == nil {
 		t.Fatal("selectTUIBackend with wrong token: want an error, got nil")
 	}

@@ -100,7 +100,14 @@ their own `--root` (defaulting to `~/.gofer`), so a daemon and a client given
 the SAME `--root` discover each other automatically; `ps`/`kill`/`archive`/
 `attach`/`agents`/bare `gofer` take no `--root` of their own and always use
 the default `~/.gofer` — a daemon started with a different `--root` needs an
-explicit `--daemon`/`$GOFER_DAEMON` on those clients.
+explicit `--daemon`/`$GOFER_DAEMON` on those clients. The endpoint file also
+carries the daemon's build `version`; when a client discovers a daemon through
+it whose version differs from the client's own, the client prints a loud stderr
+**warning** naming both versions and how to restart the daemon, then proceeds
+normally — it never auto-restarts (that would kill live sessions and can't
+touch a foreground daemon). The check is skipped when the address came from a
+flag/env or an older daemon advertised no version — a remote daemon's build is
+not locally knowable without a round-trip.
 
 Daemon-as-a-service: `gofer daemon install` writes a launchd user agent
 (macOS) or systemd `--user` unit (Linux) so the daemon starts on login;

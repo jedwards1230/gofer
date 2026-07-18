@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"testing"
 
@@ -147,7 +148,7 @@ func TestDialDaemonDiscoversEndpointFile(t *testing.T) {
 
 	t.Run("no flag uses the discovered endpoint", func(t *testing.T) {
 		f := &daemonFlags{}
-		c, err := dialDaemon(t.Context(), f, "")
+		c, err := dialDaemon(t.Context(), f, "", io.Discard)
 		if err != nil {
 			t.Fatalf("dialDaemon: %v", err)
 		}
@@ -159,7 +160,7 @@ func TestDialDaemonDiscoversEndpointFile(t *testing.T) {
 			t.Fatalf("WriteEndpoint: %v", err)
 		}
 		f := &daemonFlags{addr: addr, token: "the-token"}
-		c, err := dialDaemon(t.Context(), f, "")
+		c, err := dialDaemon(t.Context(), f, "", io.Discard)
 		if err != nil {
 			t.Fatalf("dialDaemon with explicit flag: %v", err)
 		}

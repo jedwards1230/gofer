@@ -155,7 +155,7 @@ func runRun(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 	var daemonClient *daemon.Client
 	daemonRunning := false
 	if !*local {
-		c, dialErr := dialDaemon(ctx, df, *root)
+		c, dialErr := dialDaemon(ctx, df, *root, stderr)
 		switch {
 		case dialErr == nil:
 			daemonClient = c

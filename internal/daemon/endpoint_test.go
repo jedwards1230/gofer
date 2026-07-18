@@ -42,6 +42,7 @@ func TestEndpointRoundTrip(t *testing.T) {
 		Token:     "the-token",
 		PID:       4321,
 		StartedAt: time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC),
+		Version:   "v1.2.3",
 	}
 	if err := daemon.WriteEndpoint(root, want); err != nil {
 		t.Fatalf("WriteEndpoint: %v", err)
@@ -54,7 +55,7 @@ func TestEndpointRoundTrip(t *testing.T) {
 	// across a JSON round trip — monotonic readings and wall/ext
 	// representations can differ even for the same instant) and every other
 	// field directly.
-	if got.Addr != want.Addr || got.Token != want.Token || got.PID != want.PID || !got.StartedAt.Equal(want.StartedAt) {
+	if got.Addr != want.Addr || got.Token != want.Token || got.PID != want.PID || !got.StartedAt.Equal(want.StartedAt) || got.Version != want.Version {
 		t.Errorf("ReadEndpoint = %+v, want %+v", got, want)
 	}
 }
@@ -77,6 +78,12 @@ func TestEndpointRoundTripNoToken(t *testing.T) {
 	}
 	if !got.StartedAt.Equal(want.StartedAt) {
 		t.Errorf("StartedAt = %v, want %v", got.StartedAt, want.StartedAt)
+	}
+	// An old daemon that predates the Version field never set it; omitempty
+	// means it round-trips as "" (unknown), not some other artifact — the
+	// signal the CLI's skew check treats as "skip, don't warn".
+	if got.Version != "" {
+		t.Errorf("Version = %q, want \"\"", got.Version)
 	}
 }
 

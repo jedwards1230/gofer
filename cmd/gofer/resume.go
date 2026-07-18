@@ -71,7 +71,7 @@ func runResume(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 		// dialDaemon's own root resolution (via daemon.ReadEndpoint) already
 		// falls back through [supervisor.ResolveRoot], so the raw --root flag
 		// (possibly "") is passed through unresolved here.
-		c, dialErr := dialDaemon(ctx, df, *root)
+		c, dialErr := dialDaemon(ctx, df, *root, stderr)
 		switch {
 		case dialErr == nil:
 			daemonClient = c
