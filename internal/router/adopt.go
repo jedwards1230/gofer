@@ -51,19 +51,23 @@ func (s *Supervisor) adoptExistingWorkers() {
 //  1. pid gone ([daemon.ProcessAlive] false) → STALE: the worker crashed/exited
 //     without cleaning up. GC its endpoint+socket residue; the session is now
 //     just an offline journal.
-//  2. wire-version skew from the endpoint file's pre-dial hint (design §6) →
-//     LEAVE unadopted: this slice supports only the router's own wire version
-//     (N-0 full; skew routing is Phase 3), so a skewed-but-live worker is left
-//     running detached for a future skew-aware router — NOT GC'd (it holds a
-//     live session) and NOT killed.
+//  2. version skew from the endpoint file's pre-dial hint (design §6) →
+//     ADVISORY ONLY, logged: no skew class refuses adoption, so the hint cannot
+//     decide anything on its own; the handshake below is authoritative.
 //  3. dial refused → STALE: the socket has no listener even though the pid probe
 //     passed (a reused pid, or a worker mid-crash). GC and treat offline.
 //  4. gofer/hello fails → LEAVE unadopted: the worker dialed but is
 //     unresponsive/degraded; its pid is live, so do not GC — leave it for a
-//     later reap, and do not route to it.
-//  5. wire-version skew from the authoritative handshake → LEAVE unadopted (as
-//     step 2, but post-dial).
-//  6. otherwise → ADOPT: wrap the connection in a [wirestream.Reconstructor],
+//     later reap, and do not route to it. (A FAILED handshake is not a skewed
+//     one: it means the router learned nothing at all, not that it learned the
+//     worker is old.)
+//  5. classify the authoritative handshake into a [skewClass] and ADOPT
+//     regardless of the class — the class is recorded on the handle and governs
+//     only what the router will later ASK of the worker: a wire mismatch
+//     refuses new prompts/model changes ([ErrWorkerSkewed]) while still
+//     observing, replying to permissions, and letting the turn finish; a binary
+//     mismatch is fully routable (session pinning — see the package doc).
+//  6. ADOPT: wrap the connection in a [wirestream.Reconstructor],
 //     re-attach via [wirestream.Reconstructor.Load] FIRST — which settles
 //     history and re-surfaces any still-open PermissionRequested into the broker
 //     (§7) — then register the ADOPTED handle (cmd==nil; wait fires off
@@ -79,11 +83,17 @@ func (s *Supervisor) adoptWorker(entry daemon.WorkerEndpointEntry) bool {
 		return false
 	}
 
-	// 2. Pre-dial wire-version hint from the endpoint file (design §6).
-	if !wireVersionCompatible(ep.WireVersion) {
-		s.log.Warn("adoption: wire-version skew (endpoint hint); leaving worker unadopted",
-			"session", id, "workerWire", ep.WireVersion, "routerWire", daemon.WireVersion)
-		return false
+	// 2. Pre-dial version hint from the endpoint file (design §6). ADVISORY
+	//    ONLY: under this slice's policy no skew class refuses adoption (a wire
+	//    mismatch adopts for the observe/reply/finish subset; a binary mismatch
+	//    adopts fully), so the hint cannot short-circuit the decision — it is
+	//    logged so an operator can see a stale-or-agreeing hint next to the
+	//    authoritative handshake below, and it stays the cheap pre-dial signal a
+	//    future policy (or a fleet router with no local endpoint file) needs.
+	if hint := classifySkew(s.version, ep.BinaryVersion, daemon.WireVersion, ep.WireVersion); hint != skewNone {
+		s.log.Debug("adoption: version-skew hint from endpoint file (advisory; handshake decides)",
+			"session", id, "hint", hint.String(),
+			"workerWire", ep.WireVersion, "workerBinary", ep.BinaryVersion)
 	}
 
 	// 3. Dial. A refused dial ⇒ stale socket (design §4).
@@ -106,13 +116,10 @@ func (s *Supervisor) adoptWorker(entry daemon.WorkerEndpointEntry) bool {
 		return false
 	}
 
-	// 5. Authoritative wire-version skew ⇒ leave.
-	if !wireVersionCompatible(hello.WireVersion) {
-		s.log.Warn("adoption: wire-version skew (handshake); leaving worker unadopted",
-			"session", id, "workerWire", hello.WireVersion, "routerWire", daemon.WireVersion)
-		_ = client.Close()
-		return false
-	}
+	// 5. Authoritative version classification (design §6). Every class ADOPTS —
+	//    the class only decides what the router will subsequently ask of the
+	//    worker (see [skewClass.refusesNewWork]).
+	skew := s.classifyWorker(id, hello)
 
 	// 6. Adopt. Load FIRST so history + any open permission request re-surface
 	//    into the reconstructed broker (retained by event.WithReplay, §7) before
@@ -129,7 +136,10 @@ func (s *Supervisor) adoptWorker(entry daemon.WorkerEndpointEntry) bool {
 	}
 	cancel()
 
-	h := &workerHandle{id: id, cmd: nil, client: client, rec: rec, pid: ep.PID, wait: adoptedWait(client)}
+	h := &workerHandle{
+		id: id, cmd: nil, client: client, rec: rec, pid: ep.PID, wait: adoptedWait(client),
+		binaryVersion: hello.BinaryVersion, wireVersion: hello.WireVersion, skew: skew,
+	}
 
 	s.mu.Lock()
 	if s.closed {
@@ -234,15 +244,6 @@ func (s *Supervisor) watchPermissions(h *workerHandle, relay daemon.PermissionRe
 			return
 		}
 	}
-}
-
-// wireVersionCompatible reports whether the router can adopt a worker
-// advertising router↔worker wire version workerWire. This slice supports only
-// the router's OWN wire version ([daemon.WireVersion]) — N-0 full; the
-// observe/reply/finish subset across a version gap is Phase 3 (design §6) — so
-// an equal version adopts and any skew is left for a future skew-aware router.
-func wireVersionCompatible(workerWire int) bool {
-	return workerWire == daemon.WireVersion
 }
 
 // adoptedWait returns the exit-signal channel for an ADOPTED worker: since the

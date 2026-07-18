@@ -116,6 +116,13 @@ type sessionInfoDTO struct {
 	// loadHistory. Additive field: an older client decoding this DTO simply
 	// never reads it.
 	Cwd string `json:"cwd,omitempty"`
+	// BinaryVersion is the gofer build version of the process running the
+	// session (see [supervisor.SessionInfo.BinaryVersion]) — under M6 worker
+	// mode, the session's WORKER, which a router surfaces so `gofer ps` /
+	// session/list can show mixed binary versions across a daemon upgrade.
+	// Omitted when empty, which is the normal case for the in-process daemon and
+	// for every disk-only (offline) row: it is live-only state, never journaled.
+	BinaryVersion string `json:"binaryVersion,omitempty"`
 }
 
 func toSessionInfoDTO(info supervisor.SessionInfo) sessionInfoDTO {
@@ -133,6 +140,8 @@ func toSessionInfoDTO(info supervisor.SessionInfo) sessionInfoDTO {
 		Project: info.Project,
 		Live:    info.Live,
 		Cwd:     info.Cwd,
+
+		BinaryVersion: info.BinaryVersion,
 	}
 }
 

@@ -55,6 +55,16 @@ type Config struct {
 	// is empty — passed to each worker via --model and onto the session/new
 	// request.
 	Model string
+	// Version is the ROUTER's own build version (cmd/gofer's effectiveVersion).
+	// It is compared — exactly, string-wise — against each worker's gofer/hello
+	// binaryVersion to classify version skew (see classifySkew); it is NOT sent
+	// to workers. Empty means "this router does not identify its build", which
+	// classifies every identified worker as [skewUnknown] — surfaced but never
+	// refused, so an embedder that omits it keeps a fully routable router.
+	//
+	// It MUST be the same derived identifier a worker stamps itself with, not
+	// the raw ldflags sentinel, or every locally-built worker reads as skewed.
+	Version string
 	// SelfExe is the path to the gofer executable to spawn as a worker. Empty
 	// resolves via [os.Executable] at construction (unless NewWorkerCmd is set,
 	// which bypasses selfExe entirely).
@@ -126,6 +136,20 @@ type workerHandle struct {
 	// best-effort SIGKILL on Kill/Archive (see killHandleProcess).
 	pid int
 
+	// binaryVersion, wireVersion, and skew record what the worker reported over
+	// the AUTHORITATIVE gofer/hello handshake (design §6) and how the router
+	// classified it. They are set once, before the handle is registered, and
+	// never mutated afterwards — so unlike stopped they need no lock: any
+	// goroutine that can reach the handle (via get/take/snapshotHandles) is
+	// reading values published by the same mutex that registered it.
+	//
+	// skew drives exactly two things: it refuses NEW work on a wire mismatch
+	// (see [skewClass.refusesNewWork]), and binaryVersion is surfaced on the
+	// roster so `session/list` can show mixed binary versions across an upgrade.
+	binaryVersion string
+	wireVersion   int
+	skew          skewClass
+
 	// wait delivers the worker's exit: for a SPAWNED worker, [daemon.Reap]'s
 	// cmd.Wait result (the sole owner of cmd.Wait — the reaper must never call
 	// cmd.Wait directly); for an ADOPTED worker, a nil sent when the client
@@ -145,6 +169,7 @@ type workerHandle struct {
 type Supervisor struct {
 	root    string
 	model   string
+	version string
 	selfExe string
 	log     *slog.Logger
 
@@ -245,6 +270,7 @@ func New(cfg Config) (*Supervisor, error) {
 	s := &Supervisor{
 		root:         root,
 		model:        cfg.Model,
+		version:      cfg.Version,
 		selfExe:      selfExe,
 		log:          logger,
 		store:        store,
@@ -355,6 +381,31 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts supervisor.
 		cleanupSpawnedWorker(sessionID, cmd, waitCh)
 		return supervisor.SessionInfo{}, fmt.Errorf("router: create: dial worker %s: %w", ep.Addr, err)
 	}
+
+	// Authoritative version handshake, immediately after the dial — symmetric
+	// with the adopt path (see adoptWorker) so BOTH ways a handle comes into
+	// existence record the same authoritative versions rather than trusting the
+	// endpoint file's pre-dial hint. A worker we just spawned from our own
+	// executable should never fail this, so a failure is a genuine startup
+	// fault: tear the worker down rather than register a handle whose versions
+	// are unknown.
+	//
+	// Reservation accounting: this is a NEW early return between admit() and
+	// registration. It deliberately does NOT release the slot itself — the
+	// central `defer { if reserved { releaseSlot() } }` above covers every such
+	// return (and a panic), which is what makes the release exactly-once. A
+	// manual releaseSlot here would decrement pending twice and over-admit past
+	// MaxWorkers forever.
+	helloCtx, helloCancel := context.WithTimeout(ctx, wireCallTimeout)
+	hello, err := client.Hello(helloCtx)
+	helloCancel()
+	if err != nil {
+		_ = client.Close()
+		cleanupSpawnedWorker(sessionID, cmd, waitCh)
+		return supervisor.SessionInfo{}, fmt.Errorf("router: create: gofer/hello on worker: %w", err)
+	}
+	skew := s.classifyWorker(sessionID, hello)
+
 	rec := wirestream.New(client)
 
 	// Bound the session/new Call like every other router→worker control RPC
@@ -392,7 +443,10 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts supervisor.
 	// contract). RegisterFresh keeps the create/prompt path clean.
 	rec.RegisterFresh(sessionID)
 
-	h := &workerHandle{id: sessionID, cmd: cmd, client: client, rec: rec, pid: pid, wait: waitCh}
+	h := &workerHandle{
+		id: sessionID, cmd: cmd, client: client, rec: rec, pid: pid, wait: waitCh,
+		binaryVersion: hello.BinaryVersion, wireVersion: hello.WireVersion, skew: skew,
+	}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -423,13 +477,14 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts supervisor.
 		status = supervisor.StatusWorking
 	}
 	return supervisor.SessionInfo{
-		ID:      sessionID,
-		Model:   model,
-		Cwd:     opts.Cwd,
-		Status:  status,
-		Created: now,
-		Updated: now,
-		Live:    true,
+		ID:            sessionID,
+		Model:         model,
+		Cwd:           opts.Cwd,
+		Status:        status,
+		Created:       now,
+		Updated:       now,
+		Live:          true,
+		BinaryVersion: hello.BinaryVersion,
 	}, nil
 }
 

@@ -35,3 +35,19 @@ var ErrResumeUnsupported = errors.New("router: resume not yet supported in worke
 // outcome, and the real config_option_update a model swap produces still reaches
 // clients via the worker's own emit (see [Supervisor.SetModel]).
 var ErrEmitConfigUnsupported = errors.New("router: emit config options not supported in worker mode")
+
+// ErrWorkerSkewed is the typed error [Supervisor.Send] and [Supervisor.SetModel]
+// return when the owning worker speaks a DIFFERENT router↔worker wire version
+// than this router: the protocol carrying the request cannot be trusted, so the
+// router forwards only the additive observe / permission-reply / finish subset
+// design §6 guarantees across a version gap and refuses to give that worker NEW
+// work. The session stays live, keeps streaming, keeps answering permissions, and
+// its in-flight turn finishes normally — it simply accepts no further prompts.
+//
+// It is deliberately NOT returned for a BINARY-version mismatch on a matching
+// wire: prompting an older worker merely runs another turn on that binary, which
+// is session pinning rather than a hazard (see the package doc).
+//
+// Like [ErrResumeUnsupported], the daemon surfaces it as a plain JSON-RPC
+// application error — no distinct error code, and no first-class TUI state.
+var ErrWorkerSkewed = errors.New("router: worker wire version skewed")

@@ -263,6 +263,13 @@ type SessionInfo struct {
 	// it, and this decodes to the zero value (no badge), matching M2's
 	// always-0 behavior.
 	Pending int `json:"pending,omitempty"`
+	// BinaryVersion mirrors internal/daemon/wire.go's field of the same name:
+	// the gofer build version of the process running the session. Under M6
+	// process isolation a router stamps it from the owning WORKER's gofer/hello
+	// handshake, so a roster can show mixed binary versions across a daemon
+	// upgrade. Additive and live-only: an older daemon (or any offline row)
+	// simply never sends it and this decodes to "".
+	BinaryVersion string `json:"binaryVersion,omitempty"`
 }
 
 // Roster calls gofer/roster and decodes the raw wire rows. Consumers map the

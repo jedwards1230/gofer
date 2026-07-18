@@ -198,8 +198,13 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 			return fmt.Errorf("build router: resolve gofer executable: %w", exeErr)
 		}
 		rsup, rerr := router.New(router.Config{
-			Root:       rootDir,
-			Model:      modelID,
+			Root:  rootDir,
+			Model: modelID,
+			// The router's own build version, compared against each worker's
+			// gofer/hello binaryVersion to classify skew. effectiveVersion() is
+			// the SAME derivation every worker stamps itself with (see
+			// runSessionWorker), so identical local builds compare equal.
+			Version:    effectiveVersion(),
 			SelfExe:    selfExe,
 			Logger:     logger,
 			MaxWorkers: *maxWorkers,

@@ -1,5 +1,5 @@
 // Package router is the production router-side remote supervisor of M6 process
-// isolation (docs/milestones/M6-process-isolation.md, Phase 2). It implements
+// isolation (docs/milestones/M6-process-isolation.md, Phases 2-3). It implements
 // [github.com/jedwards1230/gofer/internal/daemon.Supervisor] — the exact set of
 // methods the daemon's ACP-over-WebSocket surface drives — by running EACH
 // session in its own DETACHED `gofer session-worker` process and proxying the
@@ -10,7 +10,7 @@
 // the pump, the approval gate, the journal writer, the event broker) living one
 // tier down in a worker.
 //
-// # What ships in this slice: crash isolation + detachment + adoption
+// # What ships so far: crash isolation, detachment, adoption, version policy
 //
 // A worker is a single-session daemon (see internal/worker). The router spawns
 // one per [Supervisor.Create] via [daemon.SpawnDetached] (Setsid, stdio to a
@@ -55,9 +55,10 @@
 // [New] runs [Supervisor.adoptExistingWorkers] (see adopt.go) before the router
 // serves anything: it scans the per-worker endpoint files a prior router's
 // detached workers left ([daemon.ListWorkerEndpoints]) and, for each, runs the
-// §4 adopt/stale decision — pid-liveness probe, wire-version check (endpoint
-// hint then authoritative gofer/hello), and dial. A still-alive, version-matched,
-// responsive worker is ADOPTED: the router opens a fresh [*daemon.Client] to its
+// §4 adopt/stale decision — pid-liveness probe, dial, and the authoritative
+// gofer/hello handshake (whose versions are classified, not gated — see the
+// version-skew section below). A still-alive, responsive worker is ADOPTED
+// whatever its versions: the router opens a fresh [*daemon.Client] to its
 // socket, wraps it in a Reconstructor, re-attaches via
 // [wirestream.Reconstructor.Load] (which settles history and re-surfaces any
 // still-open PermissionRequested into the broker, §7), and registers an ADOPTED
@@ -68,6 +69,46 @@
 // best-effort: a scan or per-worker failure never fails construction (an empty
 // roster is still a usable router). Stale residue from crashed workers (dead pid,
 // or a dialed-refused socket) is garbage-collected in the same scan.
+//
+// # Version skew: what the router does with an old worker (§6, Phase 3)
+//
+// The router records every worker's versions from the AUTHORITATIVE gofer/hello
+// handshake — on both paths a handle can come into existence, Create and adopt —
+// and classifies them against its own into a skewClass (see skew.go). The
+// endpoint file's version fields remain the cheap pre-dial hint, logged but never
+// decisive: it can be stale, and no class refuses adoption anyway.
+//
+// The class governs only what the router subsequently ASKS of that worker:
+//
+//   - WIRE skew (the router↔worker wire-contract version differs) — adopt for
+//     the OBSERVE / PERMISSION-REPLY / FINISH subset only. [Supervisor.Send] and
+//     [Supervisor.SetModel] (a model change is new work) are refused with
+//     [ErrWorkerSkewed]; everything else — event reconstruction, roster,
+//     permission replies, interrupt, kill, archive — still routes, so the
+//     in-flight turn finishes normally. This is design §6's literal
+//     compatibility window: a wire mismatch means the protocol itself cannot be
+//     trusted, and only the additive event subset is guaranteed across the gap.
+//   - BINARY skew (the binary version differs, wire matches) — adopt FULLY.
+//     Recorded and surfaced, never refused. The wire is compatible, so prompting
+//     an older worker just runs another turn on that binary; that is not a
+//     hazard, it is SESSION PINNING — the isolation property M6 exists to sell.
+//     A session stays on the binary it started on until it ends; new sessions
+//     get the new binary. Phase 4 flips this to refuse-and-migrate once
+//     [Supervisor.Resume] can spawn a fresh worker to take an offline session
+//     over.
+//   - UNKNOWN (exactly one side identified its binary — e.g. a worker predating
+//     the version-reporting wiring) — treated as BINARY skew: surfaced, not
+//     refused. Refusing would brick every worker built before this slice.
+//
+// Binary comparison is EXACT, not N-1 (design §6: "N-0 full + skew-observe-only
+// (Phase 3), widen if ever needed"), and a "-dirty" build is deliberately
+// different from its base commit — it genuinely is a different binary.
+//
+// The session's owning binary is surfaced to clients as
+// [supervisor.SessionInfo.BinaryVersion], stamped by the router from the handle
+// (a worker's own roster does not know it is being proxied) and carried through
+// the existing roster/ps wire as an additive, omitempty "binaryVersion". It is
+// LIVE-ONLY: the journal does not record it, so an offline row leaves it empty.
 //
 // # Permissions across a router restart (§7)
 //
@@ -88,10 +129,16 @@
 //
 // # Deliberate cuts for this slice (documented, not oversights)
 //
-//   - Wire-version SKEW routing — adopting an old-binary worker for the
-//     observe/reply/finish subset only (design §6) — is Phase 3. This slice
-//     leaves a version-skewed worker running detached but unadopted (it is not
-//     GC'd — it holds a live session — merely not routed to).
+//   - Refusing a PROMPT on BINARY skew — which design §6's prose describes as
+//     "the next prompt waits for a fresh worker" — is deliberately NOT
+//     implemented, and the wire-mismatch case above is the only refusal. The
+//     doc's wording presupposes machinery that does not exist yet: with
+//     [Supervisor.Resume] returning [ErrResumeUnsupported] for anything without
+//     a live handle, there is no way to spawn a fresh worker to take an
+//     old-binary session over, so refusing its prompts would strand every LIVE
+//     session permanently on every daemon upgrade. Refuse-and-migrate lands in
+//     Phase 4 together with the resume-spawns-a-worker path that makes it
+//     survivable.
 //   - [Supervisor.Resume] attaches to a session this router already hosts LIVE
 //     (returning its snapshot, the §7 attach path above) but returns
 //     [ErrResumeUnsupported] for an OFFLINE id: spawning a fresh worker for an
