@@ -340,17 +340,21 @@ func (c *wsClient) waitRawResponse() rpcFrame {
 	return rpcFrame{}
 }
 
-// waitNotification blocks for the next session/update notification, silently
-// skipping any interleaved "gofer/event" frame. The M3 lossless-attach fanout
-// (see internal/daemon/handlers.go's broadcastGoferEvent) sends the daemon's
-// full-fidelity event stream on the SAME connection, for every event a
+// waitNotification blocks for the next content-bearing session/update
+// notification, silently skipping two orthogonal frames: any interleaved
+// "gofer/event" frame, and the one-shot session_info_update the daemon fans
+// when a session's first prompt derives its title. The M3 lossless-attach
+// fanout (see internal/daemon/handlers.go's broadcastGoferEvent) sends the
+// daemon's full-fidelity event stream on the SAME connection, for every event a
 // session/update would carry and many it wouldn't (turn.started,
-// session.error, tool.call.delta, ...) — so every existing session/update-
-// focused test in this package goes through this one shared primitive to see
-// only the ACP projection it's actually testing. TestPromptFanOutGoferEventFullFidelity
-// (fanout_test.go) is this package's dedicated proof that gofer/event itself
-// carries the full stream; it reads c.notifications directly instead of this
-// helper.
+// session.error, tool.call.delta, ...); the title update is a metadata
+// projection orthogonal to the content stream these tests assert on — so every
+// existing session/update-focused test in this package goes through this one
+// shared primitive to see only the content projection it's actually testing.
+// TestPromptFanOutGoferEventFullFidelity (fanout_test.go) is this package's
+// dedicated proof that gofer/event itself carries the full stream, and
+// TestSessionFirstPromptSurfacesTitle its proof of the title projection; both
+// read c.notifications directly instead of this helper.
 func (c *wsClient) waitNotification() rpcFrame {
 	c.t.Helper()
 	deadline := time.After(defaultWait)
@@ -363,11 +367,33 @@ func (c *wsClient) waitNotification() rpcFrame {
 			if f.Method == "gofer/event" {
 				continue
 			}
+			if isSessionInfoUpdate(f) {
+				continue
+			}
 			return f
 		case <-deadline:
 			c.t.Fatalf("timed out waiting for a notification")
 		}
 	}
+}
+
+// isSessionInfoUpdate reports whether f is a session/update notification whose
+// discriminator is "session_info_update" — the title metadata projection
+// waitNotification and assertNoMoreUpdates skip so content-focused tests aren't
+// disturbed by it.
+func isSessionInfoUpdate(f rpcFrame) bool {
+	if f.Method != "session/update" {
+		return false
+	}
+	var up struct {
+		Update struct {
+			SessionUpdate string `json:"sessionUpdate"`
+		} `json:"update"`
+	}
+	if err := json.Unmarshal(f.Params, &up); err != nil {
+		return false
+	}
+	return up.Update.SessionUpdate == "session_info_update"
 }
 
 const jsonrpcVersion = "2.0"

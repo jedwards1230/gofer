@@ -193,6 +193,28 @@ func drainEvents(t *testing.T, sub *event.Subscription, n int) []event.Event {
 	return out
 }
 
+// drainFirstTurnEvents drains the leading session.info event the supervisor
+// emits on a session's FIRST prompt — asserting it carries wantTitle, the title
+// gofer derives from that prompt (see supervisor/managed.go's enqueue) — then n
+// turn events, returning just the turn events. It lets a first-prompt test keep
+// its turn-event indices unchanged while still proving the title reconstructs
+// over the bridge like every other event kind. The title is a one-shot,
+// first-prompt-only event: a session's later turns (and a fresh mid-session
+// attach, which recovers the title from the roster snapshot instead) never
+// re-see it, so only first-prompt drains use this variant.
+func drainFirstTurnEvents(t *testing.T, sub *event.Subscription, wantTitle string, n int) []event.Event {
+	t.Helper()
+	all := drainEvents(t, sub, n+1)
+	info, ok := all[0].(event.SessionInfoUpdated)
+	if !ok {
+		t.Fatalf("first event = %+v, want session.info(title=%q)", all[0], wantTitle)
+	}
+	if info.Title != wantTitle {
+		t.Errorf("session.info title = %q, want %q", info.Title, wantTitle)
+	}
+	return all[1:]
+}
+
 // TestRosterReflectsCreatedSession asserts a session created through the
 // bridge shows up in a subsequent Roster call, idle (StatusNeedsInput) since
 // no prompt was given.
@@ -255,11 +277,12 @@ func TestSendReconstructsTranscript(t *testing.T) {
 		t.Fatalf("Send: %v", err)
 	}
 
+	// session.info (the title derived from this first prompt, "hi"), then:
 	// message.started(user), message.finished(user), turn.started,
 	// message.started(reasoning), 2x message.delta, message.finished(reasoning),
 	// message.started(text), 3x message.delta, message.finished(text),
-	// turn.finished = 13 events.
-	events := drainEvents(t, sub, 13)
+	// turn.finished = 13 turn events after the leading title event.
+	events := drainFirstTurnEvents(t, sub, "hi", 13)
 
 	wantKinds := []string{
 		"message.started", "message.finished",
@@ -378,7 +401,7 @@ func TestAttachReplaysHistory(t *testing.T) {
 	if err := b1.Send(context.Background(), info.ID, "hi"); err != nil {
 		t.Fatalf("Send (b1): %v", err)
 	}
-	drainEvents(t, sub1, 13) // the first turn settles fully — see TestSendReconstructsTranscript
+	drainFirstTurnEvents(t, sub1, "hi", 13) // first turn settles fully (with its leading title) — see TestSendReconstructsTranscript
 	sub1.Close()
 	if err := b1.Close(); err != nil {
 		t.Fatalf("b1.Close: %v", err)
@@ -477,7 +500,7 @@ func TestGoldenAttachHistoryReplayRendersUserTurn(t *testing.T) {
 	if err := b1.Send(context.Background(), info.ID, "hi"); err != nil {
 		t.Fatalf("Send (b1): %v", err)
 	}
-	drainEvents(t, sub1, 13) // see TestSendReconstructsTranscript
+	drainFirstTurnEvents(t, sub1, "hi", 13) // see TestSendReconstructsTranscript
 	sub1.Close()
 	if err := b1.Close(); err != nil {
 		t.Fatalf("b1.Close: %v", err)
@@ -525,7 +548,10 @@ func TestCreateSkipsHistoryLoad(t *testing.T) {
 		t.Fatalf("Send: %v", err)
 	}
 
-	events := drainEvents(t, sub, 13)
+	// drainFirstTurnEvents asserts the ONLY event ahead of the live turn is the
+	// first-prompt title (session.info), not a spurious session/load history
+	// replay — the exact regression this test guards.
+	events := drainFirstTurnEvents(t, sub, "hi", 13)
 	// The live turn's own first events (message.started(user)/message.finished
 	// (user, "hi"), then turn.started — see TestSendReconstructsTranscript's
 	// doc for why the user pair leads) must be immediately adjacent, with
@@ -628,11 +654,12 @@ func TestToolCallReconstruction(t *testing.T) {
 		t.Fatalf("Send: %v", err)
 	}
 
-	// message.started(user), message.finished(user), turn.started,
-	// tool.call.started, turn.finished(tool_use), tool.call.finished,
-	// turn.started, message.started(text), message.delta,
-	// message.finished(text), turn.finished(end_turn) = 11 events.
-	events := drainEvents(t, sub, 11)
+	// session.info (title "read a.txt"), then: message.started(user),
+	// message.finished(user), turn.started, tool.call.started,
+	// turn.finished(tool_use), tool.call.finished, turn.started,
+	// message.started(text), message.delta, message.finished(text),
+	// turn.finished(end_turn) = 11 turn events after the leading title event.
+	events := drainFirstTurnEvents(t, sub, "read a.txt", 11)
 
 	if fin, ok := events[1].(event.MessageFinished); !ok || fin.MessageKind != event.MessageUser || fin.Content != "read a.txt" {
 		t.Errorf("event 1 (user finished) = %+v, want MessageFinished(user, content=read a.txt)", events[1])
@@ -713,8 +740,9 @@ func TestPermissionRelayEndToEnd(t *testing.T) {
 	// before loop.Run ever calls runOneTool — see TestToolCallReconstruction's
 	// doc) — so these 6 events arrive until this test replies:
 	// message.started(user), message.finished(user), turn.started,
-	// tool.call.started, turn.finished(tool_use), permission.requested.
-	before := drainEvents(t, sub, 6)
+	// tool.call.started, turn.finished(tool_use), permission.requested — after
+	// the leading session.info title event (title "read a.txt").
+	before := drainFirstTurnEvents(t, sub, "read a.txt", 6)
 	if _, ok := before[2].(event.TurnStarted); !ok {
 		t.Fatalf("event 2 = %+v, want TurnStarted", before[2])
 	}
@@ -850,8 +878,9 @@ func TestInterrupt(t *testing.T) {
 	// [flushed by the cancellation check], session.error(fatal) [the loop's
 	// own emitError on the cancelled path — a kind ACP's session/update has
 	// no projection for at all, so this is only visible via gofer/event],
-	// turn.finished(cancelled) = 8 events.
-	events := drainEvents(t, sub, 8)
+	// turn.finished(cancelled) = 8 turn events after the leading session.info
+	// title event (title "hi").
+	events := drainFirstTurnEvents(t, sub, "hi", 8)
 	if fin, ok := events[1].(event.MessageFinished); !ok || fin.MessageKind != event.MessageUser || fin.Content != "hi" {
 		t.Errorf("event 1 (user finished) = %+v, want MessageFinished(user, content=hi)", events[1])
 	}
