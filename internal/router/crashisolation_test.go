@@ -15,7 +15,6 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/provider/faux"
 	"github.com/jedwards1230/agent-sdk-go/runner"
-	"github.com/jedwards1230/agent-sdk-go/session"
 
 	"github.com/jedwards1230/gofer/internal/daemon"
 	"github.com/jedwards1230/gofer/internal/supervisor"
@@ -38,36 +37,34 @@ func TestMain(m *testing.M) {
 // runFauxWorker is the worker half of the re-exec: it hosts a single-session
 // daemon whose sessions run against the SDK's deterministic faux provider (no
 // network), over the shared store root, and serves until SIGKILL. It mirrors
-// internal/worker's own test harness.
+// internal/worker's own test harness, including the session-id pinning the real
+// `gofer session-worker` performs: the session id is pinned to the router-
+// supplied GOFER_ROUTER_TEST_SESSION uuid so the worker's socket/endpoint/lock
+// keying matches what the router expects (design Option A).
 func runFauxWorker() {
 	root := os.Getenv("GOFER_ROUTER_TEST_ROOT")
-	store, err := session.NewFileStore(session.WithRoot(root))
-	if err != nil {
-		os.Exit(1)
+	sessionID := os.Getenv("GOFER_ROUTER_TEST_SESSION")
+	if sessionID == "" {
+		os.Exit(2) // the router must pass --session (via env in this seam)
 	}
 	sup, err := supervisor.New(supervisor.Config{
-		Root:  root,
-		Store: store,
+		Root: root,
 		NewSession: func(ctx context.Context, opts runner.Options) (supervisor.Session, error) {
-			opts.Store = store
+			opts.IDGen = worker.PinnedIDGen(sessionID)
 			opts.Model = "faux"
 			opts.Provider = faux.New(multiTurnScript())
 			return runner.New(ctx, opts)
-		},
-		ResumeSession: func(ctx context.Context, id string, opts runner.Options) (supervisor.Session, error) {
-			opts.Store = store
-			opts.Model = "faux"
-			opts.Provider = faux.New(multiTurnScript())
-			return runner.Resume(ctx, id, opts)
 		},
 	})
 	if err != nil {
 		os.Exit(1)
 	}
-	// Blocks until the process is killed (the router SIGKILLs workers on Close or
-	// on a crash-isolation Process.Kill). Stdout carries only the handshake line.
+	// Blocks until the process is killed (the router SIGKILLs a worker on Kill/
+	// Archive or a crash-isolation Process.Kill; Close does NOT kill it). Stdout
+	// (redirected to the per-worker log by SpawnDetached) carries the handshake.
 	if err := worker.Serve(context.Background(), worker.Options{
 		Supervisor:   sup,
+		Session:      sessionID,
 		DefaultModel: "faux",
 		Stdout:       os.Stdout,
 	}); err != nil {
@@ -88,16 +85,18 @@ func multiTurnScript() faux.Script {
 }
 
 // fauxWorkerSeam returns a Config.NewWorkerCmd that re-execs this test binary as
-// a faux worker rooted at root.
-func fauxWorkerSeam(root string) func(ctx context.Context, model, cwd string) *exec.Cmd {
-	return func(ctx context.Context, _, _ string) *exec.Cmd {
+// a faux worker rooted at root, forwarding the router-pinned session uuid so the
+// worker pins its session id and keys its runtime files to the same value.
+func fauxWorkerSeam(root string) func(ctx context.Context, sessionID, model, cwd string) *exec.Cmd {
+	return func(ctx context.Context, sessionID, _, _ string) *exec.Cmd {
 		cmd := exec.CommandContext(ctx, os.Args[0])
 		cmd.Env = append(os.Environ(),
 			"GOFER_ROUTER_TEST_WORKER=1",
 			"GOFER_ROUTER_TEST_ROOT="+root,
+			"GOFER_ROUTER_TEST_SESSION="+sessionID,
 		)
-		// Worker stderr is discarded (nil → /dev/null); the helper logs nothing
-		// anyway. Stdout is owned by the router via StdoutPipe.
+		// Stdio is left unset here — daemon.SpawnDetached redirects the worker's
+		// stdout+stderr (including the handshake line) to its per-worker log file.
 		return cmd
 	}
 }
@@ -108,12 +107,19 @@ func fauxWorkerSeam(root string) func(ctx context.Context, model, cwd string) *e
 // it. It drives the real double-hop — a worker-mode daemon over httptest, dialed
 // by real clients — and kills a worker mid-fleet with SIGKILL.
 func TestCrashIsolation(t *testing.T) {
+	shortRuntimeDir(t)
 	root := t.TempDir()
 	sup, err := New(Config{Root: root, NewWorkerCmd: fauxWorkerSeam(root)})
 	if err != nil {
 		t.Fatalf("router.New: %v", err)
 	}
-	t.Cleanup(func() { _ = sup.Close() })
+	// Detached workers survive Supervisor.Close (design §3), so terminate any
+	// still-live worker processes before Close to avoid leaking orphaned faux
+	// workers past the test binary's exit.
+	t.Cleanup(func() {
+		killWorkers(sup)
+		_ = sup.Close()
+	})
 
 	d := daemon.New(sup, daemon.Config{DefaultModel: "faux"})
 	srv := httptest.NewServer(d.Handler())
@@ -175,6 +181,41 @@ func TestCrashIsolation(t *testing.T) {
 	// wirestream client attaching to A and driving a turn observes a reconstructed
 	// fatal session.error, because the session/prompt to the dead worker fails.
 	assertTerminalError(t, ctx, addr, sessA)
+}
+
+// shortRuntimeDir points XDG_RUNTIME_DIR at a short-rooted per-user runtime dir
+// so each worker's unix socket ([daemon.WorkerSocketPath]) stays within its
+// ~103-byte budget — a deep macOS t.TempDir() would overflow it. The worker
+// processes inherit the env through the re-exec seam.
+func shortRuntimeDir(t *testing.T) {
+	t.Helper()
+	base := "/tmp"
+	if _, err := os.Stat(base); err != nil {
+		base = os.TempDir()
+	}
+	dir, err := os.MkdirTemp(base, "gfrr")
+	if err != nil {
+		t.Fatalf("mkdir short runtime dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+}
+
+// killWorkers force-terminates every live worker process. Detached workers
+// survive Supervisor.Close (design §3), so a test that spawned them must reap
+// them itself or they leak as orphans reparented to pid 1.
+func killWorkers(s *Supervisor) {
+	s.mu.Lock()
+	handles := make([]*workerHandle, 0, len(s.workers))
+	for _, h := range s.workers {
+		handles = append(handles, h)
+	}
+	s.mu.Unlock()
+	for _, h := range handles {
+		if h.cmd.Process != nil {
+			_ = h.cmd.Process.Kill()
+		}
+	}
 }
 
 // crashWorker SIGKILLs the process backing sessionID, simulating a panic/OOM/kill

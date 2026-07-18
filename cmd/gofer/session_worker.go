@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
+
+	"github.com/jedwards1230/agent-sdk-go/runner"
 
 	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/supervisor"
@@ -24,12 +27,15 @@ import (
 // — its sole client is the parent that read its handshake.
 //
 // It mirrors runDaemon's supervisor construction (root, model, permissions,
-// telemetry) but deliberately omits the endpoint-file/guardLiveEndpoint
-// machinery a top-level daemon needs. --session/--resume are intentionally
-// absent: full resume is a later M6 phase (§8) and is not implemented here.
+// telemetry) but hosts a single session whose id is PINNED to --session: the
+// M6 router pre-generates the session uuid so it can key the worker's socket,
+// endpoint file, and lock by it before the worker starts (design Option A). So
+// --session is REQUIRED; --resume is intentionally absent (full resume is a
+// later M6 phase, §8).
 func runSessionWorker(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("session-worker", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	session := fs.String("session", "", "REQUIRED: the pinned session uuid the router pre-generated")
 	model := fs.String("model", "", "default model for the session (default: the sole logged-in provider's model)")
 	root := fs.String("root", "", "session store root (default ~/.gofer)")
 	// Same explicit env-fallback convention as `gofer daemon` (see runDaemon):
@@ -39,6 +45,13 @@ func runSessionWorker(ctx context.Context, args []string, stdout, stderr io.Writ
 		return err
 	} else if help {
 		return nil
+	}
+
+	// Hard-fail on a missing --session: there is no self-generated fallback. A
+	// self-minted id would desync the worker's socket/endpoint/lock keying (all
+	// derived from this uuid by the router) from its actual session id.
+	if *session == "" {
+		return errors.New("session-worker: --session <uuid> is required")
 	}
 
 	levelStr := *logLevel
@@ -99,6 +112,17 @@ func runSessionWorker(ctx context.Context, args []string, stdout, stderr io.Writ
 	sup, err := supervisor.New(supervisor.Config{
 		Root:        rootDir,
 		Permissions: cfg.Engine,
+		// Pin the sole session's id to --session (design Option A): the factory
+		// installs a stateful IDGen whose first draw is the pinned uuid (the
+		// session id) and whose later draws are fresh UUIDv7 entry ids. This is
+		// the BRIDGE isolated in worker.PinnedIDGen; when the SDK grows a proper
+		// runner.Options.SessionID seam it collapses to a one-liner. Omitting the
+		// shared-store injection here (unlike the default factory) lets runner.New
+		// build its own store honoring opts.IDGen.
+		NewSession: func(ctx context.Context, opts runner.Options) (supervisor.Session, error) {
+			opts.IDGen = worker.PinnedIDGen(*session)
+			return runner.New(ctx, opts)
+		},
 		// Attach a per-session telemetry observer at registration — mirrors
 		// runDaemon's OnRegister exactly (see its doc for why subscribing here
 		// avoids a phantom replay span; disabled telemetry runs a noop tracer).
@@ -128,6 +152,7 @@ func runSessionWorker(ctx context.Context, args []string, stdout, stderr io.Writ
 	// serves the wire, and closes the supervisor on shutdown.
 	return worker.Serve(ctx, worker.Options{
 		Supervisor:   sup,
+		Session:      *session,
 		DefaultModel: modelID,
 		Version:      effectiveVersion(),
 		Logger:       logger,

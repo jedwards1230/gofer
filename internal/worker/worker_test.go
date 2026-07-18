@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/jedwards1230/agent-sdk-go/acp"
 	"github.com/jedwards1230/agent-sdk-go/provider/faux"
 	"github.com/jedwards1230/agent-sdk-go/runner"
@@ -20,6 +22,24 @@ import (
 	"github.com/jedwards1230/gofer/internal/supervisor"
 	"github.com/jedwards1230/gofer/internal/worker"
 )
+
+// shortRuntimeDir points XDG_RUNTIME_DIR at a short-rooted per-user runtime dir
+// for the duration of a test, so a worker's unix socket
+// ([daemon.WorkerSocketPath]) stays within its ~103-byte budget — a deep macOS
+// t.TempDir() would overflow it (runtimedir.go).
+func shortRuntimeDir(t *testing.T) {
+	t.Helper()
+	base := "/tmp"
+	if _, err := os.Stat(base); err != nil {
+		base = os.TempDir()
+	}
+	dir, err := os.MkdirTemp(base, "gfrw")
+	if err != nil {
+		t.Fatalf("mkdir short runtime dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+}
 
 // newFauxSupervisor builds a Supervisor whose sessions are real
 // [runner.Runner]s over the SDK's deterministic faux provider — no network —
@@ -64,7 +84,9 @@ func newFauxSupervisor(t *testing.T) *supervisor.Supervisor {
 // the faux provider, and confirms the single-session cap rejects a second
 // session/new.
 func TestWorkerServeHandshakeAndSingleSession(t *testing.T) {
+	shortRuntimeDir(t)
 	sup := newFauxSupervisor(t)
+	sessionUUID := uuid.Must(uuid.NewV7()).String()
 
 	// An io.Pipe stands in for the worker's stdout, so the test reads the
 	// handshake through the same "scan lines, decode JSON" path the router
@@ -83,6 +105,7 @@ func TestWorkerServeHandshakeAndSingleSession(t *testing.T) {
 	go func() {
 		serveErr <- worker.Serve(ctx, worker.Options{
 			Supervisor:   sup,
+			Session:      sessionUUID,
 			DefaultModel: "faux",
 			Version:      "test-version",
 			Stdout:       pw,
@@ -103,8 +126,8 @@ func TestWorkerServeHandshakeAndSingleSession(t *testing.T) {
 	if hs.Addr == "" {
 		t.Fatal("handshake Addr is empty")
 	}
-	if !strings.HasPrefix(hs.Addr, "127.0.0.1:") {
-		t.Errorf("handshake Addr = %q, want a loopback address", hs.Addr)
+	if !strings.HasPrefix(hs.Addr, "unix://") {
+		t.Errorf("handshake Addr = %q, want a unix:// address", hs.Addr)
 	}
 	if hs.PID != os.Getpid() {
 		t.Errorf("handshake PID = %d, want %d", hs.PID, os.Getpid())
@@ -121,6 +144,22 @@ func TestWorkerServeHandshakeAndSingleSession(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Ready callback did not fire")
+	}
+
+	// While serving, the worker advertises an endpoint file keyed by its session
+	// uuid, carrying the self-describing address and the wire version.
+	ep, err := daemon.ReadWorkerEndpoint(sessionUUID)
+	if err != nil {
+		t.Fatalf("ReadWorkerEndpoint(%s) while serving: %v", sessionUUID, err)
+	}
+	if ep.Addr != hs.Addr {
+		t.Errorf("endpoint Addr = %q, want the handshake addr %q", ep.Addr, hs.Addr)
+	}
+	if ep.WireVersion != daemon.WireVersion {
+		t.Errorf("endpoint WireVersion = %d, want %d", ep.WireVersion, daemon.WireVersion)
+	}
+	if ep.PID != os.Getpid() {
+		t.Errorf("endpoint PID = %d, want %d", ep.PID, os.Getpid())
 	}
 
 	dialCtx, dialCancel := context.WithTimeout(ctx, 5*time.Second)
@@ -175,6 +214,11 @@ func TestWorkerServeHandshakeAndSingleSession(t *testing.T) {
 	case err := <-serveErr:
 		if err != nil {
 			t.Errorf("worker.Serve returned %v, want nil", err)
+		}
+		// A clean shutdown removes the endpoint file (so a restarted router sees
+		// no stale artifact for this session).
+		if _, rerr := daemon.ReadWorkerEndpoint(sessionUUID); !errors.Is(rerr, os.ErrNotExist) {
+			t.Errorf("ReadWorkerEndpoint after clean shutdown err = %v, want os.ErrNotExist", rerr)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("worker.Serve did not return after ctx cancel")
