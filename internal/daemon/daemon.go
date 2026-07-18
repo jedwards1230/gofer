@@ -95,6 +95,15 @@ type Config struct {
 	// entry Available:false — never a reason to fail model discovery. Mirrors
 	// the TUI CommandEnv.Auth non-fatal contract (internal/tui/modelpicker.go).
 	AuthedProviders func() (map[string]bool, error)
+
+	// MaxSessions, when > 0, caps how many LIVE sessions this daemon will
+	// host: once the roster already holds that many, session/new is refused
+	// with a clean application error instead of creating another (see
+	// handleSessionNew). Zero — the default — means unlimited, the historical
+	// `gofer daemon` behavior, byte-for-byte unchanged. The M6 session-worker
+	// (docs/milestones/M6-process-isolation.md) sets it to 1 so a worker IS a
+	// single-session daemon; ordinary daemons leave it at 0.
+	MaxSessions int
 }
 
 // Daemon hosts a [Supervisor] behind an ACP-over-WebSocket listener. See the
