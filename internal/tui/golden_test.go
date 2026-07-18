@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/x/ansi"
+
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
@@ -311,6 +313,60 @@ func TestColorApprovalPromptInlineNarrow(t *testing.T) {
 	plain := testkit.Render(build(theme.Test()), width, testkit.Height)
 	colored := testkit.Render(build(testkit.ColorTheme()), width, testkit.Height)
 	assertColorLayout(t, plain, colored, width)
+}
+
+// longProse is a single ~130-char assistant sentence with no embedded
+// newlines, every word distinct enough to track across wrapped rows, that
+// clearly overflows the narrow render width the wrap test uses.
+const longProse = "The quick brown fox jumps over the lazy sleeping dog while carefully reviewing every single distinct line of refactored authentication middleware code."
+
+// TestGoldenWrapNarrowTranscript is the regression oracle for the transcript
+// word-wrap fix (#—): a long assistant prose message rendered at a narrow
+// width must WRAP across multiple rows, not clip at the right edge with a
+// trailing "…". It captures a plain golden and additionally asserts, in code:
+// every word of the message survives (nothing was truncated away), the body
+// occupies multiple rows (it actually wrapped), no rendered line carries the
+// "…" truncation ellipsis, and no line exceeds the render width.
+func TestGoldenWrapNarrowTranscript(t *testing.T) {
+	const width = 24
+	m := ingest(
+		event.NewMessageStarted(sid, event.MessageText),
+		event.NewMessageFinished(sid, event.MessageText, longProse),
+	)
+	got := testkit.Render(m, width, testkit.Height)
+	testkit.AssertGolden(t, "wrap_narrow_transcript", got)
+
+	// Every word of the prose must appear somewhere — a truncated render
+	// would drop the tail words entirely.
+	for _, word := range strings.Fields(longProse) {
+		if !strings.Contains(got, word) {
+			t.Errorf("wrapped render dropped word %q; wrapping must preserve the whole message:\n%s", word, got)
+		}
+	}
+
+	// The body must span multiple rows: count rendered lines that carry prose
+	// words (excluding the footer rule and input line). One long sentence at
+	// width 24 wraps to several rows — a single row would mean it was clipped.
+	bodyRows := 0
+	for _, line := range strings.Split(got, "\n") {
+		if strings.ContainsAny(line, "abcdefghijklmnopqrstuvwxyz") && !strings.HasPrefix(line, "> ") {
+			bodyRows++
+		}
+	}
+	if bodyRows < 2 {
+		t.Errorf("prose rendered on %d body row(s); want it wrapped across multiple rows", bodyRows)
+	}
+
+	// No line may carry the truncation ellipsis — the whole point of the fix —
+	// and no line may exceed the render width.
+	for i, line := range strings.Split(got, "\n") {
+		if strings.Contains(line, "…") {
+			t.Errorf("line %d carries the truncation ellipsis; the body must wrap, not clip: %q", i, line)
+		}
+		if w := ansi.StringWidth(line); w > width {
+			t.Errorf("line %d exceeds width %d cells (got %d): %q", i, width, w, line)
+		}
+	}
 }
 
 // TestGoldenFullTranscript covers the exit-flush render: every transcript item
