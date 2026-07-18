@@ -29,6 +29,12 @@ const (
 	methodGoferArchive  = "gofer/archive"
 	methodGoferSetModel = "gofer/set_model"
 
+	// methodGoferHello is the gofer-native version handshake (design §6): the
+	// authoritative, connection-scoped version exchange a router calls first on
+	// every worker connection to route around binary/wire skew. Returns
+	// HelloResult. Read-only; takes no params.
+	methodGoferHello = "gofer/hello"
+
 	// methodGoferModels is gofer-native model discovery over the SDK provider
 	// registry: the full registered-model catalog, each entry stamped with the
 	// host's per-provider availability (see handleGoferModels). Deliberately
@@ -97,6 +103,7 @@ var methodTable = map[string]methodHandler{
 	methodGoferArchive:  handleGoferArchive,
 	methodGoferSetModel: handleGoferSetModel,
 	methodGoferModels:   handleGoferModels,
+	methodGoferHello:    handleGoferHello,
 
 	methodPermissionReply: handlePermissionReply,
 }
@@ -1028,6 +1035,19 @@ func handleGoferRoster(d *Daemon, ctx context.Context, _ *peer, _ json.RawMessag
 // per the daemon host's current auth (see Config.AuthedProviders). Read-only.
 func handleGoferModels(d *Daemon, _ context.Context, _ *peer, _ json.RawMessage) (any, *rpcError) {
 	return toModelInfoDTOs(d.authedProviders()), nil
+}
+
+// handleGoferHello answers gofer/hello: the daemon's identity across the three
+// version axes (design §6). binaryVersion is the daemon's build version
+// (Config.Version), wireVersion the router↔worker wire contract version
+// (WireVersion), acpProtocolVersion the ACP version this daemon speaks
+// (acp.ProtocolVersion). Takes no params; never fails.
+func handleGoferHello(d *Daemon, _ context.Context, _ *peer, _ json.RawMessage) (any, *rpcError) {
+	return HelloResult{
+		BinaryVersion:      d.cfg.Version,
+		WireVersion:        WireVersion,
+		ACPProtocolVersion: acp.ProtocolVersion,
+	}, nil
 }
 
 // handleGoferPS answers gofer/ps: every session on disk, live or archived

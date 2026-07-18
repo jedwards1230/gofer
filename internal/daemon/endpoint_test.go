@@ -1,6 +1,8 @@
 package daemon_test
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -84,6 +86,51 @@ func TestEndpointRoundTripNoToken(t *testing.T) {
 	// signal the CLI's skew check treats as "skip, don't warn".
 	if got.Version != "" {
 		t.Errorf("Version = %q, want \"\"", got.Version)
+	}
+}
+
+// TestEndpointWireVersionRoundTrip covers the additive WireVersion field
+// (design §6): a set value round-trips through WriteEndpoint/ReadEndpoint.
+func TestEndpointWireVersionRoundTrip(t *testing.T) {
+	root := t.TempDir()
+	want := daemon.Endpoint{Addr: "127.0.0.1:7333", PID: 7, StartedAt: time.Now(), WireVersion: 3}
+	if err := daemon.WriteEndpoint(root, want); err != nil {
+		t.Fatalf("WriteEndpoint: %v", err)
+	}
+	got, err := daemon.ReadEndpoint(root)
+	if err != nil {
+		t.Fatalf("ReadEndpoint: %v", err)
+	}
+	if got.WireVersion != 3 {
+		t.Errorf("WireVersion = %d, want 3", got.WireVersion)
+	}
+}
+
+// TestEndpointWireVersionOmitEmpty asserts a zero WireVersion round-trips as 0
+// AND is omitted from the marshaled JSON (omitempty) — an older writer that
+// never set it reads back as 0 (unknown), never a phantom version.
+func TestEndpointWireVersionOmitEmpty(t *testing.T) {
+	root := t.TempDir()
+	ep := daemon.Endpoint{Addr: "127.0.0.1:7333", PID: 7, StartedAt: time.Now()}
+	if err := daemon.WriteEndpoint(root, ep); err != nil {
+		t.Fatalf("WriteEndpoint: %v", err)
+	}
+	got, err := daemon.ReadEndpoint(root)
+	if err != nil {
+		t.Fatalf("ReadEndpoint: %v", err)
+	}
+	if got.WireVersion != 0 {
+		t.Errorf("WireVersion = %d, want 0", got.WireVersion)
+	}
+
+	// Marshal the zero-WireVersion Endpoint ourselves and assert the key is
+	// absent — the omitempty guarantee the endpoint-file compat window relies on.
+	b, err := json.Marshal(ep)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if bytes.Contains(b, []byte("wireVersion")) {
+		t.Errorf("marshaled zero-WireVersion Endpoint contains \"wireVersion\" key: %s", b)
 	}
 }
 

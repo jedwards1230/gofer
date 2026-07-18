@@ -46,6 +46,13 @@ type Endpoint struct {
 	// so an older daemon that never wrote it round-trips as "" (unknown → the
 	// CLI skips the skew check rather than warning against a phantom version).
 	Version string `json:"version,omitempty"`
+	// WireVersion is the router↔worker wire-contract version ([WireVersion], design
+	// §6), advertised alongside the binary Version so a router can make an
+	// adopt/skew-route decision from the endpoint file alone, before it dials
+	// (the pre-dial hint gofer/hello later confirms authoritatively). omitempty so
+	// an older writer that never set it round-trips as 0 (unknown), never a
+	// phantom version.
+	WireVersion int `json:"wireVersion,omitempty"`
 }
 
 // EndpointPath returns the path [WriteEndpoint]/[ReadEndpoint]/[RemoveEndpoint]

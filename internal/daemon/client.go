@@ -101,6 +101,34 @@ type CallError struct {
 
 func (e *CallError) Error() string { return e.Message }
 
+// ErrHelloUnsupported is returned by [Client.Hello] when the daemon does not
+// implement gofer/hello (a pre-hello daemon: it replies method-not-found,
+// JSON-RPC -32601). A caller treats this as "this daemon predates the version
+// handshake" and falls back to the endpoint-file version hint (design §6),
+// rather than as a hard failure. Distinguish it with errors.Is.
+var ErrHelloUnsupported = errors.New("daemon does not support gofer/hello")
+
+// Hello performs the gofer/hello version handshake (design §6), returning the
+// daemon's binary/wire/ACP versions. A daemon that predates the handshake
+// replies method-not-found; Hello maps that to [ErrHelloUnsupported] (via %w)
+// so a caller can treat a pre-hello daemon as a known, non-fatal case with
+// errors.Is rather than string-matching. Any other error is returned as-is.
+func (c *Client) Hello(ctx context.Context) (HelloResult, error) {
+	raw, err := c.Call(ctx, methodGoferHello, nil)
+	if err != nil {
+		var ce *CallError
+		if errors.As(err, &ce) && ce.Code == codeMethodNotFound {
+			return HelloResult{}, fmt.Errorf("%w: %v", ErrHelloUnsupported, err)
+		}
+		return HelloResult{}, fmt.Errorf("daemon client: gofer/hello: %w", err)
+	}
+	var res HelloResult
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return HelloResult{}, fmt.Errorf("daemon client: decode gofer/hello result: %w", err)
+	}
+	return res, nil
+}
+
 // Dial opens a WebSocket connection to addr (a bare host:port, matching
 // [Config.ListenAddr] — or a full ws://.../wss://... URL) and starts the
 // client's read loop. token, if non-empty, is sent as a standard
