@@ -63,18 +63,29 @@ const (
 // cancel()`, the router↔worker connection dies, and a perfectly healthy running
 // session is marked offline for every attached client.
 //
-// context.Background rather than a Supervisor-owned base is deliberate: the
-// router has no base context to cancel these off (Close abandons its DETACHED
-// workers rather than tearing their connections down — see [Supervisor.Close]),
-// and wireCallTimeout already bounds every call. [Supervisor.Reply] has always
-// written this way, but only incidentally — its interface signature carries no
-// context — and [daemon.peer.request] documents the same hazard explicitly.
-// This path simply never got the treatment; the helper exists so it stays that
-// way.
+// context.Background rather than a Supervisor-owned base is a SIMPLICITY
+// choice, not a safety one. A base context cancelled by [Supervisor.Close]
+// would in fact be safe: Close already closes every worker link itself — it
+// calls rec.Close on each handle, and [wirestream.Reconstructor.Close] shuts
+// the underlying client connection down — so cancelling such a base would
+// destroy nothing Close does not destroy a few lines later. What survives a
+// router shutdown is the worker PROCESS (it reparents to pid 1 and is re-adopted
+// by socket scan on the next start), never the connection; "workers outlive the
+// router" is a statement about processes, and no base context could threaten it.
 //
-// The CALLER's ctx is still honored for pre-write admission and lookup (an
-// ctx.Err() check, the handle lookup): work that happens before anything
-// touches the wire, where cancellation is free of this hazard.
+// The base is omitted because it would buy nothing. wireCallTimeout already
+// bounds every call, and at shutdown Close's rec.Close closes the connection out
+// from under any in-flight write, which fails it immediately — so a cancellable
+// base would add a field and a lifecycle for no change in behavior.
+//
+// [Supervisor.Reply] has always written this way, but only incidentally — its
+// interface signature carries no context — and [daemon.peer.request] documents
+// the same hazard explicitly. This path simply never got the treatment; the
+// helper exists so it stays that way.
+//
+// The CALLER's ctx is consulted exactly once, by a ctx.Err() admission check
+// that runs before any wire work. Nothing after that check reads it: the handle
+// lookup takes no context, and the write runs under the bound returned here.
 func wireCallCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), wireCallTimeout)
 }

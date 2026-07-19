@@ -121,7 +121,7 @@ func (s *Supervisor) adoptWorker(entry daemon.WorkerEndpointEntry) bool {
 	//    absent wire version classifies as skewWire, so the session is adopted
 	//    on the STRICT side of the policy — observable, replyable, and able to
 	//    finish, but given no new work.
-	helloCtx, cancel := context.WithTimeout(context.Background(), wireCallTimeout)
+	helloCtx, cancel := wireCallCtx()
 	hello, err := client.Hello(helloCtx)
 	cancel()
 	if err != nil {
@@ -171,7 +171,7 @@ func (s *Supervisor) adoptWorker(entry daemon.WorkerEndpointEntry) bool {
 	// convention — but it is load-bearing, and any Load added later (Phase 4's
 	// resume-spawns-a-worker path) has to preserve it.
 	rec := wirestream.New(client, wirestream.WithEventSink(s.eventSink(id)))
-	loadCtx, cancel := context.WithTimeout(context.Background(), wireCallTimeout)
+	loadCtx, cancel := wireCallCtx()
 	if lerr := rec.Load(loadCtx, id); lerr != nil {
 		// A load that did not settle is non-fatal — the live stream still works;
 		// the session simply starts from whatever events arrive next.
