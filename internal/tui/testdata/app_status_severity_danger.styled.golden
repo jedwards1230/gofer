@@ -1,6 +1,6 @@
 
 <accent>gofer</accent> <muted>v0.3.0</muted>
-<muted>gpt-5 · ~/orchestration</muted>
+<muted>claude-haiku-4-5 · ~/orchestration</muted>
 
 
 
@@ -21,4 +21,4 @@
 ────────────────────────────────────────────────────────────────────────────────
 > ▏
 ────────────────────────────────────────────────────────────────────────────────
-<yellow>Live model swap needs the same provider — default set for new sessions; this se…</yellow>
+<red>gofer/set_model: session busy</red>

@@ -46,6 +46,27 @@ type CommandEnv struct {
 	// config write does take effect immediately.
 	DaemonBacked bool
 
+	// DaemonDefaultModel reads the ATTACHED DAEMON's current default model —
+	// the model it gives a session created with none — wrapping the gofer/hello
+	// handshake. cmd/gofer sets it on the daemon backend only; nil (the zero
+	// value, and the whole local path) means "unavailable", which callers must
+	// treat as UNKNOWN rather than "none".
+	//
+	// It exists because the daemon's default is the one thing about the header
+	// this process cannot recompute (a daemon resolves its default against ITS
+	// store), and because it is the only way to distinguish an unpinned daemon
+	// that ADOPTED a /model write from one pinned by --model that did not
+	// (issue #162). [App.probeDaemonDefaultCmd] calls it after a write, off the
+	// Update loop, and refreshes the header + status note from the answer — so
+	// a daemon-attached TUI stops showing a startup-cached model until restart.
+	//
+	// It is the second closure here that performs network IO (Models is the
+	// other), and it must stay non-fatal for the same reason: cmd/gofer maps a
+	// daemon that predates gofer/hello ([daemon.ErrHelloUnsupported]) to the
+	// unknown answer rather than an error, and every other failure collapses to
+	// unknown at the call site. The ctx carries the caller's timeout.
+	DaemonDefaultModel func(ctx context.Context) (string, error)
+
 	// Auth lists every authenticated provider, wrapping auth.Store.Status().
 	Auth func() ([]ProviderAuth, error)
 

@@ -118,7 +118,7 @@ func ColorTheme() theme.Theme {
 func AssertGoldenStyled(t *testing.T, name, coloredGot string) {
 	t.Helper()
 
-	got := tagANSI(t, coloredGot)
+	got := TagANSI(t, coloredGot)
 	path := filepath.Join("testdata", name+".styled.golden")
 
 	if *update {
@@ -143,7 +143,7 @@ func AssertGoldenStyled(t *testing.T, name, coloredGot string) {
 }
 
 // styleTags maps each of [ColorTheme]'s known foreground styles' opening SGR
-// escape sequence to a stable tag name, for [tagANSI] to translate ANSI into.
+// escape sequence to a stable tag name, for [TagANSI] to translate ANSI into.
 func styleTags() map[string]string {
 	th := ColorTheme()
 	open := func(s lipgloss.Style) string {
@@ -166,14 +166,20 @@ func styleTags() map[string]string {
 // what makes the stateful scan below correct.
 var sgrPattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
-// tagANSI translates coloredGot's ANSI escapes into stable `<tag>...</tag>`
-// markers keyed by [styleTags], for a colorless, machine-independent golden
-// comparison. It walks the string, emitting literal text between escapes;
+// TagANSI translates coloredGot's ANSI escapes into stable `<tag>...</tag>`
+// markers keyed by [styleTags], for a colorless, machine-independent
+// comparison. [AssertGoldenStyled] uses it to build the golden; it is exported
+// so a test can also assert a SINGLE style directly ("this note is yellow")
+// without committing a whole frame — a golden's failure mode is a wall of diff
+// that says only "something moved", which is a poor oracle for a one-line
+// color contract (see internal/tui's status-severity tests).
+//
+// It walks the string, emitting literal text between escapes;
 // each escape either closes the currently open tag (a bare reset), opens a
 // known tag (closing any already-open one first), or — if it matches no known
 // style — fails the test loudly, since an unrecognized escape is exactly the
 // kind of silent drift this layer exists to catch.
-func tagANSI(t *testing.T, coloredGot string) string {
+func TagANSI(t *testing.T, coloredGot string) string {
 	t.Helper()
 
 	tags := styleTags()

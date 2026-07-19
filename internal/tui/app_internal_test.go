@@ -1064,3 +1064,32 @@ func TestViewDisablesMouseModeWhenConfigured(t *testing.T) {
 		t.Errorf("View().MouseMode with tui.mouse=false = %v; want tea.MouseModeNone", got)
 	}
 }
+
+// TestClearStatusResetsTheSeverity is a WHITE-BOX assertion on purpose: it is
+// the only way to observe [App.clearStatus]'s severity reset.
+//
+// With a cleared status the footer renders nothing at all, so the leftover
+// severity is invisible from outside the package, and every current write goes
+// through [App.setStatus] and sets it explicitly — a black-box test of this
+// (the first attempt) passed with the reset deleted. It is asserted anyway
+// because the reset is what keeps [statusSeverity]'s documented zero-value
+// contract true of a live App: a note written by some future path that forgets
+// a severity must degrade to danger, not inherit the green of whatever
+// succeeded last. Nothing else pins that.
+func TestClearStatusResetsTheSeverity(t *testing.T) {
+	a := NewApp(theme.Test(), &internalFakeSup{}, GoldenMeta(), GoldenCommandEnv())
+	a.setStatus(sevOK, "it worked")
+	if a.statusSev != sevOK {
+		t.Fatalf("test premise broken: statusSev = %v, want sevOK", a.statusSev)
+	}
+
+	a.clearStatus()
+
+	if a.status != "" {
+		t.Errorf("status = %q, want cleared", a.status)
+	}
+	if a.statusSev != sevDanger {
+		t.Errorf("statusSev after clear = %v, want the sevDanger zero value — "+
+			"a stale severity must not outlive the note it described", a.statusSev)
+	}
+}

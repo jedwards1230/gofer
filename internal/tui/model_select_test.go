@@ -416,10 +416,14 @@ func TestGoldenModelSelectCrossProviderWarn(t *testing.T) {
 }
 
 // TestGoldenModelSelectCrossProviderWarnStyled is
-// TestGoldenModelSelectCrossProviderWarn's color-state counterpart: the
-// warning note renders in DangerStyle — the same status-line style every
-// other transient a.status note uses (app.go's render) — invisible under
-// theme.Test()'s forced Ascii profile.
+// TestGoldenModelSelectCrossProviderWarn's color-state counterpart, and one
+// third of issue #161's severity coverage (see TestStatusSeverityStyles for
+// the ok/warn/danger set): this note is a CAVEAT — the default was written but
+// the running session kept its model — so it must render in WarnStyle. It used
+// to render in DangerStyle, like every other status note did, which is exactly
+// the bug: a partial success was painted the same red as an HTTP 400.
+//
+// Invisible to the plain Ascii golden, which is why this styled twin exists.
 func TestGoldenModelSelectCrossProviderWarnStyled(t *testing.T) {
 	var saved []config.Config
 	sup := newFakeSup(modelSelectRoster())
@@ -472,8 +476,13 @@ func daemonModelSelectEnv(saved *[]config.Config) tui.CommandEnv {
 }
 
 // TestModelSelectDaemonAttachedDoesNotClaimTheDefaultTookEffect covers the
-// SECOND staleness layer (issue #156's follow-up comment), the one this TUI
-// cannot fix and must therefore not paper over. A running daemon resolves its
+// SECOND staleness layer (issue #156's follow-up comment) in the case where it
+// STILL cannot be resolved: daemonModelSelectEnv wires NO gofer/hello probe
+// (CommandEnv.DaemonDefaultModel is nil), which is what a daemon predating the
+// handshake, or an unreachable one, looks like. Issue #162 added the probe that
+// answers this definitively when it CAN — see model_select_probe_test.go — but
+// the hedged wording below remains the correct floor whenever it cannot, so
+// this stays the no-probe contract rather than obsolete coverage. A running daemon resolves its
 // default model exactly once at its own startup and never re-reads config.json,
 // so from a daemon-attached client the config write reaches nothing the daemon
 // will do. "Default model set to X." full stop would assert an effect that did
@@ -505,9 +514,10 @@ func TestModelSelectDaemonAttachedDoesNotClaimTheDefaultTookEffect(t *testing.T)
 		t.Fatalf("expected the status note to state the default's reach without over- or under-claiming, got:\n%s", got)
 	}
 	assertStatusFitsWidth(t, got, "Default saved; attached daemon adopts it unless pinned.")
-	// The header renders the DAEMON's own default (off gofer/hello). The
-	// daemon did not change, so neither may the header — updating it would be
-	// the same overclaim in a second place.
+	// The header renders the DAEMON's own default (off gofer/hello). With no
+	// probe available this process cannot know whether that changed, and an
+	// unknown answer is not evidence that it did — so the header must stay put.
+	// Updating it on a guess would be the same overclaim in a second place.
 	if !strings.Contains(got, "claude-sonnet-5 ·") {
 		t.Fatalf("expected the header to keep showing the daemon's unchanged default, got:\n%s", got)
 	}

@@ -16,6 +16,7 @@ import (
 
 	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/tui"
+	"github.com/jedwards1230/gofer/internal/tui/testkit"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
 
@@ -281,5 +282,33 @@ func TestPasteIgnoredWhileCommandPanelOpen(t *testing.T) {
 	}
 	if strings.Contains(got, "leaked") {
 		t.Fatalf("the paste leaked into the dispatch bar hidden behind the panel, got:\n%s", got)
+	}
+}
+
+// TestPasteClippedRendersAsACaveat is TestPasteClippedAtConfiguredLimit's
+// color-state counterpart (issue #161). A clipped paste is a CAVEAT, not a
+// failure: the paste landed, it was just truncated at tui.max_paste_bytes. It
+// used to render in the error style like every other status note, which reads
+// as "your paste was rejected".
+//
+// Rendered through testkit.ColorTheme because theme.Test's forced Ascii
+// profile emits no escapes at all, so the plain test above cannot see this.
+func TestPasteClippedRendersAsACaveat(t *testing.T) {
+	limit := 8
+	env := tui.GoldenCommandEnv()
+	env.Config = func() (config.Config, error) {
+		return config.Config{TUI: config.TUI{MaxPasteBytes: &limit}}, nil
+	}
+
+	sup := newFakeSup(tui.GoldenRoster())
+	var m tea.Model = tui.NewApp(testkit.ColorTheme(), sup, tui.GoldenMeta(), env)
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, _ = m.Update(m.Init()())
+
+	m = paste(t, m, "0123456789abcdef")
+
+	tagged := testkit.TagANSI(t, content(m))
+	if !strings.Contains(tagged, "<yellow>paste clipped to 8 bytes") {
+		t.Fatalf("expected the clip note in the warn style, not the error style; tagged render:\n%s", tagged)
 	}
 }
