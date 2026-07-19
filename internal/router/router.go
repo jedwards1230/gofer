@@ -10,11 +10,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/jedwards1230/agent-sdk-go/acp"
+	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/session"
 
 	"github.com/jedwards1230/gofer/internal/daemon"
@@ -161,6 +163,48 @@ type workerHandle struct {
 	// goroutine (see [Supervisor.reap]) does not treat the process exit as a
 	// crash. Guarded by the owning [Supervisor]'s mu.
 	stopped bool
+
+	// info is this session's PUSHED roster snapshot: seeded once from the worker
+	// and thereafter maintained from its event stream, so Roster/List cost no
+	// worker RPCs (see rostercache.go). Written only by this handle's
+	// watchSession goroutine, as whole immutable values; read lock-free. Nil
+	// until the seed lands (and permanently, if the seed failed), which is
+	// Roster's cache-miss signal.
+	info atomic.Pointer[supervisor.SessionInfo]
+	// seeded is closed once the seed attempt has settled — success or failure —
+	// so a caller (a test) can observe the cache reaching its steady state
+	// instead of polling for it. Closed exactly once via seedOnce.
+	seeded   chan struct{}
+	seedOnce sync.Once
+
+	// permMu guards openPerms.
+	permMu sync.Mutex
+	// openPerms is this session's still-OPEN permission requests by call id,
+	// maintained by the watcher. It backs both the cached row's Pending count and
+	// the replay [Supervisor.SetPermissionRelay] performs when the daemon's relay
+	// arrives after the watchers are already running.
+	openPerms map[string]event.PermissionRequested
+}
+
+// newWorkerHandle builds a live handle for a worker this router has just
+// finished bringing up — SPAWNED (cmd/wait from [daemon.Reap]) or ADOPTED (cmd
+// nil, wait from [adoptedWait]) — with its cache/permission state initialized.
+// Both paths go through here so a field added to the handle cannot be forgotten
+// on one of them.
+func newWorkerHandle(id string, cmd *exec.Cmd, client *daemon.Client, rec *wirestream.Reconstructor, pid int, wait <-chan error, hello daemon.HelloResult, skew skewClass) *workerHandle {
+	return &workerHandle{
+		id:            id,
+		cmd:           cmd,
+		client:        client,
+		rec:           rec,
+		pid:           pid,
+		wait:          wait,
+		binaryVersion: hello.BinaryVersion,
+		wireVersion:   hello.WireVersion,
+		skew:          skew,
+		seeded:        make(chan struct{}),
+		openPerms:     make(map[string]event.PermissionRequested),
+	}
 }
 
 // Supervisor runs each session in its own `gofer session-worker` child process
@@ -198,15 +242,24 @@ type Supervisor struct {
 	// under this same lock, and every failure path drops it. Guarded by mu.
 	pending int
 
-	// permRelay bridges an adopted session's reconstructed permission stream back
-	// into the OUTER daemon's fan-out (route + broadcast), set once via
+	// permRelay bridges a session's reconstructed permission stream back into the
+	// OUTER daemon's fan-out (route + broadcast), set once via
 	// [Supervisor.SetPermissionRelay] after the daemon is constructed (design §7).
-	// Nil until set — a router used without a daemon (some tests) simply runs no
-	// permission watchers. Guarded by mu.
+	// Nil until set — a router used without a daemon (some tests) simply relays no
+	// permissions. Guarded by mu.
 	permRelay daemon.PermissionRelay
-	// watcherWG joins every adopted-session permission watcher goroutine so Close
-	// returns leak-free (F4). Watchers exit when their broker closes (reap /
-	// Close) or reaperStop fires.
+
+	// eventRelay bridges a session's reconstructed EVENT stream back into the
+	// outer daemon's client fan-out (design §5), set once via
+	// [Supervisor.SetEventRelay]. It is read on every event, from each worker's
+	// own reconstruction demuxer goroutine, so it is published atomically rather
+	// than under mu: a roster read must never contend with event streaming. Nil
+	// (the zero holder) until set.
+	eventRelay atomic.Pointer[eventRelayHolder]
+
+	// watcherWG joins every per-session watcher goroutine so Close returns
+	// leak-free (F4). Watchers exit when their broker closes (reap / Close) or
+	// reaperStop fires.
 	watcherWG sync.WaitGroup
 
 	// reaperStop is closed once by Close to wake every per-worker reaper WITHOUT
@@ -232,6 +285,10 @@ const (
 // Supervisor satisfies the daemon's hosting interface — a signature drift fails
 // the build here rather than at daemon.New.
 var _ daemon.Supervisor = (*Supervisor)(nil)
+
+// eventRelayHolder boxes the [daemon.EventRelay] interface value so it can be
+// published through an [atomic.Pointer] (which needs a concrete pointee).
+type eventRelayHolder struct{ relay daemon.EventRelay }
 
 // New builds a Supervisor. It resolves the store root and (unless a NewWorkerCmd
 // seam is supplied) the gofer executable eagerly, so a bad root or an
@@ -406,7 +463,10 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts supervisor.
 	}
 	skew := s.classifyWorker(sessionID, hello)
 
-	rec := wirestream.New(client)
+	// The sink is installed at CONSTRUCTION (wirestream starts its demuxer inside
+	// New, so a later setter would race it) and re-fans every reconstructed event
+	// to this daemon's clients, verbatim — see [Supervisor.eventSink].
+	rec := wirestream.New(client, wirestream.WithEventSink(s.eventSink(sessionID)))
 
 	// Bound the session/new Call like every other router→worker control RPC
 	// (see methods.go): a worker that dialed but then wedged before answering
@@ -443,10 +503,7 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts supervisor.
 	// contract). RegisterFresh keeps the create/prompt path clean.
 	rec.RegisterFresh(sessionID)
 
-	h := &workerHandle{
-		id: sessionID, cmd: cmd, client: client, rec: rec, pid: pid, wait: waitCh,
-		binaryVersion: hello.BinaryVersion, wireVersion: hello.WireVersion, skew: skew,
-	}
+	h := newWorkerHandle(sessionID, cmd, client, rec, pid, waitCh, hello, skew)
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -461,8 +518,12 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts supervisor.
 	s.pending--
 	reserved = false
 	s.reapWG.Add(1)
+	s.watcherWG.Add(1)
 	s.mu.Unlock()
+	// Both started AFTER releasing mu, so neither can deadlock against a
+	// registry operation it triggers.
 	go s.reap(h)
+	go s.watchSession(h)
 
 	if prompt != "" {
 		// Send ignores its ctx by design (wirestream contract); the turn outlives
@@ -780,6 +841,76 @@ func (s *Supervisor) releaseSlot() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pending--
+}
+
+// SetEventRelay wires the OUTER daemon's client fan-out into the router so a
+// worker-hosted session's events reach attached clients (design §5). Like
+// [Supervisor.SetPermissionRelay] it is injected after the daemon is constructed
+// — the daemon does not exist at [New] time, since it takes this router as its
+// Supervisor — and before it serves.
+//
+// It needs no per-handle setup: every handle's reconstruction core was built
+// with a sink ([Supervisor.eventSink]) that reads this field on each event, so
+// handles created before AND after this call are covered by the same store. A
+// nil relay is ignored; events observed before it is set are simply not relayed
+// (no client is attached yet at that point — the daemon is not serving).
+//
+// # Invariant: no [wirestream.Reconstructor.Load] after this call
+//
+// The sink fires for every gofer/event a core reconstructs, and a Load REPLAYS
+// a session's settled history through that same path. Loading a session after
+// the relay is installed would therefore re-broadcast its history to attached
+// clients as if it were live — a duplicated transcript, not merely a noisy one.
+// The router honors this by construction: the only Load it performs is
+// adoption's, inside [New], which runs to completion before the daemon that
+// injects this relay even exists. Any future Load (Phase 4's resume-spawns-a-
+// worker path is the obvious candidate) must either run before this call or
+// suppress the sink for the duration of its replay.
+func (s *Supervisor) SetEventRelay(relay daemon.EventRelay) {
+	if relay == nil {
+		return
+	}
+	s.eventRelay.Store(&eventRelayHolder{relay: relay})
+}
+
+// eventRelayFor returns the installed [daemon.EventRelay], or nil.
+func (s *Supervisor) eventRelayFor() daemon.EventRelay {
+	if h := s.eventRelay.Load(); h != nil {
+		return h.relay
+	}
+	return nil
+}
+
+// eventSink builds the [wirestream.EventSink] a session's reconstruction core is
+// constructed with. It is the router half of the marshal-once event bridge: for
+// every gofer/event the worker sends, it hands the OUTER daemon the verbatim
+// frame bytes for its gofer clients and the already-decoded event for the ACP
+// session/update projection — two fan-outs, one goroutine, in wire order, with
+// no re-encode and no second decode.
+//
+// The daemon's own guard decides whether to deliver: while a client is driving
+// this session through session/prompt, that handler is already fanning the same
+// events out, so the relay stands down (see [daemon.Daemon.BroadcastRawEvent]).
+// The bridge therefore ADDS delivery for the sessions nothing else covers — an
+// adopted session finishing a turn its original router started, or a session
+// this router prompted itself from [Supervisor.Create] — and never doubles the
+// ones that are covered.
+//
+// A frame whose session id is not this handle's is dropped: a worker hosts
+// exactly one session, so anything else is protocol drift, and forwarding it
+// would inject events into an unrelated session's client fan-out.
+func (s *Supervisor) eventSink(sessionID string) wirestream.EventSink {
+	return func(evSessionID string, raw json.RawMessage, ev event.Event) {
+		if evSessionID != sessionID {
+			return
+		}
+		relay := s.eventRelayFor()
+		if relay == nil {
+			return
+		}
+		relay.BroadcastRawEvent(sessionID, raw)
+		relay.BroadcastSessionUpdate(sessionID, ev)
+	}
 }
 
 // terminate kills a spawned worker whose registration failed before a reaper

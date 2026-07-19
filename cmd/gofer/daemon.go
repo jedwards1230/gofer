@@ -291,14 +291,24 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		},
 	})
 
-	// Bridge the router's adopted sessions into the daemon's permission fan-out
-	// (design §7): the daemon did not exist when router.New ran its adoption scan,
-	// so inject it now — this starts a standing permission watcher per adopted
-	// session that records call→session routes (so handlePermissionReply resolves
-	// for adopted sessions) and re-broadcasts their re-surfaced requests. In-process
-	// mode has no router and needs none.
+	// Bridge the router's worker-hosted sessions into the daemon's fan-out. The
+	// daemon did not exist when router.New ran its adoption scan (it takes the
+	// router as its Supervisor), so both relays are injected here, after
+	// construction and before serve. In-process mode has no router and needs
+	// neither.
+	//
+	//   - PERMISSIONS (design §7): publishes the relay the per-session watchers
+	//     drive, so a permission asked — or re-surfaced by adoption's replay — on a
+	//     session no prompt handler here drives still records its call→session
+	//     route (making handlePermissionReply resolve) and reaches attached
+	//     clients.
+	//   - EVENTS (design §5): lets a worker-hosted turn's reconstructed events
+	//     stream to attached clients verbatim (see [daemon.EventRelay]). Without
+	//     it, a client attached to an adopted session watches a silent stream until
+	//     the turn ends.
 	if routerSup != nil {
 		routerSup.SetPermissionRelay(d)
+		routerSup.SetEventRelay(d)
 	}
 
 	// Install the interrupt handler around the whole serve loop: the daemon

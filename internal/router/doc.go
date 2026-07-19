@@ -116,9 +116,106 @@
 // (a worker's own roster does not know it is being proxied) and carried through
 // the existing roster/ps wire as an additive, omitempty "binaryVersion". It is
 // LIVE-ONLY: the journal does not record it, so an offline row leaves it empty.
-// It reaches the WIRE only — no client RENDERS it yet (not `gofer ps`, not the
-// TUI roster), so §11's "session/list shows mixed binaryVersions" criterion holds
-// at raw-wire level; the rendering is slice 3b.
+// As of slice 3b it is also RENDERED — a BINARY column in `gofer ps` and a
+// per-row suffix in the TUI roster — so §11's "session/list shows mixed
+// binaryVersions" criterion is observable by an operator, not just by decoding
+// the raw wire.
+//
+// # The standing per-session watcher
+//
+// Every live handle — SPAWNED by [Supervisor.Create] or ADOPTED by the startup
+// scan — gets a [Supervisor.watchSession] goroutine started right after it is
+// registered. It subscribes to that session's reconstructed broker WITH replay
+// and drives the two pieces of router state that are projections of a session's
+// event stream: the pushed roster cache (below) and the permission relay (§7,
+// below). It exits when the broker closes or the router shuts down, and is joined
+// by Close.
+//
+// # Pushed roster cache (§8)
+//
+// [Supervisor.Roster] — and so [Supervisor.List], every `gofer ps` and every TUI
+// roster tick — serves from a per-handle CACHED [supervisor.SessionInfo]: seeded
+// once per handle by a single gofer/roster call and thereafter maintained from
+// the event stream the watcher is already reading. Steady state costs ZERO worker
+// RPCs, where the pre-3b path cost one RPC PER LIVE WORKER per read.
+//
+// It is an AVAILABILITY fix first. Those per-worker RPCs ran SERIALLY, each
+// bounded by wireCallTimeout (15s), so ONE wedged worker stalled every roster
+// read fleet-wide for up to fifteen seconds — including the TUI's ~1Hz poll,
+// which runs ungated over a non-cancellable context. A cache read is an atomic
+// load and cannot be held hostage by any worker. Being cheaper is a secondary
+// consequence, not the motivation.
+//
+// Concurrency: the handle's own watchSession goroutine is the SOLE writer, and it
+// publishes whole IMMUTABLE snapshots through an [atomic.Pointer]; every reader
+// does a lock-free Load, so no reader observes a half-updated row and no roster
+// read can block on the writer. There is deliberately NO TTL — the row's lifetime
+// IS the handle's, so reap and take are its only evictors — and no staleness
+// field, since [supervisor.SessionInfo.Updated] already carries the snapshot's
+// own time. A handle with no cached row (a failed or not-yet-landed seed) falls
+// back to a live RPC for that handle alone. Full rationale: rostercache.go.
+//
+// # Event bridge (§5)
+//
+// A turn running on a worker has no daemon prompt handler in this process fanning
+// its events out, so a client attached to such a session would watch a silent
+// stream. Each handle's reconstruction core is therefore built with a
+// [wirestream.EventSink] ([Supervisor.eventSink]) that hands the daemon's
+// [daemon.EventRelay] — injected via [Supervisor.SetEventRelay] — the VERBATIM
+// frame bytes for its gofer clients plus the already-decoded event for the ACP
+// session/update projection. Two fan-outs, one goroutine, wire order, no
+// re-encode and no second decode. The daemon suppresses the relay while one of
+// its own prompt handlers is driving that session, so a client-driven turn is
+// never delivered twice.
+//
+// What the bridge does NOT reach: a worker has no continuous broker drain
+// outside its own session/prompt handler (see internal/daemon's
+// advertiseModelChange). So the tail of a turn whose DRIVING CONNECTION was
+// severed mid-flight — the pre-upgrade turn in a daemon hot-upgrade, whose
+// client went away with the old daemon — is published to the worker's broker
+// and never put on the wire at all. The router cannot forward a frame that was
+// never sent, so that tail is NOT STREAMED LIVE. It is not lost, though: the
+// worker journals it, and it comes back as folded history on the session's next
+// session/load, so a client that re-attaches sees the complete transcript.
+// Streaming it live instead would need a standing observer on the WORKER side
+// (in internal/daemon, which the worker runs), gated behind a Config flag
+// beside ReplayPendingPermissionsOnAttach and relying on exactly the
+// promptHandlerActive guard this slice shipped to avoid double delivery. That is
+// deferred, not oversighted.
+//
+// # Event-decode skew: which direction is supported (§5, §6)
+//
+// A gofer/event frame whose kind this router cannot decode is DROPPED — not
+// published to the reconstructed broker and not handed to the sink, so it is
+// neither projected nor forwarded. That makes ROUTER-NEWER-THAN-WORKER the only
+// supported skew direction for event decode, and it is a deliberate choice
+// rather than an accident of the decoder.
+//
+// It is chosen because it matches how skew actually arises here. The upgrade
+// story M6 sells (§11) upgrades the DAEMON first and leaves old workers draining
+// underneath it, so the router is by construction the newer half; a worker
+// emitting a kind the router has never heard of would mean a worker built after
+// the router that adopted it, which this milestone's rollout does not produce.
+// The alternative — forward the raw frame and skip the projection — is not
+// free: the router's own broker would then hold a stream that DISAGREES with
+// what its clients received, so the roster cache, the permission relay and every
+// projection driven off that broker would be reasoning about a different session
+// history than the client is displaying. A frame the router cannot understand is
+// better dropped consistently on both fan-outs than delivered to one of them.
+//
+// What this costs is bounded and additive-only: an OLDER router silently omits a
+// NEWER worker's new event kinds from both surfaces. Widen the decoder (in
+// wirestream) before shipping a rollout that can invert the version order.
+//
+// What this removes is specifically the ROUTER's SECOND-HOP re-encode — the cost
+// M6 §10 flags when it says the second hop doubles the per-event encode cost.
+// The daemon→client hop was ALREADY marshal-once per event: internal/daemon's
+// broadcastGoferEvent marshals once and reuses those bytes for every peer, and
+// the only remaining per-peer cost is peer.writeJSON's JSON-RPC envelope, which
+// copies the payload rather than re-encoding the typed event. So this is not
+// "making fan-out marshal-once" and the win does not scale with attached peers:
+// the router simply no longer decodes and re-encodes a frame it is forwarding
+// unchanged. That work is not made faster — it is no longer done.
 //
 // # Permissions across a router restart (§7)
 //
@@ -126,11 +223,10 @@
 // drives via session/prompt — no daemon prompt handler is watching its event
 // stream to record permission routes and fan requests out. The router bridges
 // that gap: after the daemon is constructed it injects a [daemon.PermissionRelay]
-// via [Supervisor.SetPermissionRelay], which starts a STANDING permission watcher
-// per adopted session. Each watcher subscribes to its reconstructed broker with
-// replay (so a request re-surfaced by Load is delivered) and drives the relay, so
-// the daemon records the call→session route (making handlePermissionReply resolve
-// for adopted sessions) and broadcasts the request to attached clients. A client
+// via [Supervisor.SetPermissionRelay], which the standing watchers drive. A
+// watcher's replaying subscription delivers a request re-surfaced by Load, so the
+// daemon records the call→session route (making handlePermissionReply resolve for
+// adopted sessions) and broadcasts the request to attached clients. A client
 // of the restarted router then attaches via session/load ([Supervisor.Resume]
 // returns the live snapshot for a session this router already hosts), sees the
 // re-surfaced request, and answers it — the reply routes through the daemon to

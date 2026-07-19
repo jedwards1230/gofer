@@ -162,22 +162,43 @@ func (s *Supervisor) Resume(ctx context.Context, id string, _ supervisor.ResumeO
 	return supervisor.SessionInfo{}, ErrResumeUnsupported
 }
 
-// Roster aggregates every live worker's own roster into the daemon's expected
-// snapshot type, each row marked Live. A worker whose roster call fails (it just
-// crashed, or its socket is wedged) is skipped rather than failing the whole
-// roster — crash isolation extends to observation, and the dead session
-// reappears offline via List.
+// Roster aggregates every live worker's roster row into the daemon's expected
+// snapshot type, each row marked Live.
+//
+// It serves from the PUSHED CACHE (rostercache.go): each handle's row was seeded
+// once from its worker and is maintained from the event stream this router
+// already subscribes to, so the steady-state cost of a roster read is ZERO worker
+// RPCs — a lock-free [atomic.Pointer] load per handle.
+//
+// The point is AVAILABILITY, not throughput. The old path issued one RPC per
+// live worker SERIALLY, each bounded by [wireCallTimeout] (15s), so a single
+// wedged worker stalled every Roster call — and so every `gofer ps`, every
+// [Supervisor.List] and the TUI's ~1Hz roster poll — for up to fifteen seconds.
+// An atomic load cannot be held hostage that way.
+//
+// A handle with NO cached row falls back to a live RPC for that handle alone.
+// That is the degraded path, not the normal one — it means the seed failed or has
+// not landed yet — and it keeps a struggling worker visible in the roster instead
+// of vanishing from it. A worker whose fallback call also fails is skipped rather
+// than failing the whole roster: crash isolation extends to observation, and the
+// dead session reappears offline via List.
 func (s *Supervisor) Roster(ctx context.Context) ([]supervisor.SessionInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	var out []supervisor.SessionInfo
 	for _, h := range s.snapshotHandles() {
+		// The happy path: an immutable snapshot published by this handle's
+		// watchSession goroutine. No lock, no RPC, no copy beyond the value.
+		if info := h.info.Load(); info != nil {
+			out = append(out, *info)
+			continue
+		}
 		rctx, cancel := context.WithTimeout(ctx, wireCallTimeout)
 		rows, err := h.rec.Roster(rctx)
 		cancel()
 		if err != nil {
-			s.log.Debug("roster: worker unreachable, skipping", "session", h.id, "err", err)
+			s.log.Debug("roster: uncached worker unreachable, skipping", "session", h.id, "err", err)
 			continue
 		}
 		for _, r := range rows {

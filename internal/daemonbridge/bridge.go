@@ -122,16 +122,17 @@ func statusFromWire(s string) tui.SessionStatus {
 // (contract #2).
 func toTUISessionInfo(d sessionInfoDTO) tui.SessionInfo {
 	return tui.SessionInfo{
-		ID:      d.ID,
-		Title:   d.Title,
-		Status:  statusFromWire(d.Status),
-		Model:   d.Model,
-		Cwd:     d.Cwd,
-		Cost:    d.Cost,
-		Usage:   d.Usage,
-		Pending: d.Pending,
-		Created: d.Created,
-		Updated: d.Updated,
+		ID:            d.ID,
+		Title:         d.Title,
+		Status:        statusFromWire(d.Status),
+		Model:         d.Model,
+		Cwd:           d.Cwd,
+		Cost:          d.Cost,
+		Usage:         d.Usage,
+		Pending:       d.Pending,
+		BinaryVersion: d.BinaryVersion,
+		Created:       d.Created,
+		Updated:       d.Updated,
 	}
 }
 

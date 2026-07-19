@@ -45,6 +45,13 @@ type psRow struct {
 	Queued  int    `json:"queued"`
 	Project string `json:"project"`
 	Live    bool   `json:"live"`
+	// BinaryVersion is the gofer build running the session's process. Under M6
+	// process isolation each session runs in its own worker, so a daemon upgrade
+	// leaves old workers finishing their turns on the OLD binary while new
+	// sessions start on the new one — and this column is how an operator sees
+	// that drain happening. Additive and live-only: an older daemon never sends
+	// it, and an offline row has no process, so both render as "-".
+	BinaryVersion string `json:"binaryVersion,omitempty"`
 }
 
 // psCost decodes only the total USD field of provider.Cost — the one column
@@ -103,25 +110,41 @@ func fetchRows(ctx context.Context, c *daemon.Client, method string) ([]psRow, e
 }
 
 // writePSTable renders rows as an aligned table: ID (short), STATUS, MODEL,
-// COST, QUEUED, PROJECT, plus LIVE when showLive is set (the --all view, where
-// an archived entry's Live=false is the only thing distinguishing it from a
-// live one).
+// COST, QUEUED, BINARY, PROJECT, plus LIVE when showLive is set (the --all view,
+// where an archived entry's Live=false is the only thing distinguishing it from
+// a live one).
+//
+// BINARY sits next to PROJECT rather than at the end so it stays on screen in a
+// narrow terminal: under M6 it is the column that shows a daemon upgrade
+// draining — old workers finishing on the old build alongside new sessions on
+// the new one — which is exactly what an operator wants to see mid-upgrade.
 func writePSTable(w io.Writer, rows []psRow, showLive bool) {
 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
-	header := "ID\tSTATUS\tMODEL\tCOST\tQUEUED\tPROJECT"
+	header := "ID\tSTATUS\tMODEL\tCOST\tQUEUED\tBINARY\tPROJECT"
 	if showLive {
 		header += "\tLIVE"
 	}
 	_, _ = fmt.Fprintln(tw, header)
 	for _, r := range rows {
-		line := fmt.Sprintf("%s\t%s\t%s\t$%.4f\t%d\t%s",
-			shortID(r.ID), r.Status, r.Model, r.Cost.USD, r.Queued, r.Project)
+		line := fmt.Sprintf("%s\t%s\t%s\t$%.4f\t%d\t%s\t%s",
+			shortID(r.ID), r.Status, r.Model, r.Cost.USD, r.Queued, psBinaryVersion(r.BinaryVersion), r.Project)
 		if showLive {
 			line += fmt.Sprintf("\t%v", r.Live)
 		}
 		_, _ = fmt.Fprintln(tw, line)
 	}
 	_ = tw.Flush()
+}
+
+// psBinaryVersion renders a row's BINARY cell, substituting "-" for the empty
+// value an offline row (no process to have a build) or a pre-M6 daemon (never
+// sends the field) produces — so an absent version reads as absent rather than
+// as a blank column that looks like a rendering bug.
+func psBinaryVersion(v string) string {
+	if v == "" {
+		return "-"
+	}
+	return v
 }
 
 // resolveSessionID resolves idOrPrefix — typically a [shortID] copy-pasted

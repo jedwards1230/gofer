@@ -627,6 +627,17 @@ func handleSessionPrompt(d *Daemon, ctx context.Context, p *peer, params json.Ra
 		return nil, rerr
 	}
 
+	// Mark this session as prompt-driven for as long as this handler lives, so
+	// the M6 event relay (see event_relay.go) stands down and never
+	// double-delivers the events this handler is about to fan out itself. Taken
+	// at ENTRY — before the subscription below and before Send — and released by
+	// a defer that necessarily runs AFTER this handler's final broadcast, since
+	// every broadcast is inline in the loop below. See
+	// [Daemon.BroadcastRawEvent]'s guard doc for the one-event turn-boundary
+	// window this ordering accepts (and why the other ordering is worse).
+	d.beginPromptHandler(op.SessionID)
+	defer d.endPromptHandler(op.SessionID)
+
 	sub, err := d.sup.SubscribeLive(ctx, op.SessionID)
 	if err != nil {
 		return nil, appError(fmt.Errorf("session/prompt %s: %w", op.SessionID, err))
@@ -968,6 +979,14 @@ func (d *Daemon) askPeerPermission(ctx context.Context, pr *peer, sessionID, cal
 // simply skipped rather than aborting the turn over a client-visibility
 // concern. The peer set is snapshotted under the registry RLock and released
 // before any notify runs (see peersForSession).
+//
+// It deliberately does NOT delegate to [Daemon.BroadcastRawEvent] even though
+// the two loops are otherwise identical: that method is the M6 relay, and its
+// double-delivery guard suppresses exactly the case this function IS — a live
+// prompt handler fanning out its own turn — so delegating would silence every
+// turn a client drives. The two also differ in the context they write under
+// (this one is scoped to the request; the relay has no request and uses the
+// daemon's).
 func (d *Daemon) broadcastGoferEvent(ctx context.Context, sessionID string, e event.Event) {
 	raw, err := json.Marshal(e)
 	if err != nil {

@@ -60,6 +60,33 @@ const pingInterval = 30 * time.Second
 // pingTimeout bounds a single ping round trip.
 const pingTimeout = 10 * time.Second
 
+// relayWriteTimeout bounds ONE relay fan-out — every peer write [EventRelay]
+// or [PermissionRelay] performs for a single observed event — so a stalled
+// client cannot wedge the caller that drives it.
+//
+// It exists because those relays are called SYNCHRONOUSLY on an M6 router's
+// per-worker wirestream demuxer goroutine, and that goroutine is the sole
+// drainer of its [Client.notifications] channel. Without a deadline the chain
+// is: one client whose TCP connection is stalled-but-open blocks the relay
+// write -> the demuxer stops draining -> [Client.readLoop] blocks on the full
+// notification channel -> EVERY Call to that worker hangs, including
+// gofer/roster, gofer/kill, gofer/archive and session/prompt. The session
+// becomes unkillable over its own socket and never recovers on its own, since
+// nothing cancels the daemon's base context. A bounded write turns that
+// permanent wedge into a logged, skipped delivery.
+//
+// The bound is per FAN-OUT, not per peer: N stalled peers must not multiply
+// into N * relayWriteTimeout of demuxer stall, so they share one budget. A
+// dropped relay frame is not a durability loss — the journal is the durable
+// transcript and a client re-reads it as folded history on the next
+// session/load — which is what makes a deadline the right trade here.
+//
+// 5s: a healthy peer drains a notification in microseconds, so this is orders
+// of magnitude of headroom for a slow-but-live client while still being well
+// inside the ping watchdog (pingInterval + pingTimeout) that eventually tears
+// a genuinely dead connection down.
+const relayWriteTimeout = 5 * time.Second
+
 // Config configures a [Daemon].
 type Config struct {
 	// ListenAddr is the address Serve binds. Empty uses [DefaultListenAddr].
@@ -151,6 +178,17 @@ type Daemon struct {
 	// are deleted, so a live entry always has at least one peer.
 	sessionPeers map[string]map[*peer]struct{}
 
+	// promptMu guards promptHandlers.
+	promptMu sync.Mutex
+	// promptHandlers counts the live [handleSessionPrompt] loops per session id.
+	// A non-zero count means THIS daemon is already fanning that session's events
+	// out off its own subscription, so the M6 event relay (see event_relay.go)
+	// must stand down for it or every attached peer would receive each event
+	// twice. Entries exist only while a prompt is in flight — the handler's defer
+	// deletes its own at zero — so the map is bounded by concurrent prompts, not
+	// by sessions.
+	promptHandlers map[string]int
+
 	// permMu guards permRoutes.
 	permMu sync.Mutex
 	// permRoutes maps a permission request's call id to the session it belongs
@@ -211,6 +249,7 @@ func New(sup Supervisor, cfg Config) *Daemon {
 		cancel:         cancel,
 		connSem:        make(chan struct{}, maxConns),
 		sessionPeers:   make(map[string]map[*peer]struct{}),
+		promptHandlers: make(map[string]int),
 		permRoutes:     make(map[string]string),
 		pendingPerms:   make(map[string]permissionRequestedParams),
 		permReqCancels: make(map[string]context.CancelFunc),
