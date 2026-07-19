@@ -116,23 +116,39 @@ type sessionInfoDTO struct {
 	// loadHistory. Additive field: an older client decoding this DTO simply
 	// never reads it.
 	Cwd string `json:"cwd,omitempty"`
+	// BinaryVersion is the gofer build version of the process running the
+	// session (see [supervisor.SessionInfo.BinaryVersion]) — under M6 worker
+	// mode, the session's WORKER.
+	//
+	// It reaches the WIRE only: as of slice 3a no gofer client RENDERS it —
+	// neither `gofer ps` nor the TUI roster/session-info shows it — so a mixed
+	// binaryVersion roster is observable by decoding this field (or with a raw
+	// gofer/ps call), not by looking at an operator's screen. Rendering it in
+	// `gofer ps` and the TUI roster is deferred to slice 3b; until then §11's
+	// "session/list shows mixed binaryVersions" demo criterion is satisfied at
+	// raw-wire level only.
+	//
+	// Omitted when empty, which is the normal case for the in-process daemon and
+	// for every disk-only (offline) row: it is live-only state, never journaled.
+	BinaryVersion string `json:"binaryVersion,omitempty"`
 }
 
 func toSessionInfoDTO(info supervisor.SessionInfo) sessionInfoDTO {
 	return sessionInfoDTO{
-		ID:      info.ID,
-		Title:   info.Title,
-		Status:  info.Status.String(),
-		Model:   info.Model,
-		Cost:    info.Cost,
-		Usage:   info.Usage,
-		Queued:  info.Queued,
-		Pending: info.Pending,
-		Created: info.Created,
-		Updated: info.Updated,
-		Project: info.Project,
-		Live:    info.Live,
-		Cwd:     info.Cwd,
+		ID:            info.ID,
+		Title:         info.Title,
+		Status:        info.Status.String(),
+		Model:         info.Model,
+		Cost:          info.Cost,
+		Usage:         info.Usage,
+		Queued:        info.Queued,
+		Pending:       info.Pending,
+		Created:       info.Created,
+		Updated:       info.Updated,
+		Project:       info.Project,
+		Live:          info.Live,
+		Cwd:           info.Cwd,
+		BinaryVersion: info.BinaryVersion,
 	}
 }
 

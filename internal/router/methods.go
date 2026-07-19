@@ -13,6 +13,7 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/provider"
 	"github.com/jedwards1230/agent-sdk-go/session"
 
+	"github.com/jedwards1230/gofer/internal/daemon"
 	"github.com/jedwards1230/gofer/internal/supervisor"
 	"github.com/jedwards1230/gofer/internal/wirestream"
 )
@@ -26,7 +27,30 @@ func (s *Supervisor) Send(ctx context.Context, sessionID, prompt string) error {
 	if !ok {
 		return fmt.Errorf("router: send %s: %w", sessionID, ErrNotLive)
 	}
+	if err := h.refuseNewWork("send"); err != nil {
+		return fmt.Errorf("router: send %s: %w", sessionID, err)
+	}
 	return h.rec.Send(ctx, sessionID, prompt)
+}
+
+// refuseNewWork reports whether op — a request that gives the worker NEW work —
+// must be refused because of h's version skew, returning [ErrWorkerSkewed] (with
+// the observed versions) when it must.
+//
+// Only a WIRE mismatch refuses (see [skewClass.refusesNewWork]): the protocol
+// itself is in doubt, so the router restricts the connection to the additive
+// observe / permission-reply / finish subset design §6 guarantees across a
+// version gap, and lets the in-flight turn end normally. A BINARY mismatch is
+// NOT refused — see the package doc.
+//
+// Reading h.skew/h.wireVersion needs no lock: both are set before the handle is
+// registered and never mutated (see [workerHandle]).
+func (h *workerHandle) refuseNewWork(op string) error {
+	if !h.skew.refusesNewWork() {
+		return nil
+	}
+	return fmt.Errorf("%w: cannot %s a worker on wire v%d (router speaks v%d); the session may finish but takes no new work",
+		ErrWorkerSkewed, op, h.wireVersion, daemon.WireVersion)
 }
 
 // SubscribeLive returns sessionID's reconstructed event stream WITHOUT the
@@ -68,6 +92,11 @@ func (s *Supervisor) SetModel(ctx context.Context, sessionID, model string) erro
 	h, ok := s.get(sessionID)
 	if !ok {
 		return fmt.Errorf("router: set model %s: %w", sessionID, ErrNotLive)
+	}
+	// A model change is NEW WORK — it configures the worker's next turn — so it
+	// is refused on wire skew exactly like a prompt.
+	if err := h.refuseNewWork("set the model on"); err != nil {
+		return fmt.Errorf("router: set model %s: %w", sessionID, err)
 	}
 	cctx, cancel := context.WithTimeout(ctx, wireCallTimeout)
 	defer cancel()
@@ -152,7 +181,7 @@ func (s *Supervisor) Roster(ctx context.Context) ([]supervisor.SessionInfo, erro
 			continue
 		}
 		for _, r := range rows {
-			out = append(out, toSupervisorInfo(r))
+			out = append(out, toSupervisorInfo(r, h.binaryVersion))
 		}
 	}
 	return out, nil
@@ -334,21 +363,28 @@ func mapValues(m map[string]supervisor.SessionInfo) []supervisor.SessionInfo {
 // snapshot type, marked Live (it came from a live worker). Status is carried as a
 // string on the wire so the enums can drift independently; statusFromWire maps it
 // back.
-func toSupervisorInfo(d wirestream.SessionInfo) supervisor.SessionInfo {
+//
+// binaryVersion is stamped by the ROUTER from the owning handle's gofer/hello
+// result, not read off the row: a worker's own roster reports the sessions IT
+// hosts and has no reason to know it is being proxied, so the version knowledge
+// lives with the router's handle. This is what lets session/list show mixed
+// binary versions while a daemon upgrade drains old workers (design §11 Phase 3).
+func toSupervisorInfo(d wirestream.SessionInfo, binaryVersion string) supervisor.SessionInfo {
 	return supervisor.SessionInfo{
-		ID:      d.ID,
-		Title:   d.Title,
-		Status:  statusFromWire(d.Status),
-		Model:   d.Model,
-		Cost:    d.Cost,
-		Usage:   d.Usage,
-		Pending: d.Pending,
-		Queued:  d.Queued,
-		Created: d.Created,
-		Updated: d.Updated,
-		Project: d.Project,
-		Live:    true,
-		Cwd:     d.Cwd,
+		BinaryVersion: binaryVersion,
+		ID:            d.ID,
+		Title:         d.Title,
+		Status:        statusFromWire(d.Status),
+		Model:         d.Model,
+		Cost:          d.Cost,
+		Usage:         d.Usage,
+		Pending:       d.Pending,
+		Queued:        d.Queued,
+		Created:       d.Created,
+		Updated:       d.Updated,
+		Project:       d.Project,
+		Live:          true,
+		Cwd:           d.Cwd,
 	}
 }
 

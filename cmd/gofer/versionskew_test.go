@@ -106,13 +106,21 @@ func TestResolveCapturesEndpointVersion(t *testing.T) {
 // from ours, stays silent when they match or the file advertised none, and —
 // crucially — never breaks the command: the dial still returns a live client.
 func TestDialDaemonWarnsOnSkew(t *testing.T) {
+	// The fixtures MUST be built from effectiveVersion(), not the raw `version`
+	// ldflags sentinel: dialDaemon compares against effectiveVersion(), which is
+	// what a daemon stamps its endpoint file with. Building the "match is
+	// silent" fixture from `version` would make that case — the exact regression
+	// the effectiveVersion() plumbing exists to prevent — pass only by accident,
+	// silently, on any build where the two happen to coincide (a test binary
+	// today carries no vcs.* build settings, so they do).
+	cliVersion := effectiveVersion()
 	cases := []struct {
 		name        string
 		fileVersion string
 		wantWarn    bool
 	}{
-		{name: "mismatch warns", fileVersion: version + "-different", wantWarn: true},
-		{name: "match is silent", fileVersion: version, wantWarn: false},
+		{name: "mismatch warns", fileVersion: cliVersion + "-different", wantWarn: true},
+		{name: "match is silent", fileVersion: cliVersion, wantWarn: false},
 		{name: "unknown (old daemon) is silent", fileVersion: "", wantWarn: false},
 	}
 	for _, c := range cases {
@@ -138,7 +146,7 @@ func TestDialDaemonWarnsOnSkew(t *testing.T) {
 				t.Errorf("warning emitted = %v, want %v; stderr:\n%s", gotWarn, c.wantWarn, stderr.String())
 			}
 			if c.wantWarn {
-				if !strings.Contains(stderr.String(), version) || !strings.Contains(stderr.String(), c.fileVersion) {
+				if !strings.Contains(stderr.String(), cliVersion) || !strings.Contains(stderr.String(), c.fileVersion) {
 					t.Errorf("warning missing a version; stderr:\n%s", stderr.String())
 				}
 			}

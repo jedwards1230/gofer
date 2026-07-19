@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 
@@ -51,23 +52,31 @@ func (s *Supervisor) adoptExistingWorkers() {
 //  1. pid gone ([daemon.ProcessAlive] false) → STALE: the worker crashed/exited
 //     without cleaning up. GC its endpoint+socket residue; the session is now
 //     just an offline journal.
-//  2. wire-version skew from the endpoint file's pre-dial hint (design §6) →
-//     LEAVE unadopted: this slice supports only the router's own wire version
-//     (N-0 full; skew routing is Phase 3), so a skewed-but-live worker is left
-//     running detached for a future skew-aware router — NOT GC'd (it holds a
-//     live session) and NOT killed.
+//  2. version skew from the endpoint file's pre-dial hint (design §6) →
+//     ADVISORY ONLY: no skew class refuses adoption, so the hint cannot decide
+//     anything on its own; the handshake below is authoritative. It is reported
+//     at step 5 only when the two DISAGREE (a stale endpoint file).
 //  3. dial refused → STALE: the socket has no listener even though the pid probe
 //     passed (a reused pid, or a worker mid-crash). GC and treat offline.
 //  4. gofer/hello fails → LEAVE unadopted: the worker dialed but is
 //     unresponsive/degraded; its pid is live, so do not GC — leave it for a
-//     later reap, and do not route to it.
-//  5. wire-version skew from the authoritative handshake → LEAVE unadopted (as
-//     step 2, but post-dial).
-//  6. otherwise → ADOPT: wrap the connection in a [wirestream.Reconstructor],
+//     later reap, and do not route to it. (A FAILED handshake is not a skewed
+//     one: it means the router learned nothing at all, not that it learned the
+//     worker is old.) EXCEPT [daemon.ErrHelloUnsupported] — a worker predating
+//     the handshake — which adopts with a zero HelloResult (⇒ skewWire, the
+//     strict-but-adoptable side of the policy).
+//  5. classify the authoritative handshake into a [skewClass] and ADOPT
+//     regardless of the class — the class is recorded on the handle and governs
+//     only what the router will later ASK of the worker: a wire mismatch
+//     refuses new prompts/model changes ([ErrWorkerSkewed]) while still
+//     observing, replying to permissions, and letting the turn finish; a binary
+//     mismatch is fully routable (session pinning — see the package doc).
+//  6. ADOPT: wrap the connection in a [wirestream.Reconstructor],
 //     re-attach via [wirestream.Reconstructor.Load] FIRST — which settles
 //     history and re-surfaces any still-open PermissionRequested into the broker
 //     (§7) — then register the ADOPTED handle (cmd==nil; wait fires off
-//     [daemon.Client.Done]; pid from the endpoint file) and start its reaper.
+//     [daemon.Client.Done]; pid from the endpoint file, EXCEPT when it names the
+//     router's own pid — see the self-pid guard) and start its reaper.
 func (s *Supervisor) adoptWorker(entry daemon.WorkerEndpointEntry) bool {
 	id := entry.UUID
 	ep := entry.Endpoint
@@ -79,12 +88,17 @@ func (s *Supervisor) adoptWorker(entry daemon.WorkerEndpointEntry) bool {
 		return false
 	}
 
-	// 2. Pre-dial wire-version hint from the endpoint file (design §6).
-	if !wireVersionCompatible(ep.WireVersion) {
-		s.log.Warn("adoption: wire-version skew (endpoint hint); leaving worker unadopted",
-			"session", id, "workerWire", ep.WireVersion, "routerWire", daemon.WireVersion)
-		return false
-	}
+	// 2. Pre-dial version hint from the endpoint file (design §6). ADVISORY
+	//    ONLY: under this slice's policy no skew class refuses adoption (a wire
+	//    mismatch adopts for the observe/reply/finish subset; a binary mismatch
+	//    adopts fully), so the hint cannot short-circuit the decision. It is
+	//    computed HERE — the pre-dial point the design describes, and the cheap
+	//    signal a future policy (or a fleet router with no local endpoint file)
+	//    needs — but it is only REPORTED at step 5, and then only when it
+	//    disagrees with the authoritative handshake. Agreement is the normal
+	//    case and stays silent; disagreement means a STALE endpoint file, which
+	//    is the condition §6 actually wants an operator to be able to see.
+	hint := classifySkew(s.version, ep.BinaryVersion, daemon.WireVersion, ep.WireVersion)
 
 	// 3. Dial. A refused dial ⇒ stale socket (design §4).
 	dialCtx, cancel := context.WithTimeout(context.Background(), workerDialTimeout)
@@ -97,21 +111,44 @@ func (s *Supervisor) adoptWorker(entry daemon.WorkerEndpointEntry) bool {
 	}
 
 	// 4. Authoritative version handshake (design §6). Unresponsive ⇒ leave.
+	//
+	//    ONE error is not "unresponsive": [daemon.ErrHelloUnsupported] — the
+	//    method-not-found reply of a worker built BEFORE gofer/hello existed.
+	//    That worker is healthy, it just cannot describe itself, which is
+	//    precisely the case this slice adopts rather than refuses (refusing
+	//    would brick every pre-handshake worker — the same reasoning that makes
+	//    skewUnknown adoptable). Synthesize a zero HelloResult and continue: its
+	//    absent wire version classifies as skewWire, so the session is adopted
+	//    on the STRICT side of the policy — observable, replyable, and able to
+	//    finish, but given no new work.
 	helloCtx, cancel := context.WithTimeout(context.Background(), wireCallTimeout)
 	hello, err := client.Hello(helloCtx)
 	cancel()
 	if err != nil {
-		s.log.Warn("adoption: gofer/hello failed; leaving worker unadopted", "session", id, "err", err)
-		_ = client.Close()
-		return false
+		if !errors.Is(err, daemon.ErrHelloUnsupported) {
+			s.log.Warn("adoption: gofer/hello failed; leaving worker unadopted", "session", id, "err", err)
+			_ = client.Close()
+			return false
+		}
+		s.log.Info("adoption: worker predates gofer/hello; adopting it unidentified (no new work)",
+			"session", id, "err", err)
+		hello = daemon.HelloResult{}
 	}
 
-	// 5. Authoritative wire-version skew ⇒ leave.
-	if !wireVersionCompatible(hello.WireVersion) {
-		s.log.Warn("adoption: wire-version skew (handshake); leaving worker unadopted",
-			"session", id, "workerWire", hello.WireVersion, "routerWire", daemon.WireVersion)
-		_ = client.Close()
-		return false
+	// 5. Authoritative version classification (design §6). Every class ADOPTS —
+	//    the class only decides what the router will subsequently ask of the
+	//    worker (see [skewClass.refusesNewWork]).
+	skew := s.classifyWorker(id, hello)
+
+	//    Report the step-2 endpoint-file hint ONLY when it disagrees with the
+	//    authoritative class: that disagreement IS the stale-endpoint-file
+	//    condition (design §6's "it can be stale"), and it is otherwise
+	//    invisible at any log level. Agreement is the normal case and is silent.
+	if hint != skew {
+		s.log.Info("adoption: endpoint-file version hint disagrees with the gofer/hello handshake (stale endpoint file)",
+			"session", id, "hint", hint.String(), "handshake", skew.String(),
+			"hintWire", ep.WireVersion, "hintBinary", ep.BinaryVersion,
+			"workerWire", hello.WireVersion, "workerBinary", hello.BinaryVersion)
 	}
 
 	// 6. Adopt. Load FIRST so history + any open permission request re-surface
@@ -129,7 +166,27 @@ func (s *Supervisor) adoptWorker(entry daemon.WorkerEndpointEntry) bool {
 	}
 	cancel()
 
-	h := &workerHandle{id: id, cmd: nil, client: client, rec: rec, pid: ep.PID, wait: adoptedWait(client)}
+	// SELF-PID GUARD. An adopted handle carries no *exec.Cmd, so Kill/Archive
+	// best-effort SIGKILL the pid the ENDPOINT FILE advertised (see
+	// killHandleProcess). If that file ever names the ROUTER'S OWN pid, a single
+	// `gofer kill <session>` would SIGKILL the daemon itself and take routing
+	// down for EVERY session — a blast radius far worse than the pid-reuse
+	// caveat below, and the exact shape a hand-written or copied endpoint file
+	// produces. Record pid 0 instead: killHandleProcess's `h.pid > 0` check then
+	// makes the signal a no-op, and the handle is still reconciled the normal
+	// way — Kill/Archive first ask the worker to wind down over its socket, and
+	// the reaper fires when that connection closes (adoptedWait).
+	pid := ep.PID
+	if pid == os.Getpid() {
+		s.log.Warn("adoption: endpoint file advertises the router's own pid; recording pid 0 so kill cannot signal the daemon",
+			"session", id, "pid", ep.PID)
+		pid = 0
+	}
+
+	h := &workerHandle{
+		id: id, cmd: nil, client: client, rec: rec, pid: pid, wait: adoptedWait(client),
+		binaryVersion: hello.BinaryVersion, wireVersion: hello.WireVersion, skew: skew,
+	}
 
 	s.mu.Lock()
 	if s.closed {
@@ -236,15 +293,6 @@ func (s *Supervisor) watchPermissions(h *workerHandle, relay daemon.PermissionRe
 	}
 }
 
-// wireVersionCompatible reports whether the router can adopt a worker
-// advertising router↔worker wire version workerWire. This slice supports only
-// the router's OWN wire version ([daemon.WireVersion]) — N-0 full; the
-// observe/reply/finish subset across a version gap is Phase 3 (design §6) — so
-// an equal version adopts and any skew is left for a future skew-aware router.
-func wireVersionCompatible(workerWire int) bool {
-	return workerWire == daemon.WireVersion
-}
-
 // adoptedWait returns the exit-signal channel for an ADOPTED worker: since the
 // router did not spawn it there is no *exec.Cmd to [daemon.Reap], so the only
 // crash signal is the client connection closing — its read loop exiting on the
@@ -288,6 +336,31 @@ func adoptedWait(client *daemon.Client) <-chan error {
 // practice (the router still holds a live socket to the worker, and Kill/Archive
 // first ask the worker over that socket to wind down, so a recycled pid means
 // the socket was already dead and the handle about to be reaped anyway).
+//
+// RE-EVALUATED in slice 3a, when adoption widened: before 3a a version-skewed
+// worker was never adopted, so most endpoint files never produced a handle and
+// this path was largely unreachable. Now EVERY live, dialable worker is adopted
+// whatever its versions, so the pid on the endpoint file is genuinely signalled.
+// The caveat was deliberately RE-AFFIRMED as "document, don't gate" for the
+// general case, and the reasoning is worth not re-deriving:
+//
+//   - The endpoint file is written mode 0600 inside the 0700 per-uid runtime
+//     directory, so its content crosses NO privilege boundary — only the user
+//     the router already runs as can write a pid into it, and that user can
+//     signal their own processes directly anyway.
+//   - Adoption is not credulous: reaching this handle at all required a live pid
+//     ([daemon.ProcessAlive]), a successful dial to the advertised socket, AND a
+//     gofer/hello reply on it. A recycled pid that also happens to be serving a
+//     gofer worker socket for this exact session uuid is not a realistic state.
+//   - A peer-credential check (SO_PEERCRED / LOCAL_PEERPID on the connection,
+//     which would make the pid authoritative rather than advertised) was
+//     considered and REJECTED for this slice: it is per-OS plumbing that buys
+//     nothing against the two bullets above.
+//
+// The ONE case that was NOT left as documentation is the router's own pid — see
+// the self-pid guard in [Supervisor.adoptWorker]. That one is not "some
+// unrelated process" but the daemon itself, so it is gated at adoption time by
+// recording pid 0, which the `h.pid > 0` check below turns into a no-op.
 func killHandleProcess(h *workerHandle) {
 	if h.cmd != nil {
 		if h.cmd.Process != nil {
