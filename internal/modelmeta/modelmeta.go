@@ -20,6 +20,16 @@ var displayNames = map[string]string{
 	"gpt-5-mini":       "GPT-5 mini",
 	"gpt-5-nano":       "GPT-5 nano",
 	"o4-mini":          "o4-mini",
+	// The Codex family, served to an OpenAI OAuth (ChatGPT-subscription)
+	// credential. These ids are absent from the SDK registry — it carries the
+	// API-key family — so they reach this table via internal/modelcatalog
+	// rather than via provider.Models(); without a label here they would render
+	// as their raw ids.
+	"gpt-5.6-sol":         "GPT-5.6 Sol",
+	"gpt-5.6-terra":       "GPT-5.6 Terra",
+	"gpt-5.6-luna":        "GPT-5.6 Luna",
+	"gpt-5.5":             "GPT-5.5",
+	"gpt-5.3-codex-spark": "GPT-5.3 Codex Spark",
 }
 
 // DisplayName returns id's short display name, falling back to id itself when

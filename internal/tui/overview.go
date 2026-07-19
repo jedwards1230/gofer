@@ -128,6 +128,23 @@ func (o Overview) SelectedID() string { return o.selectedID }
 // active session carries no model override.
 func (o Overview) DefaultModel() string { return o.meta.Model }
 
+// WithDefaultModel returns a copy of the overview whose header reports model
+// as the default (meta.Model). It is how `/model` makes its effect visible
+// without a restart (issue #156): meta was seeded once at NewApp time from a
+// value cmd/gofer resolved at startup, so a later change to the default left
+// the header — and the attach screen's header, which renders the same meta
+// (see attachHeaderLines) — asserting a model no new session would use.
+//
+// It is deliberately NOT called on every `/model`: the caller decides, because
+// the header is only this process's to update when this process owns the
+// default. Attached to a daemon it shows the DAEMON's default (off
+// gofer/hello), which a local config write does not change — see
+// [App.handleModelSelect].
+func (o Overview) WithDefaultModel(model string) Overview {
+	o.meta.Model = model
+	return o
+}
+
 // Selected returns the currently selected session's full info and true, or a
 // zero value and false when the roster is empty. The app root reads it to
 // route ctrl-x to kill (running) or archive (finished).

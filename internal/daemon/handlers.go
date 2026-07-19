@@ -253,7 +253,11 @@ func handleSessionNew(d *Daemon, ctx context.Context, _ *peer, params json.RawMe
 	if err := json.Unmarshal(params, &req); err != nil {
 		return nil, invalidParams(fmt.Errorf("acp: decode %s params: %w", acp.MethodSessionNew, err))
 	}
-	model := d.cfg.DefaultModel
+	// d.defaultModel, not d.cfg.DefaultModel: with a resolver configured this
+	// re-reads the daemon's default per request, so a `session.model` config
+	// write lands on the NEXT session rather than requiring a daemon restart
+	// (issue #156). A client-supplied model still wins outright.
+	model := d.defaultModel(ctx)
 	if req.Model != "" {
 		model = req.Model
 	}
@@ -339,7 +343,7 @@ func handleSessionLoad(d *Daemon, ctx context.Context, p *peer, params json.RawM
 	if rerr != nil {
 		return nil, rerr
 	}
-	if _, err := d.sup.Resume(ctx, op.SessionID, supervisor.ResumeOptions{Cwd: cwd, Model: d.cfg.DefaultModel}); err != nil {
+	if _, err := d.sup.Resume(ctx, op.SessionID, supervisor.ResumeOptions{Cwd: cwd, Model: d.defaultModel(ctx)}); err != nil {
 		return nil, appError(err)
 	}
 	d.log.Info("session resumed", "session", op.SessionID)
@@ -1164,16 +1168,19 @@ func handleGoferModels(d *Daemon, _ context.Context, _ *peer, _ json.RawMessage)
 // version axes (design §6). binaryVersion is the daemon's build version
 // (Config.Version), wireVersion the router↔worker wire contract version
 // (WireVersion), acpProtocolVersion the ACP version this daemon speaks
-// (acp.ProtocolVersion), plus defaultModel — the model this daemon resolved
-// at startup for session/new requests carrying none, which a client cannot
-// reproduce locally (see HelloResult.DefaultModel). Takes no params; never
-// fails.
-func handleGoferHello(d *Daemon, _ context.Context, _ *peer, _ json.RawMessage) (any, *rpcError) {
+// (acp.ProtocolVersion), plus defaultModel — the model this daemon would use
+// RIGHT NOW for a session/new carrying none, which a client cannot reproduce
+// locally (see HelloResult.DefaultModel). Takes no params; never fails.
+//
+// defaultModel comes from the same [Daemon.defaultModel] accessor session/new
+// and session/load use, so what a daemon advertises and what it acts on cannot
+// drift apart (issue #156).
+func handleGoferHello(d *Daemon, ctx context.Context, _ *peer, _ json.RawMessage) (any, *rpcError) {
 	return HelloResult{
 		BinaryVersion:      d.cfg.Version,
 		WireVersion:        WireVersion,
 		ACPProtocolVersion: acp.ProtocolVersion,
-		DefaultModel:       d.cfg.DefaultModel,
+		DefaultModel:       d.defaultModel(ctx),
 	}, nil
 }
 

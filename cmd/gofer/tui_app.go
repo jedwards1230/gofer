@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/daemon"
 	"github.com/jedwards1230/gofer/internal/daemonbridge"
+	"github.com/jedwards1230/gofer/internal/modelcatalog"
 	"github.com/jedwards1230/gofer/internal/supervisor"
 	"github.com/jedwards1230/gofer/internal/tui"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
@@ -119,6 +121,11 @@ func selectTUIBackend(ctx context.Context, df *daemonFlags, cwd, root string, st
 	switch {
 	case dialErr == nil:
 		b := daemonbridge.New(c)
+		// The panel's /model needs to know the default it writes cannot reach
+		// this daemon (see tui.CommandEnv.DaemonBacked) — the local config
+		// wrappers above are unchanged either way, since auth.json/config.json
+		// are always this machine's.
+		env.DaemonBacked = true
 		return tuiBackend{
 			sup:   b,
 			close: b.Close,
@@ -151,9 +158,19 @@ func selectTUIBackend(ctx context.Context, df *daemonFlags, cwd, root string, st
 	// died on `runner: unknown model ""` while the header cheerfully showed a
 	// real one (issue #147). Mirrors the daemon's own
 	// [daemon.Config.DefaultModel] shape.
+	//
+	// The header gets the value resolved NOW (it has to render something), but
+	// the bridge gets the RESOLVER, not the value: a default changed later in
+	// this process's life — `/model` writing session.model — must reach the
+	// next session created, which a string captured here never could (issue
+	// #156). The TUI keeps its header in step itself via
+	// [tui.Overview.WithDefaultModel]; re-resolving on each create keeps
+	// config.json the one source of truth for what actually runs.
 	model := resolveOverviewModel(ctx, rootDir)
 	return tuiBackend{
-		sup:   tuibridge.New(sup, model),
+		sup: tuibridge.New(sup, func(ctx context.Context) string {
+			return resolveOverviewModel(ctx, rootDir)
+		}),
 		close: sup.Close,
 		label: "local in-process supervisor (no daemon reachable)",
 		meta: tui.OverviewMeta{
@@ -180,11 +197,40 @@ func daemonDefaultModel(ctx context.Context, c *daemon.Client) string {
 	return hello.DefaultModel
 }
 
+// modelDiscoveryClient and modelDiscoveryBaseURL are the transport production
+// live model discovery runs on. nil/"" are what [modelcatalog.WithDiscovery]
+// documents as "http.DefaultClient against the real vendor host", and passing
+// http.DefaultClient explicitly means exactly that — with one difference that
+// is the entire reason these are variables: a test can pin BOTH, and pinning
+// them is what makes the production wiring assertable without touching a
+// vendor host.
+//
+// That matters more than it looks. Discovery is opt-in
+// ([modelcatalog.WithDiscovery]'s doc explains why), so a call site that stops
+// passing it does not fail, does not warn, and does not change a single test
+// result — the feature just silently stops existing. The only way to catch that
+// is a test that drives the REAL production call site and observes a request,
+// which requires the production client to be swappable. See
+// TestProductionCommandEnvPerformsDiscovery.
+//
+// A non-nil client also pins the SDK auth store's token refresh, not just the
+// listing: modelcatalog threads the injected client into auth.WithHTTPClient
+// precisely so both calls are pinnable together (see its codexCredential doc).
+// With nil, the refresh would fall back to the store's own client and could
+// reach a real vendor auth host.
+var (
+	modelDiscoveryClient  = http.DefaultClient
+	modelDiscoveryBaseURL = ""
+)
+
 // buildCommandEnv builds the command panel's data source (see
 // [tui.CommandEnv]'s doc): version/cwd/root identity plus lazy wrappers
 // around the SDK auth store and gofer's own config loader/writer, both
 // rooted at root. Auth reuses newAuthStore (the same store `gofer
 // auth`/`gofer login` drive) rather than opening auth.json a second way.
+//
+// Models is the one wrapper that can leave the machine — it enables live
+// discovery. Every other closure here is a local file read.
 func buildCommandEnv(root, cwd string) tui.CommandEnv {
 	return tui.CommandEnv{
 		Version: effectiveVersion(),
@@ -215,6 +261,16 @@ func buildCommandEnv(root, cwd string) tui.CommandEnv {
 		},
 		SaveConfig: func(c config.Config) error {
 			return config.Save(config.DefaultPath(root), c)
+		},
+		Models: func(ctx context.Context, providerID string) ([]modelcatalog.Model, error) {
+			// WithDiscovery is REQUIRED here and is the whole point of this
+			// closure: without it Catalog is offline and returns the same
+			// compiled-in floor the picker already seeded itself with, so
+			// /model would silently never show a live model. Catalog absorbs
+			// every discovery failure back down to that floor internally, so
+			// there is no failure mode to handle at this layer.
+			return modelcatalog.Catalog(ctx, root, providerID,
+				modelcatalog.WithDiscovery(modelDiscoveryClient, modelDiscoveryBaseURL))
 		},
 	}
 }

@@ -20,6 +20,7 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
 	"github.com/jedwards1230/gofer/internal/config"
+	"github.com/jedwards1230/gofer/internal/modelcatalog"
 	"github.com/jedwards1230/gofer/internal/modelmeta"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
@@ -291,6 +292,82 @@ func (p commandPanel) body(width, bodyRows int) string {
 	return ""
 }
 
+// modelsLoadedMsg carries the result of the Model tab's background catalog
+// load ([App.discoverModelsCmd]). It has no error field on purpose: every
+// failure mode already degrades to a usable list inside
+// [modelcatalog.Catalog], and the panel's response to "nothing came back" is
+// to keep the floor it opened with, which is what an empty models does.
+type modelsLoadedMsg struct{ models []modelcatalog.Model }
+
+// discoverModelsCmd fetches the live model listing for every authenticated
+// provider, OFF the Update loop.
+//
+// This is the deliberate answer to "opening /model must not freeze the TUI".
+// Live discovery is bounded (modelcatalog.DefaultDiscoveryTimeout, 3s) but 3s
+// is an eternity in a key handler, and resolving before the first render would
+// stall the panel for exactly as long as the vendor is slow. So the picker
+// opens instantly on the compiled-in floor — a complete, usable, correct-for-
+// this-credential list — and this command upgrades it in place when the
+// listing lands. The alternatives were both worse: blocking trades a
+// guaranteed freeze for a marginally fresher first frame, and rendering an
+// empty list with a spinner shows nothing where a perfectly good answer was
+// already available offline.
+//
+// It returns nil when there is nothing to fetch (no Models closure, or no
+// authenticated provider), so a caller can dispatch it unconditionally.
+// Failures are silent by design: the user asked to pick a model, not to hear
+// about the vendor's uptime, and the floor beneath them is already right.
+func (a App) discoverModelsCmd() tea.Cmd {
+	env := a.commandEnv
+	if env.Models == nil {
+		return nil
+	}
+	authed := authedProviders(env)
+	if len(authed) == 0 {
+		return nil
+	}
+	return func() tea.Msg {
+		var out []modelcatalog.Model
+		for _, p := range authed {
+			models, err := env.Models(context.Background(), p.Provider)
+			if err != nil {
+				// A broken auth.json for one provider must not cost the others
+				// their rows; Catalog has already absorbed every discovery
+				// failure by this point.
+				continue
+			}
+			out = append(out, models...)
+		}
+		return modelsLoadedMsg{models: out}
+	}
+}
+
+// applyModelsLoaded folds a completed catalog load into the open panel.
+//
+// A panel CLOSED while the fetch was in flight drops the result: the next open
+// re-fetches, and a stale slice must never resurrect a dismissed panel. That is
+// the only drop condition. A panel still open but sitting on another tab keeps
+// the result — the load was dispatched for this panel, the Model tab is one
+// ←/→ away, and discarding it would mean tabbing back re-fetches something
+// already in hand (handlePanelKey's re-fetch is guarded on !live for exactly
+// this reason).
+//
+// The result is applied through [modelPickerView.withCatalog], which is what
+// makes a LATE arrival safe: an empty result (every provider failed) leaves the
+// floor standing, and a populated one carries the user's row highlight across
+// by model id and leaves a typed entry alone. So a load landing after the user
+// has already typed or navigated upgrades the list underneath them without
+// moving what they had selected.
+func (a App) applyModelsLoaded(msg modelsLoadedMsg) App {
+	if a.panel == nil {
+		return a
+	}
+	p := *a.panel
+	p.model = p.model.withCatalog(msg.models)
+	a.panel = &p
+	return a
+}
+
 // handlePanelKey routes a key press to the open command panel. [App.Update]
 // calls this before the approval overlay and per-screen handlers whenever
 // a.panel != nil, matching the dispatch precedence panel > approval > active
@@ -319,8 +396,16 @@ func (a App) handlePanelKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// commandPanel.handleKey below.
 		return a.handleModelSelect()
 	}
+	was := a.panel.active
 	p := a.panel.handleKey(msg)
 	a.panel = &p
+	// Tabbing INTO the Model tab is the other way a user reaches the picker
+	// (the panel opens on whichever tab the slash command named, but ←/→ reach
+	// all three). Fetch on that transition too, once — a list already upgraded
+	// by a completed load is not re-fetched on every tab bounce.
+	if p.active == panelModel && was != panelModel && !p.model.live {
+		return a, a.discoverModelsCmd()
+	}
 	return a, nil
 }
 
@@ -376,21 +461,48 @@ func (a App) handleModelSelect() (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// Make the write visible where the user reads the default: the roster
+	// header (and the attach screen's, which renders the same meta). Guarded on
+	// the backend, because the header is only ours to update when this process
+	// owns the default — attached to a daemon it truthfully shows the DAEMON's,
+	// which this write did not change (see [App.defaultModelScope]).
+	if !a.commandEnv.DaemonBacked {
+		a.over = a.over.WithDefaultModel(selected)
+	}
+
 	sess := a.panel.model.sess
 	if sess == nil {
 		// The overview: no running session to swap, only the default.
-		a.status = "Default model set to " + modelmeta.DisplayName(selected) + "."
+		a.status = a.withDefaultReach(
+			"Default model set to "+modelmeta.DisplayName(selected)+".",
+			"Default saved; attached daemon adopts it unless pinned.")
 		a.panel = nil
 		return a, nil
 	}
 
 	if modelProvider(sess.Model) != modelProvider(selected) {
-		a.status = "Live model swap needs the same provider — default set for new sessions; this session keeps its model."
+		// "default set for new sessions" is only true where this process's
+		// config write reaches the thing that creates them, so the
+		// daemon-attached wording drops that clause outright rather than
+		// qualifying it — a caveat can be truncated off an 80-column status
+		// line, and an overclaim that survives truncation is exactly the bug.
+		if a.commandEnv.DaemonBacked {
+			a.status = a.withDefaultReach(
+				"Live model swap needs the same provider — this session keeps its model.",
+				"Provider differs — session keeps its model; default saved.")
+		} else {
+			a.status = "Live model swap needs the same provider — default set for new sessions; this session keeps its model."
+		}
 		a.panel = nil
 		return a, nil
 	}
 
-	a.status = "Model set to " + modelmeta.DisplayName(selected) + "."
+	// The live swap dispatched below applies on either backend — over the wire
+	// on the daemon path, in-process on the local one — so this half of the
+	// message is unconditional. Only the DEFAULT's reach differs.
+	a.status = a.withDefaultReach(
+		"Model set to "+modelmeta.DisplayName(selected)+".",
+		"Model set for this session; daemon adopts the default unless pinned.")
 	a.panel = nil
 	sessionID, sup := sess.ID, a.sup
 	return a, func() tea.Msg {
@@ -404,6 +516,50 @@ func (a App) handleModelSelect() (tea.Model, tea.Cmd) {
 		err := sup.SetModel(context.Background(), sessionID, selected)
 		return opDoneMsg{err: err}
 	}
+}
+
+// withDefaultReach appends to note whatever qualification the persisted
+// session.model default needs to stop overclaiming on THIS backend. It is the
+// single decision point for "did writing the default actually change what runs
+// next", and the only place that answer is phrased.
+//
+// Local backend: the write took effect. [Adapter.Create] resolves the default
+// per create (see internal/tuibridge), so the very next session started from
+// this TUI uses it — nothing to qualify, and note is returned unchanged.
+//
+// Daemon-attached: it did NOT take effect for the daemon on the other end. That
+// daemon now RE-READS its default per session/new (issue #156's daemon half),
+// so an unpinned daemon does adopt this write on its next session, with no
+// restart. A daemon started with an explicit --model is pinned: that flag stays
+// authoritative for its lifetime and the write reaches only future daemons.
+//
+// This TUI cannot currently tell those two apart, so the daemon-attached
+// wording is deliberately chosen to be TRUE UNDER BOTH: "adopts it unless
+// pinned" claims no effect that might not have occurred, and concedes none
+// that did. Asserting "unchanged until restart" (the pre-fix wording) is now
+// simply false for the unpinned case, which is the common one.
+//
+// PINNED/UNPINNED PROBE (follow-up): re-probing gofer/hello after the write and
+// comparing HelloResult.DefaultModel to the selected id distinguishes them —
+// equal means adopted, different means pinned — because hello now answers live
+// from the same accessor session/new uses rather than a startup snapshot. That
+// probe is a network call, so it belongs in a tea.Cmd, not in this pure
+// synchronous function; it is not wired here.
+//
+// Each branch returns a STANDALONE string rather than composing note+suffix.
+// The status line is truncated to the terminal width (App.render), and a
+// qualification that gets cut off leaves exactly the unqualified overclaim
+// behind. The base notes run to 71 columns, leaving 9 for a caveat at the
+// 80-column floor the golden tests pin — no meaningful caveat fits as a
+// suffix, which is why composition was abandoned. The daemon strings name no
+// model for the same reason: it is already on screen in the header directly
+// above, and interpolating an arbitrarily long id would put them back over
+// the edge.
+func (a App) withDefaultReach(local, daemonAttached string) string {
+	if !a.commandEnv.DaemonBacked {
+		return local
+	}
+	return daemonAttached
 }
 
 // modelProvider resolves id's provider family, or "" for an id whose backend

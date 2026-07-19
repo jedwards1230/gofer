@@ -14,7 +14,9 @@ package tui
 // command_test.go (package tui_test).
 
 import (
+	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -23,6 +25,8 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
 	"github.com/jedwards1230/gofer/internal/config"
+	"github.com/jedwards1230/gofer/internal/modelcatalog"
+	"github.com/jedwards1230/gofer/internal/modelmeta"
 	"github.com/jedwards1230/gofer/internal/tui/testkit"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
@@ -268,7 +272,24 @@ func typeModel(v modelPickerView, s string) modelPickerView {
 // whose backend provider.Resolve can still infer from its "gpt-" prefix —
 // i.e. a model newer than this binary, the exact case the free-text entry
 // exists for.
-const unregisteredID = "gpt-5.6-sol"
+//
+// It must also be absent from [modelmeta]'s display-name table, since these
+// tests assert the raw id stands in for a name gofer has no label for. That is
+// a second, easily-missed condition: this fixture was previously a real Codex
+// id, which stopped satisfying it the moment gofer learned a label for that
+// family. TestUnregisteredIDHasNoDisplayName guards it.
+const unregisteredID = "gpt-9-unreleased"
+
+// TestUnregisteredIDHasNoDisplayName locks the second half of unregisteredID's
+// contract (see its doc): every test using it expects modelDescriptionLine to
+// fall back to the raw id, which silently stops being true if the fixture ever
+// gains a modelmeta label. Without this guard that failure surfaces as a
+// confusing golden diff in an unrelated change.
+func TestUnregisteredIDHasNoDisplayName(t *testing.T) {
+	if got := modelmeta.DisplayName(unregisteredID); got != unregisteredID {
+		t.Fatalf("modelmeta.DisplayName(%q) = %q; the picker fixture must have no display name — pick an id modelmeta does not label", unregisteredID, got)
+	}
+}
 
 // TestModelDescriptionLineUnregisteredShowsNoFabricatedMetadata is the
 // regression guard for the highest-risk line in the free-text entry change:
@@ -505,4 +526,424 @@ func TestGoldenModelTypedUnroutableIDStyled(t *testing.T) {
 	auths := []ProviderAuth{{Provider: "openai", Kind: KindAPIKey}}
 	v := newModelPickerView(testkit.ColorTheme(), modelTestEnv(auths, nil), nil, "gpt-5")
 	renderModelStyled(t, "model_typed_unroutable", typeModel(v, "not-a-real-family"))
+}
+
+// TestModelRowsFollowCredentialKind is the feature at the heart of issue #156:
+// the list must be what THIS credential can reach, not what the provider sells
+// in general. OpenAI routes an OAuth (subscription) credential to a different
+// backend than an API key, and the two serve different model families — the
+// SDK registry only carries the API-key one. Listing the registry to an OAuth
+// user offered ids that backend rejects outright while hiding every id it does
+// serve, which is why switching between two Codex models meant typing raw ids.
+//
+// Both directions are asserted, because "show the OAuth family" is only half a
+// fix — regressing the API-key user to the Codex family would be the identical
+// bug pointed the other way.
+func TestModelRowsFollowCredentialKind(t *testing.T) {
+	t.Run("oauth lists the codex family, not the api-key family", func(t *testing.T) {
+		auths := []ProviderAuth{{Provider: "openai", Kind: KindOAuth}}
+		v := newModelPickerView(theme.Test(), modelTestEnv(auths, nil), nil, "")
+
+		var got []string
+		for _, r := range v.rows() {
+			got = append(got, r.id)
+		}
+		want := []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.3-codex-spark"}
+		if !slices.Equal(got, want) {
+			t.Fatalf("rows() for an OAuth openai credential = %v, want the Codex family %v", got, want)
+		}
+		// gpt-5 is precisely the id that backend answers with HTTP 400.
+		if slices.Contains(got, "gpt-5") {
+			t.Errorf("rows() = %v; must not offer gpt-5 to an OAuth credential — the Codex backend rejects it", got)
+		}
+	})
+
+	t.Run("api key keeps the registry family", func(t *testing.T) {
+		auths := []ProviderAuth{{Provider: "openai", Kind: KindAPIKey}}
+		v := newModelPickerView(theme.Test(), modelTestEnv(auths, nil), nil, "")
+
+		var got []string
+		for _, r := range v.rows() {
+			got = append(got, r.id)
+		}
+		if !slices.Contains(got, "gpt-5") {
+			t.Errorf("rows() for an API-key openai credential = %v, want it to still carry gpt-5", got)
+		}
+		for _, codexOnly := range []string{"gpt-5.6-sol", "gpt-5.6-terra"} {
+			if slices.Contains(got, codexOnly) {
+				t.Errorf("rows() = %v; an API-key credential must not be offered the OAuth-only id %q", got, codexOnly)
+			}
+		}
+	})
+}
+
+// TestModelRowsRenderCodexFamilyForOAuth is the rendered counterpart: the
+// user's stated want is picking between sol and terra from the list instead of
+// typing ids, so the display names have to be on screen, not just the ids in
+// rows().
+func TestModelRowsRenderCodexFamilyForOAuth(t *testing.T) {
+	auths := []ProviderAuth{{Provider: "openai", Kind: KindOAuth}}
+	v := newModelPickerView(theme.Test(), modelTestEnv(auths, nil), nil, "gpt-5.6-terra")
+
+	got := v.View(testkit.Width, testkit.Height)
+	for _, want := range []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected the picker to list %q for an OAuth credential, got:\n%s", want, got)
+		}
+	}
+	if !strings.Contains(got, "✓ "+modelmeta.DisplayName("gpt-5.6-terra")) {
+		t.Fatalf("expected the active mark on the resolved default, got:\n%s", got)
+	}
+}
+
+// TestModelRowsAreNotAnAdmissionGate is the non-gate proof at this layer. The
+// per-kind catalog decides what is LISTED; it must never decide what is
+// RUNNABLE. The sharpest case is an id the kind-aware list deliberately omits:
+// gpt-5 is absent from an OAuth user's rows precisely because that backend
+// rejects it — and yet typing it must still commit, because provider.Resolve,
+// not this list, is the admission decision, and the list is only ever as
+// correct as the day this binary was built.
+func TestModelRowsAreNotAnAdmissionGate(t *testing.T) {
+	auths := []ProviderAuth{{Provider: "openai", Kind: KindOAuth}}
+	v := newModelPickerView(theme.Test(), modelTestEnv(auths, nil), nil, "")
+
+	var listed []string
+	for _, r := range v.rows() {
+		listed = append(listed, r.id)
+	}
+	for _, unlisted := range []string{"gpt-5", unregisteredID} {
+		if slices.Contains(listed, unlisted) {
+			t.Fatalf("test premise broken: %q is listed for an OAuth credential (%v)", unlisted, listed)
+		}
+		if got := typeModel(v, unlisted).selectedModel(); got != unlisted {
+			t.Errorf("selectedModel() after typing the unlisted id %q = %q; the catalog must not gate what can be committed", unlisted, got)
+		}
+	}
+}
+
+// TestModelRowsMixedKindsGroupPerCredential covers the two-provider ceiling
+// with DIFFERENT credential kinds at once — the arrangement that catches a
+// per-provider (rather than per-credential) implementation, which would have to
+// pick one kind for the whole list.
+func TestModelRowsMixedKindsGroupPerCredential(t *testing.T) {
+	auths := []ProviderAuth{
+		{Provider: "openai", Kind: KindOAuth},
+		{Provider: "anthropic", Kind: KindOAuth},
+	}
+	v := newModelPickerView(theme.Test(), modelTestEnv(auths, nil), nil, "")
+
+	rows := v.rows()
+	var providers []string
+	for _, r := range rows {
+		if len(providers) == 0 || providers[len(providers)-1] != r.provider {
+			providers = append(providers, r.provider)
+		}
+	}
+	if !slices.Equal(providers, []string{"anthropic", "openai"}) {
+		t.Fatalf("row provider blocks = %v, want one ascending block per provider", providers)
+	}
+
+	var ids []string
+	for _, r := range rows {
+		ids = append(ids, r.id)
+	}
+	// Anthropic serves one family on both kinds, so it keeps the registry;
+	// openai's OAuth credential must still get the Codex family beside it.
+	if !slices.Contains(ids, "claude-sonnet-5") {
+		t.Errorf("rows() = %v, want the anthropic registry family unaffected", ids)
+	}
+	if !slices.Contains(ids, "gpt-5.6-terra") {
+		t.Errorf("rows() = %v, want openai's OAuth credential to still list the Codex family", ids)
+	}
+}
+
+// TestModelRowsDeduplicateProviders guards the one input this view does not
+// control: env.Auth is a file read, and a duplicated provider entry would
+// otherwise double that provider's whole block, silently misaligning every
+// cursor index below it.
+func TestModelRowsDeduplicateProviders(t *testing.T) {
+	auths := []ProviderAuth{
+		{Provider: "openai", Kind: KindOAuth},
+		{Provider: "openai", Kind: KindOAuth},
+	}
+	v := newModelPickerView(theme.Test(), modelTestEnv(auths, nil), nil, "")
+
+	single := newModelPickerView(theme.Test(), modelTestEnv(auths[:1], nil), nil, "")
+	if got, want := len(v.rows()), len(single.rows()); got != want {
+		t.Fatalf("rows() with a duplicated provider = %d rows, want %d", got, want)
+	}
+}
+
+// TestAuthKindMirrorsModelcatalogKind locks the one unchecked conversion
+// rows() performs. [AuthKind] is a local mirror of the SDK's auth.CredKind
+// (see env.go) and [modelcatalog.Kind] is a second, independent mirror of the
+// same thing, so rows() crossing between them with a plain string conversion is
+// only correct while the two agree. A rename on either side would compile
+// fine and silently downgrade every OAuth user back to the API-key catalog —
+// which is the original bug, restored, with no test failing anywhere else.
+func TestAuthKindMirrorsModelcatalogKind(t *testing.T) {
+	if got, want := string(KindOAuth), string(modelcatalog.KindOAuth); got != want {
+		t.Errorf("KindOAuth = %q, want modelcatalog.KindOAuth (%q)", got, want)
+	}
+	if got, want := string(KindAPIKey), string(modelcatalog.KindAPIKey); got != want {
+		t.Errorf("KindAPIKey = %q, want modelcatalog.KindAPIKey (%q)", got, want)
+	}
+}
+
+// liveCodexCatalog is a discovery result standing in for what the Codex
+// listing returns: ids absent from every compiled-in list, a vendor display
+// name that disagrees with modelmeta, and real context windows. Nothing here
+// can appear in a rendered picker unless a live load actually landed.
+func liveCodexCatalog() []modelcatalog.Model {
+	return []modelcatalog.Model{
+		{ID: "gpt-5.9-nova", Provider: "openai", Label: "GPT-5.9 Nova", ContextWindow: 512_000},
+		{ID: "gpt-5.6-terra", Provider: "openai", Label: "Terra (live name)", ContextWindow: 272_000},
+	}
+}
+
+// TestModelPickerOpensOnFloorBeforeDiscovery is the anti-freeze contract. The
+// picker must be complete and usable on its FIRST frame, before any live load
+// resolves — discovery is bounded at 3s, and a blocking resolve would stall the
+// panel for exactly as long as the vendor is slow.
+//
+// env.Models here never returns at all. If the view ever waits on it, this test
+// hangs rather than fails, which is the honest signal for "the render path
+// blocks on the network".
+func TestModelPickerOpensOnFloorBeforeDiscovery(t *testing.T) {
+	env := modelTestEnv([]ProviderAuth{{Provider: "openai", Kind: KindOAuth}}, nil)
+	env.Models = func(ctx context.Context, _ string) ([]modelcatalog.Model, error) {
+		<-ctx.Done() // never resolves on its own
+		return nil, ctx.Err()
+	}
+
+	v := newModelPickerView(theme.Test(), env, nil, "")
+
+	got := v.View(testkit.Width, testkit.Height)
+	if !strings.Contains(got, "gpt-5.6-terra") {
+		t.Fatalf("expected the offline Codex floor on the first frame, got:\n%s", got)
+	}
+	if len(v.rows()) == 0 {
+		t.Fatal("expected a usable row list before discovery resolves")
+	}
+	if v.live {
+		t.Error("expected live=false before any load landed")
+	}
+}
+
+// TestModelPickerNoIOOnTheRenderPath is the cache's reason for existing. rows()
+// is read several times per keystroke, so resolving the catalog there would
+// issue a vendor request per keypress. The catalog closure must be called ZERO
+// times by rendering, navigating, and typing — the panel host calls it once,
+// off the Update loop.
+func TestModelPickerNoIOOnTheRenderPath(t *testing.T) {
+	var modelCalls, authCalls int
+	env := GoldenCommandEnv()
+	env.Auth = func() ([]ProviderAuth, error) {
+		authCalls++
+		return []ProviderAuth{{Provider: "openai", Kind: KindOAuth}}, nil
+	}
+	env.Models = func(context.Context, string) ([]modelcatalog.Model, error) {
+		modelCalls++
+		return liveCodexCatalog(), nil
+	}
+
+	v := newModelPickerView(theme.Test(), env, nil, "")
+	seedAuthCalls := authCalls
+
+	for range 5 {
+		v = v.handleKey(tea.KeyPressMsg{Code: tea.KeyDown})
+		_ = v.View(testkit.Width, testkit.Height)
+	}
+	v = typeModel(v, "gpt-5.6-luna")
+	_ = v.View(testkit.Width, testkit.Height)
+	_ = v.selectedModel()
+
+	if modelCalls != 0 {
+		t.Errorf("env.Models called %d times from the render path, want 0 — the catalog must be resolved once by the panel host, not per keystroke", modelCalls)
+	}
+	if got := authCalls - seedAuthCalls; got != 0 {
+		t.Errorf("env.Auth called %d times from the render path, want 0 — the row list must read the cached catalog", got)
+	}
+}
+
+// TestModelPickerWithCatalogUpgradesRows covers the load landing: the live list
+// replaces the floor wholesale, and the row highlight is dropped because it was
+// an index into the OLD list and the two need not agree in length or order.
+func TestModelPickerWithCatalogUpgradesRows(t *testing.T) {
+	auths := []ProviderAuth{{Provider: "openai", Kind: KindOAuth}}
+	v := newModelPickerView(theme.Test(), modelTestEnv(auths, nil), nil, "")
+	v = v.handleKey(tea.KeyPressMsg{Code: tea.KeyDown}) // highlight a floor row
+	if v.cursor != 0 {
+		t.Fatalf("test premise broken: expected a highlighted floor row, cursor=%d", v.cursor)
+	}
+
+	v = v.withCatalog(liveCodexCatalog())
+
+	var got []string
+	for _, r := range v.rows() {
+		got = append(got, r.id)
+	}
+	if !slices.Equal(got, []string{"gpt-5.9-nova", "gpt-5.6-terra"}) {
+		t.Fatalf("rows() after the load = %v, want the live listing", got)
+	}
+	if !v.live {
+		t.Error("expected live=true after a load landed")
+	}
+	// The highlighted floor row (gpt-5.6-sol) is absent from the live listing,
+	// so it has genuinely gone away and the highlight drops to none rather
+	// than sliding onto an unrelated neighbor at the same index.
+	if v.cursor != -1 {
+		t.Errorf("cursor = %d after the highlighted model vanished from the list, want -1", v.cursor)
+	}
+}
+
+// TestModelPickerLiveCarriesHighlightByID covers withCatalog's other branch,
+// and the one a naive implementation gets wrong. The cursor is an INDEX, but
+// what the user means by it is a MODEL. A background load landing a second
+// after the panel opened must not yank the selection somewhere else, so a
+// highlighted model still present in the live listing keeps the highlight —
+// at whatever index it now occupies, which need not be the old one.
+func TestModelPickerLiveCarriesHighlightByID(t *testing.T) {
+	auths := []ProviderAuth{{Provider: "openai", Kind: KindOAuth}}
+	v := newModelPickerView(theme.Test(), modelTestEnv(auths, nil), nil, "")
+
+	// Walk onto gpt-5.6-terra in the floor, which sits at a DIFFERENT index in
+	// the live listing (floor index 1, live index 1... so move to a floor row
+	// whose live index differs to make the test meaningful).
+	var floorIdx int
+	for i, r := range v.rows() {
+		if r.id == "gpt-5.6-terra" {
+			floorIdx = i
+			break
+		}
+	}
+	for range floorIdx + 1 {
+		v = v.handleKey(tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+	if got := v.rows()[v.cursor].id; got != "gpt-5.6-terra" {
+		t.Fatalf("test premise broken: highlighted %q, want gpt-5.6-terra", got)
+	}
+
+	v = v.withCatalog(liveCodexCatalog())
+
+	if v.cursor < 0 {
+		t.Fatal("expected the highlight to survive a load that still carries the highlighted model")
+	}
+	if got := v.rows()[v.cursor].id; got != "gpt-5.6-terra" {
+		t.Fatalf("highlighted %q after the load, want the same model gpt-5.6-terra the user was on", got)
+	}
+	if got := v.selectedModel(); got != "gpt-5.6-terra" {
+		t.Fatalf("selectedModel() = %q after the load, want gpt-5.6-terra", got)
+	}
+}
+
+// TestModelPickerLivePreservesTypedEntry is withCatalog's other half: the row
+// highlight is a position in data the load replaced, but a typed id is text the
+// user wrote. A background refresh must not eat it mid-keystroke.
+func TestModelPickerLivePreservesTypedEntry(t *testing.T) {
+	auths := []ProviderAuth{{Provider: "openai", Kind: KindOAuth}}
+	v := newModelPickerView(theme.Test(), modelTestEnv(auths, nil), nil, "")
+	v = typeModel(v, "gpt-5.6-luna")
+
+	v = v.withCatalog(liveCodexCatalog())
+
+	if got := v.selectedModel(); got != "gpt-5.6-luna" {
+		t.Fatalf("selectedModel() after a background load = %q, want the typed id to survive", got)
+	}
+}
+
+// TestModelPickerEmptyCatalogKeepsFloor covers the failure path the picker
+// depends on. modelcatalog.Catalog degrades every discovery failure to the
+// floor internally, so an EMPTY result means the caller had nothing at all (a
+// nil closure, a broken auth.json). Adopting it would blank a working picker —
+// the exact outcome the floor exists to prevent.
+func TestModelPickerEmptyCatalogKeepsFloor(t *testing.T) {
+	auths := []ProviderAuth{{Provider: "openai", Kind: KindOAuth}}
+	v := newModelPickerView(theme.Test(), modelTestEnv(auths, nil), nil, "")
+	before := len(v.rows())
+	if before == 0 {
+		t.Fatal("test premise broken: expected a non-empty floor")
+	}
+
+	v = v.withCatalog(nil)
+
+	if got := len(v.rows()); got != before {
+		t.Fatalf("rows() after an empty load = %d, want the floor's %d rows kept", got, before)
+	}
+	if v.live {
+		t.Error("expected live=false — an empty result is not a completed load")
+	}
+}
+
+// TestModelPickerRendersLiveMetadata covers requirement 4: a discovered model
+// shows the VENDOR's display name and context window, since believing the live
+// listing is the point of fetching it. Pricing stays unknown — modelcatalog.Model
+// carries no pricing field because the listing carries none, and a subscription
+// model has no per-token price to quote.
+func TestModelPickerRendersLiveMetadata(t *testing.T) {
+	auths := []ProviderAuth{{Provider: "openai", Kind: KindOAuth}}
+	v := newModelPickerView(theme.Test(), modelTestEnv(auths, nil), nil, "")
+	v = v.withCatalog(liveCodexCatalog())
+
+	got := v.View(testkit.Width, testkit.Height)
+
+	if !strings.Contains(got, "GPT-5.9 Nova (gpt-5.9-nova)") {
+		t.Errorf("expected the live display name, got:\n%s", got)
+	}
+	if !strings.Contains(got, "512K context") {
+		t.Errorf("expected the live context window, got:\n%s", got)
+	}
+	// The compiled-in label for this id must lose to the vendor's.
+	if strings.Contains(got, modelmeta.DisplayName("gpt-5.6-terra")+" (gpt-5.6-terra)") {
+		t.Errorf("expected the live display_name to beat gofer's compiled-in label, got:\n%s", got)
+	}
+	if !strings.Contains(got, "Terra (live name)") {
+		t.Errorf("expected the live label for gpt-5.6-terra, got:\n%s", got)
+	}
+}
+
+// TestModelPickerNeverRendersFabricatedPricing is the standing guard, extended
+// to discovered models. A live entry has a real context window and NO price, so
+// the price must read "unknown" — never "$0", which would state as fact that a
+// model the user pays a subscription for is free.
+func TestModelPickerNeverRendersFabricatedPricing(t *testing.T) {
+	auths := []ProviderAuth{{Provider: "openai", Kind: KindOAuth}}
+	v := newModelPickerView(theme.Test(), modelTestEnv(auths, nil), nil, "")
+	v = v.withCatalog(liveCodexCatalog())
+
+	for _, line := range strings.Split(v.View(testkit.Width, testkit.Height), "\n") {
+		if !strings.Contains(line, "gpt-5.9-nova") && !strings.Contains(line, "gpt-5.6-terra") {
+			continue
+		}
+		if !strings.Contains(line, "pricing unknown") {
+			t.Errorf("discovered model line %q must report pricing as unknown", line)
+		}
+		for _, fabricated := range []string{"$0", "per Mtok"} {
+			if strings.Contains(line, fabricated) {
+				t.Errorf("discovered model line %q must not present %q as fact", line, fabricated)
+			}
+		}
+	}
+}
+
+// TestModelPickerLiveCatalogIsStillNotAnAdmissionGate carries the non-gate
+// property across the upgrade. A live list is a better list, not a permission
+// list — an id absent from it must still commit, because provider.Resolve makes
+// that decision and the vendor's picker inventory is not the same question as
+// what the backend will run.
+func TestModelPickerLiveCatalogIsStillNotAnAdmissionGate(t *testing.T) {
+	auths := []ProviderAuth{{Provider: "openai", Kind: KindOAuth}}
+	v := newModelPickerView(theme.Test(), modelTestEnv(auths, nil), nil, "")
+	v = v.withCatalog(liveCodexCatalog())
+
+	var listed []string
+	for _, r := range v.rows() {
+		listed = append(listed, r.id)
+	}
+	if slices.Contains(listed, unregisteredID) {
+		t.Fatalf("test premise broken: %q is in the live list %v", unregisteredID, listed)
+	}
+	if got := typeModel(v, unregisteredID).selectedModel(); got != unregisteredID {
+		t.Errorf("selectedModel() for an id absent from the live list = %q, want %q — a live catalog must not become a gate", got, unregisteredID)
+	}
 }

@@ -76,6 +76,8 @@ gofer exec [-p prompt] [--agent name] [--json] [--output-schema file] [-m model]
 gofer serve [--host unix://…|tcp://…]   # run the daemon in the foreground
 gofer daemon install|uninstall|status   # launchd/systemd unit for the daemon (M3)
                             #   install [--listen addr] [--root dir] [--token tok] [-m model]
+gofer daemon stop|restart [--root dir]  # stop a running daemon (driving its service manager
+                            #   when one owns it, so the stop sticks), or stop-then-start it
 gofer acp serve             # ACP over stdio (editors, stdio→ws bridges)
 gofer ps [--all]            # roster (--all includes archived; later: fleet)
 gofer kill|archive <id>     # stop running / clear finished (journal kept)
@@ -139,10 +141,18 @@ backend all share it): an explicit `-m` wins, then `session.model` in
 more credentialed providers with no explicit choice is a usage error naming
 each provider and its status — gofer favors no vendor. An expired OAuth
 credential still counts: the SDK refreshes it transparently, so it is reported
-as expired rather than silently dropped. The daemon resolves this once at
-startup and reports the result on `gofer/hello`, which is where a client's
-header reads it — a client cannot reproduce a remote daemon's resolution
-against its own auth store.
+as expired rather than silently dropped. The daemon reports its current answer
+on `gofer/hello`, which is where a client's header reads it — a client cannot
+reproduce a remote daemon's resolution against its own auth store.
+
+A daemon started **without** `--model` re-runs that resolution per request
+(`session/new`, `session/load`, `gofer/hello` share one accessor), so a later
+`session.model` write — what `/model` does — takes effect on the next session
+without restarting the daemon. A daemon started **with** `--model` keeps that
+flag for its lifetime: a model named on the command line is an operator
+decision, and a config write by any attached client must not silently retarget
+it. Re-resolution is non-fatal — a malformed `config.json` logs a warning and
+leaves the daemon on its startup model rather than failing `session/new`.
 
 Daemon lifecycle: the client auto-spawns the daemon on launch (health probe →
 detached spawn); a version/build mismatch **warns** (see daemon discovery

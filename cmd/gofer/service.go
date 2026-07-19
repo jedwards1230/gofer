@@ -63,8 +63,23 @@ type serviceManager interface {
 	isInstalled() (bool, error)
 	// load registers + starts the service from the already-written unit at path.
 	load(ctx context.Context, path string) error
-	// unload stops + deregisters the service (the command removes the file).
-	unload(ctx context.Context, path string) error
+	// unload stops + deregisters the service (the command removes the file). It
+	// reports whether it actually unloaded anything: false means the service was
+	// already not loaded, so the caller must NOT claim it uninstalled a running
+	// service. An unload that was attempted but could not be verified to have
+	// torn the process down is an error, never a silent (false, nil).
+	unload(ctx context.Context, path string) (bool, error)
+	// stopService stops the running service WITHOUT deregistering its unit file,
+	// and waits for it to actually be down. This is the lever `gofer daemon stop`
+	// pulls before signalling a pid: launchd's KeepAlive and systemd's Restart=
+	// would otherwise respawn a bare-SIGTERM'd daemon within moments, making the
+	// stop silently not stick. Reports whether anything was actually stopped.
+	stopService(ctx context.Context, path string) (bool, error)
+	// startService starts the service from its already-installed unit at path —
+	// the start half of `gofer daemon restart` for a service-managed daemon, so
+	// the replacement inherits the unit's full argv (--model, --listen, --root)
+	// rather than a partial reconstruction.
+	startService(ctx context.Context, path string) error
 	// reloadAfterRemove lets the manager forget a just-removed unit cleanly. The
 	// command layer calls it in runDaemonUninstall AFTER os.Remove(path) succeeds
 	// — on systemd this is `daemon-reload` (so the manager drops the deleted
@@ -240,8 +255,16 @@ func runDaemonInstall(ctx context.Context, args []string, stdout, stderr io.Writ
 }
 
 // runDaemonUninstall implements `gofer daemon uninstall [--root dir]`: it
-// unloads the service, removes the unit file, and best-effort removes the 0600
-// daemon.env token file. Idempotent — an absent unit is reported, not an error.
+// unloads the service, removes the unit file, removes a now-stale endpoint file,
+// and best-effort removes the 0600 daemon.env token file. Idempotent — an absent
+// unit is reported, not an error.
+//
+// It reports what actually happened rather than a blanket success: unload's bool
+// distinguishes "stopped and deregistered a loaded service" from "the unit file
+// existed but nothing was loaded" (the common case for a manually started
+// daemon), and only the former prints "Uninstalled". Previously the launchd
+// path discarded bootout's error entirely and always printed success, so an
+// uninstall that unloaded nothing was indistinguishable from one that worked.
 func runDaemonUninstall(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fs := newDaemonServiceFlagSet("daemon uninstall", stderr)
 	root := fs.String("root", "", "session store root the service used (default ~/.gofer)")
@@ -265,7 +288,8 @@ func runDaemonUninstall(ctx context.Context, args []string, stdout, stderr io.Wr
 		return nil
 	}
 
-	if err := mgr.unload(ctx, path); err != nil {
+	unloaded, err := mgr.unload(ctx, path)
+	if err != nil {
 		return fmt.Errorf("unload service %s: %w", mgr.label(), err)
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
@@ -284,8 +308,25 @@ func runDaemonUninstall(ctx context.Context, args []string, stdout, stderr io.Wr
 	if err := removeDaemonEnvToken(resolvedRoot); err != nil {
 		return err
 	}
+	// The unloaded daemon's endpoint file would otherwise linger, advertising a
+	// dead pid to every same-host client's discovery (see daemonFlags.resolve).
+	// Guarded on liveness so an unrelated daemon still serving this root keeps
+	// its advertisement.
+	removedStale, err := removeStaleEndpoint(resolvedRoot)
+	if err != nil {
+		return err
+	}
 
-	_, _ = fmt.Fprintf(stdout, "Uninstalled gofer daemon service %q.\n", mgr.label())
+	if unloaded {
+		_, _ = fmt.Fprintf(stdout, "Uninstalled gofer daemon service %q.\n", mgr.label())
+	} else {
+		// Nothing was loaded: the unit file is gone, but claiming "Uninstalled"
+		// here would tell an operator a running daemon was stopped when none was.
+		_, _ = fmt.Fprintf(stdout, "Removed gofer daemon service unit %q (nothing was loaded — a manually started daemon is unaffected; use `gofer daemon stop`).\n", mgr.label())
+	}
+	if removedStale {
+		_, _ = fmt.Fprintln(stdout, "Removed a stale daemon endpoint file.")
+	}
 	return nil
 }
 

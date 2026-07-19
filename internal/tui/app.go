@@ -476,6 +476,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
+	case modelsLoadedMsg:
+		// The /model picker's background catalog load landing (panel.go). It
+		// never touches a.status: a silent in-place list upgrade is the whole
+		// design, and reporting it would talk over whatever note the user is
+		// actually reading.
+		return a.applyModelsLoaded(msg), nil
+
 	case tea.PasteMsg:
 		// Bracketed paste arrives as ONE message carrying the whole payload,
 		// handled entirely outside the key handlers below so no character in

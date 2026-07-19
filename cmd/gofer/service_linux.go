@@ -55,14 +55,62 @@ func (systemdManager) load(ctx context.Context, _ string) error {
 	return runQuiet(ctx, "systemctl", "--user", "enable", "--now", systemdUnitName)
 }
 
-// unload disables + stops the unit (`disable --now`). The command layer then
-// removes the unit file and calls reloadAfterRemove, so the full uninstall
-// sequence is: disable --now → remove file → daemon-reload. The disable step is
-// best-effort — an already-disabled/absent unit is tolerated so uninstall stays
-// idempotent.
-func (systemdManager) unload(ctx context.Context, _ string) error {
-	_ = runQuiet(ctx, "systemctl", "--user", "disable", "--now", systemdUnitName)
-	return nil
+// unload disables + stops the unit (`disable --now`), reporting whether
+// anything was actually running to stop. The command layer then removes the
+// unit file and calls reloadAfterRemove, so the full uninstall sequence is:
+// disable --now → remove file → daemon-reload. An already-disabled/absent unit
+// is tolerated so uninstall stays idempotent, but a disable that leaves the
+// unit still active is a propagated error rather than a silent success.
+func (m systemdManager) unload(ctx context.Context, _ string) (bool, error) {
+	wasActive, err := m.running(ctx)
+	if err != nil {
+		return false, err
+	}
+	if err := runQuiet(ctx, "systemctl", "--user", "disable", "--now", systemdUnitName); err != nil {
+		// disable exits non-zero for an unknown/never-enabled unit, which is a
+		// clean idempotent no-op — the unit still being active is what makes it
+		// a real failure.
+		if stillActive, rerr := m.running(ctx); rerr != nil || stillActive {
+			return false, err
+		}
+		return wasActive, nil
+	}
+	if wasActive {
+		if err := waitServiceStopped(ctx, m.running); err != nil {
+			return false, err
+		}
+	}
+	return wasActive, nil
+}
+
+// stopService stops the unit without disabling it, so a service-managed daemon
+// stopped by `gofer daemon stop` still comes back at the next login. systemd's
+// Restart=on-failure would respawn a bare-SIGTERM'd daemon, so driving
+// systemctl is what makes the stop stick.
+func (m systemdManager) stopService(ctx context.Context, _ string) (bool, error) {
+	active, err := m.running(ctx)
+	if err != nil {
+		return false, err
+	}
+	if !active {
+		return false, nil
+	}
+	if err := runQuiet(ctx, "systemctl", "--user", "stop", systemdUnitName); err != nil {
+		if stillActive, rerr := m.running(ctx); rerr == nil && !stillActive {
+			return true, nil
+		}
+		return false, err
+	}
+	if err := waitServiceStopped(ctx, m.running); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// startService starts the already-installed unit — the start half of
+// `gofer daemon restart` for a service-managed daemon.
+func (systemdManager) startService(ctx context.Context, _ string) error {
+	return runQuiet(ctx, "systemctl", "--user", "start", systemdUnitName)
 }
 
 // reloadAfterRemove runs `systemctl --user daemon-reload` so systemd forgets the
