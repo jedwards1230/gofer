@@ -121,9 +121,9 @@ func parkedPID(t *testing.T) (pid int, waitKilled func()) {
 // daemon whose sessions run against the SDK's deterministic faux provider (no
 // network), over the shared store root, and serves until SIGKILL. It mirrors
 // internal/worker's own test harness, including the session-id pinning the real
-// `gofer session-worker` performs: the session id is pinned to the router-
-// supplied GOFER_ROUTER_TEST_SESSION uuid so the worker's socket/endpoint/lock
-// keying matches what the router expects (design Option A).
+// `gofer session-worker` performs: runner.Options.SessionID pins the session id
+// to the router-supplied GOFER_ROUTER_TEST_SESSION uuid so the worker's socket/
+// endpoint/lock keying matches what the router expects (design Option A).
 func runFauxWorker() {
 	root := os.Getenv(envWorkerRoot)
 	sessionID := os.Getenv(envWorkerSession)
@@ -133,7 +133,7 @@ func runFauxWorker() {
 	sup, err := supervisor.New(supervisor.Config{
 		Root: root,
 		NewSession: func(ctx context.Context, opts runner.Options) (supervisor.Session, error) {
-			opts.IDGen = worker.PinnedIDGen(sessionID)
+			opts.SessionID = sessionID
 			opts.Model = "faux"
 			opts.Provider = faux.New(multiTurnScript())
 			return runner.New(ctx, opts)
