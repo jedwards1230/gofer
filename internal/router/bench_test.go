@@ -843,18 +843,24 @@ func TestRosterWireFrameCount(t *testing.T) {
 	fmt.Fprintf(&b, "\n=== gofer M6 roster wire-frame count ===\n\n")
 	fmt.Fprintf(&b, "  go / os / arch     : %s %s/%s\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
 	fmt.Fprintf(&b, "  NumCPU / GOMAXPROCS: %d / %d\n\n", runtime.NumCPU(), runtime.GOMAXPROCS(0))
-	fmt.Fprintf(&b, "  %-8s | %-24s | %-24s\n", "workers", "gofer/roster frames per", "gofer/roster frames per")
-	fmt.Fprintf(&b, "  %-8s | %-24s | %-24s\n", "", "Roster() call", "List() call")
-	fmt.Fprintf(&b, "  %-8s-+-%-24s-+-%-24s\n", strings.Repeat("-", 8), strings.Repeat("-", 24), strings.Repeat("-", 24))
+	fmt.Fprintf(&b, "  %-8s | %-18s | %-18s | %-18s\n", "workers", "STEADY-STATE per", "STEADY-STATE per", "ONE-TIME warm-up")
+	fmt.Fprintf(&b, "  %-8s | %-18s | %-18s | %-18s\n", "", "Roster() call", "List() call", "(total frames)")
+	fmt.Fprintf(&b, "  %-8s-+-%-18s-+-%-18s-+-%-18s\n", strings.Repeat("-", 8), strings.Repeat("-", 18), strings.Repeat("-", 18), strings.Repeat("-", 18))
 
 	for _, n := range cfg.checkpoints {
-		roster, list := measureRosterFrames(t, n)
-		fmt.Fprintf(&b, "  %-8d | %-24s | %-24s\n", n,
-			fmt.Sprintf("%.1f", roster), fmt.Sprintf("%.1f", list))
+		c := measureRosterFrames(t, n)
+		fmt.Fprintf(&b, "  %-8d | %-18s | %-18s | %-18s\n", n,
+			fmt.Sprintf("%.2f", c.perRoster), fmt.Sprintf("%.2f", c.perList),
+			fmt.Sprintf("%d", c.warmup))
 	}
 	fmt.Fprintf(&b, "\n  [AUTHORITATIVE] a count, not a duration: contention cannot change an integer.\n")
-	fmt.Fprintf(&b, "  Expected pre-cache: exactly N per call — one RPC per live worker.\n")
-	fmt.Fprintf(&b, "  Expected post-cache (push-based roster): 0.\n\n")
+	fmt.Fprintf(&b, "  Pre-cache baseline: exactly N per call — one RPC per live worker, every call.\n")
+	fmt.Fprintf(&b, "  Post-cache: steady state should be 0 — the per-call RPC is gone, not cheaper.\n")
+	fmt.Fprintf(&b, "  Warm-up is the cache's ONE-TIME seed (~1 RPC per worker at adoption), paid\n")
+	fmt.Fprintf(&b, "  once rather than per call. It is reported separately on purpose: folding it\n")
+	fmt.Fprintf(&b, "  into a per-call average understates the win and invents a phantom recurring\n")
+	fmt.Fprintf(&b, "  cost. A steady-state row above 0 would mean handles are MISSING the cache\n")
+	fmt.Fprintf(&b, "  and falling back to live RPCs (by design, for a degraded worker).\n\n")
 
 	out := b.String()
 	fmt.Print(out)
@@ -865,9 +871,32 @@ func TestRosterWireFrameCount(t *testing.T) {
 	}
 }
 
-// measureRosterFrames adopts n counting workers into a fresh router and returns
-// the mean gofer/roster frames observed per Roster call and per List call.
-func measureRosterFrames(t *testing.T, n int) (perRoster, perList float64) {
+// rosterFrameCost separates the two distinct costs a roster cache has, which a
+// single "frames per call" number conflates.
+type rosterFrameCost struct {
+	// warmup is total gofer/roster frames observed from adoption through the
+	// first settling calls: the cache's ONE-TIME seed. The push-based cache seeds
+	// each handle with a single live RPC and thereafter serves from an atomic
+	// snapshot, so this is bounded by fleet size and paid once per worker.
+	warmup int64
+	// perRoster / perList are STEADY-STATE frames per call, measured only after
+	// the cache has settled. This is the number that answers "does a roster call
+	// still cost an RPC per worker?" — and the one comparable to the pre-cache
+	// baseline of exactly N.
+	perRoster, perList float64
+}
+
+// measureRosterFrames adopts n counting workers into a fresh router and measures
+// the gofer/roster wire frames its roster calls produce.
+//
+// It deliberately measures warm-up and steady state SEPARATELY. Measuring from a
+// cold router conflates them: seeding is asynchronous, so seed RPCs land during
+// the first calls and show up as a small fractional "per-call" cost that is
+// really a one-time startup charge racing the measurement window. Reporting that
+// fraction as the steady-state answer would misstate what the cache does — and
+// reporting 0 without settling first would be unverified. So: settle, then
+// measure.
+func measureRosterFrames(t *testing.T, n int) rosterFrameCost {
 	t.Helper()
 	// A per-N runtime dir keeps each round's endpoint files to itself, so the
 	// router adopts exactly the n workers this round planted.
@@ -892,14 +921,41 @@ func measureRosterFrames(t *testing.T, n int) (perRoster, perList float64) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	const iters = 5
+	// Warm-up: call until the frame counter stops moving, so every handle has
+	// either seeded or fallen back. Polling for quiescence rather than sleeping
+	// keeps this non-flaky on a loaded machine.
+	var (
+		last   int64 = -1
+		stable int
+	)
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, rerr := sup.Roster(ctx); rerr != nil {
+			t.Fatalf("Roster warm-up at %d workers: %v", n, rerr)
+		}
+		switch cur := frames.Load(); cur {
+		case last:
+			if stable++; stable >= settleReads {
+				deadline = time.Time{} // settled
+			}
+		default:
+			last, stable = cur, 0
+		}
+		if deadline.IsZero() {
+			break
+		}
+		time.Sleep(settleInterval)
+	}
+	out := rosterFrameCost{warmup: frames.Load()}
+
+	const iters = 20
 	frames.Store(0)
 	for range iters {
 		if _, rerr := sup.Roster(ctx); rerr != nil {
 			t.Fatalf("Roster at %d workers: %v", n, rerr)
 		}
 	}
-	perRoster = float64(frames.Load()) / iters
+	out.perRoster = float64(frames.Load()) / iters
 
 	frames.Store(0)
 	for range iters {
@@ -907,8 +963,8 @@ func measureRosterFrames(t *testing.T, n int) (perRoster, perList float64) {
 			t.Fatalf("List at %d workers: %v", n, lerr)
 		}
 	}
-	perList = float64(frames.Load()) / iters
-	return perRoster, perList
+	out.perList = float64(frames.Load()) / iters
+	return out
 }
 
 // shortRuntimeDirRound is shortRuntimeDir for one round of the frame-count
@@ -995,14 +1051,32 @@ func startCountingWorker(t *testing.T, id string, frames *atomic.Int64) {
 // Allocations per forwarded event
 // ---------------------------------------------------------------------------
 
+// ############################################################################
+// # STOP — THIS BENCHMARK MEASURES A PATH PRODUCTION NO LONGER TAKES.        #
+// #                                                                          #
+// # It reports a real-looking number (~14 and ~17 allocs/op) for the router's #
+// # decode-then-re-encode hop. Since Slice 3b that hop is GONE:              #
+// # Daemon.BroadcastRawEvent (internal/daemon/event_relay.go) forwards the    #
+// # worker's gofer/event params VERBATIM — there is no json.Marshal on the    #
+// # forwarding path at all.                                                   #
+// #                                                                          #
+// # So this is retained ONLY as historical evidence of what the pre-3b path   #
+// # cost. It is the "before" in docs/benchmarks/m6-worker-fleet-baseline.md.  #
+// # NEVER quote it as an "after" number, and never conclude anything about    #
+// # current behaviour from it — it will happily produce a number regardless.  #
+// #                                                                          #
+// # Replacing it with an end-to-end measurement of the REAL forwarding path,  #
+// # and deleting this, is tracked as follow-up work.                          #
+// ############################################################################
+//
 // BenchmarkEventForward measures the per-event allocation cost of the ROUTER's
 // second hop — decoding a worker's gofer/event envelope into a typed
 // event.Event and re-encoding it — using the testing framework's own per-op
 // allocation accounting (b.ReportAllocs), a far more stable instrument than a
 // wall clock, which on this path is dominated by socket time.
 //
-// This is the cost the M6 worker split introduced and that a marshal-once /
-// forward-verbatim bridge removes. Note it is NOT the daemon→client hop:
+// This is the cost the M6 worker split introduced and that the marshal-once /
+// forward-verbatim bridge removed. Note it is NOT the daemon→client hop:
 // daemon.broadcastGoferEvent already marshals once per event and reuses the
 // bytes for every peer (internal/daemon/handlers.go), so nothing here scales
 // with subscriber count.
@@ -1022,6 +1096,17 @@ func startCountingWorker(t *testing.T, id string, frames *atomic.Int64) {
 // carry, and must be re-checked if the wire type changes. The re-encode half IS
 // the production call (json.Marshal of the same concrete event).
 func BenchmarkEventForward(b *testing.B) {
+	// Written to stderr rather than b.Logf: benchmark logs only surface under
+	// -v, and someone running a plain `go test -bench` would otherwise see a
+	// real-looking allocs/op figure for a path production no longer takes. The
+	// noise is acceptable — this file only builds under the workerbench tag, so
+	// the only readers are people who deliberately ran this benchmark.
+	fmt.Fprintln(os.Stderr,
+		"WARNING BenchmarkEventForward: measures the PRE-Slice-3b router "+
+			"decode+re-encode hop, which no longer exists (BroadcastRawEvent "+
+			"forwards verbatim). Historical baseline evidence only — never "+
+			"quote these numbers as an 'after' result.")
+
 	// Two representative payloads: the smallest and by far most frequent event
 	// on a streaming turn (message.delta), and a fat one (tool.call.finished).
 	delta, err := json.Marshal(event.NewMessageDelta("11111111-2222-3333-4444-555555555555", "assistant", "Hello, world"))

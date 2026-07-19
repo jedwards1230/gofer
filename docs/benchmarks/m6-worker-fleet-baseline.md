@@ -1,8 +1,12 @@
-# M6 worker-fleet baseline (pre-Slice-3b)
+# M6 worker-fleet benchmark — baseline and after-run
 
-Measured baseline for the M6 per-session worker fleet, captured **before** the
-marshal-once event bridge and push-based roster cache landed. It exists so those
-two optimizations are shown with numbers rather than claimed.
+Measurements for the M6 per-session worker fleet, taken **before and after** the
+marshal-once event bridge and push-based roster cache landed (Slice 3b). It
+exists so those two optimizations are shown with numbers rather than claimed.
+
+- **[Results: before → after](#results-before--after-slice-3b)** — the comparison.
+- **Baseline detail** — everything below it: the pre-3b run, its run conditions,
+  and how to read each metric.
 
 | | |
 |---|---|
@@ -17,6 +21,108 @@ two optimizations are shown with numbers rather than claimed.
 The commit is stamped because it is immutable: this baseline is re-derivable at
 any time by checking out `5051675` and re-running the harness. A comparison run
 that does not match the machine and fleet settings above is not a comparison.
+
+---
+
+# RESULTS: before → after Slice 3b
+
+Measured after the marshal-once event bridge and push-based roster cache landed.
+**After-run commit `2e3c721`**, same machine, same fleet size (50/50), machine
+idle both times — the run conditions match, so the comparison is valid.
+
+## 1. Roster RPCs — the claim, confirmed
+
+| Fleet | Frames per `Roster()` — before | after | per `List()` — before | after |
+|--:|--:|--:|--:|--:|
+| 1 | 1.0 | **0.00** | 1.0 | **0.00** |
+| 2 | 2.0 | **0.00** | 2.0 | **0.00** |
+| 12 | 12.0 | **0.00** | 12.0 | **0.00** |
+| 25 | 25.0 | **0.00** | 25.0 | **0.00** |
+| 50 | 50.0 | **0.00** | 50.0 | **0.00** |
+
+**Exactly zero at every fleet size.** The per-call RPC is *gone*, not cheaper —
+`Roster` now reads an atomic snapshot published by each handle's watcher
+(`internal/router/methods.go`), with no lock, no RPC, and no copy.
+
+**A one-time warm-up cost replaces it**, reported separately because folding it
+into a per-call average would both understate the win and invent a phantom
+recurring cost:
+
+| Fleet | One-time warm-up (total frames) |
+|--:|--:|
+| 1 | 3 |
+| 12 | 25 |
+| 25 | 51 |
+| 50 | 101 |
+
+That is `2N+1`: one seed RPC per worker at adoption, plus roughly one cache-miss
+fallback per worker when an early `Roster` call races the async seed. It is paid
+**once**, not per call — and the fallback is deliberate design, not a defect: a
+nil snapshot is `Roster`'s cache-miss signal, so a worker that fails to seed
+degrades to the pre-cache behaviour instead of vanishing from the roster.
+
+> **Measuring this honestly required separating the two costs.** A cold-router
+> measurement conflates them: seeding is asynchronous, so seed RPCs land during
+> the first calls and appear as a small fractional "per-call" cost. An early
+> version of this after-run reported **0.4–0.6 frames per `Roster()` call** for
+> exactly that reason. That number was an artifact of the measurement window, not
+> a property of the cache. The harness now settles the cache before measuring
+> steady state, and reports warm-up separately.
+
+## 2. Fan-out allocations — work eliminated, not reduced
+
+**The path the baseline measured no longer exists.** `Daemon.BroadcastRawEvent`
+(`internal/daemon/event_relay.go:97`) forwards the worker's `gofer/event` params
+**verbatim** — there is no `json.Marshal` anywhere on that path.
+
+So the baseline's **14 allocs/op** (`message.delta`) and **17 allocs/op**
+(`tool.call.finished`) are not the "before" of a faster version of the same
+operation. They are the cost of an operation that **is no longer performed** on
+the forwarding path. The honest statement is *this work is no longer done* — not
+a percentage improvement.
+
+> **Do not re-run `BenchmarkEventForward` and quote it as an "after" number.** It
+> models the decode+re-encode in a self-contained way, so it still reports ~14/17
+> — but it is now measuring a path production does not take. Measuring the real
+> forwarding path (and deleting this model) is tracked separately; until then,
+> the baseline's allocations section describes removed work, not current work.
+
+## 3. Roster latency — collapsed, and now genuinely flat
+
+| Fleet | Roster mean, before (ms) | after (ms) |
+|--:|--:|--:|
+| 1 | 0.06 | 0.01 |
+| 12 | 1.04 | 0.03 |
+| 25 | 2.00 | 0.01 |
+| 50 | **4.17** | **0.03** |
+
+Consistent with the frame count above and with the structural argument — but
+this is **indicative only**. See the baseline's "Roster / List latency vs fleet
+size" section below, which explains why this table cannot carry a scaling claim
+in either direction; the frame count is the authoritative version. What is worth noting is that the after-numbers no longer
+*rise* with fleet size at all: ~0.01–0.03 ms flat from N=1 to N=50, where before
+they tracked N.
+
+**The 15-second stall risk is gone too.** Before, `Roster` iterated workers
+serially with a 15 s per-worker timeout, so one wedged worker stalled every call.
+Now a wedged worker's snapshot is simply served stale — fleet visibility is no
+longer hostage to its slowest member.
+
+## 4. Unchanged, as expected
+
+| Metric | Before | After |
+|---|--:|--:|
+| Per-worker RSS (p50) | 12.9 MiB | 12.7 MiB |
+| Fleet total RSS (N=50) | 647.5 MiB | 636.1 MiB |
+| Spawn latency (p50) | 24.90 ms | 23.91 ms |
+| Throughput | 18,562/sec | 27,125/sec |
+
+RSS and spawn are unchanged within noise, as they should be — 3b touched neither.
+Throughput rose ~46%, but that is an **indicative** wall-clock figure, and the
+run-to-run instability documented in the baseline sections applies to it; do not
+quote it as a result.
+
+---
 
 ## Reproducing
 
@@ -268,18 +374,21 @@ tail figure not worth reading closely.
 p90. Creates are sequential on purpose: a concurrent fan-out would measure
 machine parallelism rather than per-session spawn cost.
 
-## After-run
+## After-run — DONE
 
-Re-run at the post-3b tip under the same fleet size and machine, and record both
-sets side by side.
+Completed at `2e3c721`; see [Results: before → after](#results-before--after-slice-3b)
+at the top. Outcome in brief:
 
-1. **`gofer/roster` frames per call: N → 0.** Authoritative; this is the claim.
-2. **Fan-out allocations: below 14 / 17 allocs/op** (not down to the floor).
-   Indicative only, for the reasons above.
+1. **`gofer/roster` frames per call: N → 0, confirmed** at every fleet size, with
+   the cache's one-time warm-up (`2N+1` total) reported separately rather than
+   amortized into a per-call figure.
+2. **Fan-out allocations: the measured work is gone from the path**, not reduced.
+   `BroadcastRawEvent` forwards verbatim with no `json.Marshal`, so the 14/17
+   figures describe an operation production no longer performs there.
 
-**Planned replacement for §3.** Once the raw-forward path exists in production,
-allocations should be measured on the **actual fan-out path** — an end-to-end
-test driving real events through the real bridge — rather than on a model. That
-becomes the authoritative marshal-once evidence, and it is strictly better than
-anything obtainable pre-3b, because before 3b there is no real raw-forward code
-to compare against.
+**Still outstanding — measure allocations on the real path.** The
+`BenchmarkEventForward` model is now measuring a path production does not take,
+so it can no longer serve as evidence about current behaviour and should be
+replaced by an end-to-end measurement through the real bridge, then deleted
+rather than kept alongside it. That is tracked separately; until it lands, this
+document's allocation numbers describe **removed work only**.
