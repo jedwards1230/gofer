@@ -56,9 +56,18 @@ GOFER_BENCH_LOAD_NOTE="<what else was running>" \
 GOFER_BENCH_OUT=fleet.txt GOFER_BENCH_FRAMES_OUT=frames.txt \
   go test -tags workerbench -run 'TestWorkerFleetBenchmark|TestRosterWireFrameCount' \
   -v -timeout 30m ./internal/router/
+```
 
-# allocations on the event fan-out path
-go test -tags workerbench -run '^$' -bench BenchmarkEventForward -benchmem ./internal/router/
+Allocations on the event fan-out path are measured **separately and untagged**,
+in `internal/daemon` where the code under test lives. It spawns no processes, so
+it needs no build tag: `Benchmark*` functions are not executed by `go test ./...`
+at all — only by an explicit `-bench` — so leaving it untagged costs CI no
+runtime while making CI **compile** it on every push. That is the point. Its
+tagged predecessor survived the deletion of the very code it described precisely
+because nothing ever built it.
+
+```bash
+go test -run '^$' -bench BenchmarkBroadcastRawEvent -benchmem ./internal/daemon/
 ```
 
 Fleet size and load are env-tunable (`GOFER_BENCH_WORKERS`,
@@ -69,9 +78,9 @@ record them.
 
 Results are only meaningful against a stamped commit. See
 [`docs/benchmarks/m6-worker-fleet-baseline.md`](benchmarks/m6-worker-fleet-baseline.md)
-for the pre-Slice-3b baseline, and for which metrics are authoritative versus
-merely indicative — wall-clock numbers move with machine load, and one benchmark
-models production code rather than calling it.
+for the pre-Slice-3b baseline and the after-run, and for which metrics are
+authoritative versus merely indicative — wall-clock numbers move with machine
+load, counts reproduce.
 
 ## M3 exit gate — satisfied
 
