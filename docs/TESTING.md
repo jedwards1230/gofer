@@ -19,6 +19,13 @@ The SDK owns loop/provider/session/permission testing (see agent-sdk-go's
 - An edit-committing view (e.g. `/config`) is tested by supplying a fake
   writer closure (`CommandEnv.SaveConfig`) that captures what was written,
   asserted alongside the golden render — never a real file on disk.
+- Where a test harness mirrors production wiring, the production copy still
+  needs its own test. `internal/router`'s faux worker re-implements the M6
+  session-id pinning for router-side tests; the pin that actually ships lives in
+  `cmd/gofer`'s `runSessionWorker` and is asserted there
+  (`cmd/gofer/session_worker_test.go` drives the real entrypoint in-process:
+  temp root, handshake off an `io.Pipe`, `session/new` over the worker's socket,
+  no network). Deleting the pin must fail the suite.
 
 ## CI
 
