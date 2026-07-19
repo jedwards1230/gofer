@@ -1,5 +1,35 @@
 package daemon
 
+import "context"
+
+// PeerHandle is an opaque reference to one peer attached to a session. It
+// exists because [peer] is unexported and this package's tests live in the
+// external package daemon_test, which still needs to name a specific peer as
+// the ORIGIN of a fan-out.
+type PeerHandle struct{ p *peer }
+
+// AttachedPeers returns a handle to every peer attached to sessionID. The order
+// is unspecified — the registry is a set (see [Daemon.peersForSession]).
+func (d *Daemon) AttachedPeers(sessionID string) []PeerHandle {
+	prs := d.peersForSession(sessionID)
+	out := make([]PeerHandle, 0, len(prs))
+	for _, pr := range prs {
+		out = append(out, PeerHandle{p: pr})
+	}
+	return out
+}
+
+// BroadcastUpdate drives the unexported [Daemon.broadcastUpdate] with an
+// explicit origin peer and caller context, reporting whether the ORIGIN write
+// failed. It exposes the origin/non-origin write-context split directly, which
+// is otherwise only reachable through a real in-flight session/prompt — and the
+// interesting case (a fan-out running while the origin's context is already
+// cancelled) is a race window no end-to-end test can hit deterministically. See
+// TestFanOutNonOriginWriteSurvivesOriginContextCancel.
+func (d *Daemon) BroadcastUpdate(ctx context.Context, sessionID string, origin PeerHandle, notif any) (originWriteFailed bool) {
+	return d.broadcastUpdate(ctx, sessionID, origin.p, notif, false) != nil
+}
+
 // PeersForSessionCount reports how many peers are currently attached to
 // sessionID in the fan-out registry. It is a test-only accessor — the daemon's
 // tests live in the external package daemon_test and cannot reach
