@@ -1,7 +1,7 @@
 package tui
 
 // modelpicker.go implements the /model command-panel tab (M4 step 4): a
-// read-only picker over the SDK's static model catalog (provider.Models() /
+// picker over the SDK's static model catalog (provider.Models() /
 // provider.Lookup), grouped by provider and filtered to the providers
 // [CommandEnv.Auth] reports authenticated — the same auth seam status.go
 // already reads, never a new credential path. Each row marks (✓) the active
@@ -10,6 +10,23 @@ package tui
 // doesn't carry. With zero providers authenticated the list is empty and a
 // warning line tells the user how to sign in — the picker still opens
 // (auth-independence, docs/projects/gofer-m4-command-views-plan.md §5).
+//
+// The catalog is compiled in, so it is always at most as new as this binary:
+// a model released after the build exists for the provider but not for the
+// list. Since SDK v0.12.0 the registry is no longer an admission gate
+// ([provider.Resolve] runs an unregistered id by inferring its backend from
+// the id's shape), so the picker carries a free-text entry line as the escape
+// hatch: type any model id and Enter commits it, registered or not, with no
+// network call and no cache. Typed ids are NOT added to the list — the list
+// stays exactly "what this binary knows about", and the entry line is "what
+// you can also ask for".
+//
+// An unregistered id has NO trustworthy metadata (only ID and Provider — see
+// [provider.ModelInfo.Unregistered]), so every metadata segment of a
+// description line is rendered as "unknown" rather than as its zero value.
+// Showing a synthesized "$0/$0 per Mtok · 0 context" as fact would be a
+// fabricated price and a fabricated limit, which the SDK's own field docs
+// explicitly forbid.
 //
 // Selecting a model (Enter) couples [Supervisor.SetModel] (a mid-session
 // swap) with persisting the selected id as the session.model config default
@@ -56,6 +73,18 @@ type modelPickerView struct {
 	defaultModel string
 
 	cursor int // highlighted row index into rows(); -1 = none highlighted
+
+	// entry is the free-text model-id buffer: the escape hatch for a model
+	// this binary's compiled-in catalog doesn't list. Typing any character
+	// appends here AND drops the row highlight (cursor = -1), so the typed id
+	// — not a stale highlight from an earlier ↓ — is what Enter commits (see
+	// [modelPickerView.selectedModel]). Backspace edits it; Esc clears it
+	// ([modelPickerView.handleEscape]). It is a plain string rather than an
+	// [inputBuffer] because ←/→ are claimed by the panel host for tab
+	// switching (panel.go), leaving a cursor-aware buffer's mid-text
+	// positioning unreachable — the same reason configView.editBuf is a
+	// plain string.
+	entry string
 }
 
 // newModelPickerView returns a Model tab reading through env, with sess and
@@ -79,15 +108,22 @@ func (v modelPickerView) View(width, height int) string {
 	return strings.Join(lines, "\n")
 }
 
-// lines builds the provider-grouped row list, or the empty-list warning when
-// no provider is authenticated (§4c).
+// lines builds the free-text entry line, the typed id's candidate line (only
+// while something is typed), and the provider-grouped row list — or the
+// empty-list warning in place of the rows when no provider is authenticated
+// (§4c). The entry line renders in the zero-auth state too: committing a
+// model id only writes the session.model config default, which is possible
+// with no provider authenticated at all (auth-independence, §5).
 func (v modelPickerView) lines() []string {
+	out := []string{v.entryLine()}
+	if line, ok := v.candidateLine(); ok {
+		out = append(out, line)
+	}
 	rows := v.rows()
 	if len(rows) == 0 {
-		return []string{v.theme.WarnStyle().Render("No providers authenticated. Run /login (or 'gofer login <anthropic|openai>').")}
+		return append(out, v.theme.WarnStyle().Render("No providers authenticated. Run /login (or 'gofer login <anthropic|openai>')."))
 	}
 	active := v.activeModel()
-	var out []string
 	lastProvider := ""
 	for i, r := range rows {
 		if r.provider != lastProvider {
@@ -97,6 +133,45 @@ func (v modelPickerView) lines() []string {
 		out = append(out, v.rowLine(i, r, r.id == active))
 	}
 	return out
+}
+
+// entryLine renders the free-text model-id box: a muted prompt when empty,
+// else the typed text with the same "▏" edit caret configView's in-progress
+// string edit uses.
+func (v modelPickerView) entryLine() string {
+	if v.entry == "" {
+		return v.theme.MutedStyle().Render("Model id: (type any id, listed or not)")
+	}
+	return "Model id: " + v.entry + "▏"
+}
+
+// candidateLine renders what Enter would commit for the typed entry, or the
+// reason it can't. It reports ok=false when nothing is typed, so the line
+// only ever costs a row while the entry is in use.
+//
+// A typed id whose backend [provider.Resolve] cannot infer is not committable
+// at all (there is no adapter to route it to), so the SDK's own error message
+// is surfaced verbatim rather than restating the recognized id families here —
+// gofer would only drift out of sync with the SDK's list. This mirrors
+// [modelPickerView.selectedModel], which returns "" for exactly this case, so
+// the "why is Enter doing nothing" answer is on screen before Enter is
+// pressed.
+func (v modelPickerView) candidateLine() (string, bool) {
+	id := strings.TrimSpace(v.entry)
+	if id == "" {
+		return "", false
+	}
+	if _, err := provider.Resolve(id); err != nil {
+		return v.theme.WarnStyle().Render("  " + err.Error()), true
+	}
+	// The marker matches a highlighted row's: with nothing highlighted
+	// (cursor < 0) the typed id IS what Enter commits, so it carries the
+	// same "this one" affordance the row list uses. Once ↓ moves onto a real
+	// row that row wins the commit, so the candidate drops back to unmarked.
+	if v.cursor < 0 {
+		return v.theme.AccentStyle().Render("▸ " + modelDescriptionLine(id)), true
+	}
+	return "  " + modelDescriptionLine(id), true
 }
 
 // rowLine renders one model's marker, active-mark, and description,
@@ -118,19 +193,54 @@ func (v modelPickerView) rowLine(i int, r modelRow, isActive bool) string {
 }
 
 // modelDescriptionLine renders one model's display line: its short name (or
-// raw id, see [modelmeta.DisplayName]) plus context window and per-Mtok pricing
-// derived from provider.Lookup, e.g. "Sonnet 5 (claude-sonnet-5) · 1M
-// context · $3/$15 per Mtok". A model id the catalog doesn't recognize (not
-// reachable via rows(), which only ever lists provider.Models() ids, but
-// defensive regardless) renders as the bare display name.
+// raw id, see [modelmeta.DisplayName]) plus context window and per-Mtok
+// pricing, e.g. "Sonnet 5 (claude-sonnet-5) · 1M context · $3/$15 per Mtok".
+//
+// Every metadata segment is rendered from a KNOWN value or as "unknown" —
+// never as a zero value dressed up as fact. This matters because the entry
+// line admits ids the compiled-in registry does not carry: for those,
+// [provider.Lookup] misses entirely, and even [provider.Resolve]'s synthesized
+// record carries zeroes that mean "unknown", not "free" and not "no context"
+// (see [provider.ModelInfo.Unregistered], which states that only ID and
+// Provider are trustworthy on such a record). Rendering "$0/$0 per Mtok · 0
+// context" for a model that in reality costs money and has a large context
+// window would be a fabricated price and a fabricated limit presented as
+// fact, so both are suppressed. An id whose backend cannot be inferred at all
+// resolves to nothing and renders as the bare display name.
 func modelDescriptionLine(id string) string {
 	name := modelmeta.DisplayName(id)
-	info, ok := provider.Lookup(id)
-	if !ok {
-		return fmt.Sprintf("%s (%s)", name, id)
+	head := fmt.Sprintf("%s (%s)", name, id)
+	info, err := provider.Resolve(id)
+	if err != nil {
+		return head
 	}
-	return fmt.Sprintf("%s (%s) · %s context · $%s/$%s per Mtok",
-		name, id, formatContextWindow(info.ContextWindow), formatPrice(info.Pricing.Input), formatPrice(info.Pricing.Output))
+	return fmt.Sprintf("%s · %s · %s", head, contextSegment(info), pricingSegment(info))
+}
+
+// contextSegment renders info's context window, or "context unknown" when
+// there is no trustworthy value: an Unregistered record (whose every metadata
+// field is a placeholder) or a registered record whose ContextWindow is 0 —
+// which the SDK documents as "unknown", explicitly NOT "no context" — so an
+// incomplete registry row can't fabricate a limit either.
+func contextSegment(info provider.ModelInfo) string {
+	if info.Unregistered || info.ContextWindow == 0 {
+		return "context unknown"
+	}
+	return formatContextWindow(info.ContextWindow) + " context"
+}
+
+// pricingSegment renders info's per-Mtok input/output rates, or "pricing
+// unknown" when either is untrustworthy: an Unregistered record (whose
+// Pricing is the zero value, which the SDK documents is NOT a price of zero)
+// or a registered record missing either rate. A genuinely free model would
+// also report unknown here — a zero rate is indistinguishable from an unset
+// one in this struct, and claiming "free" wrongly is the worse error of the
+// two.
+func pricingSegment(info provider.ModelInfo) string {
+	if info.Unregistered || info.Pricing.Input == 0 || info.Pricing.Output == 0 {
+		return "pricing unknown"
+	}
+	return fmt.Sprintf("$%s/$%s per Mtok", formatPrice(info.Pricing.Input), formatPrice(info.Pricing.Output))
 }
 
 // formatContextWindow renders a token count as a compact "1M"/"400K" style
@@ -219,32 +329,102 @@ func (v modelPickerView) activeModel() string {
 	return v.defaultModel
 }
 
-// handleKey applies one key press: ↓/↑ move the row highlight; Enter is a
-// no-op HERE — this is a pure value with no IO seam. The real coupled select
-// (SetModel + config.Save) lives one level up in [App.handleModelSelect]
-// (panel.go), which intercepts Enter ahead of this method whenever the Model
-// tab is active (see App.handlePanelKey); [modelPickerView.selectedModel]
-// tells it which row was highlighted.
+// handleKey applies one key press: ↓/↑ move the row highlight; Backspace
+// edits the free-text entry; any other text key types into it (dropping the
+// row highlight, so what is on screen as the entry is what Enter commits).
+// Enter is a no-op HERE — this is a pure value with no IO seam. The real
+// coupled select (SetModel + config.Save) lives one level up in
+// [App.handleModelSelect] (panel.go), which intercepts Enter ahead of this
+// method whenever the Model tab is active (see App.handlePanelKey);
+// [modelPickerView.selectedModel] tells it what was selected. Esc never
+// reaches here either — the panel host routes it to
+// [modelPickerView.handleEscape] (see [commandPanel.handleEscape]).
 func (v modelPickerView) handleKey(msg tea.KeyPressMsg) modelPickerView {
-	switch msg.Key().Code {
+	key := msg.Key()
+	switch key.Code {
 	case tea.KeyDown:
 		return v.selectDown()
 	case tea.KeyUp:
 		return v.selectUp()
+	case tea.KeyEnter:
+		return v
+	case tea.KeyBackspace:
+		return v.backspaceEntry()
+	}
+	if key.Text != "" {
+		return v.typeEntry(key.Text)
 	}
 	return v
 }
 
-// selectedModel returns the model id at the highlighted row (v.cursor), or
-// "" when no row is highlighted (cursor < 0 — the initial state before any
-// ↓/↑) or the row list is empty (zero providers authenticated, §4c). This is
-// the value [App.handleModelSelect] reads on Enter.
+// typeEntry appends text to the free-text model-id buffer and drops the row
+// highlight, for the same reason [configView.typeFilter] does: once the user
+// is typing, an earlier highlight is no longer what they mean, and
+// [modelPickerView.selectedModel]'s row-first precedence would otherwise
+// commit a row the user has visibly moved away from.
+func (v modelPickerView) typeEntry(text string) modelPickerView {
+	v.entry += text
+	v.cursor = -1
+	return v
+}
+
+// backspaceEntry removes the last rune from the entry buffer, if any, and
+// drops the row highlight for the same reason [modelPickerView.typeEntry]
+// does.
+func (v modelPickerView) backspaceEntry() modelPickerView {
+	if v.entry == "" {
+		return v
+	}
+	r := []rune(v.entry)
+	v.entry = string(r[:len(r)-1])
+	v.cursor = -1
+	return v
+}
+
+// handleEscape applies one Esc press, reporting whether it was consumed here
+// (true, the panel stays open) or should bubble to the panel host to close it
+// (false) — the same two-stage contract [configView.handleEscape] has, so a
+// half-typed model id is discarded by the first Esc rather than taking the
+// whole panel down with it.
+func (v modelPickerView) handleEscape() (modelPickerView, bool) {
+	if v.entry != "" {
+		v.entry = ""
+		v.cursor = -1
+		return v, true
+	}
+	return v, false
+}
+
+// selectedModel returns what Enter commits: the highlighted row's id
+// (v.cursor), else the free-text entry. This is the value
+// [App.handleModelSelect] reads on Enter.
+//
+// The typed id is admitted whether or not the registry carries it —
+// [provider.Resolve], not registry membership, is what decides whether a model
+// can run (SDK v0.12.0), and this picker's catalog is only ever as new as the
+// binary. The one id it refuses is one Resolve cannot route to any backend at
+// all: there is no adapter for it, so committing it would persist a
+// session.model default that fails at the next run rather than here. That case
+// returns "" — App.handleModelSelect's existing no-op — with
+// [modelPickerView.candidateLine] already showing why on screen.
+//
+// It returns "" when nothing is selected at all: no row highlighted (cursor <
+// 0 — the initial state before any ↓/↑) or an empty row list (zero providers
+// authenticated, §4c), with an empty or whitespace-only entry. An empty entry
+// must never commit.
 func (v modelPickerView) selectedModel() string {
 	rows := v.rows()
-	if v.cursor < 0 || v.cursor >= len(rows) {
+	if v.cursor >= 0 && v.cursor < len(rows) {
+		return rows[v.cursor].id
+	}
+	id := strings.TrimSpace(v.entry)
+	if id == "" {
 		return ""
 	}
-	return rows[v.cursor].id
+	if _, err := provider.Resolve(id); err != nil {
+		return ""
+	}
+	return id
 }
 
 // selectDown moves the highlight onto the first row (from no highlight) or

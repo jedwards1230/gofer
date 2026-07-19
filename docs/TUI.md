@@ -689,7 +689,31 @@ one-line context-window/pricing description through a small gofer-side
 display-name table (`modelDisplayNames`) that falls back to the raw id. Zero
 providers authenticated renders an empty list plus a `/login` warning line
 instead of blocking the picker from opening (§4c/auth-independence). ↓/↑
-move the row highlight; **Enter couples the select** (`App.handleModelSelect`,
+move the row highlight.
+
+The list is compiled in, so it is only ever as new as the binary. Since the
+SDK stopped treating its registry as an admission gate — `provider.Resolve`
+runs an unregistered id by inferring its backend from the id's shape — the
+picker carries a **free-text entry line** as the escape hatch: type any model
+id and Enter commits it, listed or not, with no network call and no cache.
+Typing drops the row highlight (the typed id is what Enter commits; ↓ back
+onto a row hands the commit back to the row), Backspace edits, and Esc is
+two-stage like the Config tab's — the first clears a half-typed id, a second
+closes the panel. Typed ids are not added to the list: the list stays "what
+this binary knows about", the entry is "what you can also ask for". The one
+id the entry refuses is one no provider family matches — there is no adapter
+to run it — and it renders the SDK's own reason in place of the candidate
+line rather than failing silently on Enter.
+
+An unregistered model has **no trustworthy metadata**: `ModelInfo`'s zero
+`ContextWindow` and zero `Pricing` mean "unknown", explicitly not "no
+context" and not "free". So each description segment renders from a known
+value or as `context unknown` / `pricing unknown`, guarded on both the
+`Unregistered` flag and a zero field value, so neither an inferred record nor
+an incomplete registry row can put a fabricated price or limit on screen as
+fact.
+
+**Enter couples the select** (`App.handleModelSelect`,
 panel.go — the pure `modelPickerView` has no IO seam, so App intercepts Enter
 one level up, ahead of `commandPanel.handleKey`, whenever the Model tab is
 active). The selected id is always persisted as the `session.model` config
@@ -699,8 +723,9 @@ default is now honored by model resolution itself (`resolveRunModel`), where
 it outranks the credential-derived guess and is the supported way to settle
 which of several logged-in providers gofer uses (see PRD, "Model
 resolution"). When a session
-is attached/peeked, App also decides — client-side, against the SDK's static
-catalog (`provider.Lookup`), before ever calling the daemon — whether to hot-
+is attached/peeked, App also decides — client-side, through `provider.Resolve`
+(so a typed id the registry doesn't carry still resolves to its provider),
+before ever calling the daemon — whether to hot-
 swap it: same provider calls `Supervisor.SetModel` (the swap applies on the
 session's next turn, not the one in flight); a cross-provider pick leaves the
 running session on its model (a session's provider is fixed at creation) and

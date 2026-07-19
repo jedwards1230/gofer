@@ -255,6 +255,129 @@ func TestModelSelectConfigReadErrorAbortsBeforeSave(t *testing.T) {
 	}
 }
 
+// TestModelSelectTypedUnregisteredIDSetsDefault verifies the free-text entry
+// reaches the coupled select end to end from the overview: an id the
+// compiled-in catalog does not list is persisted as the session.model default
+// exactly like a listed one, with the raw id standing in for a display name
+// gofer has no label for yet.
+func TestModelSelectTypedUnregisteredIDSetsDefault(t *testing.T) {
+	const typed = "gpt-5.6-sol"
+	var saved []config.Config
+	sup := newFakeSup(modelSelectRoster())
+	m := newModelSelectApp(t, sup, modelSelectEnv(&saved))
+
+	m = dispatchSlash(t, m, "/model")
+	m = type_(t, m, typed)
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	if len(saved) != 1 || saved[0].Session.Model != typed {
+		t.Fatalf("SaveConfig calls = %v; want one entry with Session.Model %q", saved, typed)
+	}
+	if len(sup.ops) != 0 {
+		t.Fatalf("sup.ops = %v; want none — no active session to swap", sup.ops)
+	}
+	if got := content(m); !strings.Contains(got, "Default model set to "+typed) {
+		t.Fatalf("expected the default-set status note for the typed id, got:\n%s", got)
+	}
+}
+
+// TestModelSelectTypedUnregisteredIDHotSwapsSameProvider is the regression
+// guard for how handleModelSelect compares providers. An unregistered id is
+// absent from the registry, so a membership-based comparison reports no
+// provider for it and misclassifies a same-provider pick as cross-provider —
+// silently declining a live swap that is perfectly legal. The comparison goes
+// through provider.Resolve (panel.go's modelProvider), which infers the
+// backend from the id's shape, so a typed anthropic model still hot-swaps an
+// attached anthropic session.
+func TestModelSelectTypedUnregisteredIDHotSwapsSameProvider(t *testing.T) {
+	const typed = "claude-sonnet-5-9" // unregistered, but unmistakably anthropic
+	var saved []config.Config
+	sup := newFakeSup(modelSelectRoster())
+	m := newModelSelectApp(t, sup, modelSelectEnv(&saved))
+
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected (sonnet) session
+	m = dispatchSlash(t, m, "/model")
+	m = type_(t, m, typed)
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	wantOp := "set-model:0192a1b2-app0-7000-8000-000000000001:" + typed
+	if len(sup.ops) != 1 || sup.ops[0] != wantOp {
+		t.Fatalf("sup.ops = %v; want one entry %q — an unregistered same-provider id must still hot-swap", sup.ops, wantOp)
+	}
+	if len(saved) != 1 || saved[0].Session.Model != typed {
+		t.Fatalf("SaveConfig calls = %v; want one entry with Session.Model %q", saved, typed)
+	}
+	got := content(m)
+	if strings.Contains(got, "Live model swap needs the same provider") {
+		t.Fatalf("expected no cross-provider warning for a same-provider typed id, got:\n%s", got)
+	}
+	if !strings.Contains(got, "Model set to "+typed) {
+		t.Fatalf("expected the hot-swap status note for the typed id, got:\n%s", got)
+	}
+}
+
+// TestModelSelectTypedUnroutableIDIsNoOp verifies an id no provider family
+// matches never reaches config or the daemon: there is no adapter to run it,
+// so committing it would persist a default that fails at the next run. Enter
+// is a no-op and the panel stays open with the reason on screen.
+func TestModelSelectTypedUnroutableIDIsNoOp(t *testing.T) {
+	var saved []config.Config
+	sup := newFakeSup(modelSelectRoster())
+	m := newModelSelectApp(t, sup, modelSelectEnv(&saved))
+
+	m = dispatchSlash(t, m, "/model")
+	m = type_(t, m, "not-a-real-family")
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	if len(saved) != 0 {
+		t.Fatalf("SaveConfig calls = %v; want none — an unroutable id must not be persisted", saved)
+	}
+	if len(sup.ops) != 0 {
+		t.Fatalf("sup.ops = %v; want none", sup.ops)
+	}
+	got := content(m)
+	if !strings.Contains(got, "[Model]") {
+		t.Fatalf("expected the panel to stay open after a refused select, got:\n%s", got)
+	}
+	if !strings.Contains(got, "cannot determine which provider") {
+		t.Fatalf("expected the refusal reason to stay on screen, got:\n%s", got)
+	}
+}
+
+// TestModelSelectTypedIDShowsNoFabricatedPricing is the App-level counterpart
+// to the picker's unknown-metadata guard: the id is unregistered, so the
+// panel must not put a $0 price or a 0-token context window on screen for it.
+// The assertion is scoped to the typed id's own line — the registered rows
+// below it legitimately carry sub-dollar prices like "$0.25/$2".
+func TestModelSelectTypedIDShowsNoFabricatedPricing(t *testing.T) {
+	const typed = "gpt-5.6-sol"
+	var saved []config.Config
+	sup := newFakeSup(modelSelectRoster())
+	m := newModelSelectApp(t, sup, modelSelectEnv(&saved))
+
+	m = dispatchSlash(t, m, "/model")
+	m = type_(t, m, typed)
+
+	var line string
+	for _, l := range strings.Split(content(m), "\n") {
+		if strings.Contains(l, typed+" ("+typed+")") {
+			line = l
+			break
+		}
+	}
+	if line == "" {
+		t.Fatalf("expected a description line for the typed id, got:\n%s", content(m))
+	}
+	if !strings.Contains(line, "context unknown") || !strings.Contains(line, "pricing unknown") {
+		t.Fatalf("expected the typed id's metadata to render as unknown, got %q", line)
+	}
+	for _, fabricated := range []string{"$0", "0 context", "per Mtok"} {
+		if strings.Contains(line, fabricated) {
+			t.Fatalf("expected no fabricated pricing or context window, got %q (contains %q)", line, fabricated)
+		}
+	}
+}
+
 // TestGoldenModelSelectHotSwap covers the full post-select rendered state
 // for a same-provider attached select: the panel has closed back to the
 // attach screen underneath it, with the confirmation note as the visible

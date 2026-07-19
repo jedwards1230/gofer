@@ -1,0 +1,7 @@
+Model id: not-a-real-family▏
+  cannot determine which provider serves model "not-a-real-family"
+openai:
+  ✓ GPT-5 (gpt-5) · 400K context · $1.25/$10 per Mtok
+    GPT-5 mini (gpt-5-mini) · 400K context · $0.25/$2 per Mtok
+    GPT-5 nano (gpt-5-nano) · 400K context · $0.05/$0.4 per Mtok
+    o4-mini (o4-mini) · 200K context · $1.1/$4.4 per Mtok
