@@ -157,7 +157,11 @@ func (s *Supervisor) adoptWorker(entry daemon.WorkerEndpointEntry) bool {
 	//    Referencing via Load (not a first-reference SubscribeLive) also means a
 	//    later SubscribeLive on this session won't re-trigger a history replay
 	//    onto the live stream (see wirestream's Load/SubscribeLive contract).
-	rec := wirestream.New(client)
+	// The event sink is installed at construction (see [Supervisor.eventSink] and
+	// wirestream's Option contract) so the adopted session's turn — which is
+	// running RIGHT NOW on the worker, with no prompt handler of ours observing
+	// it — streams to this router's attached clients.
+	rec := wirestream.New(client, wirestream.WithEventSink(s.eventSink(id)))
 	loadCtx, cancel := context.WithTimeout(context.Background(), wireCallTimeout)
 	if lerr := rec.Load(loadCtx, id); lerr != nil {
 		// A load that did not settle is non-fatal — the live stream still works;
@@ -183,10 +187,7 @@ func (s *Supervisor) adoptWorker(entry daemon.WorkerEndpointEntry) bool {
 		pid = 0
 	}
 
-	h := &workerHandle{
-		id: id, cmd: nil, client: client, rec: rec, pid: pid, wait: adoptedWait(client),
-		binaryVersion: hello.BinaryVersion, wireVersion: hello.WireVersion, skew: skew,
-	}
+	h := newWorkerHandle(id, nil, client, rec, pid, adoptedWait(client), hello, skew)
 
 	s.mu.Lock()
 	if s.closed {
@@ -204,93 +205,157 @@ func (s *Supervisor) adoptWorker(entry daemon.WorkerEndpointEntry) bool {
 	}
 	s.workers[id] = h
 	s.reapWG.Add(1)
+	s.watcherWG.Add(1)
 	s.mu.Unlock()
 	go s.reap(h)
+	go s.watchSession(h)
 
 	s.log.Info("adopted live worker", "session", id, "addr", ep.Addr, "pid", ep.PID, "binaryVersion", hello.BinaryVersion)
 	return true
 }
 
 // SetPermissionRelay wires the OUTER daemon's permission fan-out into the router
-// and starts a STANDING permission watcher for every already-adopted session
 // (design §7, F1). It must be called once, after the daemon that hosts this
 // router is constructed and BEFORE it serves — the daemon does not exist yet at
 // [New] time (it takes this router as its Supervisor), so the bridge is injected
 // here rather than in the constructor.
 //
-// The gap it closes: an adopted session's turn runs on its worker, so no
-// [daemon] session/prompt handler is observing its event stream to record
+// The gap it closes: a session whose turn runs on a worker has no [daemon]
+// session/prompt handler in THIS process observing its event stream to record
 // permission routes and broadcast requests. Without a standing watcher a
-// re-surfaced (or newly asked) permission on an adopted session would never
-// reach the daemon's route table or its attached clients — invisible and
-// unanswerable. Each watcher subscribes to its session's reconstructed broker
-// WITH replay (so a still-open request re-surfaced by adoption's
-// [wirestream.Reconstructor.Load] is delivered) and drives the relay, so the
-// daemon records the call→session route (making handlePermissionReply resolve
-// for adopted sessions) and fans the request out exactly as the prompt handler
-// would.
+// re-surfaced (or newly asked) permission on such a session would never reach the
+// daemon's route table or its attached clients — invisible and unanswerable. The
+// per-session watcher ([Supervisor.watchSession]) drives the relay so the daemon
+// records the call→session route (making handlePermissionReply resolve) and fans
+// the request out exactly as the prompt handler would.
 //
-// Only ADOPTED sessions get a watcher: a session this router CREATES has its
-// turns driven by a client's session/prompt, whose handler already performs the
-// fan-out. At the one call site (right after daemon construction, before serve)
-// every live handle is an adopted one, so iterating the roster here covers
-// exactly them. A nil relay, or a closed router, is a no-op.
+// # Contract change in slice 3b: no longer adopted-sessions-only
+//
+// This method used to START the watchers, and only for sessions adopted before
+// it ran — its documented "adopted sessions only" invariant. Watchers now start
+// from BOTH paths a handle comes into existence, [Supervisor.Create] as well as
+// adopt, because the same subscription also maintains the pushed roster cache
+// (see rostercache.go), which every live session needs. So this method now only
+// PUBLISHES the relay; the watchers were already running.
+//
+// The widening is safe: a CREATED session's turns are usually driven by a
+// client's session/prompt, whose handler ALSO observes the same permission
+// events, so the daemon sees two observers. Its fan-out is already
+// first-observer-gated for exactly this reason ([daemon.Daemon.recordPermRoute] /
+// clearPendingPerm), so the request is still routed and broadcast exactly once.
+//
+// Because the watchers predate the relay, requests observed BEFORE this call
+// would otherwise be lost — precisely the §7 case of a permission re-surfaced by
+// adoption's replay. So this also FLUSHES each handle's still-open requests to
+// the newly installed relay. The flush and a concurrent watcher cannot lose a
+// request between them: the watcher records into the open set BEFORE it reads the
+// relay, so any request the flush's snapshot misses is one whose watcher must
+// then observe the already-published relay. It can deliver a request TWICE
+// (flush + watcher), which the first-observer gate absorbs. A nil relay, or a
+// closed router, is a no-op.
 func (s *Supervisor) SetPermissionRelay(relay daemon.PermissionRelay) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if relay == nil || s.closed {
+		s.mu.Unlock()
 		return
 	}
 	s.permRelay = relay
+	handles := make([]*workerHandle, 0, len(s.workers))
 	for _, h := range s.workers {
-		s.watcherWG.Add(1)
-		go s.watchPermissions(h, relay)
+		handles = append(handles, h)
+	}
+	s.mu.Unlock()
+
+	// Flush outside mu: RequestPermission broadcasts to peers (socket writes).
+	for _, h := range handles {
+		for _, pe := range h.openPermissions() {
+			relay.RequestPermission(h.id, pe)
+		}
 	}
 }
 
-// watchPermissions is the standing per-adopted-session permission watcher
-// SetPermissionRelay starts. It subscribes to h's reconstructed broker WITH
-// replay and, for every permission event, drives the relay so the outer daemon's
-// route table and client fan-out track the worker's live gate state. It exits
-// when the broker closes (the handle was reaped, or the router shut down and
-// closed every rec) or reaperStop fires — so it never outlives its session and
-// is joined by [Supervisor.Close] via watcherWG.
+// permissionRelay returns the installed [daemon.PermissionRelay], or nil.
+func (s *Supervisor) permissionRelay() daemon.PermissionRelay {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.permRelay
+}
+
+// watchSession is the standing per-session watcher, started for EVERY live
+// handle (spawned or adopted) right after it is registered. It subscribes to h's
+// reconstructed broker WITH replay and drives the two pieces of router state
+// that are projections of a session's event stream:
+//
+//   - the PUSHED ROSTER CACHE (rostercache.go) — this goroutine is its single
+//     writer, which is what lets Roster/List serve snapshots lock-free and
+//     RPC-free;
+//   - the PERMISSION RELAY (design §7) — the outer daemon's route table and
+//     client fan-out, so a permission asked (or re-surfaced) on a session no
+//     prompt handler here is driving is still visible and answerable.
+//
+// It exits when the broker closes (the handle was reaped, or the router shut
+// down and closed every rec) or reaperStop fires — so it never outlives its
+// session and is joined by [Supervisor.Close] via watcherWG.
 //
 // Using the replaying Subscribe is deliberate: a request re-surfaced by
 // adoption's Load is retained on the broker, and Subscribe replays it so the
-// watcher relays it even though it was published before the watcher existed. A
+// watcher sees it even though it was published before the watcher existed. A
 // retained request that ALSO has a retained resolution replays as
-// requested-then-resolved, netting to a no-op (recorded then cleared) — only a
-// still-OPEN request stays routed, which is exactly the mid-approval state §7
-// must survive.
-func (s *Supervisor) watchPermissions(h *workerHandle, relay daemon.PermissionRelay) {
+// requested-then-resolved, netting to a no-op — only a still-OPEN request stays
+// routed, which is exactly the mid-approval state §7 must survive.
+//
+// The roster seed runs AFTER the subscription is live (see [Supervisor.seedRosterCache]),
+// so nothing published during the seeding RPC is lost.
+func (s *Supervisor) watchSession(h *workerHandle) {
 	defer s.watcherWG.Done()
 	sub, err := h.rec.Subscribe(context.Background(), h.id)
 	if err != nil {
-		return // reconstructor already closed (handle reaped before the watcher started)
+		// Reconstructor already closed (handle reaped before the watcher started).
+		// Mark the seed settled anyway so nothing waits on a cache that will never
+		// be filled.
+		h.markSeeded()
+		return
 	}
 	defer sub.Close()
+
+	s.seedRosterCache(h)
+
 	for {
 		select {
 		case ev, ok := <-sub.C:
 			if !ok {
 				return // broker closed: session gone or router shutting down
 			}
-			switch pe := ev.(type) {
-			case event.PermissionRequested:
-				// Idempotent under duplicate delivery: even if the replay re-emits
-				// a request a concurrent prompt handler also observed, the relay's
-				// route-first / pending-presence gates broadcast it exactly once,
-				// and a client answers by call id regardless — a double delivery is
-				// harmless.
-				relay.RequestPermission(h.id, pe)
-			case event.PermissionResolved:
-				relay.ResolvePermission(h.id, pe)
-			}
+			s.observeSessionEvent(h, ev)
 		case <-s.reaperStop:
 			return
 		}
 	}
+}
+
+// observeSessionEvent applies one event to the watcher's two responsibilities.
+// The permission open-set is updated BEFORE the relay call — see
+// [Supervisor.SetPermissionRelay] for why that order is what makes a relay
+// installed concurrently unable to miss an open request — and the cached roster
+// row is folded last, so its Pending count reads the already-updated set.
+func (s *Supervisor) observeSessionEvent(h *workerHandle, ev event.Event) {
+	switch pe := ev.(type) {
+	case event.PermissionRequested:
+		h.trackPermission(pe)
+		if relay := s.permissionRelay(); relay != nil {
+			// Idempotent under duplicate delivery: even if the replay re-emits a
+			// request a concurrent prompt handler also observed, the relay's
+			// route-first / pending-presence gates broadcast it exactly once, and a
+			// client answers by call id regardless.
+			relay.RequestPermission(h.id, pe)
+		}
+	case event.PermissionResolved:
+		h.forgetPermission(pe.ID)
+		if relay := s.permissionRelay(); relay != nil {
+			relay.ResolvePermission(h.id, pe)
+		}
+	}
+	h.applyRosterEvent(ev)
 }
 
 // adoptedWait returns the exit-signal channel for an ADOPTED worker: since the

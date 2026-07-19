@@ -116,9 +116,50 @@
 // (a worker's own roster does not know it is being proxied) and carried through
 // the existing roster/ps wire as an additive, omitempty "binaryVersion". It is
 // LIVE-ONLY: the journal does not record it, so an offline row leaves it empty.
-// It reaches the WIRE only — no client RENDERS it yet (not `gofer ps`, not the
-// TUI roster), so §11's "session/list shows mixed binaryVersions" criterion holds
-// at raw-wire level; the rendering is slice 3b.
+// As of slice 3b it is also RENDERED — a BINARY column in `gofer ps` and a
+// per-row suffix in the TUI roster — so §11's "session/list shows mixed
+// binaryVersions" criterion is observable by an operator, not just by decoding
+// the raw wire.
+//
+// # The standing per-session watcher
+//
+// Every live handle — SPAWNED by [Supervisor.Create] or ADOPTED by the startup
+// scan — gets a [Supervisor.watchSession] goroutine started right after it is
+// registered. It subscribes to that session's reconstructed broker WITH replay
+// and drives the two pieces of router state that are projections of a session's
+// event stream: the pushed roster cache (below) and the permission relay (§7,
+// below). It exits when the broker closes or the router shuts down, and is joined
+// by Close.
+//
+// # Pushed roster cache (§8)
+//
+// [Supervisor.Roster] — and so [Supervisor.List], every `gofer ps` and every TUI
+// roster tick — serves from a per-handle CACHED [supervisor.SessionInfo]: seeded
+// once per handle by a single gofer/roster call and thereafter maintained from
+// the event stream the watcher is already reading. Steady state costs ZERO worker
+// RPCs, where the pre-3b path cost one RPC PER LIVE WORKER per read.
+//
+// Concurrency: the handle's own watchSession goroutine is the SOLE writer, and it
+// publishes whole IMMUTABLE snapshots through an [atomic.Pointer]; every reader
+// does a lock-free Load, so no reader observes a half-updated row and no roster
+// read can block on the writer. There is deliberately NO TTL — the row's lifetime
+// IS the handle's, so reap and take are its only evictors — and no staleness
+// field, since [supervisor.SessionInfo.Updated] already carries the snapshot's
+// own time. A handle with no cached row (a failed or not-yet-landed seed) falls
+// back to a live RPC for that handle alone. Full rationale: rostercache.go.
+//
+// # Event bridge (§5)
+//
+// A turn running on a worker has no daemon prompt handler in this process fanning
+// its events out, so a client attached to such a session would watch a silent
+// stream. Each handle's reconstruction core is therefore built with a
+// [wirestream.EventSink] ([Supervisor.eventSink]) that hands the daemon's
+// [daemon.EventRelay] — injected via [Supervisor.SetEventRelay] — the VERBATIM
+// frame bytes for its gofer clients plus the already-decoded event for the ACP
+// session/update projection. Two fan-outs, one goroutine, wire order, no
+// re-encode and no second decode. The daemon suppresses the relay while one of
+// its own prompt handlers is driving that session, so a client-driven turn is
+// never delivered twice.
 //
 // # Permissions across a router restart (§7)
 //
@@ -126,11 +167,10 @@
 // drives via session/prompt — no daemon prompt handler is watching its event
 // stream to record permission routes and fan requests out. The router bridges
 // that gap: after the daemon is constructed it injects a [daemon.PermissionRelay]
-// via [Supervisor.SetPermissionRelay], which starts a STANDING permission watcher
-// per adopted session. Each watcher subscribes to its reconstructed broker with
-// replay (so a request re-surfaced by Load is delivered) and drives the relay, so
-// the daemon records the call→session route (making handlePermissionReply resolve
-// for adopted sessions) and broadcasts the request to attached clients. A client
+// via [Supervisor.SetPermissionRelay], which the standing watchers drive. A
+// watcher's replaying subscription delivers a request re-surfaced by Load, so the
+// daemon records the call→session route (making handlePermissionReply resolve for
+// adopted sessions) and broadcasts the request to attached clients. A client
 // of the restarted router then attaches via session/load ([Supervisor.Resume]
 // returns the live snapshot for a session this router already hosts), sees the
 // re-surfaced request, and answers it — the reply routes through the daemon to

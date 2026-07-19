@@ -466,6 +466,18 @@ func (r *Reconstructor) handleGoferEvent(raw json.RawMessage) {
 		// tolerance, not a reason to crash replay.
 		return
 	}
+	// The sink sees the frame BOTH ways — the verbatim bytes and the event just
+	// decoded from them — immediately before the local publish, so a consumer
+	// forwarding this stream onwards re-emits the SAME bytes (marshal-once, see
+	// [EventSink]) while any projection it also drives reuses ev rather than
+	// decoding twice. Deliberately before Publish: a publish can block on
+	// must-deliver backpressure, and the forwarded frame should not wait on this
+	// core's own local subscribers. An unknown kind returns above WITHOUT
+	// invoking the sink — a consumer must not forward a frame this core could not
+	// decode, or the two fan-outs would disagree about what the stream contains.
+	if r.sink != nil {
+		r.sink(w.SessionID, raw, ev)
+	}
 	rec.broker.Publish(ev)
 }
 

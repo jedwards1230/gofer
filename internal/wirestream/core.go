@@ -73,6 +73,53 @@ const turnEndChanBuffer = 16
 // comfortably fits.
 const loadChanBuffer = 16
 
+// EventSink observes every gofer/event this core reconstructs, called on the
+// demuxer goroutine immediately BEFORE the event is published to its session's
+// broker (see reconstruct.go's handleGoferEvent). It receives BOTH halves of
+// the same frame:
+//
+//   - raw: the notification's params exactly as they arrived — the source
+//     [event.Event]'s own MarshalJSON envelope, VERBATIM. A consumer forwarding
+//     a session's stream onwards (the M6 router re-fanning a worker's events to
+//     its own clients) writes these bytes through unchanged, so the frame a
+//     client receives is byte-identical to the one the worker emitted: no
+//     decode/re-encode step exists to drop a field ACP's lossy session/update
+//     projection would (tool.call.finished's Diagnostics/Spill*, tool.call.delta
+//     fragments). raw is owned by the caller for the duration of the call only —
+//     a sink that retains it past return must copy it.
+//   - ev: the concrete event this core just decoded from raw. Handed over so a
+//     consumer that ALSO needs a decoded event (an ACP session/update
+//     projection) gets it for free rather than decoding the same bytes twice.
+//
+// Both fan-outs a consumer drives from one sink call therefore run on ONE
+// goroutine, in wire order, marshaling nothing.
+//
+// # Accepted design risk (documented, not fixed)
+//
+// The sink runs ON the demuxer goroutine, so whatever it does — including a
+// client WebSocket write — is synchronous with this session's reconstruction: a
+// wedged client stalls it. That blast radius is exactly ONE session, because one
+// worker is one connection is one Reconstructor (M6 §3), which is the isolation
+// property working as intended. A hand-off channel would decouple them at the
+// cost of the single-goroutine wire-ordering guarantee this core's whole replay
+// argument rests on (see reconstruct.go's package-level ordering proof), and is
+// deliberately NOT used.
+type EventSink func(sessionID string, raw json.RawMessage, ev event.Event)
+
+// Option configures a [Reconstructor] at construction. Options exist because
+// [New] starts the demuxer goroutine before it returns: anything the demuxer
+// reads must be installed BEFORE that, so there is no post-hoc setter for it to
+// race with.
+type Option func(*Reconstructor)
+
+// WithEventSink installs sink, invoked for every reconstructed gofer/event (see
+// [EventSink]). A nil sink is ignored. It is deliberately a construction-time
+// option and NOT a setter: the demuxer goroutine [New] starts reads this field
+// on every event, so a mutable field would be a data race by construction.
+func WithEventSink(sink EventSink) Option {
+	return func(r *Reconstructor) { r.sink = sink }
+}
+
 // Reconstructor drains a [*daemon.Client]'s inbound notification stream and
 // reconstructs each session's typed [event.Event] stream from it into a
 // per-session [*event.Broker] — the tui-free core behind
@@ -81,6 +128,11 @@ const loadChanBuffer = 16
 // see reconstruct.go.
 type Reconstructor struct {
 	client *daemon.Client
+
+	// sink, when non-nil, observes every reconstructed gofer/event (see
+	// [EventSink]). Written once by [New] before the demuxer starts and never
+	// mutated afterwards, so the demuxer's reads need no synchronization.
+	sink EventSink
 
 	mu       sync.Mutex
 	sessions map[string]*sessionState
@@ -98,13 +150,21 @@ type Reconstructor struct {
 // caller dials client (see [daemon.Dial]) and hands it over; New starts the
 // demuxer goroutine that drains [daemon.Client.Notifications] for the
 // lifetime of the Reconstructor. Call [Reconstructor.Close] to tear both down.
-func New(client *daemon.Client) *Reconstructor {
+//
+// Options ([WithEventSink]) are applied BEFORE the demuxer starts, which is the
+// only safe point: once it is running, anything it reads is shared with it.
+func New(client *daemon.Client, opts ...Option) *Reconstructor {
 	r := &Reconstructor{
 		client:    client,
 		sessions:  make(map[string]*sessionState),
 		turnEndCh: make(chan turnEnd, turnEndChanBuffer),
 		loadCh:    make(chan *sessionState, loadChanBuffer),
 		closed:    make(chan struct{}),
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(r)
+		}
 	}
 	r.wg.Add(1)
 	go r.demux()

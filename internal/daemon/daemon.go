@@ -151,6 +151,17 @@ type Daemon struct {
 	// are deleted, so a live entry always has at least one peer.
 	sessionPeers map[string]map[*peer]struct{}
 
+	// promptMu guards promptHandlers.
+	promptMu sync.Mutex
+	// promptHandlers counts the live [handleSessionPrompt] loops per session id.
+	// A non-zero count means THIS daemon is already fanning that session's events
+	// out off its own subscription, so the M6 event relay (see event_relay.go)
+	// must stand down for it or every attached peer would receive each event
+	// twice. Entries exist only while a prompt is in flight — the handler's defer
+	// deletes its own at zero — so the map is bounded by concurrent prompts, not
+	// by sessions.
+	promptHandlers map[string]int
+
 	// permMu guards permRoutes.
 	permMu sync.Mutex
 	// permRoutes maps a permission request's call id to the session it belongs
@@ -211,6 +222,7 @@ func New(sup Supervisor, cfg Config) *Daemon {
 		cancel:         cancel,
 		connSem:        make(chan struct{}, maxConns),
 		sessionPeers:   make(map[string]map[*peer]struct{}),
+		promptHandlers: make(map[string]int),
 		permRoutes:     make(map[string]string),
 		pendingPerms:   make(map[string]permissionRequestedParams),
 		permReqCancels: make(map[string]context.CancelFunc),
