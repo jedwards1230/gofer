@@ -70,10 +70,10 @@ type countingWorker struct {
 	once      sync.Once
 }
 
-// startCountingWorker binds a worker socket for a fresh session id, writes its
+// startRosterCacheWorker binds a worker socket for a fresh session id, writes its
 // endpoint file so the router's startup scan adopts it, and serves the minimal
 // worker protocol the cache path needs.
-func startCountingWorker(t *testing.T, version string) *countingWorker {
+func startRosterCacheWorker(t *testing.T, version string) *countingWorker {
 	t.Helper()
 	id := uuid.Must(uuid.NewV7()).String()
 	w := &countingWorker{
@@ -250,7 +250,7 @@ func adoptCountingWorker(t *testing.T, root string, w *countingWorker) (*Supervi
 func TestRosterServesFromCacheWithoutWorkerRPCs(t *testing.T) {
 	shortRuntimeDir(t)
 	root := t.TempDir()
-	w := startCountingWorker(t, "0.3.0")
+	w := startRosterCacheWorker(t, "0.3.0")
 	sup, _ := adoptCountingWorker(t, root, w)
 
 	// Bring-up costs a small CONSTANT number of roster calls, independent of how
@@ -291,7 +291,7 @@ func TestRosterServesFromCacheWithoutWorkerRPCs(t *testing.T) {
 func TestRosterCacheSeedContent(t *testing.T) {
 	shortRuntimeDir(t)
 	root := t.TempDir()
-	w := startCountingWorker(t, "0.9.9")
+	w := startRosterCacheWorker(t, "0.9.9")
 	sup, _ := adoptCountingWorker(t, root, w)
 
 	rows, err := sup.Roster(context.Background())
@@ -326,7 +326,7 @@ func TestRosterCacheSeedContent(t *testing.T) {
 func TestRosterCacheTracksEventStream(t *testing.T) {
 	shortRuntimeDir(t)
 	root := t.TempDir()
-	w := startCountingWorker(t, "0.3.0")
+	w := startRosterCacheWorker(t, "0.3.0")
 	_, h := adoptCountingWorker(t, root, w)
 	afterSeed := w.rosterCalls.Load()
 
@@ -365,7 +365,7 @@ func TestRosterCacheTracksEventStream(t *testing.T) {
 func TestRosterCacheMidTurnStatus(t *testing.T) {
 	shortRuntimeDir(t)
 	root := t.TempDir()
-	w := startCountingWorker(t, "0.3.0")
+	w := startRosterCacheWorker(t, "0.3.0")
 	_, h := adoptCountingWorker(t, root, w)
 
 	// Seeded "working"; a tool_use turn.finished must leave it working, and its
@@ -389,7 +389,7 @@ func TestRosterCacheMidTurnStatus(t *testing.T) {
 func TestRosterCacheMissFallsBackToRPC(t *testing.T) {
 	shortRuntimeDir(t)
 	root := t.TempDir()
-	w := startCountingWorker(t, "0.3.0")
+	w := startRosterCacheWorker(t, "0.3.0")
 	sup, h := adoptCountingWorker(t, root, w)
 
 	// Force a cache miss the way a failed seed leaves one: no published snapshot.
