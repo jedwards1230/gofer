@@ -93,7 +93,10 @@ func (p Peek) View(width, height int) string {
 	if p.reply == "" {
 		replyLine = "❯ " + p.theme.MutedStyle().Render("reply")
 	} else {
-		replyLine = "❯ " + p.reply + "▏"
+		// displaySafe for the same reason inputBuffer.Render applies it: the
+		// reply is a one-row line in a fixed-height card, and a paste can put
+		// a newline (or any other control character) in it — see paste.go.
+		replyLine = "❯ " + displaySafe(p.reply) + "▏"
 	}
 
 	footer := truncate(p.theme.MutedStyle().Render(

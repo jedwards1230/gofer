@@ -95,6 +95,39 @@ type TUI struct {
 	// a plain bool can't distinguish "unset" from "explicitly false". See
 	// [TUI.MouseEnabled] for the resolved value every caller should read.
 	Mouse *bool `json:"mouse,omitempty"`
+
+	// MaxPasteBytes caps how much bracketed-paste content one paste may
+	// insert into a text-entry surface: nil (unset) is the default
+	// [DefaultMaxPasteBytes], an explicit 0 is "no limit", and any other
+	// value is a byte cap. The cap exists because a pasted buffer is a plain
+	// Go string that the whole input line is re-derived from on EVERY frame
+	// (rune-slicing plus a display-width measure — see internal/tui's
+	// inputBuffer.Render), so an accidental multi-megabyte paste turns every
+	// redraw into megabytes of allocation and wedges the UI, with the
+	// content itself unreadable in a one-line input anyway. A paste over the
+	// cap is clipped on a rune boundary and reported on the status line —
+	// never dropped silently. A *int, not a plain int, for the same reason
+	// [TUI.Autoscroll] is a *bool: a plain int can't distinguish "field
+	// absent" (use the default) from an explicit 0 ("no limit"). See
+	// [TUI.PasteLimitBytes] for the resolved value every caller should read.
+	MaxPasteBytes *int `json:"max_paste_bytes,omitempty"`
+}
+
+// DefaultMaxPasteBytes is [TUI.MaxPasteBytes]'s default: 128 KiB, comfortably
+// above any prompt a human pastes into a one-line input (a 128 KiB prompt is
+// already tens of thousands of tokens) while still well below the size at
+// which per-frame re-rendering of the buffer becomes visible latency.
+const DefaultMaxPasteBytes = 128 << 10
+
+// PasteLimitBytes resolves [TUI.MaxPasteBytes]'s effective value:
+// [DefaultMaxPasteBytes] when unset, else the explicit stored value (0 = no
+// limit). A negative stored value is meaningless as a cap and resolves to the
+// default rather than clipping every paste to nothing.
+func (t TUI) PasteLimitBytes() int {
+	if t.MaxPasteBytes == nil || *t.MaxPasteBytes < 0 {
+		return DefaultMaxPasteBytes
+	}
+	return *t.MaxPasteBytes
 }
 
 // AutoscrollEnabled resolves [TUI.Autoscroll]'s effective value: true (the

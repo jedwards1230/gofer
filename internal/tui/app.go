@@ -476,6 +476,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
+	case tea.PasteMsg:
+		// Bracketed paste arrives as ONE message carrying the whole payload,
+		// handled entirely outside the key handlers below so no character in
+		// it can be read as a binding — see paste.go.
+		return a.handlePaste(msg)
+
 	case tea.KeyPressMsg:
 		a.status = ""
 		// Any key press clears an active/frozen mouse selection — docs/TUI.md's
@@ -575,17 +581,25 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case key.Code == tea.KeyRight && key.Mod == 0:
 		// Bare (unmodified) Right only — a modified Right (Alt+Right, the
-		// input keymap's word-move) is NOT the navigation contract's
-		// attach-selected-session binding; it falls through to
-		// applyInputKey below like any other editing key.
-		id := a.over.SelectedID()
-		if id == "" {
-			return a, nil
+		// input keymap's word-move) falls through to applyInputKey below like
+		// any other editing key. → in an EMPTY dispatch bar attaches the
+		// selected session (the navigation contract); with text, it edits —
+		// moves the cursor right one rune, the same as everywhere else Right
+		// means "move right" — rather than claiming the key outright and
+		// leaving the dispatch-bar cursor able to move only left. Exactly the
+		// mirror of handleAttachKey's bare-Left case.
+		if a.over.InputEmpty() {
+			id := a.over.SelectedID()
+			if id == "" {
+				return a, nil
+			}
+			a.scr = screenAttach
+			a.scroll = 0
+			cmd := a.enter(id)
+			return a, cmd
 		}
-		a.scr = screenAttach
-		a.scroll = 0
-		cmd := a.enter(id)
-		return a, cmd
+		a.over = a.over.MoveRight()
+		return a, nil
 
 	case key.Code == tea.KeyPgUp:
 		a.scroll += scrollPageLines
@@ -648,9 +662,10 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Every key not already claimed by the navigation contract above falls
 	// through to the shared input keymap (input_keymap.go) — movement,
 	// insertion at the cursor, and deletion, the same keymap the attach
-	// input uses. A bare Right never reaches here: it is already claimed by
-	// the tea.KeyRight case above ("→ attaches the selected session" — see
-	// applyInputKey's doc).
+	// input uses. Bare Right never reaches here: it is already claimed by the
+	// tea.KeyRight case above (conditionally — attach the selected session
+	// from an empty dispatch bar, else move the cursor right — see its own
+	// comment).
 	if buf, ok := applyInputKey(a.over.input, key); ok {
 		a.over.input = buf
 	}
