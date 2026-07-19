@@ -326,6 +326,16 @@ func (s *Supervisor) History(ctx context.Context, id string) ([]provider.Message
 // process — a worker daemon does not exit merely because its one session was
 // killed — and lets the reaper drop the handle and reconcile.
 //
+// The teardown is UNCONDITIONAL: the process is killed and the handle reaped on
+// every path, including when the gofer/kill reply errors or its bound expires.
+// A failing reply is reported to the caller AFTER that teardown, matching the
+// in-process supervisor, whose Kill likewise stops the session and only then
+// returns its Close error (see [supervisor.Supervisor.Kill]). A non-nil error
+// therefore means "the worker reported a problem while ending the session", NOT
+// "the session may still be live" — every caller that treats it as advisory
+// (the daemon's gofer/kill handler surfaces it to the client; the TUI shows it)
+// stays correct.
+//
 // ctx is read exactly once, by the admission check below; neither the handle
 // lookup nor the SIGKILL takes a context, and the write runs under an owned
 // bound (see [wireCallCtx]).
@@ -338,7 +348,7 @@ func (s *Supervisor) Kill(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("router: kill %s: %w", sessionID, ErrNotLive)
 	}
 	kctx, cancel := wireCallCtx()
-	_, _ = h.client.Call(kctx, methodGoferKill, map[string]string{"sessionId": sessionID})
+	_, callErr := h.client.Call(kctx, methodGoferKill, map[string]string{"sessionId": sessionID})
 	cancel()
 	// Terminal-event race (accepted, best-effort): gofer/kill's Call returns
 	// when the worker ACKs, but the session.killed it emits travels as an async
@@ -348,6 +358,17 @@ func (s *Supervisor) Kill(ctx context.Context, sessionID string) error {
 	// event; a drain/settle before the kill would tighten it but is not required
 	// for this slice.
 	killHandleProcess(h)
+	if callErr != nil {
+		// Report, never abort: the handle is already taken and the process is
+		// already signalled above, so this return is pure signal — it can never
+		// leave a live worker behind a caller who believes it dead. (This is why
+		// Kill must NOT copy Archive's return-before-teardown shape: Archive
+		// bails to keep a rejected session live, which for Kill would strand a
+		// process.) The reply is the operator's only channel for a worker-side
+		// failure to finish the session; the in-process daemon surfaced it, so
+		// dropping it here would be a worker-mode regression.
+		return fmt.Errorf("router: kill %s: %w", sessionID, callErr)
+	}
 	return nil
 }
 
