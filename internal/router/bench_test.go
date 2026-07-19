@@ -32,6 +32,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -74,8 +75,11 @@ type benchConfig struct {
 	// callIters is how many Roster/List calls are timed per checkpoint.
 	callIters int
 	// fanoutSessions / fanoutSubscribers / fanoutTurns shape the event-throughput
-	// phase. Subscribers matter most: a marshal-once fan-out's win scales with
-	// the number of peers one event is delivered to.
+	// phase. Subscribers exercise the daemon's per-peer delivery cost (one write
+	// per peer); they do NOT amplify marshal cost — daemon.broadcastGoferEvent
+	// already marshals each event once and reuses the bytes for every peer
+	// (internal/daemon/handlers.go). What the M6 worker split adds, and what a
+	// marshal-once bridge removes, is the ROUTER's second-hop decode+re-encode.
 	fanoutSessions    int
 	fanoutSubscribers int
 	fanoutTurns       int
@@ -507,10 +511,16 @@ func (f fanoutResult) perSec() float64 {
 // those peers receive per second of prompt time.
 //
 // The denominator is deliberately the PROMPT wall time, not "time until the last
-// notification was read": the fan-out work a marshal-once change removes
-// (marshal per peer, then write per peer) happens inline on the prompt path
-// before session/prompt returns, so prompt time is what that change moves.
-// Delivery counts are settled separately, after the clock has stopped.
+// notification was read": the per-event work on the forwarding path happens
+// inline before session/prompt returns, so prompt time is what a change to that
+// path moves. Delivery counts are settled separately, after the clock stops.
+//
+// What subscribers do and do not measure: they scale the daemon's per-peer
+// WRITE cost, not marshal cost. daemon.broadcastGoferEvent already marshals an
+// event once and reuses the bytes across peers, so peer count does not multiply
+// encoding work at that hop. The cost the M6 worker split introduced — and the
+// one a marshal-once bridge removes — is the ROUTER's decode+re-encode on the
+// second hop, which is per-event and independent of peer count.
 func measureFanout(t *testing.T, ctx context.Context, sup *Supervisor, ids []string, cwd string, cfg benchConfig) fanoutResult {
 	t.Helper()
 
@@ -604,20 +614,38 @@ func measureFanout(t *testing.T, ctx context.Context, sup *Supervisor, ids []str
 	}
 }
 
-// waitCounterSettled blocks until n stops moving (two consecutive equal reads a
-// poll apart) or the deadline passes. It is a quiescence poll, not a sleep: the
-// observable condition is "no further deliveries".
+// waitCounterSettled blocks until n has stopped moving or the deadline passes.
+// It is a quiescence poll, not a sleep: the observable condition is "no further
+// deliveries".
+//
+// "Stopped" requires settleReads CONSECUTIVE equal samples, not one. A single
+// quiet poll interval is not evidence the stream ended — a natural lull between
+// a turn's events (provider latency, a tool call) can produce one, and treating
+// that as settled would silently bias the throughput number in both directions:
+// it truncates the pre-measurement drain (leaving replay traffic to be counted
+// as live) and cuts the post-measurement settle short (undercounting
+// deliveries). Requiring several consecutive quiet intervals makes a mid-stream
+// false settle much less likely for the same worst-case cost.
+const (
+	settleReads    = 3
+	settleInterval = 50 * time.Millisecond
+)
+
 func waitCounterSettled(t *testing.T, n *atomic.Int64, budget time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(budget)
 	last := int64(-1)
+	stable := 0
 	for time.Now().Before(deadline) {
-		cur := n.Load()
-		if cur == last {
-			return
+		switch cur := n.Load(); cur {
+		case last:
+			if stable++; stable >= settleReads {
+				return
+			}
+		default:
+			last, stable = cur, 0
 		}
-		last = cur
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(settleInterval)
 	}
 	t.Logf("note: notification counter never settled within %v (last %d)", budget, n.Load())
 }
@@ -730,12 +758,24 @@ func (r *benchReport) render() string {
 			fmt.Sprintf("%s / %s / %s / %s", ms(p.roster.mean), ms(p.roster.p50), ms(p.roster.p90), ms(p.roster.max_)),
 			fmt.Sprintf("%s / %s / %s / %s", ms(p.list.mean), ms(p.list.p50), ms(p.list.p90), ms(p.list.max_)))
 	}
+	// Per-SEGMENT slopes, not first-to-last. A single end-to-end ratio anchored
+	// at N=1 is dominated by fixed per-call overhead amortizing away, which
+	// reads as "super-linear growth" when the truth is the opposite. The slope
+	// between adjacent checkpoints is what actually says whether cost scales
+	// with N: ~1.0 is linear, >1 super-linear, <1 sub-linear.
 	if len(r.curve) >= 2 {
-		first, last := r.curve[0], r.curve[len(r.curve)-1]
-		if first.roster.mean > 0 {
-			fmt.Fprintf(&b, "  scaling: Roster mean x%.1f from %d to %d workers (x%.1f more workers)\n",
-				float64(last.roster.mean)/float64(first.roster.mean), first.workers, last.workers,
-				float64(last.workers)/float64(first.workers))
+		fmt.Fprintf(&b, "  per-segment slope (dlog(mean)/dlog(workers); ~1.0 = linear):\n")
+		for i := 1; i < len(r.curve); i++ {
+			prev, cur := r.curve[i-1], r.curve[i]
+			if prev.roster.mean <= 0 || prev.workers <= 0 {
+				continue
+			}
+			workerRatio := float64(cur.workers) / float64(prev.workers)
+			if workerRatio <= 1 {
+				continue
+			}
+			slope := math.Log(float64(cur.roster.mean)/float64(prev.roster.mean)) / math.Log(workerRatio)
+			fmt.Fprintf(&b, "    %3d -> %3d workers : %.2f\n", prev.workers, cur.workers, slope)
 		}
 	}
 	fmt.Fprintf(&b, "\n")
@@ -955,27 +995,32 @@ func startCountingWorker(t *testing.T, id string, frames *atomic.Int64) {
 // Allocations per forwarded event
 // ---------------------------------------------------------------------------
 
-// BenchmarkEventForward measures the per-event allocation cost of the
-// router→client event hop, using the testing framework's own per-op allocation
-// accounting (b.ReportAllocs) — a far more stable instrument than a wall clock,
-// which on this path is dominated by socket time.
+// BenchmarkEventForward measures the per-event allocation cost of the ROUTER's
+// second hop — decoding a worker's gofer/event envelope into a typed
+// event.Event and re-encoding it — using the testing framework's own per-op
+// allocation accounting (b.ReportAllocs), a far more stable instrument than a
+// wall clock, which on this path is dominated by socket time.
 //
-// Two sub-benchmarks bracket the change a marshal-once / forward-verbatim
-// fan-out makes:
+// This is the cost the M6 worker split introduced and that a marshal-once /
+// forward-verbatim bridge removes. Note it is NOT the daemon→client hop:
+// daemon.broadcastGoferEvent already marshals once per event and reuses the
+// bytes for every peer (internal/daemon/handlers.go), so nothing here scales
+// with subscriber count.
 //
-//   - decode_reencode — TODAY's shape: the router decodes the worker's
-//     gofer/event envelope into a typed event.Event (wirestream's
-//     handleGoferEvent) and the daemon re-encodes that event for each client
-//     hop (broadcastGoferEvent's json.Marshal).
-//   - forward_verbatim — the FLOOR the change targets: pass the worker's bytes
-//     through untouched.
+// There is deliberately no "forward verbatim" comparison arm. Rebinding a
+// json.RawMessage compiles to nothing measurable — a body with no function call
+// is not protected from elimination by b.Loop, and the measured result was
+// dominated by loop overhead (the LARGER payload reported a SMALLER ns/op,
+// which is only possible if the number is noise). Its zero would also invite
+// reading the pair as a ~1000x speedup. The meaningful figure is the absolute
+// allocs/op below; a post-3b run should land below it and above zero.
 //
-// Honesty note: this MODELS the production path rather than calling it. The
+// Honesty note: this MODELS the production decode rather than calling it. The
 // production decoder (wirestream's goferEventWire + its New* dispatch) is
 // unexported in another package, and this harness may not modify existing
-// files; goferEventWire's field set is replicated below and must be kept in
-// sync if the wire type gains fields. The re-encode half IS the production
-// call (json.Marshal of the same concrete event the daemon marshals).
+// files. benchGoferEventWire replicates only the fields the benchmarked kinds
+// carry, and must be re-checked if the wire type changes. The re-encode half IS
+// the production call (json.Marshal of the same concrete event).
 func BenchmarkEventForward(b *testing.B) {
 	// Two representative payloads: the smallest and by far most frequent event
 	// on a streaming turn (message.delta), and a fat one (tool.call.finished).
@@ -1001,7 +1046,7 @@ func BenchmarkEventForward(b *testing.B) {
 	}
 
 	for _, f := range fixtures {
-		b.Run(f.name+"/decode_reencode", func(b *testing.B) {
+		b.Run(f.name, func(b *testing.B) {
 			b.ReportAllocs()
 			b.SetBytes(int64(len(f.raw)))
 			for b.Loop() {
@@ -1018,22 +1063,18 @@ func BenchmarkEventForward(b *testing.B) {
 				}
 			}
 		})
-		b.Run(f.name+"/forward_verbatim", func(b *testing.B) {
-			b.ReportAllocs()
-			b.SetBytes(int64(len(f.raw)))
-			for b.Loop() {
-				out := json.RawMessage(f.raw)
-				if len(out) == 0 {
-					b.Fatal("empty forward")
-				}
-			}
-		})
 	}
 }
 
-// benchGoferEventWire replicates internal/wirestream's (unexported)
-// goferEventWire — the envelope every gofer/event notification carries. See
-// BenchmarkEventForward's honesty note.
+// benchGoferEventWire mirrors the SHAPE of internal/wirestream's (unexported)
+// goferEventWire — the envelope every gofer/event notification carries — for
+// the kinds this benchmark decodes. It is a replica, not the production type;
+// see BenchmarkEventForward's honesty note.
+//
+// It is NOT field-for-field identical to production and does not need to be:
+// only the fields the benchmarked kinds actually carry affect the measurement.
+// Fields outside that set are present to keep the decode shape representative.
+// Re-check this type if the wire envelope changes.
 type benchGoferEventWire struct {
 	Type      string `json:"type"`
 	SessionID string `json:"session_id"`
@@ -1044,7 +1085,11 @@ type benchGoferEventWire struct {
 
 	StopReason string         `json:"stop_reason"`
 	Usage      provider.Usage `json:"usage"`
-	Cost       provider.Cost  `json:"cost"`
+	// Pointer, matching production — a value here would decode a null `cost`
+	// into a zero struct rather than nil. Neither benchmarked kind carries a
+	// cost field, so this does not affect the recorded numbers, but the replica
+	// should not diverge from the type it stands in for.
+	Cost *provider.Cost `json:"cost"`
 
 	Kind    string            `json:"kind"`
 	Text    string            `json:"text"`

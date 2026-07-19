@@ -59,9 +59,15 @@ that would run this. Memory is not the constraint.
 The roster call pattern is. The TUI polls `Roster()` on a **1-second cycle**
 (`rosterInterval`, `internal/tui/app.go:29`), and each call fans out **one
 sequential RPC per live worker**. So an operator running 50 agents pays **50 wire
-round-trips every second**, just to keep the roster painted — and the latency
-table shows it degrading *super-linearly* (×65.3 cost across ×50 workers),
-because per-call overhead compounds at the tail.
+round-trips every second**, just to keep the roster painted.
+
+**The decisive problem is structural, not statistical.** `Roster` iterates live
+workers **serially**, each call bounded by `wireCallTimeout = 15 s`
+(`internal/router/router.go:39`, `methods.go:170`). So **a single wedged worker
+stalls every `Roster` call for up to 15 seconds** — and with the TUI polling on a
+1-second cycle, the roster simply stops updating for that whole window. Fleet
+roster latency is hostage to its slowest member. That does not depend on a slope,
+an anchor, or how busy the machine was; it follows from the loop.
 
 Two things make this worse than it first looks:
 
@@ -155,29 +161,37 @@ rest on them.
 
 ### 3. Allocations per forwarded event — MODELED, not measured in production
 
-> **This metric is indicative, not authoritative, for two independent reasons.**
-> It is suggestive of the marshal-once win; it does not prove it.
->
-> 1. **It models the production decoder rather than calling it.** gofer's real
->    decoder is unexported in `internal/wirestream`, which this harness may not
->    modify, so `benchGoferEventWire` **replicates `goferEventWire`'s field set**
->    locally. If that wire type gains or changes fields, these numbers silently
->    drift from what production does. Anyone changing the event envelope should
->    assume this benchmark is stale until re-checked.
-> 2. **`forward_verbatim` is a near-no-op by construction.** It rebinds a
->    `json.RawMessage`, so its 0 allocs and ~2.9 ns are a theoretical *floor*,
->    not a measurement of real forwarding work.
+This measures the **router's second hop**: decoding a worker's `gofer/event`
+envelope into a typed `event.Event` and re-encoding it. That is the cost the M6
+worker split introduced and that a marshal-once bridge removes.
 
-| Payload | Shape | ns/op | B/op | allocs/op |
-|---|---|---:|---:|---:|
-| `message.delta` | decode + re-encode (models today) | 2850 | 1209 | **14** |
-| `message.delta` | forward verbatim (floor) | 2.9 | 0 | 0 |
-| `tool.call.finished` | decode + re-encode (models today) | 11321 | 3824 | **17** |
-| `tool.call.finished` | forward verbatim (floor) | 2.9 | 0 | 0 |
+> **Common misconception, worth stating plainly:** this is **not** the
+> daemon→client hop, and it does **not** scale with subscriber count.
+> `daemon.broadcastGoferEvent` already marshals each event **once** and reuses
+> the bytes for every peer (`internal/daemon/handlers.go`). Marshal-once already
+> exists at that hop; the router's re-encode is what is new.
 
-**Compare a post-3b run against 14 and 17 allocs/op — not against the floor.** A
-real marshal-once implementation should land meaningfully below those figures but
-above zero. Treating the floor as the target would overstate the win.
+> **Indicative, not authoritative:** it **models** the production decoder rather
+> than calling it. gofer's real decoder is unexported in `internal/wirestream`,
+> which this harness may not modify, so `benchGoferEventWire` mirrors the
+> envelope's *shape* for the kinds benchmarked. It is not field-for-field
+> identical and does not need to be — but it can drift, so re-check it if the
+> wire envelope changes. Measuring the real path is queued for post-3b.
+
+| Payload | ns/op | B/op | allocs/op |
+|---|---:|---:|---:|
+| `message.delta` | 2850 | 1209 | **14** |
+| `tool.call.finished` | 11321 | 3824 | **17** |
+
+**Compare a post-3b run against 14 and 17 allocs/op.** A real marshal-once
+implementation should land meaningfully below these and above zero.
+
+There is deliberately **no "forward verbatim" comparison row**. Rebinding a
+`json.RawMessage` compiles to nothing measurable — `b.Loop` does not protect a
+body containing no function call, and the measured result was dominated by loop
+overhead (the *larger* payload reported a *smaller* ns/op, which is only possible
+if the number is noise). Publishing it beside 2850 ns would also read as a
+"~1000×" win no caveat could undo.
 
 ### 4. Roster / List latency vs fleet size
 
@@ -189,11 +203,38 @@ above zero. Treating the floor as the target would overstate the win.
 | 25 | 2.00 / 1.79 / 2.40 / 4.68 | 1.96 / 1.88 / 2.21 / 2.59 |
 | 50 | 4.17 / 3.67 / 4.47 / 10.38 | 5.06 / 3.62 / 4.56 / 22.79 |
 
-Roster mean grows **×65.3 across a ×50 increase in workers** — cost scales with
-fleet size, slightly super-linearly at the tail. That slope is the wall-clock
-shadow of the frame count above; the frame count is the authoritative version of
-the same claim. `List`'s max of 22.79 ms at N=50 is a single outlier against a
-p90 of 4.56 ms — the kind of tail figure not worth reading closely.
+**Cost is essentially LINEAR in fleet size from N≈12 upward** — one RPC per
+worker, as the frame count says. Per-segment slopes (`dlog(mean)/dlog(workers)`;
+1.0 = linear):
+
+| Segment | Slope |
+|---|---:|
+| 1 → 2 | 1.08 |
+| 2 → 12 | 1.33 |
+| 12 → 25 | **0.92** (sub-linear) |
+| 25 → 50 | 1.04 |
+
+> **Do not quote a first-to-last ratio here.** Mean latency rises ×65.3 from N=1
+> to N=50, which looks super-linear but is an artifact of anchoring at N=1, where
+> fixed per-call overhead dominates and then amortizes away. The amortization is
+> the *opposite* of a scaling worry. An earlier draft of this document made
+> exactly that error; `render()` now prints per-segment slopes so the misreading
+> is harder to repeat.
+
+**These slopes are themselves noisy — do not over-read them either.** A second
+run on the same commit and machine produced 0.94 / 0.98 / 0.93 / 1.24 for the
+same four segments. The qualitative conclusion is unchanged (roughly linear, no
+runaway), but no individual segment figure is stable to two digits. That is the
+indicative tier behaving exactly as labelled — and it is why **the real argument
+for the roster cache is the structural one above (serial iteration × a 15 s
+per-worker timeout), not this curve.**
+
+For contrast, the same second run reproduced the **allocations** in §3 *exactly*
+(14 and 17 allocs/op) while its ns/op and B/op drifted — which is the clearest
+demonstration in this document of why the tiers are drawn where they are.
+
+`List`'s max of 22.79 ms at N=50 is a single outlier against a p90 of 4.56 ms — a
+tail figure not worth reading closely.
 
 ### 5. Event throughput through the fan-out
 
