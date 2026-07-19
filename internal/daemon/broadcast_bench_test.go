@@ -64,8 +64,8 @@ const benchSessionID = "11111111-2222-3333-4444-555555555555"
 // BenchmarkBroadcastRawEvent measures per-event allocations on the forwarding
 // path a worker-hosted turn actually takes, at several attached-peer counts.
 //
-// Two payload shapes are used, the same two the pre-Slice-3b baseline recorded
-// (docs/benchmarks/m6-worker-fleet-baseline.md §3): the small, overwhelmingly
+// Two payload shapes are used, the same two the pre-Slice-3b baseline recorded:
+// the small, overwhelmingly
 // most frequent event on a streaming turn (message.delta) and a fat one with
 // spill fields (tool.call.finished). Comparing the two is the sharpest read
 // available here — the removed decode+re-encode cost MORE for the fatter event

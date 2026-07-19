@@ -83,11 +83,15 @@ produce a comparable, lower-N run rather than failing. **A run is only
 comparable to another run with the same settings on the same machine** — always
 record them.
 
-Results are only meaningful against a stamped commit. See
-[`docs/benchmarks/m6-worker-fleet-baseline.md`](benchmarks/m6-worker-fleet-baseline.md)
-for the pre-Slice-3b baseline and the after-run, and for which metrics are
-authoritative versus merely indicative — wall-clock numbers move with machine
-load, counts reproduce.
+Results are only meaningful against a stamped commit — record the SHA with any
+run you intend to compare against.
+
+Not every metric carries the same weight. **Counts are authoritative**: frames
+per call, allocations per operation, and process RSS reproduce across machines
+and are safe to quote. **Wall-clock numbers are indicative only**: latency and
+throughput move with machine load and core count, so they are comparable solely
+against another run with the same settings on the same otherwise-idle machine.
+Quoting a wall-clock figure without those conditions attached says nothing.
 
 ## M3 exit gate — satisfied
 
