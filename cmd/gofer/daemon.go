@@ -14,6 +14,7 @@ import (
 
 	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/daemon"
+	"github.com/jedwards1230/gofer/internal/router"
 	"github.com/jedwards1230/gofer/internal/supervisor"
 	"github.com/jedwards1230/gofer/internal/telemetry"
 )
@@ -59,6 +60,25 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	token := fs.String("token", "", "bearer token required of ws clients (default: $GOFER_TOKEN; empty disables auth)")
 	model := fs.String("model", "", "default model for sessions created over ACP (default: the sole logged-in provider's model)")
 	root := fs.String("root", "", "session store root (default ~/.gofer)")
+	// --workers opts the daemon into M6 process isolation: each session runs in
+	// its own `gofer session-worker` child process behind a router supervisor,
+	// so a session crash cannot take down the daemon or its siblings (see
+	// docs/milestones/M6-process-isolation.md). Absent (the default), the daemon
+	// hosts the in-process supervisor exactly as before — byte-for-byte
+	// unchanged. A raw flag (not a config.Session knob) is deliberate for this
+	// experimental slice: it is an operator-level launch mode, not a persisted
+	// session default; it graduates to config once the feature is past Phase 1.
+	workers := fs.Bool("workers", false, "run each session in its own worker process (M6 process isolation; experimental)")
+	// --max-workers bounds the process fan-out --workers introduces: each worker
+	// is a whole OS process (~10-20 MB RSS baseline plus its loop's working set
+	// — M6 §10), so an unbounded session/new fan-out is a machine-resource risk
+	// the in-process supervisor never had. At the cap, session/new is refused
+	// with router.ErrAtCapacity before anything is forked. A flag rather than a
+	// config.json field for the same reason as --workers above: it is an
+	// operator-level launch mode sized to the host, not a persisted session
+	// default. Ignored without --workers (the in-process supervisor forks
+	// nothing).
+	maxWorkers := fs.Int("max-workers", router.DefaultMaxWorkers, "under --workers, cap live worker processes (0 = unlimited)")
 	// Same explicit-fallback pattern as token/GOFER_TOKEN above: the flag's own
 	// default is "", not os.Getenv("GOFER_LOG_LEVEL"), purely for symmetry
 	// (there's no leak risk here, but one env-fallback convention in this
@@ -164,39 +184,90 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	}()
 	logger = wrappedLogger
 
-	sup, err := supervisor.New(supervisor.Config{
-		Root:        rootDir,
-		Permissions: cfg.Engine,
-		// Attach a per-session telemetry observer at registration, before the
-		// session's first turn — subscribing here (rather than after a turn
-		// has already started) means Events' replay backlog is still empty,
-		// so Instrument never sees a phantom span for history that predates
-		// it. Mirrors watchPermissions' own subscribe-at-registration
-		// precedent. When telemetry is disabled, tel.Instrument runs over a
-		// noop tracer/meter: the hook still runs but produces zero spans and
-		// zero exports, only cheap channel drains.
-		OnRegister: func(sess supervisor.Session) func() {
-			sub := sess.Events()
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				tel.Instrument(ctx, sess.ID(), sub.C)
-			}()
-			return func() {
-				sub.Close()
-				<-done
-			}
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("build supervisor: %w", err)
+	// The daemon hosts a Supervisor interface: the in-process supervisor by
+	// default, or — under --workers — the M6 router that runs each session in
+	// its own worker process. closeSup releases whichever was built.
+	var sup daemon.Supervisor
+	var closeSup func() error
+	var routerSup *router.Supervisor
+	if *workers {
+		// Each worker is spawned from THIS gofer binary (`gofer session-worker`),
+		// so the router needs its own executable path.
+		selfExe, exeErr := os.Executable()
+		if exeErr != nil {
+			return fmt.Errorf("build router: resolve gofer executable: %w", exeErr)
+		}
+		rsup, rerr := router.New(router.Config{
+			Root:  rootDir,
+			Model: modelID,
+			// The router's own build version, compared against each worker's
+			// gofer/hello binaryVersion to classify skew. effectiveVersion() is
+			// the SAME derivation every worker stamps itself with (see
+			// runSessionWorker), so identical local builds compare equal.
+			Version:    effectiveVersion(),
+			SelfExe:    selfExe,
+			Logger:     logger,
+			MaxWorkers: *maxWorkers,
+		})
+		if rerr != nil {
+			return fmt.Errorf("build router: %w", rerr)
+		}
+		routerSup = rsup
+		// The router links no SDK runner/loop and instruments no sessions itself
+		// — each worker owns its own telemetry — so there is no OnRegister hook
+		// here. tel is still built above and flushed on exit (a no-op with no
+		// spans), keeping the shared startup path uniform.
+		sup, closeSup = rsup, rsup.Close
+		logger.Info("session process isolation enabled (M6 workers)", "max_workers", *maxWorkers)
+	} else {
+		isup, serr := supervisor.New(supervisor.Config{
+			Root:        rootDir,
+			Permissions: cfg.Engine,
+			// Attach a per-session telemetry observer at registration, before the
+			// session's first turn — subscribing here (rather than after a turn
+			// has already started) means Events' replay backlog is still empty,
+			// so Instrument never sees a phantom span for history that predates
+			// it. Mirrors watchPermissions' own subscribe-at-registration
+			// precedent. When telemetry is disabled, tel.Instrument runs over a
+			// noop tracer/meter: the hook still runs but produces zero spans and
+			// zero exports, only cheap channel drains.
+			OnRegister: func(sess supervisor.Session) func() {
+				sub := sess.Events()
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					tel.Instrument(ctx, sess.ID(), sub.C)
+				}()
+				return func() {
+					sub.Close()
+					<-done
+				}
+			},
+		})
+		if serr != nil {
+			return fmt.Errorf("build supervisor: %w", serr)
+		}
+		sup, closeSup = isup, isup.Close
 	}
 
 	d := daemon.New(sup, daemon.Config{
 		ListenAddr:   *listen,
 		BearerToken:  bearerToken,
 		DefaultModel: modelID,
-		Logger:       logger,
+		// effectiveVersion(), NOT the raw ldflags `version`: this value is what
+		// gofer/hello reports as binaryVersion, and every worker stamps its own
+		// with effectiveVersion() (see runSessionWorker). Stamping the raw
+		// sentinel here would report "dev" for any local build while its own
+		// workers report "dev-<sha>", making every locally-built worker look
+		// version-skewed to the router that spawned it (M6 §6).
+		Version: effectiveVersion(),
+		Logger:  logger,
+		// Under --workers, an adopted session's still-open permission is
+		// re-surfaced into the router by its standing watcher (recordPendingPerm);
+		// replaying it on session/load lets a client that attaches AFTER the
+		// re-surface still see and answer it (design §7). The in-process daemon
+		// leaves this false — its session/load is byte-for-byte unchanged.
+		ReplayPendingPermissionsOnAttach: *workers,
 		// Let gofer/models report per-model availability to remote clients: a
 		// phone ACP client can't see the daemon host's auth state, so the daemon
 		// resolves the logged-in providers here (the same store `gofer auth`
@@ -219,6 +290,26 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 			return authed, nil
 		},
 	})
+
+	// Bridge the router's worker-hosted sessions into the daemon's fan-out. The
+	// daemon did not exist when router.New ran its adoption scan (it takes the
+	// router as its Supervisor), so both relays are injected here, after
+	// construction and before serve. In-process mode has no router and needs
+	// neither.
+	//
+	//   - PERMISSIONS (design §7): publishes the relay the per-session watchers
+	//     drive, so a permission asked — or re-surfaced by adoption's replay — on a
+	//     session no prompt handler here drives still records its call→session
+	//     route (making handlePermissionReply resolve) and reaches attached
+	//     clients.
+	//   - EVENTS (design §5): lets a worker-hosted turn's reconstructed events
+	//     stream to attached clients verbatim (see [daemon.EventRelay]). Without
+	//     it, a client attached to an adopted session watches a silent stream until
+	//     the turn ends.
+	if routerSup != nil {
+		routerSup.SetPermissionRelay(d)
+		routerSup.SetEventRelay(d)
+	}
 
 	// Install the interrupt handler around the whole serve loop: the daemon
 	// reads no interactive stdin, so there is no blocking-read-before-signal
@@ -244,7 +335,11 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		Token:     bearerToken,
 		PID:       ourPID,
 		StartedAt: time.Now(),
-		Version:   version,
+		// Same normalization as daemon.Config.Version above: the endpoint file is
+		// the cheap pre-dial version hint, so it must advertise the SAME string
+		// the in-protocol handshake reports, or the hint and the handshake would
+		// disagree on every local build.
+		Version: effectiveVersion(),
 	}); err != nil {
 		return fmt.Errorf("write daemon endpoint: %w", err)
 	}
@@ -267,7 +362,7 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	}()
 
 	serveErr := d.Serve(ctx)
-	if cerr := sup.Close(); cerr != nil && serveErr == nil {
+	if cerr := closeSup(); cerr != nil && serveErr == nil {
 		serveErr = fmt.Errorf("close supervisor: %w", cerr)
 	}
 	return serveErr

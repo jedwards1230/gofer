@@ -5,15 +5,16 @@
 // instead render a daemon's live roster: a session created from a phone or
 // editor ACP client appears in the laptop TUI too.
 //
-// # Why this is not a thin pass-through
+// # A thin TUI adapter over the reconstruction core
 //
-// [internal/tuibridge.Adapter] wraps an in-process [*supervisor.Supervisor]:
-// the TUI and the supervisor share memory, so Subscribe is a direct pass
-// through to the supervisor's own [*event.Broker]. daemonbridge has no such
-// shared memory — the daemon's supervisor runs in a different process (or a
-// different machine entirely) and exposes only the wire: ACP session/update
-// notifications and gofer's own control methods. So [Supervisor] must
-// RECONSTRUCT the typed [event.Event] stream [tui.Model.Ingest] expects from
-// that narrower wire projection. See reconstruct.go for the reconstruction
-// design and its event-ordering guarantee.
+// The event-stream reconstruction — draining the client's notification stream
+// and rebuilding each session's typed [event.Event] stream from the daemon's
+// lossless gofer/event wire — lives in the tui-free
+// [github.com/jedwards1230/gofer/internal/wirestream] package, so the same
+// decoder can also back the M6 router's worker proxy. This package composes a
+// [*wirestream.Reconstructor] and layers the TUI-shaped translation on top:
+// mapping the daemon's wire roster rows to [tui.SessionInfo]
+// ([statusFromWire]/[toTUISessionInfo]) and exposing the
+// create/kill/archive/set-model/interrupt/reply control surface [tui.Model]
+// drives. See [Supervisor] and the wirestream package doc for the split.
 package daemonbridge

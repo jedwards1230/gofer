@@ -31,7 +31,7 @@ const defaultWait = 5 * time.Second
 // newProvider is called once per Create/Resume so each session gets its own
 // provider instance (important for [blockingProvider], whose state is
 // per-turn).
-func newTestSupervisor(t *testing.T, newProvider func() provider.Provider) *supervisor.Supervisor {
+func newTestSupervisor(t testing.TB, newProvider func() provider.Provider) *supervisor.Supervisor {
 	t.Helper()
 	return newTestSupervisorAtRoot(t, t.TempDir(), newProvider)
 }
@@ -40,7 +40,7 @@ func newTestSupervisor(t *testing.T, newProvider func() provider.Provider) *supe
 // instead of a fresh t.TempDir() — the seam a daemon-restart test uses to
 // build a second Supervisor over the exact same on-disk root once the first
 // is closed.
-func newTestSupervisorAtRoot(t *testing.T, root string, newProvider func() provider.Provider) *supervisor.Supervisor {
+func newTestSupervisorAtRoot(t testing.TB, root string, newProvider func() provider.Provider) *supervisor.Supervisor {
 	t.Helper()
 	return newTestSupervisorModelAtRoot(t, root, "faux", newProvider)
 }
@@ -51,7 +51,7 @@ func newTestSupervisorAtRoot(t *testing.T, root string, newProvider func() provi
 // (context-window sizing + usage pricing), which the faux model can't reach
 // (faux is not in the provider registry, so [provider.Lookup]/[provider.CostOf]
 // miss and TurnFinished carries ContextWindow 0). See TestSessionPromptUsageUpdate.
-func newTestSupervisorModelAtRoot(t *testing.T, root, model string, newProvider func() provider.Provider) *supervisor.Supervisor {
+func newTestSupervisorModelAtRoot(t testing.TB, root, model string, newProvider func() provider.Provider) *supervisor.Supervisor {
 	t.Helper()
 	store, err := session.NewFileStore(session.WithRoot(root))
 	if err != nil {
@@ -87,7 +87,7 @@ func newTestSupervisorModelAtRoot(t *testing.T, root, model string, newProvider 
 // Daemon and its ws:// base URL. The server is closed on test cleanup. It is a
 // thin wrapper over [newTestDaemonWithConfig] with the default token/model
 // config every non-auth test uses.
-func newTestDaemon(t *testing.T, sup *supervisor.Supervisor, token string) (*daemon.Daemon, string) {
+func newTestDaemon(t testing.TB, sup *supervisor.Supervisor, token string) (*daemon.Daemon, string) {
 	t.Helper()
 	return newTestDaemonWithConfig(t, sup, daemon.Config{BearerToken: token, DefaultModel: "faux"})
 }
@@ -96,7 +96,7 @@ func newTestDaemon(t *testing.T, sup *supervisor.Supervisor, token string) (*dae
 // the caller-supplied cfg, so a test can exercise Config fields (e.g.
 // AuthedProviders) the common newTestDaemon path doesn't set. The server is
 // closed on test cleanup.
-func newTestDaemonWithConfig(t *testing.T, sup *supervisor.Supervisor, cfg daemon.Config) (*daemon.Daemon, string) {
+func newTestDaemonWithConfig(t testing.TB, sup *supervisor.Supervisor, cfg daemon.Config) (*daemon.Daemon, string) {
 	t.Helper()
 	d := daemon.New(sup, cfg)
 	srv := httptest.NewServer(d.Handler())
@@ -119,6 +119,22 @@ type frameError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 }
+
+// wsNotificationBuffer sizes every [wsClient]'s notification buffer.
+//
+// [wsClient.readLoop]'s send into that channel is BLOCKING and unselected, so a
+// test that emits a BURST of frames before it starts draining needs the whole
+// burst to fit. Anything over capacity rests on TCP socket buffers alone, and
+// when those fill the daemon-side fan-out write stalls against
+// [relayWriteTimeout] — whose cancellation then closes the very connection the
+// test is watching, failing it for a reason unrelated to what it asserts.
+//
+// It is sized well clear of the largest such burst (the fan-out write-context
+// probe's fanOutProbeWrites + 1 sentinel) rather than exactly at it: the
+// coupling between a test's repetition count and this constant should have
+// slack, and a test that depends on the burst fitting guards it explicitly
+// against cap() instead of assuming a number here.
+const wsNotificationBuffer = 256
 
 // wsClient is a minimal JSON-RPC-over-WebSocket test client: it demuxes
 // inbound frames into a notifications stream and a responses stream so a test
@@ -163,7 +179,7 @@ func dial(t *testing.T, ctx context.Context, url string, header map[string][]str
 		t:               t,
 		conn:            conn,
 		ctx:             ctx,
-		notifications:   make(chan rpcFrame, 64),
+		notifications:   make(chan rpcFrame, wsNotificationBuffer),
 		inboundRequests: make(chan rpcFrame, 16),
 		pending:         make(map[string]chan rpcFrame),
 		unmatched:       make(chan rpcFrame, 16),

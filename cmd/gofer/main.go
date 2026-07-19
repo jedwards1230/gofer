@@ -84,6 +84,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return reportCmdErr(cmd, err, stderr)
 		}
 		return 0
+	case "session-worker":
+		if err := runSessionWorker(ctx, rest, stdout, stderr); err != nil {
+			return reportCmdErr("session-worker", err, stderr)
+		}
+		return 0
 	case "ps":
 		if err := runPS(ctx, rest, stdout, stderr); err != nil {
 			return reportCmdErr("ps", err, stderr)
@@ -178,6 +183,9 @@ Commands:
   daemon    Run the supervisor behind an ACP-over-WebSocket listener (alias: serve);
             "daemon install|uninstall|status" manage a launchd/systemd unit so it
             starts on login
+  session-worker  Single-session daemon on a loopback ephemeral port; prints a
+            handshake line to stdout. Spawned by the daemon (M6 process isolation),
+            not meant to be run directly.
   ps        List sessions on a running daemon's roster (--all: include archived)
   kill      Interrupt and drop a live session from the roster (journal kept)
   archive   Drop a finished session from the roster (journal kept)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -101,34 +102,146 @@ type CallError struct {
 
 func (e *CallError) Error() string { return e.Message }
 
-// Dial opens a WebSocket connection to addr (a bare host:port, matching
-// [Config.ListenAddr] — or a full ws://.../wss://... URL) and starts the
-// client's read loop. token, if non-empty, is sent as a standard
-// "Authorization: Bearer <token>" header, mirroring the header [Daemon.authorized]
-// prefers.
+// ErrHelloUnsupported is returned by [Client.Hello] when the daemon does not
+// implement gofer/hello (a pre-hello daemon: it replies method-not-found,
+// JSON-RPC -32601). A caller treats this as "this daemon predates the version
+// handshake" and falls back to the endpoint-file version hint (design §6),
+// rather than as a hard failure. Distinguish it with errors.Is.
+var ErrHelloUnsupported = errors.New("daemon does not support gofer/hello")
+
+// Hello performs the gofer/hello version handshake (design §6), returning the
+// daemon's binary/wire/ACP versions. A daemon that predates the handshake
+// replies method-not-found; Hello maps that to [ErrHelloUnsupported] (via %w)
+// so a caller can treat a pre-hello daemon as a known, non-fatal case with
+// errors.Is rather than string-matching. Any other error is returned as-is.
+func (c *Client) Hello(ctx context.Context) (HelloResult, error) {
+	raw, err := c.Call(ctx, methodGoferHello, nil)
+	if err != nil {
+		var ce *CallError
+		if errors.As(err, &ce) && ce.Code == codeMethodNotFound {
+			return HelloResult{}, fmt.Errorf("%w: %v", ErrHelloUnsupported, err)
+		}
+		return HelloResult{}, fmt.Errorf("daemon client: gofer/hello: %w", err)
+	}
+	var res HelloResult
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return HelloResult{}, fmt.Errorf("daemon client: decode gofer/hello result: %w", err)
+	}
+	return res, nil
+}
+
+// Dial opens a WebSocket connection to addr and starts the client's read loop.
+// addr is one of three forms:
+//
+//   - a bare host:port (matching [Config.ListenAddr]) — dialed over TCP;
+//   - a full ws://.../wss://... URL — dialed verbatim (the wss:// case is a
+//     caller fronting the daemon with TLS);
+//   - unix://<path> — an AF_UNIX socket, the transport an M6 session-worker
+//     listens on so the router can reach it host-locally
+//     (docs/milestones/M6-process-isolation.md §3/§4). The same WebSocket +
+//     JSON-RPC wire runs over the socket; only the transport differs.
+//
+// token, if non-empty, is sent as a standard "Authorization: Bearer <token>"
+// header, mirroring the header [Daemon.authorized] prefers — over every
+// transport, including unix.
 //
 // Dial distinguishes two failure modes so a caller can decide whether to fall
 // back to an in-process path ([ErrNoDaemon]) or surface a credential problem
 // ([ErrUnauthorized]) instead of silently falling back: a 401 response means a
-// daemon IS listening at addr, it just rejected the token, while any other
-// dial failure (connection refused, timeout, DNS failure) means there is no
-// daemon to fall back from at all. See [Probe] for the common case of only
-// needing the yes/no answer.
+// daemon (or worker) IS listening at addr, it just rejected the token, while
+// any other dial failure (connection refused, timeout, DNS failure, a missing
+// or dead unix socket) means there is nothing to fall back from at all. This
+// distinction holds identically over the unix transport — a live worker socket
+// that rejects auth surfaces [ErrUnauthorized], a stale/refused one
+// [ErrNoDaemon] — because the 401 rides the HTTP upgrade the same way it does
+// over TCP. See [Probe] for the common case of only needing the yes/no answer.
 func Dial(ctx context.Context, addr, token string) (*Client, error) {
 	header := http.Header{}
 	if token != "" {
 		header.Set("Authorization", "Bearer "+token)
 	}
 
-	conn, resp, err := websocket.Dial(ctx, wsURL(addr), &websocket.DialOptions{HTTPHeader: header})
+	url, opts := dialTarget(addr, header)
+	conn, resp, err := websocket.Dial(ctx, url, opts)
 	if err != nil {
+		// The unix path attaches a throwaway *http.Client with its own
+		// transport (see dialTarget); on a failed dial that still completed an
+		// HTTP round-trip — chiefly a 401 — the transport keeps the socket as
+		// an idle keep-alive conn, leaking one fd per failed Dial/Probe until
+		// GC. Release it now. The TCP path sets no HTTPClient, so this is a
+		// no-op there.
+		if opts.HTTPClient != nil {
+			if tr, ok := opts.HTTPClient.Transport.(*http.Transport); ok {
+				tr.CloseIdleConnections()
+			}
+		}
 		if resp != nil && resp.StatusCode == http.StatusUnauthorized {
 			return nil, fmt.Errorf("%w: %s", ErrUnauthorized, addr)
 		}
 		return nil, fmt.Errorf("%w: %s: %w", ErrNoDaemon, addr, err)
 	}
-	conn.SetReadLimit(maxMessageBytes)
+	return newClient(conn), nil
+}
 
+// unixScheme prefixes a unix-socket addr (unix://<filesystem path>). The path
+// after the scheme is a plain filesystem path, not a URL host — see
+// [dialTarget].
+const unixScheme = "unix://"
+
+// syntheticUnixHost is the host placed in the ws:// URL for a unix-socket dial.
+// The connection is pinned to a fixed AF_UNIX socket by the HTTPClient transport
+// (see [unixHTTPClient]), so this host is never resolved or connected to — it
+// exists only to give websocket.Dial a syntactically valid ws:// URL to parse.
+const syntheticUnixHost = "gofer-worker"
+
+// dialTarget resolves addr into the (url, options) pair websocket.Dial needs,
+// selecting the transport by scheme:
+//
+//   - unix://<path> dials the AF_UNIX socket at <path>. The returned options
+//     carry an *http.Client whose transport always connects that socket
+//     regardless of the URL host, so the ws:// URL host ([syntheticUnixHost])
+//     is an inert placeholder and the Host is irrelevant over the fixed conn.
+//   - anything else (a bare host:port or an explicit ws://.../wss://... URL) is
+//     dialed exactly as before — no HTTPClient override, [wsURL] deciding the
+//     scheme — so the TCP path is byte-for-byte unchanged.
+//
+// The unix:// Addr FORMAT a worker persists for the router to dial (whether
+// [WorkerEndpoint.Addr] stores "unix://<path>" or a bare path) is a Slice 2b
+// decision; Slice 2a only teaches Dial to speak the unix:// scheme when handed
+// one.
+func dialTarget(addr string, header http.Header) (string, *websocket.DialOptions) {
+	if path, ok := strings.CutPrefix(addr, unixScheme); ok {
+		return "ws://" + syntheticUnixHost + "/", &websocket.DialOptions{
+			HTTPHeader: header,
+			HTTPClient: unixHTTPClient(path),
+		}
+	}
+	return wsURL(addr), &websocket.DialOptions{HTTPHeader: header}
+}
+
+// unixHTTPClient builds the *http.Client websocket.Dial uses to reach a
+// session-worker over its AF_UNIX socket. The transport's DialContext ignores
+// the address it is handed (the synthetic ws:// host) and always connects the
+// fixed socketPath — the WebSocket upgrade, the bearer-auth 401, and every data
+// frame then ride that single unix connection exactly as they would over TCP.
+// Timeout is left zero so cancellation flows through the dial context, the same
+// contract coder/websocket relies on for the TCP path.
+func unixHTTPClient(socketPath string) *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", socketPath)
+			},
+		},
+	}
+}
+
+// newClient wraps an established connection in a Client and starts its read
+// loop. Factored out of [Dial] so both transports (TCP and unix) share the
+// exact same read-limit, buffering, and lifecycle setup and can never drift.
+func newClient(conn *websocket.Conn) *Client {
+	conn.SetReadLimit(maxMessageBytes)
 	cctx, cancel := context.WithCancel(context.Background())
 	c := &Client{
 		conn:          conn,
@@ -139,13 +252,14 @@ func Dial(ctx context.Context, addr, token string) (*Client, error) {
 		done:          make(chan struct{}),
 	}
 	go c.readLoop()
-	return c, nil
+	return c
 }
 
-// wsURL builds the WebSocket URL Dial connects to: addr passed through
-// verbatim if it already names a scheme, else prefixed ws:// — the daemon
-// speaks plain ws:// only (see [Daemon]'s package doc); a caller fronting it
-// with TLS passes a full wss://... addr instead.
+// wsURL builds the WebSocket URL Dial connects to for the TCP transport: addr
+// passed through verbatim if it already names a scheme, else prefixed ws:// —
+// the daemon speaks plain ws:// only (see [Daemon]'s package doc); a caller
+// fronting it with TLS passes a full wss://... addr instead. The unix://
+// transport does not go through here (see [dialTarget]).
 func wsURL(addr string) string {
 	if strings.Contains(addr, "://") {
 		return addr
@@ -172,6 +286,16 @@ func Probe(ctx context.Context, addr, token string) bool {
 // pushes, chiefly) is delivered on. It is closed when the connection closes —
 // ranging over it until it closes is the idiomatic way to drain it.
 func (c *Client) Notifications() <-chan Notification { return c.notifications }
+
+// Done returns a channel closed once this client's connection has closed — the
+// read loop having exited on a transport error (the peer went away) or an
+// explicit [Client.Close]. The M6 router watches it to learn when an ADOPTED
+// worker has died: an adopted worker is held only by its client connection (the
+// router did not spawn it, so it has no *exec.Cmd to Wait on), and the socket
+// closing when that worker's process exits is the router's crash signal for it.
+// Safe to read from repeatedly and from multiple goroutines; it is closed at
+// most once.
+func (c *Client) Done() <-chan struct{} { return c.done }
 
 // Call sends a JSON-RPC request for method with params and blocks for its
 // matching response, returning the raw result on success or a *[CallError] for

@@ -115,6 +115,15 @@ type SessionInfo struct {
 	Queued      int
 	Live        bool // false for disk-only archived entries from List
 
+	// BinaryVersion is the gofer build version of the process actually running
+	// this session — under M6 process isolation, its worker's, which may differ
+	// from the router's after a daemon upgrade (design §6; the router's
+	// session-pinning property). It is LIVE-ONLY and best-effort: the journal
+	// does not record it, so a disk-only entry from [Supervisor.List] leaves it
+	// empty, as does the in-process supervisor (there is no second binary to
+	// distinguish). Additive — a consumer that ignores it is unaffected.
+	BinaryVersion string
+
 	// Cwd is the working directory the session was created/resumed into.
 	// Live sessions carry it from their [managed] bookkeeping; a disk-only
 	// entry from [Supervisor.List] reads it back from the journal's

@@ -62,6 +62,50 @@ func drivePrompt(t *testing.T, c *wsClient, sid, text string, wantNotifs int) (r
 	return <-respCh, texts
 }
 
+// drainNotifications empties whatever is currently queued on c's notification
+// channel and reports how many frames it discarded.
+//
+// It is deliberately NON-BLOCKING: it drains what is already there rather than
+// waiting for a count someone predicted. Paired with a SYNCHRONOUS request whose
+// response the daemon writes after the notifications in question (session/load
+// replays history before responding), that is race-free — the harness's readLoop
+// is the connection's only reader and processes frames in wire order, so every
+// notification that preceded the response on the socket is already buffered by
+// the time the response is delivered.
+//
+// It drains the channel DIRECTLY rather than through waitNotification, which
+// skips gofer/event and session_info_update frames: the point is to leave
+// nothing queued that could be miscounted as the NEXT capture's content.
+//
+// # Buffer requirement: the replay must FIT in c.notifications (cap 64)
+//
+// The drain-after-a-synchronous-request pattern above depends on every replay
+// notification being BUFFERED by the time the response is delivered, and
+// readLoop's send into c.notifications is BLOCKING (see dial/readLoop in
+// harness_test.go). So a replay longer than the channel's 64-frame capacity does
+// not merely make this drain short — it stalls readLoop mid-replay, which means
+// the response frame behind those notifications is never read, which means the
+// c.request call above never returns. That is a DEADLOCK, resolved only by the
+// test binary's own timeout, not a flake that reruns green.
+//
+// Callers must therefore keep a drained replay under 64 frames (a settled turn
+// or two — comfortably inside it) or grow the harness channel alongside. This is
+// a hard constraint on the pattern, not a tuning knob.
+func drainNotifications(c *wsClient) int {
+	var n int
+	for {
+		select {
+		case _, ok := <-c.notifications:
+			if !ok {
+				return n
+			}
+			n++
+		default:
+			return n
+		}
+	}
+}
+
 // promptStopReason unmarshals resp's result as a PromptResponse and returns
 // its StopReason, failing the test on a response-shaped error or a decode
 // failure.
@@ -150,41 +194,50 @@ func TestPromptAfterLoadStreams(t *testing.T) {
 	}
 
 	// session/load replays the settled fold as session/update notifications
-	// before its response; drain exactly as many as ReplayNotifications
-	// would build from the current fold (the same oracle
-	// TestSessionLoadReplaysHistoryBeforeResponse uses), so the load
-	// response can be read cleanly off respCh below.
-	msgs, err := sup.History(context.Background(), sid)
-	if err != nil {
-		t.Fatalf("History: %v", err)
-	}
-	wantReplay := acp.ReplayNotifications(sid, msgs)
-	if len(wantReplay) == 0 {
-		t.Fatal("expected at least one replay notification from the settled turn")
-	}
-
-	loadRespCh := make(chan rpcFrame, 1)
-	go func() {
-		loadRespCh <- c.request(acp.MethodSessionLoad, acp.LoadSessionRequest{SessionID: sid, Cwd: cwd})
-	}()
-	for i := 0; i < len(wantReplay); i++ {
-		c.waitNotification()
-	}
-	loadResp := <-loadRespCh
+	// BEFORE its response, so the replay is drained by draining what the load
+	// left queued — not by predicting how much there will be.
+	//
+	// The obvious count-based drain (build an oracle from sup.History, then read
+	// exactly that many notifications) is RACY, and was a real ~0.5% flake here:
+	// the oracle is built from the fold at one instant and the daemon replays the
+	// fold at a later one, so a fold that gains an entry in between makes the
+	// drain short. The surplus notification then survives into the next capture
+	// and this test fails downstream with texts2 = [turn-one-reply].
+	//
+	// This ordering is race-free instead of merely less likely to race: the
+	// harness's readLoop is the connection's ONLY reader and processes frames in
+	// wire order, so by the time it delivers the load RESPONSE below, every
+	// replay notification that preceded it on the socket is already sitting in
+	// c.notifications. Draining after the synchronous request therefore cannot
+	// observe a partially-arrived replay, whatever the fold did.
+	//
+	// The fold bracket below is instrumentation, not an oracle: it never gates
+	// the drain (that stays count-free, per the paragraph above) — it only
+	// records what the daemon had available to replay, so a failure here reports
+	// whether the history was short AT READ TIME. See foldProbe's doc.
+	probe := newFoldProbe(t, sup, sid)
+	loadResp := c.request(acp.MethodSessionLoad, acp.LoadSessionRequest{SessionID: sid, Cwd: cwd})
 	if loadResp.Error != nil {
 		t.Fatalf("session/load error: %+v", loadResp.Error)
+	}
+	if drained := drainNotifications(c); drained == 0 {
+		t.Fatalf("expected at least one replay notification from the settled turn%s", probe.diagnosis(nil))
 	}
 
 	resp2, texts2 := drivePrompt(t, c, sid, "hi again", 1)
 	if got := promptStopReason(t, resp2); got != acp.StopReasonEndTurn {
 		t.Errorf("prompt #2 (post-load) StopReason = %q, want %q", got, acp.StopReasonEndTurn)
 	}
+	// A surplus/short replay above surfaces HERE first (a leftover replay
+	// notification is captured as prompt #2's content), so the fold bracket is
+	// reported on these assertions too — that is where the earlier ~0.5% flake
+	// actually failed.
 	if len(texts2) != 1 || texts2[0] != "turn-two-reply" {
-		t.Fatalf("prompt #2 (post-load) texts = %+v, want [turn-two-reply]", texts2)
+		t.Fatalf("prompt #2 (post-load) texts = %+v, want [turn-two-reply]%s", texts2, probe.diagnosis(texts2))
 	}
 	for _, txt := range texts2 {
 		if txt == texts1[0] {
-			t.Errorf("prompt #2 (post-load) re-emitted prompt #1's content: %q", txt)
+			t.Errorf("prompt #2 (post-load) re-emitted prompt #1's content: %q%s", txt, probe.diagnosis(texts2))
 		}
 	}
 }

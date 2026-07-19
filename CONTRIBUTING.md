@@ -38,6 +38,32 @@ golangci-lint run
 - Sign your commits where possible (`git commit -S`).
 - Keep each PR focused; delete dead code rather than commenting it out.
 
+## Known false positives from automated review
+
+The automated reviewer raises these repeatedly. They have each been refuted with
+evidence more than once. **Do not "fix" them** — changing correct code to quiet a
+bot makes the code worse and the next reviewer will raise the same objection
+about the workaround.
+
+- **Loop-variable capture in goroutines.** Reports of the form "the closure
+  captures `i`/`v` by reference, so all goroutines see the last value" are
+  **wrong for this repo** *when the variable is the loop variable itself*. Go
+  made loop variables **per-iteration in 1.22**, and `go.mod` declares
+  `go 1.25.0`. Each iteration gets its own variable, so
+  `for i, v := range xs { go func() { use(i, v) }() }` is correct as written and
+  the pre-1.22 `i := i` shadow is redundant. (The codebase also uses
+  range-over-int, which is itself 1.22+, so the language version is not in
+  doubt.) Reply with the `go.mod` line and resolve.
+
+  **This is not a blanket dismissal.** Go 1.22 changed the *loop variable*, and
+  nothing else. A goroutine closing over a variable declared **outside** the
+  loop, or over one the loop body reassigns, is still a genuine data race and
+  the report may well be right. Check *which* variable is captured before
+  reaching for this entry.
+
+If you refute one of these, add it here rather than only in the PR thread — the
+bot has no memory across pull requests, but this file does.
+
 ## Pull requests
 
 - Open the PR against `main`.
