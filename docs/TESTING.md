@@ -35,6 +35,44 @@ eyeballed without pulling the branch. Frames are published to the orphan
 it complements, never gates. Fork PRs get a read-only token and degrade to a
 `vhs-frames` artifact upload instead of a push+comment.
 
+## Worker-fleet benchmark (M6, off by default)
+
+`internal/router/bench_test.go` spawns ~50 real detached worker processes and
+reports measurements — RSS, `Roster`/`List` cost, event throughput, spawn
+latency. It is a measurement harness, not a correctness test: it asserts almost
+nothing, and a failure means a measurement could not be taken (or a process
+leaked), not that a number moved.
+
+It is gated behind the **`workerbench` build tag**, not `testing.Short()`. CI
+runs bare `go test ./...` and `go test -race ./...` with no `-short` flag, and
+`testing.Short()` is false by default — so a Short-gated benchmark would run on
+every push and spawn 50 processes inside the runner. The build tag is the only
+gate that actually excludes it, and it matches the repo's existing
+conditional-compilation idiom.
+
+```bash
+# fleet measurements + roster wire-frame count
+GOFER_BENCH_LOAD_NOTE="<what else was running>" \
+GOFER_BENCH_OUT=fleet.txt GOFER_BENCH_FRAMES_OUT=frames.txt \
+  go test -tags workerbench -run 'TestWorkerFleetBenchmark|TestRosterWireFrameCount' \
+  -v -timeout 30m ./internal/router/
+
+# allocations on the event fan-out path
+go test -tags workerbench -run '^$' -bench BenchmarkEventForward -benchmem ./internal/router/
+```
+
+Fleet size and load are env-tunable (`GOFER_BENCH_WORKERS`,
+`GOFER_BENCH_CALL_ITERS`, `GOFER_BENCH_FANOUT_*`) so a smaller machine can
+produce a comparable, lower-N run rather than failing. **A run is only
+comparable to another run with the same settings on the same machine** — always
+record them.
+
+Results are only meaningful against a stamped commit. See
+[`docs/benchmarks/m6-worker-fleet-baseline.md`](benchmarks/m6-worker-fleet-baseline.md)
+for the pre-Slice-3b baseline, and for which metrics are authoritative versus
+merely indicative — wall-clock numbers move with machine load, and one benchmark
+models production code rather than calling it.
+
 ## M3 exit gate — satisfied
 
 M3's close required a **live multi-client pass**: two clients on one session
