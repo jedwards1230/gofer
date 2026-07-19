@@ -35,6 +35,16 @@ import (
 // the ACP projection separately, from the event the relay's caller ALREADY
 // decoded, so the lossy projection never sits on the lossless path.
 //
+// Scope of the claim, precisely: what this removes is the ROUTER's SECOND-HOP
+// re-encode (M6 §10's "the second hop doubles the per-event encode cost"). The
+// daemon→client fan-out was already marshal-once per event —
+// [Daemon.broadcastGoferEvent] marshals once and reuses those bytes for every
+// peer, and the only per-peer cost left is [peer.writeJSON]'s JSON-RPC envelope,
+// which copies the payload rather than re-encoding the typed event. So this
+// relay does not make fan-out marshal-once and its win does not scale with the
+// number of attached peers; it means the router's decode-then-re-encode is no
+// longer performed at all.
+//
 // *[Daemon] implements it; the router receives one via its own SetEventRelay and
 // never imports daemon internals. Both methods are safe to call from the
 // router's per-session sink goroutine concurrently with ordinary request

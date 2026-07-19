@@ -139,6 +139,13 @@
 // the event stream the watcher is already reading. Steady state costs ZERO worker
 // RPCs, where the pre-3b path cost one RPC PER LIVE WORKER per read.
 //
+// It is an AVAILABILITY fix first. Those per-worker RPCs ran SERIALLY, each
+// bounded by wireCallTimeout (15s), so ONE wedged worker stalled every roster
+// read fleet-wide for up to fifteen seconds — including the TUI's ~1Hz poll,
+// which runs ungated over a non-cancellable context. A cache read is an atomic
+// load and cannot be held hostage by any worker. Being cheaper is a secondary
+// consequence, not the motivation.
+//
 // Concurrency: the handle's own watchSession goroutine is the SOLE writer, and it
 // publishes whole IMMUTABLE snapshots through an [atomic.Pointer]; every reader
 // does a lock-free Load, so no reader observes a half-updated row and no roster
@@ -160,6 +167,16 @@
 // re-encode and no second decode. The daemon suppresses the relay while one of
 // its own prompt handlers is driving that session, so a client-driven turn is
 // never delivered twice.
+//
+// What this removes is specifically the ROUTER's SECOND-HOP re-encode — the cost
+// M6 §10 flags when it says the second hop doubles the per-event encode cost.
+// The daemon→client hop was ALREADY marshal-once per event: internal/daemon's
+// broadcastGoferEvent marshals once and reuses those bytes for every peer, and
+// the only remaining per-peer cost is peer.writeJSON's JSON-RPC envelope, which
+// copies the payload rather than re-encoding the typed event. So this is not
+// "making fan-out marshal-once" and the win does not scale with attached peers:
+// the router simply no longer decodes and re-encodes a frame it is forwarding
+// unchanged. That work is not made faster — it is no longer done.
 //
 // # Permissions across a router restart (§7)
 //

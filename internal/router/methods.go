@@ -168,11 +168,13 @@ func (s *Supervisor) Resume(ctx context.Context, id string, _ supervisor.ResumeO
 // It serves from the PUSHED CACHE (rostercache.go): each handle's row was seeded
 // once from its worker and is maintained from the event stream this router
 // already subscribes to, so the steady-state cost of a roster read is ZERO worker
-// RPCs — a lock-free [atomic.Pointer] load per handle. That matters because
-// Roster is on the path of every `gofer ps`, every TUI roster tick and every
-// [Supervisor.List]: the old per-call fan-out cost one RPC PER LIVE WORKER per
-// read, and put a wedged worker's socket on the latency path of an operator
-// listing an unrelated session.
+// RPCs — a lock-free [atomic.Pointer] load per handle.
+//
+// The point is AVAILABILITY, not throughput. The old path issued one RPC per
+// live worker SERIALLY, each bounded by [wireCallTimeout] (15s), so a single
+// wedged worker stalled every Roster call — and so every `gofer ps`, every
+// [Supervisor.List] and the TUI's ~1Hz roster poll — for up to fifteen seconds.
+// An atomic load cannot be held hostage that way.
 //
 // A handle with NO cached row falls back to a live RPC for that handle alone.
 // That is the degraded path, not the normal one — it means the seed failed or has

@@ -13,9 +13,21 @@ import (
 // rostercache.go implements the PUSH-based roster (M6 §8's "session/list" row,
 // slice 3b). Before it, every [Supervisor.Roster] — and so every
 // [Supervisor.List], every `gofer ps`, every TUI roster tick — issued one
-// gofer/roster RPC PER LIVE WORKER, on the request's own goroutine. That cost
-// scales with (sessions × poll rate) and puts a wedged worker socket on the
-// latency path of an operator listing an unrelated session.
+// gofer/roster RPC PER LIVE WORKER, on the request's own goroutine.
+//
+// # This is an AVAILABILITY fix that also happens to be faster
+//
+// The per-call fan-out is not merely N RPCs; it is N SERIAL RPCs, each bounded
+// by [wireCallTimeout] (15s). So ONE wedged worker stalls EVERY Roster call for
+// up to fifteen seconds: fleet-wide roster visibility is hostage to its slowest
+// member, and an operator listing an unrelated session waits behind a worker
+// they have never heard of. The TUI polls the roster about once a second with no
+// view, focus, or reachability gate, over a context.Background that is not even
+// cancellable — so a single wedged worker degrades the whole roster UI.
+//
+// A cache read cannot be hostage to a wedged worker: it is an atomic load. That
+// is the structural property this file buys. Lower per-call cost is a real but
+// secondary consequence — do not describe this as a perf micro-optimization.
 //
 // The router already subscribes to every worker's reconstructed event stream
 // (see [Supervisor.watchSession]), and a session's roster row is a projection of
