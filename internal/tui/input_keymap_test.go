@@ -3,10 +3,11 @@ package tui_test
 // input_keymap_test.go covers the native editing keymap (input_keymap.go)
 // wired end to end through App's exported surface — both text-entry paths
 // it applies to (the overview dispatch bar and the attach input), and the
-// navigation-contract interplay with Left/Right (a bare Right on the
-// overview stays "attach the selected session"; a bare Left on the attach
-// screen backs out only when the input is empty). [inputBuffer]'s own edit
-// operations are hard-unit-tested in isolation in inputbuf_test.go.
+// navigation-contract interplay with Left/Right (each screen's own arrow is
+// conditional on its input being empty: a bare Right on the overview
+// attaches only from an empty dispatch bar, a bare Left on the attach screen
+// backs out only from an empty input). [inputBuffer]'s own edit operations
+// are hard-unit-tested in isolation in inputbuf_test.go.
 
 import (
 	"strings"
@@ -44,17 +45,53 @@ func TestOverviewDispatchLeftMovesCursorMidText(t *testing.T) {
 	}
 }
 
-// TestOverviewDispatchBareRightAttachesNotCursor pins the navigation
-// contract's precedence: a bare (unmodified) Right on the overview screen
-// always attaches the selected session, even with dispatch-bar text typed —
-// it is never claimed by the input keymap's cursor-right binding.
-func TestOverviewDispatchBareRightAttachesNotCursor(t *testing.T) {
+// TestOverviewDispatchBareRightMovesCursorWithText pins the overview's half
+// of the conditional-nav contract: with dispatch-bar text, a bare
+// (unmodified) Right EDITS — it moves the cursor right one rune rather than
+// attaching, the exact mirror of bare Left on the attach screen
+// (TestAttachInputLeftBacksOutOnlyWhenEmpty). Before this the case claimed
+// bare Right outright, so the dispatch-bar cursor could only ever move left.
+func TestOverviewDispatchBareRightMovesCursorWithText(t *testing.T) {
 	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
 	m = type_(t, m, "abc")
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyLeft})
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyLeft})
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
+	m = press(t, m, tea.KeyPressMsg{Text: "X"})
+
+	if got := content(m); !strings.Contains(got, "❯ abX▏c") {
+		t.Fatalf("expected bare Right with text to move the dispatch-bar cursor, got:\n%s", got)
+	}
+	if got := content(m); strings.Contains(got, "> ▏") {
+		t.Fatalf("expected to stay on the overview (Right must not attach with text), got:\n%s", got)
+	}
+}
+
+// TestOverviewDispatchBareRightAttachesWhenEmpty pins the other half: with an
+// EMPTY dispatch bar, bare Right stays the navigation contract's "attach the
+// selected session".
+func TestOverviewDispatchBareRightAttachesWhenEmpty(t *testing.T) {
+	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
 
 	if got := content(m); !strings.Contains(got, "> ▏") {
 		t.Fatalf("expected bare Right to attach the selected session (empty attach input), got:\n%s", got)
+	}
+}
+
+// TestOverviewDispatchBareRightNoOpWithoutSessions covers the third case: an
+// empty dispatch bar with nothing selected (an empty roster) has nothing to
+// attach, so bare Right is a no-op and the overview stays put.
+func TestOverviewDispatchBareRightNoOpWithoutSessions(t *testing.T) {
+	m := newTestApp(t, newFakeSup(nil))
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
+
+	got := content(m)
+	if !strings.Contains(got, "No sessions yet") {
+		t.Fatalf("expected to stay on the overview with an empty roster, got:\n%s", got)
+	}
+	if strings.Contains(got, "> ▏") {
+		t.Fatalf("expected bare Right with no selection to be a no-op, got:\n%s", got)
 	}
 }
 

@@ -212,8 +212,15 @@ func (b inputBuffer) DeleteToLineEnd() inputBuffer {
 // Render splices cursorGlyph into text at the cursor's rune position —
 // mid-text when the cursor sits mid-buffer, not always appended at the end
 // the way the pre-cursor append-only buffer rendered it.
+//
+// Each half is passed through [displaySafe] (paste.go) so a control
+// character a paste put in the buffer — a newline above all — renders as a
+// visible one-cell picture instead of breaking a single-line input out of
+// its row. The buffer's own text is untouched: what gets submitted is what
+// was pasted. Sanitizing the halves separately keeps the splice exact,
+// since displaySafe is one rune per rune either way.
 func (b inputBuffer) Render(cursorGlyph string) string {
 	r := b.runes()
 	cur := clampCursor(b.cursor, len(r))
-	return string(r[:cur]) + cursorGlyph + string(r[cur:])
+	return displaySafe(string(r[:cur])) + cursorGlyph + displaySafe(string(r[cur:]))
 }

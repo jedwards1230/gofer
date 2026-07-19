@@ -151,7 +151,8 @@ holds only frame padding.)
 **Navigation contract** — enforced by the app root (`App` in `app.go`, the
 bubbletea root that composes overview/peek/attach): `enter` peeks the selected
 session (with dispatch-bar text, it instead creates a session from that text
-and attaches into it); `→` attaches the selected session; `esc`
+and attaches into it); `→` in an **empty** dispatch bar attaches the selected
+session (with text, it edits); `esc`
 interrupts/acts on the *active* session (never "go back"); `←` in an **empty**
 input backs out to the overview (with text, it edits); `ctrl-x` kills a running
 session or archives a finished one; `ctrl-c` quits. In peek, `up`/`down` move
@@ -327,13 +328,37 @@ dependable line-start/end bindings, not a Cmd pairing.
 
 Word movement/deletion only treats whitespace as a boundary — `foo.bar` is
 one word, matching bash/zsh/readline's own Ctrl-W convention rather than an
-editor's finer-grained punctuation-splitting. A bare (unmodified) `→` on the
-overview screen stays the navigation contract's "attach the selected
-session" (`handleOverviewKey`'s own `key.Mod == 0` guard keeps it from
-colliding with the keymap's word/char-right bindings); a bare `←` on the
-attach screen is conditional the same way — an empty input backs out to the
-overview, a non-empty one moves the cursor left — so both nav-contract
-arrows take priority over the shared keymap only when unmodified.
+editor's finer-grained punctuation-splitting. Each screen's one nav-contract
+arrow is **conditional on its input being empty**, and only when unmodified
+(`handleOverviewKey`/`handleAttachKey`'s own `key.Mod == 0` guards keep them
+from colliding with the keymap's word-move bindings): a bare `→` on the
+overview attaches the selected session from an empty dispatch bar and moves
+the cursor right when it has text; a bare `←` on attach backs out to the
+overview from an empty input and moves the cursor left when it has text. So
+neither arrow is ever swallowed mid-edit — the cursor moves both ways on
+both surfaces.
+
+**Bracketed paste** (`paste.go`) arrives as a single `tea.PasteMsg` carrying
+the whole clipboard payload — bubbletea enables bracketed paste by default —
+and is inserted at the focused surface's cursor **outside the key handlers**.
+That is the point: replayed as key presses, a pasted newline would submit
+mid-paste and a pasted leading space would close peek. All three text-entry
+surfaces take it (dispatch bar, attach input, and peek's `❯` reply, which is
+a plain string and so appends); an open command panel or a pending approval
+prompt owns the keyboard, so a paste there is a no-op exactly as a typed rune
+is. CR/CRLF line endings normalize to `\n`, and the buffer keeps its real
+newlines — the paste submits as pasted. Control characters are substituted
+only at **render** time, with their one-cell Unicode Control Pictures glyph
+(`␊`, `␉`, `␛`), because a literal newline inside a one-row input line breaks
+the frame out of its height budget.
+
+**`tui.max_paste_bytes`** (default 128 KiB, `0` = unlimited) caps one paste.
+The input line is re-derived from the buffer string on every frame, so a
+stray multi-megabyte paste makes each redraw allocate megabytes — and it is
+unreadable in a one-line input anyway. An over-cap paste is clipped on a rune
+boundary and reported on the status line, never dropped silently. It is a
+`config.json` knob rather than a `/config` registry row: the registry's
+string editor has no numeric validation affordance today.
 
 `App.render` composes the autocomplete menu into the pinned input block
 rather than budgeting for it separately — `Overview`/`Model`'s `*WithMenu`
