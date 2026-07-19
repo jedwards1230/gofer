@@ -82,10 +82,40 @@ func TestDaemonInstallNoModelLeavesArgvUnchanged(t *testing.T) {
 	}
 }
 
-// TestDaemonInstallRejectsUnknownModel proves the id is validated at INSTALL
-// time. Writing an unknown model into the unit would reproduce the original
-// bug in a new costume: a service that loads, then exits at startup with the
-// reason buried in a log file. The check must also leave no unit behind.
+// TestDaemonInstallAcceptsUnregisteredModel is the counterpart to the
+// rejection test below, and the more important of the two: an id the SDK
+// registry does not carry, but whose provider is inferable from its shape, is
+// a model newer than this binary and must install cleanly. Validating with a
+// registry membership check instead would make this gate block the exact case
+// `-m` exists to unblock — a brand-new model an operator cannot otherwise
+// reach.
+func TestDaemonInstallAcceptsUnregisteredModel(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	fake := &fakeServiceManager{path: filepath.Join(t.TempDir(), "gofer.service")}
+	withFakeManager(t, fake)
+
+	const future = "gpt-5.6"
+	var out, errBuf bytes.Buffer
+	if err := runDaemonInstall(context.Background(), []string{"-m", future}, &out, &errBuf); err != nil {
+		t.Fatalf("runDaemonInstall with an unregistered but inferable model: %v (stderr=%q)", err, errBuf.String())
+	}
+	body, err := os.ReadFile(fake.path)
+	if err != nil {
+		t.Fatalf("unit file not written: %v", err)
+	}
+	if !bytes.Contains(body, []byte("--model "+future)) {
+		t.Errorf("unit file missing --model %s:\n%s", future, body)
+	}
+	if fake.loadCalls != 1 {
+		t.Errorf("install called load %d times, want 1", fake.loadCalls)
+	}
+}
+
+// TestDaemonInstallRejectsUnknownModel proves the gate still has teeth: an id
+// matching no provider family at all (a typo, not a new model) is rejected at
+// INSTALL time. Writing one into the unit would reproduce the original bug in
+// a new costume: a service that loads, then exits at startup with the reason
+// buried in a log file. The check must also leave no unit behind.
 func TestDaemonInstallRejectsUnknownModel(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	fake := &fakeServiceManager{path: filepath.Join(t.TempDir(), "gofer.service")}

@@ -380,18 +380,25 @@ func (a App) handleModelSelect() (tea.Model, tea.Cmd) {
 	}
 }
 
-// modelProvider resolves id's provider family via the SDK's static catalog,
-// or "" for an id the catalog doesn't recognize — including "" itself, the
-// state a session created with no explicit model override carries
-// ([SessionInfo.Model]). [App.handleModelSelect] treats two unresolvable
-// providers as a mismatch rather than guessing, so an unknown current model
-// never triggers a live swap it can't reason about.
+// modelProvider resolves id's provider family, or "" for an id whose backend
+// cannot be determined at all — including "" itself, the state a session
+// created with no explicit model override carries ([SessionInfo.Model]).
+// [App.handleModelSelect] treats two unresolvable providers as a mismatch
+// rather than guessing, so an unknown current model never triggers a live swap
+// it can't reason about.
+//
+// This is a DECISION path, not a display one, so it uses Resolve rather than
+// Lookup: it only ever reads .Provider, never metadata. Lookup here would
+// return "" for an unregistered-but-runnable id (a model newer than this
+// binary's registry), which handleModelSelect reads as a provider mismatch —
+// so swapping between two models of the SAME provider would silently decline
+// the live swap and only set the new-session default. Resolve infers the
+// provider from the id's shape, keeping the swap available. The picker itself
+// still lists only registered ids (see modelpicker.go), which is why the
+// metadata paths stay on Lookup.
 func modelProvider(id string) string {
-	if id == "" {
-		return ""
-	}
-	info, ok := provider.Lookup(id)
-	if !ok {
+	info, err := provider.Resolve(id)
+	if err != nil {
 		return ""
 	}
 	return info.Provider

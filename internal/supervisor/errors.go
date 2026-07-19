@@ -42,7 +42,9 @@ var ErrNoModel = errors.New("no model configured")
 // model swap can only move within the same provider (e.g. claude-sonnet-5 ->
 // claude-opus-4-8); switching providers requires a new session. Callers that
 // branch on this (e.g. "set the new-session default only") should compare
-// provider.Lookup(current).Provider vs provider.Lookup(target).Provider
+// provider.Resolve(current).Provider vs provider.Resolve(target).Provider
 // themselves before calling — the concrete error type is not carried across
-// the daemon wire (see internal/daemonbridge).
+// the daemon wire (see internal/daemonbridge). Resolve, not Lookup: an
+// unregistered id is still runnable and still has a knowable provider, and
+// Lookup would report neither.
 var ErrCrossProvider = errors.New("cannot change model across providers")

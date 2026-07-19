@@ -453,14 +453,23 @@ func (s *Supervisor) SetModel(ctx context.Context, sessionID, model string) erro
 		return fmt.Errorf("supervisor: set model %s: %w", sessionID, err)
 	}
 
-	next, ok := provider.Lookup(model)
-	if !ok {
-		return fmt.Errorf("supervisor: set model %s: unknown model %q", sessionID, model)
+	next, err := provider.Resolve(model)
+	if err != nil {
+		return fmt.Errorf("supervisor: set model %s: %w", sessionID, err)
 	}
 	m.mu.Lock()
 	current := m.model
 	m.mu.Unlock()
-	if cur, ok := provider.Lookup(current); ok && cur.Provider != next.Provider {
+	// Resolve for the CURRENT model too, not just the target. With Lookup here,
+	// a session already running an unregistered-but-runnable id (say a model
+	// newer than this binary's registry) would fail the ok check, silently
+	// skipping the cross-provider guard entirely — so a genuine cross-provider
+	// swap would slip past and come back from the SDK as a plain error the TUI
+	// cannot errors.Is against, losing the ErrCrossProvider branch it needs.
+	// Resolve infers the provider from the id's shape, so the guard keeps
+	// firing. A current id Resolve CANNOT place (a non-registry test model)
+	// still skips the comparison and defers to the SDK, exactly as before.
+	if cur, cerr := provider.Resolve(current); cerr == nil && cur.Provider != next.Provider {
 		return fmt.Errorf("supervisor: set model %s: cannot change from %q (%s) to %q (%s): %w",
 			sessionID, current, cur.Provider, model, next.Provider, ErrCrossProvider)
 	}

@@ -48,10 +48,66 @@ func TestSetModel(t *testing.T) {
 	}
 }
 
+// TestSetModelUnregisteredSameProvider asserts a target id the SDK registry
+// does NOT carry, but whose provider is inferable from its shape, is accepted
+// for a same-provider swap. This is the case a strict registry check silently
+// blocks: a model released after this binary was built is perfectly runnable,
+// and refusing it here would make gofer unable to reach exactly the models a
+// user most wants.
+func TestSetModelUnregisteredSameProvider(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	entry, err := h.sup.Create(ctx, "", supervisor.CreateOptions{Cwd: "/proj", Model: "claude-sonnet-5"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	fs := h.session(entry.ID)
+
+	// Unregistered, but "claude-" places it with anthropic — same provider as
+	// the session's current model, so the swap is legal.
+	const target = "claude-sonnet-9-future"
+	if err := h.sup.SetModel(ctx, entry.ID, target); err != nil {
+		t.Fatalf("SetModel to an unregistered same-provider id: %v", err)
+	}
+	if got := infoFor(t, h.sup, entry.ID).Model; got != target {
+		t.Errorf("roster Model = %q, want %q", got, target)
+	}
+	if got := fs.lastSetModel(); got != target {
+		t.Errorf("fake session's last SetModel arg = %q, want %q", got, target)
+	}
+}
+
+// TestSetModelCrossProviderFromUnregisteredCurrent is the guard-still-fires
+// case. With the CURRENT model unregistered, a registry-only check reports
+// "unknown" for it and skips the cross-provider comparison entirely — letting
+// a genuine cross-provider swap through to the SDK, which rejects it with a
+// plain error no caller can errors.Is against, so the TUI loses its
+// ErrCrossProvider branch. Resolving the current model keeps the guard live.
+func TestSetModelCrossProviderFromUnregisteredCurrent(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	// Current model: unregistered, but inferably openai.
+	entry, err := h.sup.Create(ctx, "", supervisor.CreateOptions{Cwd: "/proj", Model: "gpt-5.6-future"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	fs := h.session(entry.ID)
+
+	err = h.sup.SetModel(ctx, entry.ID, "claude-sonnet-5")
+	if !errors.Is(err, supervisor.ErrCrossProvider) {
+		t.Fatalf("SetModel err = %v, want errors.Is ErrCrossProvider", err)
+	}
+	if got := fs.setModelCallCount(); got != 0 {
+		t.Errorf("fake session's SetModel call count = %d, want 0 (rejected before reaching the SDK)", got)
+	}
+}
+
 // TestSetModelCrossProvider asserts a cross-provider target is rejected with
 // [supervisor.ErrCrossProvider], WITHOUT reaching the SDK setter and without
 // changing the roster's Model — the supervisor's own pre-check (via
-// provider.Lookup) catches it before ever calling the fake session.
+// provider.Resolve) catches it before ever calling the fake session.
 func TestSetModelCrossProvider(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
@@ -75,8 +131,11 @@ func TestSetModelCrossProvider(t *testing.T) {
 	}
 }
 
-// TestSetModelUnknownModel asserts an unregistered target model id is
-// rejected with a clear error.
+// TestSetModelUnknownModel asserts a target id whose PROVIDER cannot be
+// determined at all is rejected with a clear error. Note the bar is
+// unresolvable, not merely unregistered: an unregistered id whose backend is
+// inferable from its shape is runnable and is accepted (see
+// TestSetModelUnregisteredSameProvider).
 func TestSetModelUnknownModel(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()

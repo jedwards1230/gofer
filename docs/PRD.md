@@ -122,6 +122,17 @@ validated at install time — without it, an operator with more than one
 logged-in provider has no way to give a service-managed daemon the model it
 requires.
 
+Model admission vs metadata: gofer admits any id whose provider it can
+determine (`provider.Resolve`), NOT only ids in the SDK's registry
+(`provider.Lookup`). A model released after this binary was built is
+unregistered but perfectly runnable, so registry membership is the wrong bar
+for "can I run this?" — every validation gate (`daemon install -m`,
+`SetModel`, the TUI's same-provider swap check) uses Resolve, and an id
+matching no provider family at all is still rejected. Metadata paths — the
+`/model` picker and `gofer/models` — stay on Lookup, since they must show real
+context windows and pricing; unregistered records carry `Unregistered` with
+every metadata field zero, which means *unknown*, never *zero*.
+
 Model resolution (`gofer run`/`resume`, `gofer daemon`, and the local TUI
 backend all share it): an explicit `-m` wins, then `session.model` in
 `<root>/config.json`, then the sole logged-in provider's default model. Two or

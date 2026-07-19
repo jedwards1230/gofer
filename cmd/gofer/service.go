@@ -191,9 +191,15 @@ func runDaemonInstall(ctx context.Context, args []string, stdout, stderr io.Writ
 	// than writing it into a unit whose daemon then exits at startup with the
 	// message buried in a log file — the exact failure mode this flag exists to
 	// end. Checked against the same registry `gofer daemon` resolves against.
+	// Resolve, not Lookup: Lookup answers "does the SDK know this model's
+	// pricing and limits?", which is the wrong question for admission. A model
+	// newer than this binary's registry is unregistered but perfectly runnable,
+	// and rejecting it here would make this gate block the exact case the flag
+	// exists to unblock. Resolve still errors on an id matching no provider
+	// family (a genuine typo), so the gate keeps its teeth.
 	if model != "" {
-		if _, ok := provider.Lookup(model); !ok {
-			return &usageError{msg: fmt.Sprintf("unknown model %q", model)}
+		if _, err := provider.Resolve(model); err != nil {
+			return &usageError{msg: fmt.Sprintf("cannot use model %q: %v", model, err)}
 		}
 	}
 
