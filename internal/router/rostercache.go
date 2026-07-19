@@ -1,7 +1,6 @@
 package router
 
 import (
-	"context"
 	"time"
 
 	"github.com/jedwards1230/agent-sdk-go/event"
@@ -86,7 +85,7 @@ import (
 func (s *Supervisor) seedRosterCache(h *workerHandle) {
 	defer h.markSeeded()
 
-	ctx, cancel := context.WithTimeout(context.Background(), wireCallTimeout)
+	ctx, cancel := wireCallCtx()
 	rows, err := h.rec.Roster(ctx)
 	cancel()
 	if err != nil {

@@ -120,6 +120,22 @@ type frameError struct {
 	Message string `json:"message"`
 }
 
+// wsNotificationBuffer sizes every [wsClient]'s notification buffer.
+//
+// [wsClient.readLoop]'s send into that channel is BLOCKING and unselected, so a
+// test that emits a BURST of frames before it starts draining needs the whole
+// burst to fit. Anything over capacity rests on TCP socket buffers alone, and
+// when those fill the daemon-side fan-out write stalls against
+// [relayWriteTimeout] — whose cancellation then closes the very connection the
+// test is watching, failing it for a reason unrelated to what it asserts.
+//
+// It is sized well clear of the largest such burst (the fan-out write-context
+// probe's fanOutProbeWrites + 1 sentinel) rather than exactly at it: the
+// coupling between a test's repetition count and this constant should have
+// slack, and a test that depends on the burst fitting guards it explicitly
+// against cap() instead of assuming a number here.
+const wsNotificationBuffer = 256
+
 // wsClient is a minimal JSON-RPC-over-WebSocket test client: it demuxes
 // inbound frames into a notifications stream and a responses stream so a test
 // can send a request and drain session/update notifications concurrently
@@ -163,7 +179,7 @@ func dial(t *testing.T, ctx context.Context, url string, header map[string][]str
 		t:               t,
 		conn:            conn,
 		ctx:             ctx,
-		notifications:   make(chan rpcFrame, 64),
+		notifications:   make(chan rpcFrame, wsNotificationBuffer),
 		inboundRequests: make(chan rpcFrame, 16),
 		pending:         make(map[string]chan rpcFrame),
 		unmatched:       make(chan rpcFrame, 16),

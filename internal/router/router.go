@@ -46,6 +46,50 @@ const (
 	replyCallTimeout = 10 * time.Second
 )
 
+// wireCallCtx returns the context a router→worker WRITE runs under: a fresh
+// [wireCallTimeout] bound off context.Background, never a caller's request
+// context.
+//
+// # Why a write must not borrow a caller's context
+//
+// coder/websocket's setupWriteTimeout registers a context.AfterFunc(ctx, …
+// c.close()), so cancelling the context handed to a write destroys the WHOLE
+// connection, not just that write. A router's h.client is a LONG-LIVED shared
+// link to a live worker, while the ctx reaching Interrupt/SetModel/Kill/Archive
+// belongs to ONE daemon peer's in-flight request. Deriving the write context
+// from that peer's ctx therefore hands any single client the power to kill the
+// worker link for everyone: a client that sends session/cancel (or changes the
+// model) and hangs up before the write completes trips peer.run's `defer
+// cancel()`, the router↔worker connection dies, and a perfectly healthy running
+// session is marked offline for every attached client.
+//
+// context.Background rather than a Supervisor-owned base is a SIMPLICITY
+// choice, not a safety one. A base context cancelled by [Supervisor.Close]
+// would in fact be safe: Close already closes every worker link itself — it
+// calls rec.Close on each handle, and [wirestream.Reconstructor.Close] shuts
+// the underlying client connection down — so cancelling such a base would
+// destroy nothing Close does not destroy a few lines later. What survives a
+// router shutdown is the worker PROCESS (it reparents to pid 1 and is re-adopted
+// by socket scan on the next start), never the connection; "workers outlive the
+// router" is a statement about processes, and no base context could threaten it.
+//
+// The base is omitted because it would buy nothing. wireCallTimeout already
+// bounds every call, and at shutdown Close's rec.Close closes the connection out
+// from under any in-flight write, which fails it immediately — so a cancellable
+// base would add a field and a lifecycle for no change in behavior.
+//
+// [Supervisor.Reply] has always written this way, but only incidentally — its
+// interface signature carries no context — and [daemon.peer.request] documents
+// the same hazard explicitly. This path simply never got the treatment; the
+// helper exists so it stays that way.
+//
+// The CALLER's ctx is consulted exactly once, by a ctx.Err() admission check
+// that runs before any wire work. Nothing after that check reads it: the handle
+// lookup takes no context, and the write runs under the bound returned here.
+func wireCallCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), wireCallTimeout)
+}
+
 // Config configures a [Supervisor].
 type Config struct {
 	// Root is the shared session store root — passed to each worker via
@@ -453,7 +497,13 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts supervisor.
 	// return (and a panic), which is what makes the release exactly-once. A
 	// manual releaseSlot here would decrement pending twice and over-admit past
 	// MaxWorkers forever.
-	helloCtx, helloCancel := context.WithTimeout(ctx, wireCallTimeout)
+	//
+	// The hello WRITE runs under an owned context, not the creating peer's (see
+	// [wireCallCtx]). The borrow is less dangerous here than on an established
+	// handle — this connection is new and owned by the Create that is failing —
+	// but leaving it would invite the next reader to copy the pattern onto a
+	// shared link, so both of Create's wire calls use the same owned bound.
+	helloCtx, helloCancel := wireCallCtx()
 	hello, err := client.Hello(helloCtx)
 	helloCancel()
 	if err != nil {
@@ -472,8 +522,9 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts supervisor.
 	// (see methods.go): a worker that dialed but then wedged before answering
 	// must not hang this Create — and with it the daemon handler for the whole
 	// connection lifetime — which is the exact failure mode M6 isolation exists
-	// to contain.
-	newCtx, newCancel := context.WithTimeout(ctx, wireCallTimeout)
+	// to contain. The bound is OWNED, not derived from the creating peer's ctx
+	// (see [wireCallCtx]).
+	newCtx, newCancel := wireCallCtx()
 	raw, err := client.Call(newCtx, acp.MethodSessionNew, acp.NewSessionRequest{Cwd: opts.Cwd, Model: model})
 	newCancel()
 	if err != nil {

@@ -69,12 +69,21 @@ func (s *Supervisor) SubscribeLive(ctx context.Context, sessionID string) (*even
 // Interrupt cancels sessionID's in-flight turn by forwarding session/cancel to
 // its worker — a notification, per ACP. The bounded context keeps a wedged
 // worker socket from blocking the handler.
+//
+// ctx is read exactly once, by the admission check below; the write runs under
+// an owned bound (see [wireCallCtx]). Interrupt is the likeliest trigger for
+// that hazard in practice — Ctrl-C then quit cancels the peer request that
+// carried the session/cancel — and borrowing here would have let the quit
+// destroy the router's link to a still-healthy worker.
 func (s *Supervisor) Interrupt(ctx context.Context, sessionID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	h, ok := s.get(sessionID)
 	if !ok {
 		return fmt.Errorf("router: interrupt %s: %w", sessionID, ErrNotLive)
 	}
-	cctx, cancel := context.WithTimeout(ctx, wireCallTimeout)
+	cctx, cancel := wireCallCtx()
 	defer cancel()
 	if err := h.client.Notify(cctx, acp.MethodSessionCancel, acp.CancelNotification{SessionID: sessionID}); err != nil {
 		return fmt.Errorf("router: interrupt %s: %w", sessionID, err)
@@ -88,7 +97,17 @@ func (s *Supervisor) Interrupt(ctx context.Context, sessionID string) error {
 // actual change, emits its own config_option_update — which the router
 // reconstructs and re-fans, so clients track the new model without the router
 // itself emitting anything (see EmitConfigOptions).
+//
+// ctx is read exactly once, by the admission check below — the handle lookup
+// and the skew refusal that follow take no context — while the write runs under
+// an owned bound (see [wireCallCtx]). A borrow here is the most DAMAGING of the
+// four: the peer whose ctx it would be is by definition mid-model-change on a
+// session that may be running, so its cancellation would kill the worker link
+// under a live turn.
 func (s *Supervisor) SetModel(ctx context.Context, sessionID, model string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	h, ok := s.get(sessionID)
 	if !ok {
 		return fmt.Errorf("router: set model %s: %w", sessionID, ErrNotLive)
@@ -98,7 +117,7 @@ func (s *Supervisor) SetModel(ctx context.Context, sessionID, model string) erro
 	if err := h.refuseNewWork("set the model on"); err != nil {
 		return fmt.Errorf("router: set model %s: %w", sessionID, err)
 	}
-	cctx, cancel := context.WithTimeout(ctx, wireCallTimeout)
+	cctx, cancel := wireCallCtx()
 	defer cancel()
 	params := map[string]string{"sessionId": sessionID, "model": model}
 	if _, err := h.client.Call(cctx, methodGoferSetModel, params); err != nil {
@@ -194,7 +213,13 @@ func (s *Supervisor) Roster(ctx context.Context) ([]supervisor.SessionInfo, erro
 			out = append(out, *info)
 			continue
 		}
-		rctx, cancel := context.WithTimeout(ctx, wireCallTimeout)
+		// The degraded path issues a REAL gofer/roster Call on this handle's
+		// shared worker link, so — like every other router→worker write — it runs
+		// under an owned bound rather than the reading peer's ctx (see
+		// [wireCallCtx]), the same helper the seed path uses. Otherwise
+		// a client that hangs up mid-`gofer ps` could destroy the link to a worker
+		// whose only sin was not having published its first roster row yet.
+		rctx, cancel := wireCallCtx()
 		rows, err := h.rec.Roster(rctx)
 		cancel()
 		if err != nil {
@@ -300,12 +325,19 @@ func (s *Supervisor) History(ctx context.Context, id string) ([]provider.Message
 // clean terminal event), then SIGKILLs the now-empty single-session worker
 // process — a worker daemon does not exit merely because its one session was
 // killed — and lets the reaper drop the handle and reconcile.
+//
+// ctx is read exactly once, by the admission check below; neither the handle
+// lookup nor the SIGKILL takes a context, and the write runs under an owned
+// bound (see [wireCallCtx]).
 func (s *Supervisor) Kill(ctx context.Context, sessionID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	h, ok := s.take(sessionID)
 	if !ok {
 		return fmt.Errorf("router: kill %s: %w", sessionID, ErrNotLive)
 	}
-	kctx, cancel := context.WithTimeout(ctx, wireCallTimeout)
+	kctx, cancel := wireCallCtx()
 	_, _ = h.client.Call(kctx, methodGoferKill, map[string]string{"sessionId": sessionID})
 	cancel()
 	// Terminal-event race (accepted, best-effort): gofer/kill's Call returns
@@ -324,13 +356,19 @@ func (s *Supervisor) Kill(ctx context.Context, sessionID string) error {
 // rejects a running session, surfaced as the Call error) and then terminates the
 // now-empty worker. An offline session (no live worker) is already retired from
 // the live set — its journal persists — so archiving it is an idempotent no-op.
+//
+// ctx is read exactly once, by the admission check below; the write runs under
+// an owned bound (see [wireCallCtx]).
 func (s *Supervisor) Archive(ctx context.Context, sessionID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	h, ok := s.get(sessionID)
 	if !ok {
 		// Offline: nothing live to drop; the journal already persists.
 		return nil
 	}
-	actx, cancel := context.WithTimeout(ctx, wireCallTimeout)
+	actx, cancel := wireCallCtx()
 	_, err := h.client.Call(actx, methodGoferArchive, map[string]string{"sessionId": sessionID})
 	cancel()
 	if err != nil {

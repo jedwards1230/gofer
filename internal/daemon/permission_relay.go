@@ -1,8 +1,6 @@
 package daemon
 
 import (
-	"context"
-
 	"github.com/jedwards1230/agent-sdk-go/event"
 )
 
@@ -60,15 +58,14 @@ func (d *Daemon) RequestPermission(sessionID string, pe event.PermissionRequeste
 	}
 	if d.recordPermRoute(pe.ID, sessionID) {
 		d.recordPendingPerm(pe.ID, params)
-		// Bounded like the event relay's fan-outs, and for the identical reason:
-		// this runs on the router's per-worker demuxer goroutine, so an unbounded
-		// write to a stalled peer wedges that whole session's control plane (see
-		// [relayWriteTimeout]). The route and pending payload are recorded ABOVE
-		// the broadcast, so a client that misses the timed-out notification still
-		// gets the request on its next attach via the replay-on-attach path.
-		ctx, cancel := context.WithTimeout(d.ctx, relayWriteTimeout)
-		defer cancel()
-		d.broadcastPermission(ctx, sessionID, methodGoferPermissionRequested, params)
+		// broadcastPermission bounds the fan-out itself off the daemon's base
+		// context (see [relayWriteTimeout]), which is what this path needs: it runs
+		// on the router's per-worker demuxer goroutine, so an unbounded write to a
+		// stalled peer would wedge that whole session's control plane. The route
+		// and pending payload are recorded ABOVE the broadcast, so a client that
+		// misses the timed-out notification still gets the request on its next
+		// attach via the replay-on-attach path.
+		d.broadcastPermission(sessionID, methodGoferPermissionRequested, params)
 	}
 }
 
@@ -80,10 +77,9 @@ func (d *Daemon) RequestPermission(sessionID string, pe event.PermissionRequeste
 func (d *Daemon) ResolvePermission(sessionID string, pe event.PermissionResolved) {
 	d.clearPermRoute(pe.ID)
 	if d.clearPendingPerm(pe.ID) {
-		// Bounded — same goroutine, same wedge (see [relayWriteTimeout]).
-		ctx, cancel := context.WithTimeout(d.ctx, relayWriteTimeout)
-		defer cancel()
-		d.broadcastPermission(ctx, sessionID, methodGoferPermissionResolved, permissionResolvedParams{
+		// Bounded by broadcastPermission — same goroutine, same wedge (see
+		// [relayWriteTimeout]).
+		d.broadcastPermission(sessionID, methodGoferPermissionResolved, permissionResolvedParams{
 			SessionID: sessionID,
 			ID:        pe.ID,
 			Verdict:   string(pe.Verdict),
