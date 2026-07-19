@@ -2,6 +2,15 @@ package daemon
 
 import "context"
 
+// MethodGoferEvent is the wire method the daemon relays a raw event under,
+// exported for the external test package. A test that drains a peer's
+// notification stream UNTIL a gofer/event sentinel arrives is silently turned
+// into an infinite drain if that method is renamed and the test still matches
+// the old string literal — the drain would then run until the test context is
+// cancelled and report a phantom teardown. Matching this constant makes such a
+// rename a compile error instead. See awaitSentinel.
+const MethodGoferEvent = methodGoferEvent
+
 // PeerHandle is an opaque reference to one peer attached to a session. It
 // exists because [peer] is unexported and this package's tests live in the
 // external package daemon_test, which still needs to name a specific peer as

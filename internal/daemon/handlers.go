@@ -841,6 +841,19 @@ func handleSessionPrompt(d *Daemon, ctx context.Context, p *peer, params json.Ra
 //     context would let A disconnecting mid-turn tear down B's healthy
 //     connection — for an M6 router that peer is frequently the link to a live
 //     worker, marking a running session offline.
+//
+// # Teardown-latency delta of owning the fan-out context
+//
+// Borrowing ctx used to make the non-origin loop collapse instantly once the
+// origin cancelled: every write inherited an already-cancelled context and
+// returned at once. Owning fanCtx removes that shortcut, so a fan-out racing an
+// origin teardown now runs to completion instead of short-circuiting. The delta
+// is BOUNDED and small: fanCtx is one shared relayWriteTimeout budget for the
+// whole fan-out (not per peer — see [relayWriteTimeout]), so the worst case is
+// 5s of one demuxer goroutine, and only when a peer is stalled-but-open.
+// Healthy peers drain in microseconds, which is the ordinary case. That trade is
+// the point: the old shortcut was the same mechanism that let one peer's
+// cancellation close every other peer's connection.
 func (d *Daemon) broadcastUpdate(ctx context.Context, sessionID string, origin *peer, notif any, isUserEcho bool) *rpcError {
 	fanCtx, cancel := context.WithTimeout(d.ctx, relayWriteTimeout)
 	defer cancel()

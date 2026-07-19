@@ -9,6 +9,8 @@ import (
 
 	"github.com/jedwards1230/agent-sdk-go/acp"
 	"github.com/jedwards1230/agent-sdk-go/event"
+
+	"github.com/jedwards1230/gofer/internal/daemon"
 )
 
 // fanOutProbeWrites is how many times the probe below repeats its fan-out.
@@ -18,11 +20,20 @@ import (
 // bug slip through: writeFrame arms the close-on-cancel AfterFunc and then
 // disarms it with `defer c.clearWriteTimeout()`, and it acquires the frame lock
 // with a select that has both ctx.Done and the lock ready. So a single write
-// under an already-cancelled context is two coin flips — it may succeed, and it
-// may leave the connection open. Repeating makes the escape probability
-// 2^-fanOutProbeWrites while keeping correct code perfectly deterministic: with
-// the write context owned rather than borrowed, all N land and the connection
-// stays open, every run.
+// under an already-cancelled context may succeed AND may leave the connection
+// open.
+//
+// Why repetition is strong evidence rests on the closed state being ABSORBING,
+// not on 64 writes being independent trials: the assertion is on whether the
+// connection is open at the END, and once coder/websocket closes it, it stays
+// closed — no later write reopens it. So a reintroduced borrow escapes
+// detection only if ALL fanOutProbeWrites writes dodge the close, and each
+// additional write can only ever move the run toward detection. The argument
+// therefore needs no independence assumption (the writes share a connection and
+// a lock, so they are plainly not independent); it needs only monotonicity,
+// which the absorbing state gives for free. Correct code is meanwhile perfectly
+// deterministic: with the write context owned rather than borrowed, nothing arms
+// a close at all, so all N land and the connection stays open, every run.
 const fanOutProbeWrites = 64
 
 // awaitSentinel drains c's notifications until the sentinel gofer/event frame
@@ -50,7 +61,7 @@ func awaitSentinel(t *testing.T, c *wsClient) (updates int, alive bool) {
 			switch f.Method {
 			case acp.MethodSessionUpdate:
 				updates++
-			case "gofer/event":
+			case daemon.MethodGoferEvent:
 				return updates, true
 			}
 		case <-c.ctx.Done():
@@ -135,6 +146,19 @@ func TestFanOutNonOriginWriteSurvivesOriginContextCancel(t *testing.T) {
 	notif, ok := acp.ToSessionUpdate(sid, event.NewMessageDelta(sid, event.MessageText, "survivor"))
 	if !ok {
 		t.Fatal("message.delta has no session/update projection")
+	}
+
+	// Nothing drains the observer until awaitSentinel below, so its whole burst —
+	// every fanned session/update plus the sentinel — must fit in its notification
+	// buffer, whose readLoop send is blocking and unselected. A burst over
+	// capacity survives only on TCP socket buffering, and when THAT fills, the
+	// daemon's fan-out write stalls against relayWriteTimeout and its cancellation
+	// closes the observer: this test would then report a torn-down connection —
+	// precisely the misleading failure it exists to distinguish from a real
+	// regression. Fail loudly at the constants instead of mysteriously at a
+	// deadline.
+	if burst := fanOutProbeWrites + 1; burst > cap(observer.notifications) {
+		t.Fatalf("probe burst of %d frames (fanOutProbeWrites + 1 sentinel) exceeds the observer's notification buffer (%d): raise wsNotificationBuffer to keep this test measuring the write-context split rather than socket backpressure", burst, cap(observer.notifications))
 	}
 
 	// The origin's context, already cancelled: the state it is in the instant a
