@@ -61,7 +61,7 @@ func TestRunTUI_ConstructionOnly(t *testing.T) {
 	}
 	defer func() { _ = sup.Close() }()
 
-	app := tui.NewApp(theme.Default(), tuibridge.New(sup), tui.OverviewMeta{
+	app := tui.NewApp(theme.Default(), tuibridge.New(sup, "faux"), tui.OverviewMeta{
 		App:     "gofer",
 		Version: effectiveVersion(),
 		Model:   resolveOverviewModel(context.Background(), root),

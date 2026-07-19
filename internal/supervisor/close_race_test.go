@@ -40,7 +40,7 @@ func TestCreateRegisterRejectsAfterClose(t *testing.T) {
 		t.Fatalf("supervisor.New: %v", err)
 	}
 
-	_, cerr := sup.Create(context.Background(), "hi", supervisor.CreateOptions{Cwd: t.TempDir()})
+	_, cerr := sup.Create(context.Background(), "hi", supervisor.CreateOptions{Cwd: t.TempDir(), Model: "m"})
 	if !errors.Is(cerr, supervisor.ErrClosed) {
 		t.Fatalf("Create racing Close: want ErrClosed, got %v", cerr)
 	}
@@ -71,7 +71,7 @@ func TestOpsAfterCloseRejected(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	if _, err := h.sup.Create(context.Background(), "hi", supervisor.CreateOptions{Cwd: "/tmp"}); !errors.Is(err, supervisor.ErrClosed) {
+	if _, err := h.sup.Create(context.Background(), "hi", supervisor.CreateOptions{Cwd: "/tmp", Model: "m"}); !errors.Is(err, supervisor.ErrClosed) {
 		t.Fatalf("Create after Close: want ErrClosed, got %v", err)
 	}
 	if _, err := h.sup.Resume(context.Background(), "sess-x", supervisor.ResumeOptions{Model: "m", Cwd: "/tmp"}); !errors.Is(err, supervisor.ErrClosed) {

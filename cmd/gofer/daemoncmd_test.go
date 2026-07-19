@@ -38,11 +38,35 @@ import (
 // test in this package that does not pass its own --daemon flag (tests that
 // deliberately exercise discovery construct their own controlled endpoint
 // file/env instead — see daemonclient_test.go).
+// closedDaemonAddr is a loopback address nothing listens on — port 1 is
+// privileged, so no unprivileged developer daemon can be bound there — used
+// by hermeticDaemonEnv to force a refused dial.
+const closedDaemonAddr = "127.0.0.1:1"
+
 func hermeticDaemonEnv(t *testing.T) {
 	t.Helper()
+	hermeticDaemonHome(t)
+	// A CLOSED address, not "": an empty $GOFER_DAEMON is indistinguishable
+	// from unset, so [daemonFlags.resolve] falls through to
+	// daemon.DefaultListenAddr — and on a developer's own machine that is
+	// where their REAL gofer daemon is listening. These tests then drove that
+	// daemon (and its live provider credentials) instead of the in-process
+	// path they mean to exercise. Pointing the env var at a port nothing binds
+	// keeps the dial refused, which daemonUnreachable maps to the local
+	// fallback exactly as "no daemon anywhere" does.
+	t.Setenv("GOFER_DAEMON", closedDaemonAddr)
+}
+
+// hermeticDaemonHome isolates only the DISCOVERY INPUTS a test's own
+// endpoint file must not compete with: a fresh HOME (so
+// [daemon.ReadEndpoint]'s default root is this test's, not the developer's)
+// and no ambient token. It leaves $GOFER_DAEMON alone, so endpoint-file
+// discovery still runs — which is the point for a test that writes one and
+// expects dialDaemon to find it. Tests that want NO daemon discovered at all
+// use hermeticDaemonEnv instead.
+func hermeticDaemonHome(t *testing.T) {
+	t.Helper()
 	t.Setenv("HOME", t.TempDir())
-	t.Setenv("GOFER_DAEMON", "")
-	t.Setenv("GOFER_TOKEN", "")
 }
 
 // testDaemon builds a real [daemon.Daemon] hosting a real [supervisor.Supervisor]

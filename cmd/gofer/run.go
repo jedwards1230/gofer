@@ -11,6 +11,7 @@ import (
 
 	"github.com/jedwards1230/agent-sdk-go/runner"
 
+	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/daemon"
 	"github.com/jedwards1230/gofer/internal/supervisor"
 )
@@ -69,22 +70,80 @@ func wrapCredentialHint(err error) error {
 	return &credentialHintError{msg: msg, cause: nce}
 }
 
-// ambiguousModelMsg is the usage-error message when -m is not given and more
-// than one provider has a credential configured: gofer picks no favorite
-// among logged-in providers, so the caller must say which model to run.
-func ambiguousModelMsg(creds []string) string {
+// ambiguousModelMsg is the usage-error message when neither -m nor
+// config.Session.Model names a model and more than one provider has a
+// credential configured: gofer picks no favorite among logged-in providers,
+// so the caller must say which model to run.
+//
+// It names each credentialed provider AND its status, because "expired" is
+// the state that makes this error most confusing: a provider whose OAuth
+// token lapsed still HAS a credential (the SDK refreshes it transparently on
+// first use — see auth.Store.Credential), so it still counts toward the
+// ambiguity, which reads as gofer refusing over a login the operator thinks
+// is already dead. Both remedies are spelled out: the per-invocation -m and
+// the persistent session.model, so the operator is never left with 'gofer
+// logout <provider>' as the only way forward (issue #147).
+func ambiguousModelMsg(root string, creds []string, expired map[string]bool) string {
+	labels := make([]string, len(creds))
 	models := make([]string, len(creds))
 	for i, p := range creds {
+		labels[i] = p
+		if expired[p] {
+			labels[i] = p + " (expired)"
+		}
 		models[i] = runner.DefaultModel(p)
 	}
-	return fmt.Sprintf("multiple providers have credentials — pass -m (e.g. -m %s)", strings.Join(models, " or -m "))
+	return fmt.Sprintf("multiple providers have credentials (%s) — pass -m (e.g. -m %s), or set session.model in %s",
+		strings.Join(labels, ", "), strings.Join(models, " or -m "), config.DefaultPath(root))
 }
 
-// resolveRunModel picks the model `gofer run`/`gofer resume` uses when -m is
-// not given: the sole logged-in provider's default model. No credentials is
-// a command error (exit 1); more than one is a usage error (exit 2) — gofer
-// never guesses a vendor to favor.
+// expiredProviders reports which providers' stored credentials are past their
+// refresh window, keyed by provider id. Best-effort and non-fatal: it only
+// decorates [ambiguousModelMsg]'s provider list, so an unreadable auth store
+// degrades to an undecorated list rather than replacing a useful usage error
+// with an I/O one.
+func expiredProviders(root string) map[string]bool {
+	store, err := newAuthStore(root)
+	if err != nil {
+		return nil
+	}
+	entries, err := store.Status()
+	if err != nil {
+		return nil
+	}
+	out := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		out[e.Provider] = e.Expired
+	}
+	return out
+}
+
+// resolveRunModel picks the model `gofer run`/`gofer resume`/the local TUI
+// backend uses when -m is not given, in precedence order:
+//
+//  1. config.Session.Model, when set — an explicit operator decision outranks
+//     any credential-derived inference, and is the only way to state a
+//     preference that survives across invocations.
+//  2. the sole logged-in provider's default model.
+//
+// No credentials is a command error (exit 1); more than one, with no config
+// default to break the tie, is a usage error (exit 2) — gofer never guesses a
+// vendor to favor.
 func resolveRunModel(ctx context.Context, root string) (string, error) {
+	// Consulted BEFORE the credential scan, not as a fallback after it: a
+	// second logged-in provider used to make gofer unusable outright, with
+	// `gofer logout <provider>` the only escape (issue #147). config.Load
+	// treats a missing file as the zero Config, so the common no-config case
+	// falls straight through; a malformed one is surfaced rather than silently
+	// ignored, matching how `gofer daemon` already fails on it.
+	cfg, err := config.Load(config.DefaultPath(root))
+	if err != nil {
+		return "", err
+	}
+	if cfg.Session.Model != "" {
+		return cfg.Session.Model, nil
+	}
+
 	creds, err := runner.CredentialedProviders(ctx, root)
 	if err != nil {
 		return "", err
@@ -95,7 +154,7 @@ func resolveRunModel(ctx context.Context, root string) (string, error) {
 	case 0:
 		return "", errNoProviderCredentials
 	default:
-		return "", &usageError{msg: ambiguousModelMsg(creds)}
+		return "", &usageError{msg: ambiguousModelMsg(root, creds, expiredProviders(root))}
 	}
 }
 

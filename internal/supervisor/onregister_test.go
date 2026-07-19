@@ -45,7 +45,7 @@ func TestOnRegister_InvokedOnceBeforeReachableTeardownJoinedOnKill(t *testing.T)
 	}
 	t.Cleanup(func() { _ = sup.Close() })
 
-	info, err := sup.Create(context.Background(), "", supervisor.CreateOptions{Cwd: root})
+	info, err := sup.Create(context.Background(), "", supervisor.CreateOptions{Cwd: root, Model: "m"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestOnRegister_Nil(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sup.Close() })
 
-	info, err := sup.Create(context.Background(), "", supervisor.CreateOptions{Cwd: root})
+	info, err := sup.Create(context.Background(), "", supervisor.CreateOptions{Cwd: root, Model: "m"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

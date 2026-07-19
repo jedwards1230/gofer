@@ -42,7 +42,7 @@ func TestReplyRoutesToGateAndPendingCount(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
 
-	info, err := h.sup.Create(ctx, "", supervisor.CreateOptions{Cwd: h.root})
+	info, err := h.sup.Create(ctx, "", supervisor.CreateOptions{Cwd: h.root, Model: "m"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestReplyDenyResolves(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
 
-	info, err := h.sup.Create(ctx, "", supervisor.CreateOptions{Cwd: h.root})
+	info, err := h.sup.Create(ctx, "", supervisor.CreateOptions{Cwd: h.root, Model: "m"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestCancelReleasesAwaitNoLeak(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
 
-	info, err := h.sup.Create(ctx, "", supervisor.CreateOptions{Cwd: h.root})
+	info, err := h.sup.Create(ctx, "", supervisor.CreateOptions{Cwd: h.root, Model: "m"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

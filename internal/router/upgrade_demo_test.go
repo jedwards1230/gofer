@@ -375,11 +375,12 @@ func TestUpgradeMidTurnMixedBinaryVersions(t *testing.T) {
 	workerErr := make(chan error, 1)
 	go func() {
 		workerErr <- worker.Serve(workerCtx, worker.Options{
-			Supervisor: oldSup,
-			Session:    oldSessionID,
-			Version:    oldBinaryVersion, // slice 3a's version seam, worker-side
-			Stdout:     io.Discard,
-			Ready:      func(hs worker.Handshake) { ready <- hs },
+			Supervisor:   oldSup,
+			Session:      oldSessionID,
+			DefaultModel: "faux",
+			Version:      oldBinaryVersion, // slice 3a's version seam, worker-side
+			Stdout:       io.Discard,
+			Ready:        func(hs worker.Handshake) { ready <- hs },
 		})
 	}()
 	t.Cleanup(func() {

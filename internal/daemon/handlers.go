@@ -1164,12 +1164,16 @@ func handleGoferModels(d *Daemon, _ context.Context, _ *peer, _ json.RawMessage)
 // version axes (design §6). binaryVersion is the daemon's build version
 // (Config.Version), wireVersion the router↔worker wire contract version
 // (WireVersion), acpProtocolVersion the ACP version this daemon speaks
-// (acp.ProtocolVersion). Takes no params; never fails.
+// (acp.ProtocolVersion), plus defaultModel — the model this daemon resolved
+// at startup for session/new requests carrying none, which a client cannot
+// reproduce locally (see HelloResult.DefaultModel). Takes no params; never
+// fails.
 func handleGoferHello(d *Daemon, _ context.Context, _ *peer, _ json.RawMessage) (any, *rpcError) {
 	return HelloResult{
 		BinaryVersion:      d.cfg.Version,
 		WireVersion:        WireVersion,
 		ACPProtocolVersion: acp.ProtocolVersion,
+		DefaultModel:       d.cfg.DefaultModel,
 	}, nil
 }
 

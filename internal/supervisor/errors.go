@@ -18,11 +18,23 @@ var ErrRunning = errors.New("session is running or has queued work")
 var ErrClosed = errors.New("supervisor closed")
 
 // ErrEmptyModel indicates [Supervisor.SetModel] was called with an empty
-// model string — there is no sensible "unset the model" operation, unlike an
-// empty [CreateOptions.Model]/[ResumeOptions.Model], which resolves to a
-// credential-driven default at session construction. A live model swap has
-// no such default to fall back to, so an empty target is rejected outright.
+// model string — there is no sensible "unset the model" operation, so an
+// empty target is rejected outright. Its create/resume counterpart is
+// [ErrNoModel].
 var ErrEmptyModel = errors.New("model must not be empty")
+
+// ErrNoModel indicates [Supervisor.Create]/[Supervisor.Resume] was reached
+// with no model at all. The supervisor resolves no default of its own — every
+// caller owns that decision before it gets here (`gofer run`'s -m or
+// resolveRunModel, the daemon's Config.DefaultModel, the TUI bridge's
+// defaultModel) — so an empty model means the caller's own resolution came up
+// empty and quietly passed the gap along.
+//
+// It exists because that gap used to reach the SDK instead, where it
+// surfaced as `runner: unknown model ""` — an error naming neither the cause
+// nor a remedy, and the one users actually saw (issue #147). Callers wrap it
+// with the remedy that applies to them.
+var ErrNoModel = errors.New("no model configured")
 
 // ErrCrossProvider indicates a SetModel call asked to change a session to a
 // model served by a DIFFERENT provider than its current one. A runner's

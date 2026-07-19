@@ -62,7 +62,7 @@ func newTestSupervisor(t *testing.T) *supervisor.Supervisor {
 // omitempty-mirrored shape).
 func TestAdapterReplyReachesSessionGate(t *testing.T) {
 	sup := newTestSupervisor(t)
-	a := tuibridge.New(sup)
+	a := tuibridge.New(sup, "faux")
 
 	info, err := a.Create(context.Background(), "", tui.CreateOptions{Cwd: t.TempDir()})
 	if err != nil {
@@ -82,7 +82,7 @@ func TestAdapterReplyReachesSessionGate(t *testing.T) {
 // matching every other Adapter method's error passthrough.
 func TestAdapterReplyUnknownSessionErrors(t *testing.T) {
 	sup := newTestSupervisor(t)
-	a := tuibridge.New(sup)
+	a := tuibridge.New(sup, "faux")
 
 	if err := a.Reply(context.Background(), "no-such-session", "perm-1", true, false); err == nil {
 		t.Error("Reply for an unknown session: want an error, got nil")

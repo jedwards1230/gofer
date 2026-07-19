@@ -115,10 +115,11 @@ func TestRestartMidApprovalSurvives(t *testing.T) {
 	workerErr := make(chan error, 1)
 	go func() {
 		workerErr <- worker.Serve(workerCtx, worker.Options{
-			Supervisor: sup,
-			Session:    pinnedID,
-			Stdout:     io.Discard, // we learn the addr via Ready, not the stdout line
-			Ready:      func(hs worker.Handshake) { ready <- hs },
+			Supervisor:   sup,
+			Session:      pinnedID,
+			DefaultModel: "faux",
+			Stdout:       io.Discard, // we learn the addr via Ready, not the stdout line
+			Ready:        func(hs worker.Handshake) { ready <- hs },
 		})
 	}()
 	t.Cleanup(func() {
