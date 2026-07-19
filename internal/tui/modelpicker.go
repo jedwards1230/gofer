@@ -1,9 +1,9 @@
 package tui
 
 // modelpicker.go implements the /model command-panel tab (M4 step 4): a
-// picker over the SDK's static model catalog (provider.Models() /
-// provider.Lookup), grouped by provider and filtered to the providers
-// [CommandEnv.Auth] reports authenticated — the same auth seam status.go
+// picker over [modelcatalog], grouped by provider and listing, per
+// authenticated provider, the family that provider's CREDENTIAL KIND can
+// actually reach — read from [CommandEnv.Auth], the same auth seam status.go
 // already reads, never a new credential path. Each row marks (✓) the active
 // model and shows a one-line description (context window + pricing) derived
 // from provider.Lookup through a small gofer-side display-name table the SDK
@@ -47,6 +47,7 @@ import (
 
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
+	"github.com/jedwards1230/gofer/internal/modelcatalog"
 	"github.com/jedwards1230/gofer/internal/modelmeta"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
@@ -72,6 +73,26 @@ type modelPickerView struct {
 	// config default.
 	defaultModel string
 
+	// models is the picker's list, RESOLVED ONCE and cached for the panel's
+	// lifetime — never per render. It is seeded at construction with the
+	// compiled-in floor ([modelcatalog.CatalogForKind], pure and instant, so
+	// the picker opens with a usable list on the very first frame) and
+	// replaced wholesale by [modelPickerView.withCatalog] when the live
+	// listing arrives from the background load.
+	//
+	// Caching is not an optimization here, it is a correctness constraint: a
+	// live listing costs a bounded-but-real vendor round trip, and rows() is
+	// read several times per keystroke (lines, View, Height, selectedModel).
+	// Resolving there would either freeze the TUI or issue a request per
+	// keypress.
+	models []modelcatalog.Model
+
+	// live records that models came from a completed load rather than from the
+	// seeded floor. Nothing renders differently on it today; it exists so the
+	// panel host can tell "not loaded yet" from "loaded, and this is what
+	// there is" without comparing slices.
+	live bool
+
 	cursor int // highlighted row index into rows(); -1 = none highlighted
 
 	// entry is the free-text model-id buffer: the escape hatch for a model
@@ -90,8 +111,88 @@ type modelPickerView struct {
 // newModelPickerView returns a Model tab reading through env, with sess and
 // defaultModel captured at open time the same way status.go's statusView
 // captures them (command.go's openPanel).
+//
+// The model list is seeded here from the OFFLINE floor so the panel renders
+// immediately. The live listing is fetched off the Update loop by the panel
+// host ([App.discoverModelsCmd]) and applied later via
+// [modelPickerView.withCatalog]; see the models field for why it must not be
+// resolved on the render path.
 func newModelPickerView(th theme.Theme, env CommandEnv, sess *SessionInfo, defaultModel string) modelPickerView {
-	return modelPickerView{theme: th, env: env, sess: sess, defaultModel: defaultModel, cursor: -1}
+	return modelPickerView{
+		theme:        th,
+		env:          env,
+		sess:         sess,
+		defaultModel: defaultModel,
+		models:       floorCatalog(env),
+		cursor:       -1,
+	}
+}
+
+// floorCatalog builds the offline model list: each authenticated provider's
+// compiled-in family for that credential's KIND, provider blocks ascending and
+// each block in its catalog's own display order. Pure and instant — no network,
+// no store read beyond env.Auth.
+func floorCatalog(env CommandEnv) []modelcatalog.Model {
+	var out []modelcatalog.Model
+	for _, a := range authedProviders(env) {
+		out = append(out, modelcatalog.CatalogForKind(a.Provider, modelcatalog.Kind(a.Kind))...)
+	}
+	return out
+}
+
+// withCatalog returns a copy of the view listing models, replacing whatever it
+// was seeded or last loaded with.
+//
+// An EMPTY result is ignored on purpose. [modelcatalog.Catalog] is contracted
+// never to return an empty list on a discovery failure — it falls back to the
+// floor internally — so an empty slice here means the caller had nothing to
+// offer at all (a nil env.Models closure, or an auth.json read error). Adopting
+// it would replace a working list with a blank picker, which is precisely the
+// outcome the floor exists to prevent.
+//
+// The row highlight is carried across by MODEL ID, not by index. The index is
+// meaningless across the swap — a live listing can be shorter, longer, or
+// differently ordered than the floor, so keeping the number would silently
+// move the highlight onto a different model than the one the user was looking
+// at when they pressed ↓. Dropping it outright is not the answer either: a load
+// landing a second after the panel opened would yank the selection out from
+// under a user mid-keypress, and a background upgrade must not undo the user's
+// own navigation. Re-finding the same id gives the only reading that is true
+// under both lists — the user was pointing at THAT model, and still is. A
+// highlighted model absent from the live listing has genuinely gone away, so
+// the highlight drops to none rather than sliding to an unrelated neighbor.
+//
+// A typed entry is untouched — it is text the user wrote, not a position in
+// this data.
+func (v modelPickerView) withCatalog(models []modelcatalog.Model) modelPickerView {
+	if len(models) == 0 {
+		return v
+	}
+	// Read the highlighted id BEFORE the list is replaced, since cursor
+	// indexes the OLD rows.
+	highlighted := ""
+	if rows := v.rows(); v.cursor >= 0 && v.cursor < len(rows) {
+		highlighted = rows[v.cursor].id
+	}
+	v.models = models
+	v.live = true
+	v.cursor = indexOfModel(models, highlighted)
+	return v
+}
+
+// indexOfModel returns models' index for id, or -1 when id is empty or the
+// list no longer carries it. The result indexes rows() too — rows() is a
+// 1:1 flattening of models, in order.
+func indexOfModel(models []modelcatalog.Model, id string) int {
+	if id == "" {
+		return -1
+	}
+	for i, m := range models {
+		if m.ID == id {
+			return i
+		}
+	}
+	return -1
 }
 
 // View renders the view's rows, width-truncated and capped to height — the
@@ -185,11 +286,61 @@ func (v modelPickerView) rowLine(i int, r modelRow, isActive bool) string {
 	if isActive {
 		check = "✓ "
 	}
-	line := marker + check + modelDescriptionLine(r.id)
+	line := marker + check + v.rowDescription(r.id)
 	if i == v.cursor {
 		return v.theme.AccentStyle().Render(line)
 	}
 	return line
+}
+
+// rowDescription renders a listed row's description line, preferring the
+// catalog entry's own metadata over anything compiled in. For a discovered
+// model that means the VENDOR's current display name and context window rather
+// than gofer's table and the SDK registry, which are both only ever as fresh as
+// this binary — the point of fetching a live listing is to believe it.
+//
+// Pricing is deliberately not part of that preference, because there is nothing
+// to prefer: [modelcatalog.Model] carries no pricing field at all, since the
+// listing carries none (a subscription model has no per-token price to quote).
+// It therefore keeps coming from the registry via [pricingSegment], which
+// renders "pricing unknown" for exactly the unregistered ids discovery returns.
+// A discovered model must never show $0 — that would be a fabricated price, not
+// a free one.
+func (v modelPickerView) rowDescription(id string) string {
+	for _, m := range v.models {
+		if m.ID == id {
+			return catalogDescriptionLine(m)
+		}
+	}
+	return modelDescriptionLine(id)
+}
+
+// catalogDescriptionLine renders one catalog entry's display line, using its
+// Label and ContextWindow where it has them and falling back to the compiled-in
+// answer where it does not. An id whose backend cannot be inferred at all has no
+// pricing story to tell, so it renders name + whatever context the catalog knew.
+func catalogDescriptionLine(m modelcatalog.Model) string {
+	name := m.Label
+	if name == "" {
+		name = modelmeta.DisplayName(m.ID)
+	}
+	head := fmt.Sprintf("%s (%s)", name, m.ID)
+
+	info, err := provider.Resolve(m.ID)
+	if err != nil {
+		if m.ContextWindow > 0 {
+			return fmt.Sprintf("%s · %s context · pricing unknown", head, formatContextWindow(m.ContextWindow))
+		}
+		return head
+	}
+	// A live context window outranks the registry's: it is what the backend
+	// currently serves. Zero means the catalog didn't know, NOT "no context"
+	// (see modelcatalog.codexFloor), so it defers rather than reporting 0.
+	ctxSeg := contextSegment(info)
+	if m.ContextWindow > 0 {
+		ctxSeg = formatContextWindow(m.ContextWindow) + " context"
+	}
+	return fmt.Sprintf("%s · %s · %s", head, ctxSeg, pricingSegment(info))
 }
 
 // modelDescriptionLine renders one model's display line: its short name (or
@@ -264,51 +415,72 @@ func formatPrice(usd float64) string {
 	return strings.TrimRight(s, ".")
 }
 
-// rows returns the flattened, provider-then-id-sorted list of catalog models
-// whose provider is authenticated ([modelPickerView.authedProviders]) — the
-// intersection of provider.Models() and CommandEnv.Auth()'s providers (§4a).
-// Zero providers authenticated yields an empty list, never an error.
+// rows returns the flattened list of models the authenticated providers'
+// CREDENTIALS can actually reach, provider blocks in ascending provider order
+// and each block in its catalog's own display order (§4a). Zero providers
+// authenticated yields an empty list, never an error.
+//
+// It is a pure read of the cached [modelPickerView.models] — no store read, no
+// network, nothing that can block a keystroke. That cache is the whole shape of
+// this view's data flow; see the field's doc.
+//
+// The list is per-credential-KIND, not per-provider (issue #156): OpenAI routes
+// an OAuth (subscription) credential to a different backend than an API key,
+// serving a different model family, and the SDK registry only carries the
+// API-key one. Listing the registry to an OAuth user offered ids that backend
+// rejects outright while hiding every id it does serve, so the models the user
+// could actually run were reachable only by typing them. [modelcatalog] owns
+// that mapping; this view only asks it, per authenticated credential.
+//
+// [modelcatalog.CatalogForKind] is the pure, IO-free entry point, which is what
+// this render path needs — rows() runs several times per keystroke, and the
+// kind is already in hand from env.Auth. Its root-reading sibling
+// modelcatalog.Catalog is the one that would gain live vendor discovery; if
+// that lands, the upgrade is to thread it in through a CommandEnv closure
+// (cmd/gofer owning root and ctx, as it does for Auth/Config) rather than to
+// re-derive any of this here.
 func (v modelPickerView) rows() []modelRow {
-	authed := v.authedProviders()
-	if len(authed) == 0 {
-		return nil
+	rows := make([]modelRow, 0, len(v.models))
+	for _, m := range v.models {
+		rows = append(rows, modelRow{provider: m.Provider, id: m.ID})
 	}
-	ids := provider.Models()
-	rows := make([]modelRow, 0, len(ids))
-	for _, id := range ids {
-		info, ok := provider.Lookup(id)
-		if !ok || !authed[info.Provider] {
-			continue
-		}
-		rows = append(rows, modelRow{provider: info.Provider, id: id})
-	}
-	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].provider != rows[j].provider {
-			return rows[i].provider < rows[j].provider
-		}
-		return rows[i].id < rows[j].id
-	})
 	return rows
 }
 
-// authedProviders reads env.Auth, mirroring statusView.authList's non-fatal
+// authedProviders reads env.Auth and returns one entry per authenticated
+// provider, ascending by provider name so the row list's grouping never
+// depends on Auth's return order. It mirrors statusView.authList's non-fatal
 // contract: a nil closure (the zero CommandEnv) or a read error is treated
 // identically to "no providers authenticated" — never a reason to block the
 // view. This is a lock-free local read (see CommandEnv.Auth's doc) — it
 // never resolves a credential or hits a provider network call.
-func (v modelPickerView) authedProviders() map[string]bool {
-	set := map[string]bool{}
-	if v.env.Auth == nil {
-		return set
+//
+// A provider reported twice keeps its first entry, so a malformed auth.json
+// can't double every row of that provider's block.
+//
+// It is a package function rather than a method because both the view's own
+// seeding ([floorCatalog]) and the panel host's background load
+// ([App.discoverModelsCmd], which runs off the Update loop with no view in
+// hand) need the same answer from the same env.
+func authedProviders(env CommandEnv) []ProviderAuth {
+	if env.Auth == nil {
+		return nil
 	}
-	auths, err := v.env.Auth()
+	auths, err := env.Auth()
 	if err != nil {
-		return set
+		return nil
 	}
+	seen := map[string]bool{}
+	out := make([]ProviderAuth, 0, len(auths))
 	for _, a := range auths {
-		set[a.Provider] = true
+		if seen[a.Provider] {
+			continue
+		}
+		seen[a.Provider] = true
+		out = append(out, a)
 	}
-	return set
+	sort.Slice(out, func(i, j int) bool { return out[i].Provider < out[j].Provider })
+	return out
 }
 
 // activeModel resolves the model the ✓ mark applies to: the attached/peeked

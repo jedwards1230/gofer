@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jedwards1230/agent-sdk-go/auth"
 	"github.com/jedwards1230/agent-sdk-go/runner"
 
 	"github.com/jedwards1230/gofer/internal/config"
@@ -66,6 +67,43 @@ func TestResolveRunModel(t *testing.T) {
 		}
 		if model != "claude-sonnet-5" {
 			t.Errorf("resolveRunModel model = %q, want claude-sonnet-5", model)
+		}
+	})
+
+	// Issue #157 at the call site: an OpenAI OAuth (ChatGPT-subscription)
+	// credential routes to the Codex backend, which rejects the SDK's
+	// provider-keyed gpt-5 default with HTTP 400 — so a fresh install plus a
+	// login used to make the very first message fail. resolveRunModel now
+	// resolves the credential KIND (a local auth.json read, no vendor call)
+	// through internal/modelcatalog. The sibling api-key case below must stay
+	// on gpt-5: this fix is a branch, not a replacement.
+	t.Run("openai oauth credential yields the codex default", func(t *testing.T) {
+		root := t.TempDir()
+		t.Setenv("ANTHROPIC_API_KEY", "")
+		t.Setenv("OPENAI_API_KEY", "")
+		writeAuthEntry(t, root, "openai", auth.Entry{Kind: auth.KindOAuth, Access: "tok", Refresh: "ref"})
+
+		model, err := resolveRunModel(context.Background(), root)
+		if err != nil {
+			t.Fatalf("resolveRunModel: %v", err)
+		}
+		if model != "gpt-5.6-terra" {
+			t.Errorf("resolveRunModel model = %q, want gpt-5.6-terra", model)
+		}
+	})
+
+	t.Run("openai api-key credential keeps the registry default", func(t *testing.T) {
+		root := t.TempDir()
+		t.Setenv("ANTHROPIC_API_KEY", "")
+		t.Setenv("OPENAI_API_KEY", "")
+		writeAuthEntry(t, root, "openai", auth.Entry{Kind: auth.KindAPIKey, Access: "sk-test-key"})
+
+		model, err := resolveRunModel(context.Background(), root)
+		if err != nil {
+			t.Fatalf("resolveRunModel: %v", err)
+		}
+		if model != "gpt-5" {
+			t.Errorf("resolveRunModel model = %q, want gpt-5", model)
 		}
 	})
 
@@ -162,6 +200,20 @@ func TestAmbiguousModelMsg_NamesExpiredProviders(t *testing.T) {
 	const wantProviders = "multiple providers have credentials (anthropic (expired), openai)"
 	if !strings.HasPrefix(got, wantProviders) {
 		t.Errorf("ambiguousModelMsg = %q, want prefix %q", got, wantProviders)
+	}
+}
+
+// writeAuthEntry persists one provider credential into root's auth.json via
+// the SDK's own store — no network IO, and no live daemon or vendor host is
+// involved.
+func writeAuthEntry(t *testing.T, root, providerID string, e auth.Entry) {
+	t.Helper()
+	store, err := auth.New(auth.WithRoot(root))
+	if err != nil {
+		t.Fatalf("auth.New: %v", err)
+	}
+	if err := store.Set(providerID, e); err != nil {
+		t.Fatalf("store.Set(%s): %v", providerID, err)
 	}
 }
 

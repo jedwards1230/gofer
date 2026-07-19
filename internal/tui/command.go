@@ -136,6 +136,12 @@ func openPanel(tab commandPanelTab) func(App, []string) (App, tea.Cmd) {
 	return func(a App, _ []string) (App, tea.Cmd) {
 		p := newCommandPanel(a.theme, tab, a.commandEnv, a.currentSessionInfo(), a.over.DefaultModel())
 		a.panel = &p
+		if tab == panelModel {
+			// Only /model pays for a listing. Opening /status or /config must
+			// not issue a vendor request the user never asked for — tabbing
+			// across to Model later fetches then (see App.handlePanelKey).
+			return a, a.discoverModelsCmd()
+		}
 		return a, nil
 	}
 }

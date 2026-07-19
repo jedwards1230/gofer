@@ -21,11 +21,16 @@ type HelloResult struct {
 	ACPProtocolVersion int    `json:"acpProtocolVersion"`
 
 	// DefaultModel is the model this daemon creates a session with when the
-	// client's session/new carries none ([Config.DefaultModel]). A client
-	// showing "the model sessions will use" must read it from here rather than
-	// resolve one locally: the daemon resolved its own at ITS startup against
-	// ITS store, which a client machine cannot reproduce. Omitted (and decoded
-	// as "") by daemons predating the field, which callers must treat as
-	// "unknown", not "none".
+	// client's session/new carries none. A client showing "the model sessions
+	// will use" must read it from here rather than resolve one locally: the
+	// daemon resolves its own against ITS store, which a client machine cannot
+	// reproduce. Omitted (and decoded as "") by daemons predating the field,
+	// which callers must treat as "unknown", not "none".
+	//
+	// It is answered live, from the same accessor session/new uses, so it is
+	// the daemon's CURRENT default rather than a startup snapshot — a daemon
+	// that picks up a config change (see [Config.ResolveDefaultModel]) reports
+	// the new value on the next hello. A client that cached an earlier hello is
+	// therefore the only remaining staleness layer; re-handshake to refresh.
 	DefaultModel string `json:"defaultModel,omitempty"`
 }

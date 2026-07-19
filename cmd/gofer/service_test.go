@@ -118,6 +118,21 @@ type fakeServiceManager struct {
 	unloadCalls int
 	loadErr     error
 
+	// unloadDidWork is what unload reports as its "anything actually unloaded"
+	// bool; unloadErr is the error it returns. Both default to the zero value
+	// (nothing unloaded, no error), which is the honest answer for a fake whose
+	// service was never running.
+	unloadDidWork bool
+	unloadErr     error
+
+	// stopCalls/startCalls count the stopService/startService lever `gofer daemon
+	// stop|restart` pulls for a service-managed daemon; stopDidWork is what
+	// stopService reports.
+	stopCalls   int
+	startCalls  int
+	stopDidWork bool
+	stopErr     error
+
 	// reloadCalls counts reloadAfterRemove invocations; fileGoneAtReload records
 	// whether the unit file was already removed by the time reloadAfterRemove
 	// ran — proof the command layer reloads AFTER os.Remove, not before.
@@ -144,8 +159,24 @@ func (f *fakeServiceManager) load(_ context.Context, _ string) error {
 	return f.loadErr
 }
 
-func (f *fakeServiceManager) unload(_ context.Context, _ string) error {
+func (f *fakeServiceManager) unload(_ context.Context, _ string) (bool, error) {
 	f.unloadCalls++
+	return f.unloadDidWork, f.unloadErr
+}
+
+func (f *fakeServiceManager) stopService(_ context.Context, _ string) (bool, error) {
+	f.stopCalls++
+	if f.stopErr != nil {
+		return false, f.stopErr
+	}
+	if f.stopDidWork {
+		f.isRunning = false
+	}
+	return f.stopDidWork, nil
+}
+
+func (f *fakeServiceManager) startService(_ context.Context, _ string) error {
+	f.startCalls++
 	return nil
 }
 
@@ -281,12 +312,17 @@ func TestRunDaemonUninstallViaSeam(t *testing.T) {
 	if err := os.WriteFile(path, []byte("[Unit]\n"), 0o644); err != nil {
 		t.Fatalf("seed unit file: %v", err)
 	}
-	fake := &fakeServiceManager{path: path}
+	// unloadDidWork: the service WAS loaded, so this covers the real-uninstall
+	// path (see TestRunDaemonUninstallReportsNothingUnloaded for the other one).
+	fake := &fakeServiceManager{path: path, unloadDidWork: true}
 	withFakeManager(t, fake)
 
 	var out, errBuf bytes.Buffer
 	if err := runDaemonUninstall(context.Background(), nil, &out, &errBuf); err != nil {
 		t.Fatalf("runDaemonUninstall: %v (stderr=%q)", err, errBuf.String())
+	}
+	if !strings.Contains(out.String(), "Uninstalled") {
+		t.Errorf("stdout = %q, want the success message when a loaded service was unloaded", out.String())
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Errorf("uninstall left the unit file behind (err=%v)", err)

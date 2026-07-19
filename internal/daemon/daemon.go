@@ -113,7 +113,30 @@ type Config struct {
 	// Callers resolve this the same way `gofer run` does (the sole logged-in
 	// provider's model) before constructing Config; the daemon does not
 	// re-derive it.
+	//
+	// With ResolveDefaultModel set, this becomes the STARTUP value and the
+	// standing fallback the resolver degrades to, rather than the value used
+	// forever.
 	DefaultModel string
+	// ResolveDefaultModel, when non-nil, is consulted per request for the
+	// daemon's current default model instead of using the frozen startup
+	// DefaultModel — the fix for a daemon that could never observe a
+	// `session.model` config write made after it started (issue #156), which
+	// made `/model` from a daemon-attached client permanently ineffective no
+	// matter how many times the CLIENT restarted.
+	//
+	// The daemon still does NOT re-derive the model itself: model policy
+	// (config precedence, credential scanning, the OpenAI credential-kind
+	// routing of #157) lives in cmd/gofer, and this callback is how that policy
+	// is re-invoked. Deliberately mirrors the AuthedProviders callback below,
+	// including its non-fatal contract: an error, or an empty result, degrades
+	// to DefaultModel and is never a reason to fail the request. A daemon
+	// started with an explicit --model passes nil here, pinning its flag for
+	// the process lifetime (see cmd/gofer's daemonDefaultModelResolver).
+	//
+	// It must be safe for concurrent use: peers are served on their own
+	// goroutines, so several may resolve at once.
+	ResolveDefaultModel func(context.Context) (string, error)
 	// Version is the daemon's build version (cmd/gofer's effectiveVersion()),
 	// surfaced verbatim as gofer/hello's binaryVersion so a router/peer can
 	// detect version skew in-band (design §6). Empty ("") when a caller does not
@@ -281,6 +304,40 @@ func (d *Daemon) authedProviders() map[string]bool {
 		return nil
 	}
 	return authed
+}
+
+// defaultModel reports the model this daemon currently uses for a session/new
+// that carries none, for session/load (which has no model field of its own),
+// and as gofer/hello's advertised defaultModel.
+//
+// It is deliberately the SINGLE source for all three. Before this existed the
+// value was read straight off cfg.DefaultModel at each site, so any fix that
+// unfroze the behavior without unfreezing what hello advertises would have left
+// the daemon acting on one model while telling every attached client it used
+// another — moving the lie rather than removing it (issue #156).
+//
+// Resolution is non-fatal by contract, mirroring [Daemon.authedProviders]: a
+// nil resolver (a daemon pinned by an explicit --model), a resolver error (a
+// malformed config.json, a credential store that has become ambiguous since
+// startup), or an empty result all degrade to the startup [Config.DefaultModel].
+// A session/new must not start failing because an unrelated config edit was
+// mistyped — the daemon keeps serving with the model it already had.
+func (d *Daemon) defaultModel(ctx context.Context) string {
+	if d.cfg.ResolveDefaultModel == nil {
+		return d.cfg.DefaultModel
+	}
+	model, err := d.cfg.ResolveDefaultModel(ctx)
+	if err != nil {
+		// Logged, never returned: the operator needs to know their config is
+		// unreadable, but the request proceeds on the startup value.
+		d.log.Warn("resolve daemon default model; falling back to the startup default",
+			"err", err, "default", d.cfg.DefaultModel)
+		return d.cfg.DefaultModel
+	}
+	if model == "" {
+		return d.cfg.DefaultModel
+	}
+	return model
 }
 
 // attachPeer records that p is interested in sessionID's session/update

@@ -12,13 +12,16 @@ package tui_test
 // dispatchSlash.
 
 import (
+	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/jedwards1230/gofer/internal/config"
+	"github.com/jedwards1230/gofer/internal/modelcatalog"
 	"github.com/jedwards1230/gofer/internal/tui"
 	"github.com/jedwards1230/gofer/internal/tui/testkit"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
@@ -261,7 +264,7 @@ func TestModelSelectConfigReadErrorAbortsBeforeSave(t *testing.T) {
 // exactly like a listed one, with the raw id standing in for a display name
 // gofer has no label for yet.
 func TestModelSelectTypedUnregisteredIDSetsDefault(t *testing.T) {
-	const typed = "gpt-5.6-sol"
+	const typed = "gpt-9-unreleased"
 	var saved []config.Config
 	sup := newFakeSup(modelSelectRoster())
 	m := newModelSelectApp(t, sup, modelSelectEnv(&saved))
@@ -350,7 +353,7 @@ func TestModelSelectTypedUnroutableIDIsNoOp(t *testing.T) {
 // The assertion is scoped to the typed id's own line — the registered rows
 // below it legitimately carry sub-dollar prices like "$0.25/$2".
 func TestModelSelectTypedIDShowsNoFabricatedPricing(t *testing.T) {
-	const typed = "gpt-5.6-sol"
+	const typed = "gpt-9-unreleased"
 	var saved []config.Config
 	sup := newFakeSup(modelSelectRoster())
 	m := newModelSelectApp(t, sup, modelSelectEnv(&saved))
@@ -428,4 +431,321 @@ func TestGoldenModelSelectCrossProviderWarnStyled(t *testing.T) {
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 
 	testkit.AssertGoldenStyled(t, "app_model_select_cross_provider_warn", content(m))
+}
+
+// TestModelSelectUpdatesOverviewHeader is the visible half of issue #156's TUI
+// fix. The roster header's model is seeded once at NewApp time from a value
+// cmd/gofer resolved at startup, so before this it kept displaying the OLD
+// default after /model set a new one — the status line claimed the default was
+// set while the line directly above it said otherwise, and only a restart
+// reconciled them. The header must move with the selection, with no restart.
+func TestModelSelectUpdatesOverviewHeader(t *testing.T) {
+	var saved []config.Config
+	sup := newFakeSup(modelSelectRoster())
+	m := newModelSelectApp(t, sup, modelSelectEnv(&saved))
+
+	// GoldenMeta seeds the header with claude-sonnet-5.
+	if got := content(m); !strings.Contains(got, "claude-sonnet-5 ·") {
+		t.Fatalf("test premise broken: expected the header to start on claude-sonnet-5, got:\n%s", got)
+	}
+
+	m = dispatchSlash(t, m, "/model")
+	m = pressDown(t, m, pressesToHaiku)
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	got := content(m)
+	if !strings.Contains(got, "claude-haiku-4-5 ·") {
+		t.Fatalf("expected the header to show the newly selected default without a restart, got:\n%s", got)
+	}
+	if strings.Contains(got, "claude-sonnet-5 ·") {
+		t.Fatalf("expected the stale default to be gone from the header, got:\n%s", got)
+	}
+}
+
+// daemonModelSelectEnv is modelSelectEnv with the backend marked
+// daemon-attached — the state a TUI is in whenever a `gofer daemon` is
+// reachable (cmd/gofer's selectTUIBackend).
+func daemonModelSelectEnv(saved *[]config.Config) tui.CommandEnv {
+	env := modelSelectEnv(saved)
+	env.DaemonBacked = true
+	return env
+}
+
+// TestModelSelectDaemonAttachedDoesNotClaimTheDefaultTookEffect covers the
+// SECOND staleness layer (issue #156's follow-up comment), the one this TUI
+// cannot fix and must therefore not paper over. A running daemon resolves its
+// default model exactly once at its own startup and never re-reads config.json,
+// so from a daemon-attached client the config write reaches nothing the daemon
+// will do. "Default model set to X." full stop would assert an effect that did
+// not occur.
+//
+// The write itself still happens — it is what a future daemon will read — so
+// this is about the CLAIM, not about skipping the save.
+func TestModelSelectDaemonAttachedDoesNotClaimTheDefaultTookEffect(t *testing.T) {
+	var saved []config.Config
+	sup := newFakeSup(modelSelectRoster())
+	m := newModelSelectApp(t, sup, daemonModelSelectEnv(&saved))
+
+	m = dispatchSlash(t, m, "/model")
+	m = pressDown(t, m, pressesToHaiku)
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	if len(saved) != 1 || saved[0].Session.Model != "claude-haiku-4-5" {
+		t.Fatalf("SaveConfig calls = %v; want the default still persisted for future daemons", saved)
+	}
+	got := content(m)
+	// Asserted against the RENDERED, width-truncated view on purpose: a caveat
+	// that only exists off the right edge of an 80-column screen is not a
+	// caveat, and the unqualified claim is what the user would actually read.
+	// The daemon now re-reads its default per session/new, so an UNPINNED
+	// daemon does adopt this write — "unchanged until restart" (the pre-fix
+	// wording) would now be false. The TUI cannot yet tell pinned from
+	// unpinned, so the wording must be true under both.
+	if !strings.Contains(got, "Default saved; attached daemon adopts it unless pinned.") {
+		t.Fatalf("expected the status note to state the default's reach without over- or under-claiming, got:\n%s", got)
+	}
+	assertStatusFitsWidth(t, got, "Default saved; attached daemon adopts it unless pinned.")
+	// The header renders the DAEMON's own default (off gofer/hello). The
+	// daemon did not change, so neither may the header — updating it would be
+	// the same overclaim in a second place.
+	if !strings.Contains(got, "claude-sonnet-5 ·") {
+		t.Fatalf("expected the header to keep showing the daemon's unchanged default, got:\n%s", got)
+	}
+	if strings.Contains(got, "claude-haiku-4-5 ·") {
+		t.Fatalf("expected the header NOT to adopt a default the attached daemon never saw, got:\n%s", got)
+	}
+}
+
+// TestModelSelectDaemonAttachedHotSwapStillReportsDefaultReach covers the
+// attached-session variant: the live swap DOES cross the wire and take effect,
+// so that half of the note is unqualified — but the default's reach is still
+// the daemon's, and the note must say so in the same breath rather than
+// letting "Model set to X." stand in for both.
+func TestModelSelectDaemonAttachedHotSwapStillReportsDefaultReach(t *testing.T) {
+	var saved []config.Config
+	sup := newFakeSup(modelSelectRoster())
+	m := newModelSelectApp(t, sup, daemonModelSelectEnv(&saved))
+
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected (sonnet) session
+	m = dispatchSlash(t, m, "/model")
+	m = pressDown(t, m, pressesToHaiku)
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	wantOp := "set-model:0192a1b2-app0-7000-8000-000000000001:claude-haiku-4-5"
+	if len(sup.ops) != 1 || sup.ops[0] != wantOp {
+		t.Fatalf("sup.ops = %v; want one entry %q — the live swap crosses the wire on the daemon path too", sup.ops, wantOp)
+	}
+	got := content(m)
+	// Standalone on the daemon path, not note+suffix: the base note plus any
+	// meaningful caveat busts the 80-column floor, and a caveat truncated off
+	// the right edge leaves exactly the unqualified overclaim behind.
+	if !strings.Contains(got, "Model set for this session; daemon adopts the default unless pinned.") {
+		t.Fatalf("expected the note to report the live swap AND the default's reach, got:\n%s", got)
+	}
+	assertStatusFitsWidth(t, got, "Model set for this session; daemon adopts the default unless pinned.")
+}
+
+// assertStatusFitsWidth pins the property that made the pre-fix wording a bug
+// twice over: a status note is truncated to the terminal width, so any part of
+// it that does not fit is not merely invisible — it silently converts a
+// qualified statement back into the unqualified overclaim. want must therefore
+// survive INTACT in the rendered, already-truncated view.
+func assertStatusFitsWidth(t *testing.T, rendered, want string) {
+	t.Helper()
+	if len([]rune(want)) > 80 {
+		t.Fatalf("status note is %d columns, over the 80-column floor the golden tests pin: %q", len([]rune(want)), want)
+	}
+	if !strings.Contains(rendered, want) {
+		t.Fatalf("status note did not survive truncation intact; want %q in:\n%s", want, rendered)
+	}
+}
+
+// TestModelSelectLocalBackendMakesNoDaemonClaim is
+// TestModelSelectDaemonAttachedDoesNotClaimTheDefaultTookEffect's twin, and the
+// reason the qualification is conditional rather than always-on: on the local
+// backend the write genuinely does take effect (the bridge re-resolves the
+// default per create), so there is nothing to caveat and a daemon caveat would
+// itself be the false statement.
+func TestModelSelectLocalBackendMakesNoDaemonClaim(t *testing.T) {
+	var saved []config.Config
+	sup := newFakeSup(modelSelectRoster())
+	m := newModelSelectApp(t, sup, modelSelectEnv(&saved))
+
+	m = dispatchSlash(t, m, "/model")
+	m = pressDown(t, m, pressesToHaiku)
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	if got := content(m); strings.Contains(got, "daemon") {
+		t.Fatalf("expected no daemon caveat on the local backend, got:\n%s", got)
+	}
+}
+
+// discoveryEnv returns a CommandEnv whose Models closure records which
+// providers were asked for and answers with a live-only catalog, so a test can
+// tell "the panel host fetched" from "the picker rendered its floor".
+func discoveryEnv(asked *[]string) tui.CommandEnv {
+	env := tui.GoldenCommandEnv()
+	env.Auth = func() ([]tui.ProviderAuth, error) {
+		return []tui.ProviderAuth{{Provider: "openai", Kind: tui.KindOAuth}}, nil
+	}
+	env.Models = func(_ context.Context, providerID string) ([]modelcatalog.Model, error) {
+		*asked = append(*asked, providerID)
+		return []modelcatalog.Model{
+			{ID: "gpt-5.9-nova", Provider: "openai", Label: "GPT-5.9 Nova", ContextWindow: 512_000},
+		}, nil
+	}
+	return env
+}
+
+// dispatchSlashCmd is [dispatchSlash] that hands BACK the command rather than
+// running it. dispatchSlash goes through press, which resolves any command
+// immediately — fine for everything else, but it would hide the very thing
+// these tests are about: that /model renders a usable panel BEFORE its catalog
+// load resolves.
+func dispatchSlashCmd(t *testing.T, m tea.Model, slash string) (tea.Model, tea.Cmd) {
+	t.Helper()
+	m = type_(t, m, slash)
+	return m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+}
+
+// runCmd executes a tea.Cmd and feeds its message back into the model, the way
+// the bubbletea runtime does. Returns the model unchanged when cmd is nil.
+func runCmd(t *testing.T, m tea.Model, cmd tea.Cmd) tea.Model {
+	t.Helper()
+	if cmd == nil {
+		return m
+	}
+	msg := cmd()
+	if msg == nil {
+		return m
+	}
+	next, _ := m.Update(msg)
+	return next
+}
+
+// TestOpenModelPanelFetchesAndUpgrades is the end-to-end path for the live
+// picker: /model opens on the offline floor, returns a command, and the
+// command's result upgrades the visible list — all without the open itself
+// blocking on the fetch.
+func TestOpenModelPanelFetchesAndUpgrades(t *testing.T) {
+	var asked []string
+	sup := newFakeSup(modelSelectRoster())
+	m := newModelSelectApp(t, sup, discoveryEnv(&asked))
+
+	m, cmd := dispatchSlashCmd(t, m, "/model")
+
+	// The panel is already usable before the fetch resolves.
+	if got := content(m); !strings.Contains(got, "gpt-5.6-terra") {
+		t.Fatalf("expected the offline Codex floor on open, got:\n%s", got)
+	}
+	if cmd == nil {
+		t.Fatal("expected /model to return a catalog-load command")
+	}
+
+	m = runCmd(t, m, cmd)
+
+	if !slices.Equal(asked, []string{"openai"}) {
+		t.Fatalf("env.Models asked for %v, want [openai]", asked)
+	}
+	got := content(m)
+	if !strings.Contains(got, "GPT-5.9 Nova") {
+		t.Fatalf("expected the live listing to replace the floor, got:\n%s", got)
+	}
+	if strings.Contains(got, "gpt-5.6-terra") {
+		t.Fatalf("expected the floor to be gone once the live list landed, got:\n%s", got)
+	}
+}
+
+// TestOpenStatusPanelDoesNotFetchModels pins the cost boundary: only /model
+// pays for a vendor listing. Opening /status or /config must not issue a
+// request the user never asked for.
+func TestOpenStatusPanelDoesNotFetchModels(t *testing.T) {
+	var asked []string
+	sup := newFakeSup(modelSelectRoster())
+	m := newModelSelectApp(t, sup, discoveryEnv(&asked))
+
+	m, cmd := dispatchSlashCmd(t, m, "/status")
+	_ = runCmd(t, m, cmd)
+
+	if len(asked) != 0 {
+		t.Fatalf("env.Models called for %v on /status, want no vendor request from a tab the user did not open", asked)
+	}
+}
+
+// TestTabbingIntoModelFetches covers the other route to the picker: the panel
+// opens on whichever tab the slash command named, but ←/→ reach all three, so
+// arriving at Model by tabbing must load the catalog too.
+func TestTabbingIntoModelFetches(t *testing.T) {
+	var asked []string
+	sup := newFakeSup(modelSelectRoster())
+	m := newModelSelectApp(t, sup, discoveryEnv(&asked))
+
+	m, _ = dispatchSlashCmd(t, m, "/status")
+	if len(asked) != 0 {
+		t.Fatalf("test premise broken: /status already fetched %v", asked)
+	}
+
+	// Status -> Config -> Model.
+	var cmd tea.Cmd
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	m, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	m = runCmd(t, m, cmd)
+
+	if !slices.Equal(asked, []string{"openai"}) {
+		t.Fatalf("env.Models asked for %v after tabbing into Model, want [openai]", asked)
+	}
+	if got := content(m); !strings.Contains(got, "GPT-5.9 Nova") {
+		t.Fatalf("expected the live listing after tabbing into Model, got:\n%s", got)
+	}
+}
+
+// TestModelsLoadedAfterPanelClosedIsDropped covers the in-flight-then-dismissed
+// race: a load resolving after the user closed the panel must not resurrect it.
+func TestModelsLoadedAfterPanelClosedIsDropped(t *testing.T) {
+	var asked []string
+	sup := newFakeSup(modelSelectRoster())
+	m := newModelSelectApp(t, sup, discoveryEnv(&asked))
+
+	m, cmd := dispatchSlashCmd(t, m, "/model")
+	msg := cmd() // resolve the load, but do NOT deliver it yet
+
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEscape}) // close the panel
+	if strings.Contains(content(m), "[Model]") {
+		t.Fatal("test premise broken: expected Esc to close the panel")
+	}
+
+	m, _ = m.Update(msg)
+
+	if got := content(m); strings.Contains(got, "[Model]") {
+		t.Fatalf("a catalog load landing after the panel closed must not reopen it, got:\n%s", got)
+	}
+}
+
+// TestModelSelectCommitsALiveOnlyID is the payoff, stated as behavior: an id
+// that exists ONLY in the live listing — absent from the SDK registry, the
+// static Codex floor, and modelmeta — is selectable from the list and persisted
+// as the default. Before discovery there was no way to reach such a model
+// except by typing its id from memory.
+func TestModelSelectCommitsALiveOnlyID(t *testing.T) {
+	var asked []string
+	var saved []config.Config
+	env := discoveryEnv(&asked)
+	env.SaveConfig = func(c config.Config) error { saved = append(saved, c); return nil }
+
+	sup := newFakeSup(modelSelectRoster())
+	m := newModelSelectApp(t, sup, env)
+
+	m, cmd := dispatchSlashCmd(t, m, "/model")
+	m = runCmd(t, m, cmd)
+	m = pressDown(t, m, 1) // the live list's only row
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	if len(saved) != 1 || saved[0].Session.Model != "gpt-5.9-nova" {
+		t.Fatalf("SaveConfig calls = %v; want one entry with the live-only id gpt-5.9-nova", saved)
+	}
+	// The panel commits and closes, same as any other select — asserted so the
+	// final press is observed rather than left as a dead assignment.
+	if got := content(m); strings.Contains(got, "[Model]") {
+		t.Fatalf("expected the panel to close after committing a live-only id, got:\n%s", got)
+	}
 }

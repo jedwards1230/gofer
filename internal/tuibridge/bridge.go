@@ -24,18 +24,32 @@ import (
 // Adapter presents a [*supervisor.Supervisor] as a [tui.Supervisor].
 type Adapter struct {
 	sup *supervisor.Supervisor
-	// defaultModel is the model a Create with no explicit model resolves to —
-	// this adapter's equivalent of [daemon.Config.DefaultModel] on the daemon
-	// path. Without it the TUI's own resolved model never reached Create and
-	// every session started from the roster died on an empty model id (issue
-	// #147). May be "": Create then fails with supervisor.ErrNoModel, whose
-	// message names the remedy.
-	defaultModel string
+	// defaultModel RESOLVES the model a Create with no explicit model falls
+	// back to — this adapter's equivalent of [daemon.Config.DefaultModel] on
+	// the daemon path. Without it the TUI's own resolved model never reached
+	// Create and every session started from the roster died on an empty model
+	// id (issue #147).
+	//
+	// It is a function, not a captured string, and that is the whole point
+	// (issue #156). A string is a COPY of the default taken at construction:
+	// once `/model` writes a new session.model into config.json, the copy is
+	// stale for the rest of the process's life, so every session the TUI
+	// created after a `/model` still ran the model the process started with
+	// and no amount of reselecting could change it. Resolving on each Create
+	// keeps exactly one source of truth — whatever the resolver reads — so a
+	// change made anywhere (this TUI's `/model`, an edit to config.json, a
+	// `gofer login` in another terminal) is picked up with no restart.
+	//
+	// nil, or a resolver returning "", is valid: Create then fails with
+	// supervisor.ErrNoModel, whose message names the remedy.
+	defaultModel func(context.Context) string
 }
 
-// New returns an Adapter wrapping sup, creating sessions with defaultModel
-// whenever the caller supplies no model of its own.
-func New(sup *supervisor.Supervisor, defaultModel string) Adapter {
+// New returns an Adapter wrapping sup, resolving the create-time fallback
+// model through defaultModel whenever the caller supplies no model of its own.
+// defaultModel is called on each such Create — see [Adapter.defaultModel] for
+// why it must not be a value captured once.
+func New(sup *supervisor.Supervisor, defaultModel func(context.Context) string) Adapter {
 	return Adapter{sup: sup, defaultModel: defaultModel}
 }
 
@@ -64,12 +78,14 @@ func (a Adapter) Subscribe(ctx context.Context, sessionID string) (*event.Subscr
 
 // Create maps the TUI's create options onto the supervisor's and returns the
 // new session's TUI row. An unset opts.Model falls back to the adapter's
-// defaultModel, mirroring how the daemon resolves session/new against
-// [daemon.Config.DefaultModel].
+// defaultModel resolver, mirroring how the daemon resolves session/new against
+// [daemon.Config.DefaultModel] — resolved HERE, per create, so a default
+// changed since this adapter was built (via `/model`, say) applies to this
+// session rather than to the next process.
 func (a Adapter) Create(ctx context.Context, prompt string, opts tui.CreateOptions) (tui.SessionInfo, error) {
 	model := opts.Model
-	if model == "" {
-		model = a.defaultModel
+	if model == "" && a.defaultModel != nil {
+		model = a.defaultModel(ctx)
 	}
 	info, err := a.sup.Create(ctx, prompt, supervisor.CreateOptions{Model: model, Cwd: opts.Cwd})
 	if err != nil {

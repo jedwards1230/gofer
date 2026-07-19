@@ -22,6 +22,14 @@ import (
 	"github.com/jedwards1230/gofer/internal/tuibridge"
 )
 
+// fixedModel is the trivial resolver: a default that genuinely never changes,
+// for the tests below whose subject is the fallback ORDER rather than the
+// fallback's freshness. Tests about freshness (see
+// TestAdapterCreateReresolvesDefaultPerCreate) supply a resolver that changes.
+func fixedModel(id string) func(context.Context) string {
+	return func(context.Context) string { return id }
+}
+
 // newModelRecordingSupervisor builds a Supervisor that records the model each
 // Create actually reaches the runner with, then substitutes the faux provider
 // so no network is touched. It deliberately does NOT reuse
@@ -60,7 +68,7 @@ func newModelRecordingSupervisor(t *testing.T, seen *[]string) *supervisor.Super
 // too (the empty model only failed later, inside the SDK).
 func TestAdapterCreateUsesDefaultModel(t *testing.T) {
 	var seen []string
-	a := tuibridge.New(newModelRecordingSupervisor(t, &seen), "claude-sonnet-5")
+	a := tuibridge.New(newModelRecordingSupervisor(t, &seen), fixedModel("claude-sonnet-5"))
 
 	if _, err := a.Create(context.Background(), "", tui.CreateOptions{Cwd: t.TempDir()}); err != nil {
 		t.Fatalf("Create: %v", err)
@@ -78,7 +86,7 @@ func TestAdapterCreateUsesDefaultModel(t *testing.T) {
 // override is never silently replaced by the adapter's default.
 func TestAdapterCreateExplicitModelWins(t *testing.T) {
 	var seen []string
-	a := tuibridge.New(newModelRecordingSupervisor(t, &seen), "claude-sonnet-5")
+	a := tuibridge.New(newModelRecordingSupervisor(t, &seen), fixedModel("claude-sonnet-5"))
 
 	opts := tui.CreateOptions{Cwd: t.TempDir(), Model: "gpt-5"}
 	if _, err := a.Create(context.Background(), "", opts); err != nil {
@@ -99,7 +107,7 @@ func TestAdapterCreateExplicitModelWins(t *testing.T) {
 // the message users actually saw (issue #147).
 func TestAdapterCreateNoModelAnywhereIsActionable(t *testing.T) {
 	var seen []string
-	a := tuibridge.New(newModelRecordingSupervisor(t, &seen), "")
+	a := tuibridge.New(newModelRecordingSupervisor(t, &seen), fixedModel(""))
 
 	_, err := a.Create(context.Background(), "", tui.CreateOptions{Cwd: t.TempDir()})
 	if err == nil {
@@ -110,5 +118,61 @@ func TestAdapterCreateNoModelAnywhereIsActionable(t *testing.T) {
 	}
 	if len(seen) != 0 {
 		t.Errorf("NewSession ran %d times with an empty model, want 0 — the guard must fire first", len(seen))
+	}
+}
+
+// TestAdapterCreateReresolvesDefaultPerCreate is the regression guard for
+// issue #156's TUI half. The adapter used to capture the default model BY
+// VALUE at construction, so the fallback was frozen for the process's whole
+// life: `/model` wrote a new session.model into config.json, the status line
+// said the default was set, and every session created afterwards still ran the
+// model this process had started with. No amount of reselecting — or even
+// restarting the TUI client, on the daemon path — could reach it.
+//
+// The proof has to be that a SECOND create sees a CHANGED default, not merely
+// that one create sees the right value: a captured string passes the
+// single-create version of this test perfectly.
+//
+// nil, meanwhile, must stay survivable rather than panicking — the adapter's
+// contract is that a missing default fails with the actionable
+// supervisor.ErrNoModel, not with a nil-func dereference.
+func TestAdapterCreateReresolvesDefaultPerCreate(t *testing.T) {
+	var seen []string
+	current := "claude-sonnet-5"
+	a := tuibridge.New(newModelRecordingSupervisor(t, &seen), func(context.Context) string { return current })
+
+	if _, err := a.Create(context.Background(), "", tui.CreateOptions{Cwd: t.TempDir()}); err != nil {
+		t.Fatalf("first Create: %v", err)
+	}
+
+	// Stand-in for what /model does: change the one source of truth the
+	// resolver reads (config.json in the real wiring, this variable here).
+	current = "claude-haiku-4-5"
+
+	if _, err := a.Create(context.Background(), "", tui.CreateOptions{Cwd: t.TempDir()}); err != nil {
+		t.Fatalf("second Create: %v", err)
+	}
+
+	want := []string{"claude-sonnet-5", "claude-haiku-4-5"}
+	if len(seen) != len(want) {
+		t.Fatalf("NewSession models = %v, want %v", seen, want)
+	}
+	for i := range want {
+		if seen[i] != want[i] {
+			t.Fatalf("NewSession models = %v, want %v — a create after the default changed must use the NEW default, not the one captured at construction", seen, want)
+		}
+	}
+}
+
+// TestAdapterNilResolverIsNotAPanic pins the nil-resolver contract the doc
+// promises: no default is a normal state (no credential yet), and it must
+// surface as supervisor.ErrNoModel rather than as a nil-func call.
+func TestAdapterNilResolverIsNotAPanic(t *testing.T) {
+	var seen []string
+	a := tuibridge.New(newModelRecordingSupervisor(t, &seen), nil)
+
+	_, err := a.Create(context.Background(), "", tui.CreateOptions{Cwd: t.TempDir()})
+	if !errors.Is(err, supervisor.ErrNoModel) {
+		t.Errorf("Create with a nil resolver err = %v, want supervisor.ErrNoModel", err)
 	}
 }

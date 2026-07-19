@@ -59,14 +59,58 @@ func (launchdManager) load(ctx context.Context, path string) error {
 	return nil
 }
 
-// unload boots the agent out of the GUI domain. An already-unloaded label is
-// tolerated so uninstall stays idempotent.
-func (m launchdManager) unload(ctx context.Context, path string) error {
-	domain := "gui/" + strconv.Itoa(os.Getuid())
-	target := domain + "/" + m.label()
-	// bootout by service target; ignore "not loaded" so uninstall is idempotent.
-	_ = runQuiet(ctx, "launchctl", "bootout", target)
-	return nil
+// unload boots the agent out of the GUI domain, reporting whether anything was
+// actually unloaded. On launchd, bootout both stops the job and deregisters it,
+// so unload and stopService are the same operation (see bootout).
+func (m launchdManager) unload(ctx context.Context, _ string) (bool, error) {
+	return m.bootout(ctx)
+}
+
+// stopService boots the agent out of the GUI domain, which is launchd's only
+// way to stop a KeepAlive=true job: `launchctl kill` merely signals it, and the
+// job is immediately respawned. The consequence is that the agent stays down
+// until it is bootstrapped again — by the next login (RunAtLoad) or by
+// `gofer daemon restart`, which re-bootstraps explicitly (startService). The
+// plist is left in place either way, so the install survives.
+func (m launchdManager) stopService(ctx context.Context, _ string) (bool, error) {
+	return m.bootout(ctx)
+}
+
+// startService re-bootstraps the already-installed plist — the start half of
+// `gofer daemon restart` after stopService booted it out.
+func (m launchdManager) startService(ctx context.Context, path string) error {
+	return m.load(ctx, path)
+}
+
+// bootout is the shared stop path. It probes first so an already-unloaded label
+// is a clean (false, nil) rather than a bootout error, then — crucially —
+// propagates a genuine bootout failure and WAITS for launchd to actually report
+// the job gone. The previous implementation discarded bootout's error and
+// returned immediately, which made a failed unload indistinguishable from a
+// successful one and let the caller print "Uninstalled" over a still-running
+// daemon.
+func (m launchdManager) bootout(ctx context.Context) (bool, error) {
+	loaded, err := m.running(ctx)
+	if err != nil {
+		return false, err
+	}
+	if !loaded {
+		return false, nil
+	}
+	target := m.serviceTarget()
+	if err := runQuiet(ctx, "launchctl", "bootout", target); err != nil {
+		// The job may have exited between the probe and the bootout, which
+		// launchctl reports as an error but is exactly the outcome we wanted.
+		// Only a job that is genuinely still loaded makes this a real failure.
+		if stillLoaded, rerr := m.running(ctx); rerr == nil && !stillLoaded {
+			return true, nil
+		}
+		return false, err
+	}
+	if err := waitServiceStopped(ctx, m.running); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // reloadAfterRemove is a no-op on launchd: bootout in unload already dropped the
@@ -74,11 +118,15 @@ func (m launchdManager) unload(ctx context.Context, path string) error {
 // (the systemd path is the only one that must forget a deleted unit).
 func (launchdManager) reloadAfterRemove(_ context.Context) error { return nil }
 
+// serviceTarget is the launchd service target (<domain>/<label>) that bootout
+// and print address.
+func (m launchdManager) serviceTarget() string {
+	return "gui/" + strconv.Itoa(os.Getuid()) + "/" + m.label()
+}
+
 // running reports whether launchctl knows the label in the GUI domain.
 func (m launchdManager) running(ctx context.Context) (bool, error) {
-	domain := "gui/" + strconv.Itoa(os.Getuid())
-	target := domain + "/" + m.label()
-	err := runQuiet(ctx, "launchctl", "print", target)
+	err := runQuiet(ctx, "launchctl", "print", m.serviceTarget())
 	if err == nil {
 		return true, nil
 	}

@@ -29,7 +29,17 @@ func (unsupportedServiceManager) isInstalled() (bool, error) { return false, nil
 
 func (unsupportedServiceManager) load(_ context.Context, _ string) error { return unsupportedErr() }
 
-func (unsupportedServiceManager) unload(_ context.Context, _ string) error { return unsupportedErr() }
+func (unsupportedServiceManager) unload(_ context.Context, _ string) (bool, error) {
+	return false, unsupportedErr()
+}
+
+func (unsupportedServiceManager) stopService(_ context.Context, _ string) (bool, error) {
+	return false, unsupportedErr()
+}
+
+func (unsupportedServiceManager) startService(_ context.Context, _ string) error {
+	return unsupportedErr()
+}
 
 func (unsupportedServiceManager) reloadAfterRemove(_ context.Context) error { return nil }
 

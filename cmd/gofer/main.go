@@ -181,6 +181,7 @@ Commands:
   attach    Open the roster TUI against a running daemon (requires one)
   agents    Alias for "attach" with no <session>: open the roster overview
   daemon    Run the supervisor behind an ACP-over-WebSocket listener (alias: serve);
+            "daemon stop|restart" stop or replace a running one, and
             "daemon install|uninstall|status" manage a launchd/systemd unit so it
             starts on login
   session-worker  Single-session daemon on a loopback ephemeral port; prints a

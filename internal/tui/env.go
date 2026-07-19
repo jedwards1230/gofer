@@ -11,9 +11,11 @@ package tui
 // shows up the next time the panel opens with no extra plumbing.
 
 import (
+	"context"
 	"time"
 
 	"github.com/jedwards1230/gofer/internal/config"
+	"github.com/jedwards1230/gofer/internal/modelcatalog"
 )
 
 // CommandEnv is the command panel's read-only data source. Auth and Config
@@ -30,6 +32,20 @@ type CommandEnv struct {
 	Cwd     string
 	Root    string // the resolved store root (~/.gofer, or --root)
 
+	// DaemonBacked reports whether the roster this TUI drives belongs to a
+	// running `gofer daemon` rather than to a local in-process supervisor this
+	// process owns (cmd/gofer's selectTUIBackend picks one or the other).
+	//
+	// It exists because it changes what a config write MEANS. Auth and Config
+	// are always local to this machine, but the daemon resolves its own default
+	// model exactly once, at ITS startup, and never re-reads config.json — so
+	// from a daemon-attached TUI, persisting session.model cannot change what
+	// the attached daemon runs, only what a future one will (issue #156). The
+	// only consumer is [App.handleModelSelect], which must not report an effect
+	// that did not occur. False (the zero value) is the local backend, where a
+	// config write does take effect immediately.
+	DaemonBacked bool
+
 	// Auth lists every authenticated provider, wrapping auth.Store.Status().
 	Auth func() ([]ProviderAuth, error)
 
@@ -41,6 +57,24 @@ type CommandEnv struct {
 	// on every committed edit — bool toggle, enum cycle, or a string edit's
 	// Enter — immediately, with no separate save step.
 	SaveConfig func(config.Config) error
+
+	// Models resolves the models providerID's CURRENT credential can actually
+	// reach, wrapping modelcatalog.Catalog with live discovery enabled.
+	//
+	// It is the ONE closure here that can perform network IO, and it is the
+	// reason /model resolves its list once at panel-open rather than per
+	// render: [modelcatalog.DefaultDiscoveryTimeout] bounds it at 3s, which is
+	// fine for a one-shot background load and unusable on a keystroke path.
+	// It takes a ctx for that reason — the caller runs it off the Update loop
+	// in a tea.Cmd and can cancel it — and gofer's store root stays cmd/gofer's
+	// business, exactly as it is for Auth/Config.
+	//
+	// Non-fatal like the rest: [modelcatalog.Catalog] already degrades every
+	// discovery failure to the compiled-in floor internally, so an error here
+	// means only a broken auth.json. A nil closure (the zero CommandEnv) is
+	// valid and leaves the picker on the floor it seeded itself with — never
+	// an empty list.
+	Models func(ctx context.Context, providerID string) ([]modelcatalog.Model, error)
 }
 
 // AuthKind is a credential's kind, mirroring the SDK auth package's CredKind

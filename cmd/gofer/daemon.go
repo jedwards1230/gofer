@@ -28,16 +28,29 @@ import (
 // daemon's own graceful HTTP shutdownTimeout (internal/daemon).
 const telemetryShutdownTimeout = 5 * time.Second
 
-// runDaemon implements `gofer daemon` (alias `serve`): it builds a supervisor,
-// hosts it behind an ACP-over-WebSocket listener, and blocks in the
-// foreground until interrupted (SIGINT) or ctx is otherwise cancelled, then
-// shuts both down.
+// serveForeground is the seam a test swaps to observe whether a `gofer daemon`
+// invocation reached the foreground-serve path at all. It is what makes "an
+// unknown sub-verb starts nothing" an assertion about the serve function never
+// being entered, rather than an inference from an exit code — the old
+// fall-through bug produced a non-zero exit too (via the already-running
+// guard), so exit code alone cannot distinguish the fix from the defect.
+var serveForeground = serveDaemonForeground
+
+// runDaemon implements `gofer daemon` (alias `serve`): it dispatches the
+// lifecycle sub-verbs and otherwise hands off to the foreground serve path.
 func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	// Peel a lifecycle sub-verb before treating the remaining args as
-	// foreground-serve flags: `gofer daemon install|uninstall|status` manage the
-	// launchd/systemd unit, while a bare `gofer daemon` (or any other leading
-	// token, e.g. `--listen`) falls through to today's foreground serve.
+	// foreground-serve flags: `gofer daemon install|uninstall|status|stop|restart`
+	// manage the daemon's lifecycle, while a bare `gofer daemon` — or one whose
+	// first token is a FLAG, e.g. `--listen` — falls through to foreground serve.
 	// Mirrors runAuth peeling its lone positional.
+	//
+	// The default arm is load-bearing, not defensive. Without it every
+	// unrecognized positional fell through to foreground serve, so `gofer daemon
+	// stop` literally tried to START a daemon and the already-running guard then
+	// answered "a gofer daemon is already running — stop it first"; a typo like
+	// `gofer daemon staus` silently started one. Only a leading `-` still falls
+	// through, because that is a serve flag rather than a mistyped sub-verb.
 	if len(args) > 0 {
 		switch args[0] {
 		case "install":
@@ -46,9 +59,26 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 			return runDaemonUninstall(ctx, args[1:], stdout, stderr)
 		case "status":
 			return runDaemonStatus(ctx, args[1:], stdout, stderr)
+		case "stop":
+			return runDaemonStop(ctx, args[1:], stdout, stderr)
+		case "restart":
+			return runDaemonRestart(ctx, args[1:], stdout, stderr)
+		default:
+			if !strings.HasPrefix(args[0], "-") {
+				return &usageError{msg: fmt.Sprintf(
+					"unknown sub-verb %q (want install, uninstall, status, stop, or restart; a bare `gofer daemon` starts one in the foreground)", args[0])}
+			}
 		}
 	}
 
+	return serveForeground(ctx, args, stdout, stderr)
+}
+
+// serveDaemonForeground builds a supervisor, hosts it behind an
+// ACP-over-WebSocket listener, and blocks in the foreground until interrupted
+// (SIGINT) or ctx is otherwise cancelled, then shuts both down. Reached only
+// from runDaemon, for a bare `gofer daemon` or one whose args are serve flags.
+func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("daemon", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	listen := fs.String("listen", daemon.DefaultListenAddr, "address to bind the ACP WebSocket listener")
@@ -148,7 +178,13 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 
 	// Resolve the model before starting anything: a daemon with no usable
 	// credential should fail fast at startup, not on the first session/new.
+	//
+	// modelPinned records the PROVENANCE of that value, not just the value:
+	// whether the operator named the model on the command line. It decides
+	// whether later config writes may retarget this daemon (see
+	// daemonDefaultModelResolver).
 	modelID := *model
+	modelPinned := modelFlagPinned(fs, modelID)
 	if modelID == "" {
 		var rerr error
 		modelID, rerr = resolveRunModel(ctx, rootDir)
@@ -254,6 +290,10 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		ListenAddr:   *listen,
 		BearerToken:  bearerToken,
 		DefaultModel: modelID,
+		// Let a running daemon observe a later `session.model` config write
+		// instead of freezing its startup answer forever (issue #156). nil when
+		// the operator pinned --model, which keeps DefaultModel authoritative.
+		ResolveDefaultModel: daemonDefaultModelResolver(modelPinned, rootDir),
 		// effectiveVersion(), NOT the raw ldflags `version`: this value is what
 		// gofer/hello reports as binaryVersion, and every worker stamps its own
 		// with effectiveVersion() (see runSessionWorker). Stamping the raw
@@ -366,6 +406,72 @@ func runDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		serveErr = fmt.Errorf("close supervisor: %w", cerr)
 	}
 	return serveErr
+}
+
+// modelFlagPinned reports whether this daemon's default model was chosen by the
+// operator on the command line, and is therefore authoritative for the process
+// lifetime rather than open to being retargeted by a later config write.
+//
+// Both halves are required. flagWasSet, not `model != ""` alone, so the rule
+// reads as "the operator passed --model" rather than being inferred from a
+// sentinel — an explicit --model that happens to equal the config value is
+// still explicit, and a future non-empty flag default would not silently
+// become a pin. Non-empty, because `--model ""` explicitly asks for NO pinned
+// model: startup then falls through to resolveRunModel exactly as an omitted
+// flag does, so pinning it would freeze the daemon on a value the operator
+// never named.
+func modelFlagPinned(fs *flag.FlagSet, model string) bool {
+	return flagWasSet(fs, "model") && model != ""
+}
+
+// flagWasSet reports whether name was actually passed on the command line, as
+// opposed to merely holding its zero/default value. [flag.FlagSet.Visit] walks
+// only the flags Parse actually saw, which is the one way to tell "the operator
+// chose this" from "nobody said anything" without inventing a sentinel value.
+func flagWasSet(fs *flag.FlagSet, name string) bool {
+	set := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			set = true
+		}
+	})
+	return set
+}
+
+// daemonDefaultModelResolver builds the [daemon.Config.ResolveDefaultModel]
+// callback that lets a running daemon pick up a `session.model` config change
+// without a restart (issue #156), and decides — once, at startup — whether this
+// daemon is eligible for that at all.
+//
+// The rule is provenance-based:
+//
+//   - pinned (the operator passed --model): returns nil, so the daemon keeps
+//     its flag for its whole lifetime. A model named on the command line is a
+//     deliberate operator decision — this is the #147 lineage, where --model
+//     exists precisely so an operator can pin a service-managed daemon — and a
+//     config write by any attached client must not silently retarget it. A
+//     daemon that could be redirected by a stray write would make --model
+//     advisory, which is the opposite of what it is for.
+//   - unpinned (the daemon inferred its default): returns a closure re-running
+//     the SAME resolveRunModel policy `gofer run` uses, against the same root.
+//     Re-running the whole policy — rather than reading config.Session.Model
+//     directly — is what keeps one definition of "the default model": config
+//     precedence, the credential scan, and #157's OpenAI credential-kind
+//     routing all stay in one place, and a config write that CLEARS the model
+//     correctly falls back to the credential-derived answer instead of
+//     stranding the daemon on a value config no longer names.
+//
+// Errors are the caller's to absorb: the daemon treats a resolver error as
+// non-fatal and keeps its startup value (see [daemon.Config.ResolveDefaultModel]),
+// so a malformed config.json degrades a session/new to the old model rather
+// than failing it.
+func daemonDefaultModelResolver(pinned bool, root string) func(context.Context) (string, error) {
+	if pinned {
+		return nil
+	}
+	return func(ctx context.Context) (string, error) {
+		return resolveRunModel(ctx, root)
+	}
 }
 
 // guardLiveEndpoint reports whether a still-running `gofer daemon` already

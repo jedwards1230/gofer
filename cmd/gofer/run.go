@@ -13,6 +13,7 @@ import (
 
 	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/daemon"
+	"github.com/jedwards1230/gofer/internal/modelcatalog"
 	"github.com/jedwards1230/gofer/internal/supervisor"
 )
 
@@ -150,7 +151,12 @@ func resolveRunModel(ctx context.Context, root string) (string, error) {
 	}
 	switch len(creds) {
 	case 1:
-		return runner.DefaultModel(creds[0]), nil
+		// modelcatalog, not runner.DefaultModel: the SDK's default is keyed by
+		// provider id alone, but OpenAI routes by credential KIND, and the
+		// Codex backend an OAuth (ChatGPT-subscription) credential reaches
+		// rejects the SDK's gpt-5 with HTTP 400 (issue #157). Resolving the
+		// kind is a local read of auth.json — no vendor call on the start path.
+		return modelcatalog.DefaultModel(ctx, root, creds[0])
 	case 0:
 		return "", errNoProviderCredentials
 	default:
