@@ -105,18 +105,46 @@ care how many fields an event has. Byte counts still differ (1.0 kB/op vs
 1.6 kB/op at one peer) — the frame is copied, just never parsed.
 
 What remains is ~8 allocations of fixed per-event cost plus **~7 per attached
-peer**: the JSON-RPC notification envelope `peer.writeJSON` marshals around the
-verbatim params, and the WebSocket frame write. That per-peer term is not new —
-it was paid before Slice 3b too, and it is not event encoding. Reproduced
-identically across runs (allocs/op is a count; the `ns/op` column in the same
-runs moved by up to 2×, which is the usual reason counts are the tier that
-carries claims here).
+peer** (arithmetic from the three peer counts above: 15 → 64 → 232). That
+per-peer term is not new — it was paid before Slice 3b too — and, importantly,
+**it is not event encoding.**
+
+Where it actually goes, from `go tool pprof -sample_index=alloc_objects` over the
+`message_delta/peers=8` run — **measured, not read off the call site**:
+
+| Site | share of alloc objects |
+|---|--:|
+| `context.AfterFunc` | 22.5% |
+| `websocket.(*Conn).setupWriteTimeout` | 18.4% |
+| `encoding/json.Marshal` | 15.5% |
+| benchmark's own peer drain (`io` read path) | 14.0% |
+| `context` cancel/deadline plumbing (`propagateCancel`, `Done`, `WithDeadlineCause`) | 8.7% |
+
+**The dominant per-peer cost is the per-write deadline and context machinery,
+not the JSON envelope** — roughly half the allocations versus `json.Marshal`'s
+~15%. An earlier draft of this section attributed the per-peer term to "the
+JSON-RPC envelope marshal and the WebSocket frame write," inferred from reading
+`peer.writeJSON`. That was reasonable and it was wrong in its emphasis; the
+profile is why this table exists. (Note `encoding/json.Marshal` here is the
+JSON-RPC *notification envelope* around the already-serialized params — the
+event body itself is still forwarded verbatim, which is what the payload-shape
+equality above demonstrates.)
+
+Allocation counts reproduced identically across runs; the `ns/op` column in the
+same runs moved by up to 2×, which is the usual reason counts are the tier that
+carries claims here.
 
 > **Read these as an upper bound on the daemon-side cost.** Go's allocation
 > accounting is process-wide and the benchmark's peers are in-process, so their
 > own frame reads land in the measured window. The drain loops are kept as lean
 > as possible (raw byte copy, no JSON decode) to keep that share small; a real
 > client pays its read allocations on another machine.
+>
+> The profile above puts a number on it: the benchmark's own peer-drain read path
+> is **~14%** of allocated objects. So the true daemon-side figure is roughly a
+> seventh lower than the headline — which does not affect any conclusion here,
+> since every claim rests on the *equality* between payload shapes and on
+> before/after comparison, both of which shift the same way on both sides.
 
 ## 3. Roster latency — collapsed, and now genuinely flat
 
