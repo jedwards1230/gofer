@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/jedwards1230/agent-sdk-go/provider"
+
 	"github.com/jedwards1230/gofer/internal/daemon"
 	"github.com/jedwards1230/gofer/internal/supervisor"
 )
@@ -149,14 +151,23 @@ func daemonServiceReachable(ctx context.Context) bool {
 }
 
 // runDaemonInstall implements `gofer daemon install [--listen addr] [--root
-// dir] [--token tok]`. It writes the platform unit file, delivers a token (if
-// any) via the 0600 daemon.env file, and loads the service. A non-loopback
-// --listen requires a token (--token or $GOFER_TOKEN), enforced up front by
-// daemon.ValidateListen exactly as `gofer daemon` itself does.
+// dir] [--token tok] [-m model]`. It writes the platform unit file, delivers a
+// token (if any) via the 0600 daemon.env file, and loads the service. A
+// non-loopback --listen requires a token (--token or $GOFER_TOKEN), enforced
+// up front by daemon.ValidateListen exactly as `gofer daemon` itself does.
 func runDaemonInstall(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fs := newDaemonServiceFlagSet("daemon install", stderr)
 	listen := fs.String("listen", daemon.DefaultListenAddr, "address the installed daemon binds")
 	root := fs.String("root", "", "session store root the installed daemon uses (default ~/.gofer)")
+	// The installed unit's --model. Without it, an operator with more than one
+	// logged-in provider had NO way to give the service-managed daemon a model:
+	// `gofer daemon` refuses to start ambiguous, so the unit respawn-looped with
+	// the fix reachable only by editing the generated plist/unit by hand or
+	// logging a provider out (issue #147). Spelled both -m (matching `gofer
+	// run`) and --model (matching `gofer daemon`, the flag it is written into).
+	var model string
+	fs.StringVar(&model, "m", "", "default model for sessions the installed daemon creates (default: resolved at its startup)")
+	fs.StringVar(&model, "model", "", "alias for -m")
 	// Empty default, not os.Getenv("GOFER_TOKEN"): flag.PrintDefaults would
 	// otherwise render a token set in the environment into --help output. The
 	// env fallback is applied explicitly below. Same rationale as daemon.go.
@@ -176,9 +187,24 @@ func runDaemonInstall(ctx context.Context, args []string, stdout, stderr io.Writ
 	if err := daemon.ValidateListen(*listen, bearerToken); err != nil {
 		return err
 	}
+	// Reject an unknown model id HERE, where the operator sees the error, rather
+	// than writing it into a unit whose daemon then exits at startup with the
+	// message buried in a log file — the exact failure mode this flag exists to
+	// end. Checked against the same registry `gofer daemon` resolves against.
+	// Resolve, not Lookup: Lookup answers "does the SDK know this model's
+	// pricing and limits?", which is the wrong question for admission. A model
+	// newer than this binary's registry is unregistered but perfectly runnable,
+	// and rejecting it here would make this gate block the exact case the flag
+	// exists to unblock. Resolve still errors on an id matching no provider
+	// family (a genuine typo), so the gate keeps its teeth.
+	if model != "" {
+		if _, err := provider.Resolve(model); err != nil {
+			return &usageError{msg: fmt.Sprintf("cannot use model %q: %v", model, err)}
+		}
+	}
 
 	mgr := newServiceManager()
-	cfg, err := buildServiceConfig(mgr, *listen, *root)
+	cfg, err := buildServiceConfig(mgr, *listen, *root, model)
 	if err != nil {
 		return err
 	}
@@ -304,8 +330,11 @@ func newDaemonServiceFlagSet(name string, stderr io.Writer) *flag.FlagSet {
 // buildServiceConfig assembles the token-free serviceConfig for an install:
 // the symlink-resolved self path, the manager's label, and the daemon argv
 // tail that pins --listen/--root explicitly so the service-managed daemon and
-// its clients agree on one address and store.
-func buildServiceConfig(mgr serviceManager, listen, root string) (serviceConfig, error) {
+// its clients agree on one address and store. A non-empty model appends
+// --model, pinning the installed daemon's default so it starts even with more
+// than one provider logged in; an empty one leaves the argv exactly as before,
+// so the daemon resolves its own default at startup.
+func buildServiceConfig(mgr serviceManager, listen, root, model string) (serviceConfig, error) {
 	exe, err := resolveSelfExec()
 	if err != nil {
 		return serviceConfig{}, err
@@ -314,12 +343,16 @@ func buildServiceConfig(mgr serviceManager, listen, root string) (serviceConfig,
 	if err != nil {
 		return serviceConfig{}, err
 	}
+	args := []string{"daemon", "--listen", listen, "--root", resolvedRoot}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
 	return serviceConfig{
 		Label:      mgr.label(),
 		ExecPath:   exe,
 		ListenAddr: listen,
 		Root:       resolvedRoot,
-		Args:       []string{"daemon", "--listen", listen, "--root", resolvedRoot},
+		Args:       args,
 	}, nil
 }
 

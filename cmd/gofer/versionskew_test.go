@@ -126,7 +126,11 @@ func TestDialDaemonWarnsOnSkew(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			addr := testDaemon(t, "the-token", fauxProvider)
-			hermeticDaemonEnv(t)
+			// hermeticDaemonHome, not hermeticDaemonEnv: this test's whole
+			// subject is endpoint-FILE discovery, so it needs a fresh HOME to
+			// write that file into but must leave $GOFER_DAEMON unset for
+			// discovery to reach the file at all.
+			hermeticDaemonHome(t)
 			if err := daemon.WriteEndpoint("", daemon.Endpoint{
 				Addr: addr, Token: "the-token", PID: os.Getpid(), Version: c.fileVersion,
 			}); err != nil {

@@ -10,9 +10,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/jedwards1230/agent-sdk-go/runner"
-
 	"github.com/jedwards1230/gofer/internal/config"
+	"github.com/jedwards1230/gofer/internal/daemon"
 	"github.com/jedwards1230/gofer/internal/daemonbridge"
 	"github.com/jedwards1230/gofer/internal/supervisor"
 	"github.com/jedwards1230/gofer/internal/tui"
@@ -127,8 +126,14 @@ func selectTUIBackend(ctx context.Context, df *daemonFlags, cwd, root string, st
 			meta: tui.OverviewMeta{
 				App:     "gofer",
 				Version: effectiveVersion(),
-				Cwd:     cwd,
-				Now:     time.Now(),
+				// The DAEMON's default model, read off gofer/hello — not a
+				// locally recomputed one. The daemon resolved its own default at
+				// startup and every session it creates without an explicit model
+				// uses that value, so it is the only answer the header can show
+				// that is true of the sessions this backend actually starts.
+				Model: daemonDefaultModel(ctx, c),
+				Cwd:   cwd,
+				Now:   time.Now(),
 			},
 			env: env,
 		}, nil
@@ -140,19 +145,39 @@ func selectTUIBackend(ctx context.Context, df *daemonFlags, cwd, root string, st
 	if err != nil {
 		return tuiBackend{}, fmt.Errorf("build supervisor: %w", err)
 	}
+	// ONE resolution feeding both the header and the bridge's create default:
+	// the header used to display a model the bridge never passed to Create, so
+	// a session started from the TUI reached the runner with an empty model and
+	// died on `runner: unknown model ""` while the header cheerfully showed a
+	// real one (issue #147). Mirrors the daemon's own
+	// [daemon.Config.DefaultModel] shape.
+	model := resolveOverviewModel(ctx, rootDir)
 	return tuiBackend{
-		sup:   tuibridge.New(sup),
+		sup:   tuibridge.New(sup, model),
 		close: sup.Close,
 		label: "local in-process supervisor (no daemon reachable)",
 		meta: tui.OverviewMeta{
 			App:     "gofer",
 			Version: effectiveVersion(),
-			Model:   resolveOverviewModel(ctx, rootDir),
+			Model:   model,
 			Cwd:     cwd,
 			Now:     time.Now(),
 		},
 		env: env,
 	}, nil
+}
+
+// daemonDefaultModel reads the connected daemon's own default model off the
+// gofer/hello handshake, best-effort: a daemon predating the field (or one
+// that never resolved a default) yields "", which the header renders exactly
+// as it did before this existed. Non-fatal by design — a header detail must
+// never keep the roster from opening.
+func daemonDefaultModel(ctx context.Context, c *daemon.Client) string {
+	hello, err := c.Hello(ctx)
+	if err != nil {
+		return ""
+	}
+	return hello.DefaultModel
 }
 
 // buildCommandEnv builds the command panel's data source (see
@@ -194,23 +219,28 @@ func buildCommandEnv(root, cwd string) tui.CommandEnv {
 	}
 }
 
-// resolveOverviewModel resolves the model string the LOCAL-backend roster
-// TUI's header shows, best-effort: the sole logged-in provider's default
-// model when exactly one is credentialed, "" otherwise (zero, or more than
-// one). It has no daemon-backend equivalent — a daemon's own default model
-// is resolved once at `gofer daemon` startup and is not exposed over
-// gofer/roster as a fleet-wide value, so the daemon-backend header's Model
-// field is left "" (see selectTUIBackend); per-session model still shows on
-// each roster row via [tui.SessionInfo.Model]. Unlike resolveRunModel — where
-// "no credential" and "ambiguous" are command/usage errors run/resume fail
-// fast on — the overview TUI must open regardless of credential state; an
-// empty header model, like an empty roster, is a valid starting point the
-// operator resolves by logging in or passing -m to a later `gofer
-// run`/session-scoped model override.
+// resolveOverviewModel resolves the model the LOCAL-backend roster TUI both
+// SHOWS in its header and CREATES sessions with, best-effort. It defers
+// wholly to [resolveRunModel] so the TUI, `gofer run`, and `gofer daemon`
+// resolve identically — config.Session.Model first, else the sole logged-in
+// provider's default — rather than the TUI keeping a second, subtly different
+// rule of its own.
+//
+// The daemon backend has its own equivalent (daemonDefaultModel, off
+// gofer/hello): a daemon's default is resolved at ITS startup against ITS
+// store, so recomputing one locally could name a model that daemon would
+// never use.
+//
+// Unlike resolveRunModel — where "no credential" and "ambiguous" are
+// command/usage errors run/resume fail fast on — the overview TUI must open
+// regardless of credential state, so every error collapses to "". An empty
+// value here is not a silent failure: the header shows no model, and a
+// create attempt fails with the actionable [supervisor.ErrNoModel] rather
+// than reaching the runner as an empty model id.
 func resolveOverviewModel(ctx context.Context, root string) string {
-	creds, err := runner.CredentialedProviders(ctx, root)
-	if err != nil || len(creds) != 1 {
+	model, err := resolveRunModel(ctx, root)
+	if err != nil {
 		return ""
 	}
-	return runner.DefaultModel(creds[0])
+	return model
 }

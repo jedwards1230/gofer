@@ -22,10 +22,22 @@ import (
 )
 
 // Adapter presents a [*supervisor.Supervisor] as a [tui.Supervisor].
-type Adapter struct{ sup *supervisor.Supervisor }
+type Adapter struct {
+	sup *supervisor.Supervisor
+	// defaultModel is the model a Create with no explicit model resolves to —
+	// this adapter's equivalent of [daemon.Config.DefaultModel] on the daemon
+	// path. Without it the TUI's own resolved model never reached Create and
+	// every session started from the roster died on an empty model id (issue
+	// #147). May be "": Create then fails with supervisor.ErrNoModel, whose
+	// message names the remedy.
+	defaultModel string
+}
 
-// New returns an Adapter wrapping sup.
-func New(sup *supervisor.Supervisor) Adapter { return Adapter{sup: sup} }
+// New returns an Adapter wrapping sup, creating sessions with defaultModel
+// whenever the caller supplies no model of its own.
+func New(sup *supervisor.Supervisor, defaultModel string) Adapter {
+	return Adapter{sup: sup, defaultModel: defaultModel}
+}
 
 // Adapter satisfies the TUI's consumer interface. Failing this assertion means
 // the supervisor's method set drifted from what the TUI drives.
@@ -51,9 +63,15 @@ func (a Adapter) Subscribe(ctx context.Context, sessionID string) (*event.Subscr
 }
 
 // Create maps the TUI's create options onto the supervisor's and returns the
-// new session's TUI row.
+// new session's TUI row. An unset opts.Model falls back to the adapter's
+// defaultModel, mirroring how the daemon resolves session/new against
+// [daemon.Config.DefaultModel].
 func (a Adapter) Create(ctx context.Context, prompt string, opts tui.CreateOptions) (tui.SessionInfo, error) {
-	info, err := a.sup.Create(ctx, prompt, supervisor.CreateOptions{Model: opts.Model, Cwd: opts.Cwd})
+	model := opts.Model
+	if model == "" {
+		model = a.defaultModel
+	}
+	info, err := a.sup.Create(ctx, prompt, supervisor.CreateOptions{Model: model, Cwd: opts.Cwd})
 	if err != nil {
 		return tui.SessionInfo{}, err
 	}

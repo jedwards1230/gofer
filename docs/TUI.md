@@ -669,7 +669,11 @@ panel.go — the pure `modelPickerView` has no IO seam, so App intercepts Enter
 one level up, ahead of `commandPanel.handleKey`, whenever the Model tab is
 active). The selected id is always persisted as the `session.model` config
 default via `env.SaveConfig` — the only side effect possible with zero
-providers authenticated, keeping Enter auth-independent (§5). When a session
+providers authenticated, keeping Enter auth-independent (§5). That persisted
+default is now honored by model resolution itself (`resolveRunModel`), where
+it outranks the credential-derived guess and is the supported way to settle
+which of several logged-in providers gofer uses (see PRD, "Model
+resolution"). When a session
 is attached/peeked, App also decides — client-side, against the SDK's static
 catalog (`provider.Lookup`), before ever calling the daemon — whether to hot-
 swap it: same provider calls `Supervisor.SetModel` (the swap applies on the

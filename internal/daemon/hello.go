@@ -19,4 +19,13 @@ type HelloResult struct {
 	BinaryVersion      string `json:"binaryVersion"`
 	WireVersion        int    `json:"wireVersion"`
 	ACPProtocolVersion int    `json:"acpProtocolVersion"`
+
+	// DefaultModel is the model this daemon creates a session with when the
+	// client's session/new carries none ([Config.DefaultModel]). A client
+	// showing "the model sessions will use" must read it from here rather than
+	// resolve one locally: the daemon resolved its own at ITS startup against
+	// ITS store, which a client machine cannot reproduce. Omitted (and decoded
+	// as "") by daemons predating the field, which callers must treat as
+	// "unknown", not "none".
+	DefaultModel string `json:"defaultModel,omitempty"`
 }

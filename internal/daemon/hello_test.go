@@ -51,6 +51,10 @@ func TestGoferHelloHandler(t *testing.T) {
 		BinaryVersion:      "v9.9.9",
 		WireVersion:        daemon.WireVersion,
 		ACPProtocolVersion: 1,
+		// The daemon's own Config.DefaultModel, echoed verbatim: a client
+		// showing "the model sessions will use" reads it from here rather than
+		// resolving one against its own machine's auth store.
+		DefaultModel: "faux",
 	}
 	if got != want {
 		t.Errorf("Hello() = %+v, want %+v", got, want)

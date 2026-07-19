@@ -17,6 +17,7 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/runner"
 	"github.com/jedwards1230/agent-sdk-go/session"
 
+	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/sandbox"
 )
 
@@ -211,10 +212,11 @@ func ResolveRoot(root string) (string, error) {
 	return filepath.Join(home, ".gofer"), nil
 }
 
-// CreateOptions configures [Supervisor.Create]. The zero value is valid: an
-// empty Model resolves to the credential-driven default, an empty Cwd to the
-// daemon's working directory (the caller's responsibility upstream), and a
-// zero MaxIters to the loop default.
+// CreateOptions configures [Supervisor.Create]. Model is REQUIRED — the
+// supervisor resolves no default of its own, and an empty one is rejected
+// with [ErrNoModel] rather than passed down to the runner. An empty Cwd
+// resolves to the daemon's working directory (the caller's responsibility
+// upstream) and a zero MaxIters to the loop default.
 type CreateOptions struct {
 	Model    string
 	Cwd      string
@@ -232,6 +234,15 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts CreateOptio
 	}
 	if s.isClosed() {
 		return SessionInfo{}, ErrClosed
+	}
+	// Fail here, with the remedy named, rather than letting an empty model id
+	// reach the SDK and come back as `runner: unknown model ""` — see
+	// [ErrNoModel]. Every caller resolves a model before this point; reaching
+	// it empty means that resolution found nothing, which is exactly what the
+	// operator needs told.
+	if opts.Model == "" {
+		return SessionInfo{}, fmt.Errorf("supervisor: create session: %w — run 'gofer login <provider>' if none is logged in, or set session.model in %s",
+			ErrNoModel, filepath.Join(s.root, config.ConfigFileName))
 	}
 	guard, gate, tools := s.sessionGuard(opts.Cwd)
 	sess, err := s.newSession(ctx, runner.Options{
@@ -442,14 +453,23 @@ func (s *Supervisor) SetModel(ctx context.Context, sessionID, model string) erro
 		return fmt.Errorf("supervisor: set model %s: %w", sessionID, err)
 	}
 
-	next, ok := provider.Lookup(model)
-	if !ok {
-		return fmt.Errorf("supervisor: set model %s: unknown model %q", sessionID, model)
+	next, err := provider.Resolve(model)
+	if err != nil {
+		return fmt.Errorf("supervisor: set model %s: %w", sessionID, err)
 	}
 	m.mu.Lock()
 	current := m.model
 	m.mu.Unlock()
-	if cur, ok := provider.Lookup(current); ok && cur.Provider != next.Provider {
+	// Resolve for the CURRENT model too, not just the target. With Lookup here,
+	// a session already running an unregistered-but-runnable id (say a model
+	// newer than this binary's registry) would fail the ok check, silently
+	// skipping the cross-provider guard entirely — so a genuine cross-provider
+	// swap would slip past and come back from the SDK as a plain error the TUI
+	// cannot errors.Is against, losing the ErrCrossProvider branch it needs.
+	// Resolve infers the provider from the id's shape, so the guard keeps
+	// firing. A current id Resolve CANNOT place (a non-registry test model)
+	// still skips the comparison and defers to the SDK, exactly as before.
+	if cur, cerr := provider.Resolve(current); cerr == nil && cur.Provider != next.Provider {
 		return fmt.Errorf("supervisor: set model %s: cannot change from %q (%s) to %q (%s): %w",
 			sessionID, current, cur.Provider, model, next.Provider, ErrCrossProvider)
 	}

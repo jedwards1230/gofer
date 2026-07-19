@@ -75,7 +75,7 @@ gofer exec [-p prompt] [--agent name] [--json] [--output-schema file] [-m model]
                             #   on stdout (M3)
 gofer serve [--host unix://…|tcp://…]   # run the daemon in the foreground
 gofer daemon install|uninstall|status   # launchd/systemd unit for the daemon (M3)
-                            #   install [--listen addr] [--root dir] [--token tok]
+                            #   install [--listen addr] [--root dir] [--token tok] [-m model]
 gofer acp serve             # ACP over stdio (editors, stdio→ws bridges)
 gofer ps [--all]            # roster (--all includes archived; later: fleet)
 gofer kill|archive <id>     # stop running / clear finished (journal kept)
@@ -117,7 +117,32 @@ delivered out of band through a 0600 `<root>/daemon.env` file — never
 templated into the (world-readable) unit or the daemon's argv. On a fresh,
 fully interactive `gofer` (stdin+stdout TTYs, not CI, no service installed and
 no daemon reachable) a one-line first-use prompt offers to install it; it is a
-complete no-op in every other case.
+complete no-op in every other case. `-m` pins the installed unit's `--model`,
+validated at install time — without it, an operator with more than one
+logged-in provider has no way to give a service-managed daemon the model it
+requires.
+
+Model admission vs metadata: gofer admits any id whose provider it can
+determine (`provider.Resolve`), NOT only ids in the SDK's registry
+(`provider.Lookup`). A model released after this binary was built is
+unregistered but perfectly runnable, so registry membership is the wrong bar
+for "can I run this?" — every validation gate (`daemon install -m`,
+`SetModel`, the TUI's same-provider swap check) uses Resolve, and an id
+matching no provider family at all is still rejected. Metadata paths — the
+`/model` picker and `gofer/models` — stay on Lookup, since they must show real
+context windows and pricing; unregistered records carry `Unregistered` with
+every metadata field zero, which means *unknown*, never *zero*.
+
+Model resolution (`gofer run`/`resume`, `gofer daemon`, and the local TUI
+backend all share it): an explicit `-m` wins, then `session.model` in
+`<root>/config.json`, then the sole logged-in provider's default model. Two or
+more credentialed providers with no explicit choice is a usage error naming
+each provider and its status — gofer favors no vendor. An expired OAuth
+credential still counts: the SDK refreshes it transparently, so it is reported
+as expired rather than silently dropped. The daemon resolves this once at
+startup and reports the result on `gofer/hello`, which is where a client's
+header reads it — a client cannot reproduce a remote daemon's resolution
+against its own auth store.
 
 Daemon lifecycle: the client auto-spawns the daemon on launch (health probe →
 detached spawn); a version/build mismatch **warns** (see daemon discovery
