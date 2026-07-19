@@ -315,11 +315,15 @@ func (o Overview) row(s SessionInfo, width int, showStatus bool) string {
 // field — marks nothing rather than rendering as a difference from the app's
 // version, which would light up every offline row in the --all view. Likewise a
 // meta with no version of its own has nothing to compare against.
+//
+// The mark carries NO padding of its own — every caller owns the separator it
+// needs. Baking a leading space in made the status-view join (`" " + mark`)
+// render a double space between the status word and the mark.
 func (o Overview) binaryMark(s SessionInfo) string {
 	if s.BinaryVersion == "" || o.meta.Version == "" || s.BinaryVersion == o.meta.Version {
 		return ""
 	}
-	return " (v" + s.BinaryVersion + ")"
+	return "(v" + s.BinaryVersion + ")"
 }
 
 // statusColorFor returns the state color a session's effective status renders

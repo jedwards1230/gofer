@@ -854,6 +854,18 @@ func (s *Supervisor) releaseSlot() {
 // handles created before AND after this call are covered by the same store. A
 // nil relay is ignored; events observed before it is set are simply not relayed
 // (no client is attached yet at that point — the daemon is not serving).
+//
+// # Invariant: no [wirestream.Reconstructor.Load] after this call
+//
+// The sink fires for every gofer/event a core reconstructs, and a Load REPLAYS
+// a session's settled history through that same path. Loading a session after
+// the relay is installed would therefore re-broadcast its history to attached
+// clients as if it were live — a duplicated transcript, not merely a noisy one.
+// The router honors this by construction: the only Load it performs is
+// adoption's, inside [New], which runs to completion before the daemon that
+// injects this relay even exists. Any future Load (Phase 4's resume-spawns-a-
+// worker path is the obvious candidate) must either run before this call or
+// suppress the sink for the duration of its replay.
 func (s *Supervisor) SetEventRelay(relay daemon.EventRelay) {
 	if relay == nil {
 		return

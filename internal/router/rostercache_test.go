@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -194,6 +195,13 @@ func awaitSeed(t *testing.T, h *workerHandle) {
 // in for a signal — and is bounded by cacheTimeout as a failure backstop. It
 // exists because a pushed event's effect lands on the watcher goroutine, which
 // has no completion channel of its own to wait on.
+//
+// Each miss YIELDS rather than spinning. A bare retry loop here is a busy-spin
+// that burns a core for the whole wait, and — worse for a test — starves the
+// very watcher goroutine it is waiting on whenever the scheduler has fewer
+// runnable Ps than the package's other tests are already using. Gosched is the
+// yield, not a sleep: it hands the processor over and resumes immediately, so
+// the loop still observes the update at the first opportunity.
 func awaitSnapshot(t *testing.T, h *workerHandle, what string, want func(supervisor.SessionInfo) bool) supervisor.SessionInfo {
 	t.Helper()
 	deadline := time.After(cacheTimeout)
@@ -209,6 +217,7 @@ func awaitSnapshot(t *testing.T, h *workerHandle, what string, want func(supervi
 			}
 			t.Fatalf("cached roster row never reached %s; last snapshot: %+v", what, got)
 		default:
+			runtime.Gosched()
 		}
 	}
 }

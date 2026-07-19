@@ -161,6 +161,15 @@ func (s *Supervisor) adoptWorker(entry daemon.WorkerEndpointEntry) bool {
 	// wirestream's Option contract) so the adopted session's turn — which is
 	// running RIGHT NOW on the worker, with no prompt handler of ours observing
 	// it — streams to this router's attached clients.
+	//
+	// INVARIANT — this Load must happen BEFORE [Supervisor.SetEventRelay]: the
+	// sink fires for replayed history frames exactly as it does for live ones, so
+	// a Load with the relay already installed would re-broadcast this session's
+	// whole history to attached clients as if it were live. Adoption runs inside
+	// [New], which returns before the daemon that injects the relay is even
+	// constructed, so the ordering holds by construction rather than by
+	// convention — but it is load-bearing, and any Load added later (Phase 4's
+	// resume-spawns-a-worker path) has to preserve it.
 	rec := wirestream.New(client, wirestream.WithEventSink(s.eventSink(id)))
 	loadCtx, cancel := context.WithTimeout(context.Background(), wireCallTimeout)
 	if lerr := rec.Load(loadCtx, id); lerr != nil {

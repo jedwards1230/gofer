@@ -142,9 +142,17 @@ func TestBroadcastRawEventSuppressedDuringPrompt(t *testing.T) {
 }
 
 // TestPromptHandlerMarkIsCounted pins that the mark is a COUNTER, not a flag.
-// Nothing in the wire contract forbids two concurrent session/prompt calls for
+// Nothing in the wire contract forbids two overlapping session/prompt calls for
 // one session, and a misbehaving client is not a reason to un-suppress the relay
 // — so the mark must clear only when the LAST handler leaves.
+//
+// It asserts the counter's ALGEBRA directly, on one goroutine: begin/begin/end
+// leaves the mark set, the second end clears it. That is the whole property, and
+// nesting the calls sequentially states it more precisely than racing two real
+// prompt handlers would — a concurrent version would exercise the same three
+// mutex-guarded map operations while making the assertion depend on scheduling.
+// The end-to-end behavior under a real, live prompt handler is covered by
+// TestClientPromptedSessionDeliversEachEventOnce below.
 func TestPromptHandlerMarkIsCounted(t *testing.T) {
 	sup := newTestSupervisor(t, func() provider.Provider { return faux.New(faux.Default()) })
 	d, _ := newTestDaemon(t, sup, "")

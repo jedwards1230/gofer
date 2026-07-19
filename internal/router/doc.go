@@ -168,6 +168,45 @@
 // its own prompt handlers is driving that session, so a client-driven turn is
 // never delivered twice.
 //
+// What the bridge does NOT reach: a worker has no continuous broker drain
+// outside its own session/prompt handler (see internal/daemon's
+// advertiseModelChange). So the tail of a turn whose DRIVING CONNECTION was
+// severed mid-flight — the pre-upgrade turn in a daemon hot-upgrade, whose
+// client went away with the old daemon — is published to the worker's broker
+// and never put on the wire at all. The router cannot forward a frame that was
+// never sent, so that tail is NOT STREAMED LIVE. It is not lost, though: the
+// worker journals it, and it comes back as folded history on the session's next
+// session/load, so a client that re-attaches sees the complete transcript.
+// Streaming it live instead would need a standing observer on the WORKER side
+// (in internal/daemon, which the worker runs), gated behind a Config flag
+// beside ReplayPendingPermissionsOnAttach and relying on exactly the
+// promptHandlerActive guard this slice shipped to avoid double delivery. That is
+// deferred, not oversighted.
+//
+// # Event-decode skew: which direction is supported (§5, §6)
+//
+// A gofer/event frame whose kind this router cannot decode is DROPPED — not
+// published to the reconstructed broker and not handed to the sink, so it is
+// neither projected nor forwarded. That makes ROUTER-NEWER-THAN-WORKER the only
+// supported skew direction for event decode, and it is a deliberate choice
+// rather than an accident of the decoder.
+//
+// It is chosen because it matches how skew actually arises here. The upgrade
+// story M6 sells (§11) upgrades the DAEMON first and leaves old workers draining
+// underneath it, so the router is by construction the newer half; a worker
+// emitting a kind the router has never heard of would mean a worker built after
+// the router that adopted it, which this milestone's rollout does not produce.
+// The alternative — forward the raw frame and skip the projection — is not
+// free: the router's own broker would then hold a stream that DISAGREES with
+// what its clients received, so the roster cache, the permission relay and every
+// projection driven off that broker would be reasoning about a different session
+// history than the client is displaying. A frame the router cannot understand is
+// better dropped consistently on both fan-outs than delivered to one of them.
+//
+// What this costs is bounded and additive-only: an OLDER router silently omits a
+// NEWER worker's new event kinds from both surfaces. Widen the decoder (in
+// wirestream) before shipping a rollout that can invert the version order.
+//
 // What this removes is specifically the ROUTER's SECOND-HOP re-encode — the cost
 // M6 §10 flags when it says the second hop doubles the per-event encode cost.
 // The daemon→client hop was ALREADY marshal-once per event: internal/daemon's

@@ -76,6 +76,21 @@ func drivePrompt(t *testing.T, c *wsClient, sid, text string, wantNotifs int) (r
 // It drains the channel DIRECTLY rather than through waitNotification, which
 // skips gofer/event and session_info_update frames: the point is to leave
 // nothing queued that could be miscounted as the NEXT capture's content.
+//
+// # Buffer requirement: the replay must FIT in c.notifications (cap 64)
+//
+// The drain-after-a-synchronous-request pattern above depends on every replay
+// notification being BUFFERED by the time the response is delivered, and
+// readLoop's send into c.notifications is BLOCKING (see dial/readLoop in
+// harness_test.go). So a replay longer than the channel's 64-frame capacity does
+// not merely make this drain short — it stalls readLoop mid-replay, which means
+// the response frame behind those notifications is never read, which means the
+// c.request call above never returns. That is a DEADLOCK, resolved only by the
+// test binary's own timeout, not a flake that reruns green.
+//
+// Callers must therefore keep a drained replay under 64 frames (a settled turn
+// or two — comfortably inside it) or grow the harness channel alongside. This is
+// a hard constraint on the pattern, not a tuning knob.
 func drainNotifications(c *wsClient) int {
 	var n int
 	for {
