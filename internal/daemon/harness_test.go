@@ -31,7 +31,7 @@ const defaultWait = 5 * time.Second
 // newProvider is called once per Create/Resume so each session gets its own
 // provider instance (important for [blockingProvider], whose state is
 // per-turn).
-func newTestSupervisor(t *testing.T, newProvider func() provider.Provider) *supervisor.Supervisor {
+func newTestSupervisor(t testing.TB, newProvider func() provider.Provider) *supervisor.Supervisor {
 	t.Helper()
 	return newTestSupervisorAtRoot(t, t.TempDir(), newProvider)
 }
@@ -40,7 +40,7 @@ func newTestSupervisor(t *testing.T, newProvider func() provider.Provider) *supe
 // instead of a fresh t.TempDir() — the seam a daemon-restart test uses to
 // build a second Supervisor over the exact same on-disk root once the first
 // is closed.
-func newTestSupervisorAtRoot(t *testing.T, root string, newProvider func() provider.Provider) *supervisor.Supervisor {
+func newTestSupervisorAtRoot(t testing.TB, root string, newProvider func() provider.Provider) *supervisor.Supervisor {
 	t.Helper()
 	return newTestSupervisorModelAtRoot(t, root, "faux", newProvider)
 }
@@ -51,7 +51,7 @@ func newTestSupervisorAtRoot(t *testing.T, root string, newProvider func() provi
 // (context-window sizing + usage pricing), which the faux model can't reach
 // (faux is not in the provider registry, so [provider.Lookup]/[provider.CostOf]
 // miss and TurnFinished carries ContextWindow 0). See TestSessionPromptUsageUpdate.
-func newTestSupervisorModelAtRoot(t *testing.T, root, model string, newProvider func() provider.Provider) *supervisor.Supervisor {
+func newTestSupervisorModelAtRoot(t testing.TB, root, model string, newProvider func() provider.Provider) *supervisor.Supervisor {
 	t.Helper()
 	store, err := session.NewFileStore(session.WithRoot(root))
 	if err != nil {
@@ -87,7 +87,7 @@ func newTestSupervisorModelAtRoot(t *testing.T, root, model string, newProvider 
 // Daemon and its ws:// base URL. The server is closed on test cleanup. It is a
 // thin wrapper over [newTestDaemonWithConfig] with the default token/model
 // config every non-auth test uses.
-func newTestDaemon(t *testing.T, sup *supervisor.Supervisor, token string) (*daemon.Daemon, string) {
+func newTestDaemon(t testing.TB, sup *supervisor.Supervisor, token string) (*daemon.Daemon, string) {
 	t.Helper()
 	return newTestDaemonWithConfig(t, sup, daemon.Config{BearerToken: token, DefaultModel: "faux"})
 }
@@ -96,7 +96,7 @@ func newTestDaemon(t *testing.T, sup *supervisor.Supervisor, token string) (*dae
 // the caller-supplied cfg, so a test can exercise Config fields (e.g.
 // AuthedProviders) the common newTestDaemon path doesn't set. The server is
 // closed on test cleanup.
-func newTestDaemonWithConfig(t *testing.T, sup *supervisor.Supervisor, cfg daemon.Config) (*daemon.Daemon, string) {
+func newTestDaemonWithConfig(t testing.TB, sup *supervisor.Supervisor, cfg daemon.Config) (*daemon.Daemon, string) {
 	t.Helper()
 	d := daemon.New(sup, cfg)
 	srv := httptest.NewServer(d.Handler())

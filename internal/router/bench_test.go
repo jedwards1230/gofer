@@ -53,8 +53,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/jedwards1230/agent-sdk-go/acp"
-	"github.com/jedwards1230/agent-sdk-go/event"
-	"github.com/jedwards1230/agent-sdk-go/provider"
 
 	"github.com/jedwards1230/gofer/internal/daemon"
 	"github.com/jedwards1230/gofer/internal/supervisor"
@@ -782,7 +780,9 @@ func (r *benchReport) render() string {
 
 	fmt.Fprintf(&b, "3. Event throughput through the fan-out  [INDICATIVE ONLY]\n")
 	fmt.Fprintf(&b, "   Dominated by socket time and machine load. The authoritative version of\n")
-	fmt.Fprintf(&b, "   this claim is allocs/op on the fan-out path (BenchmarkEventForward).\n")
+	fmt.Fprintf(&b, "   this claim is allocs/op on the fan-out path\n")
+	fmt.Fprintf(&b, "   (BenchmarkBroadcastRawEvent, internal/daemon — untagged, no -bench flag needed\n")
+	fmt.Fprintf(&b, "   beyond -bench BenchmarkBroadcastRawEvent).\n")
 	fmt.Fprintf(&b, "  sessions driven    : %d (concurrently), %d turns each\n", r.fanout.sessions, r.fanout.turns)
 	fmt.Fprintf(&b, "  subscribers        : %d per session (%d peers total)\n", r.fanout.subscribers, r.fanout.sessions*r.fanout.subscribers)
 	fmt.Fprintf(&b, "  notifications      : %d delivered in %s\n", r.fanout.deliveries, r.fanout.elapsed.Round(time.Millisecond))
@@ -1045,167 +1045,4 @@ func startCountingWorker(t *testing.T, id string, frames *atomic.Int64) {
 	t.Cleanup(func() { _ = srv.Close(); _ = ln.Close() })
 
 	writeEndpoint(t, id, os.Getpid(), daemon.WireVersion, "unix://"+sockPath)
-}
-
-// ---------------------------------------------------------------------------
-// Allocations per forwarded event
-// ---------------------------------------------------------------------------
-
-// ############################################################################
-// # STOP — THIS BENCHMARK MEASURES A PATH PRODUCTION NO LONGER TAKES.        #
-// #                                                                          #
-// # It reports a real-looking number (~14 and ~17 allocs/op) for the router's #
-// # decode-then-re-encode hop. Since Slice 3b that hop is GONE:              #
-// # Daemon.BroadcastRawEvent (internal/daemon/event_relay.go) forwards the    #
-// # worker's gofer/event params VERBATIM — there is no json.Marshal on the    #
-// # forwarding path at all.                                                   #
-// #                                                                          #
-// # So this is retained ONLY as historical evidence of what the pre-3b path   #
-// # cost. It is the "before" in docs/benchmarks/m6-worker-fleet-baseline.md.  #
-// # NEVER quote it as an "after" number, and never conclude anything about    #
-// # current behaviour from it — it will happily produce a number regardless.  #
-// #                                                                          #
-// # Replacing it with an end-to-end measurement of the REAL forwarding path,  #
-// # and deleting this, is tracked as follow-up work.                          #
-// ############################################################################
-//
-// BenchmarkEventForward measures the per-event allocation cost of the ROUTER's
-// second hop — decoding a worker's gofer/event envelope into a typed
-// event.Event and re-encoding it — using the testing framework's own per-op
-// allocation accounting (b.ReportAllocs), a far more stable instrument than a
-// wall clock, which on this path is dominated by socket time.
-//
-// This is the cost the M6 worker split introduced and that the marshal-once /
-// forward-verbatim bridge removed. Note it is NOT the daemon→client hop:
-// daemon.broadcastGoferEvent already marshals once per event and reuses the
-// bytes for every peer (internal/daemon/handlers.go), so nothing here scales
-// with subscriber count.
-//
-// There is deliberately no "forward verbatim" comparison arm. Rebinding a
-// json.RawMessage compiles to nothing measurable — a body with no function call
-// is not protected from elimination by b.Loop, and the measured result was
-// dominated by loop overhead (the LARGER payload reported a SMALLER ns/op,
-// which is only possible if the number is noise). Its zero would also invite
-// reading the pair as a ~1000x speedup. The meaningful figure is the absolute
-// allocs/op below; a post-3b run should land below it and above zero.
-//
-// Honesty note: this MODELS the production decode rather than calling it. The
-// production decoder (wirestream's goferEventWire + its New* dispatch) is
-// unexported in another package, and this harness may not modify existing
-// files. benchGoferEventWire replicates only the fields the benchmarked kinds
-// carry, and must be re-checked if the wire type changes. The re-encode half IS
-// the production call (json.Marshal of the same concrete event).
-func BenchmarkEventForward(b *testing.B) {
-	// Written to stderr rather than b.Logf: benchmark logs only surface under
-	// -v, and someone running a plain `go test -bench` would otherwise see a
-	// real-looking allocs/op figure for a path production no longer takes. The
-	// noise is acceptable — this file only builds under the workerbench tag, so
-	// the only readers are people who deliberately ran this benchmark.
-	fmt.Fprintln(os.Stderr,
-		"WARNING BenchmarkEventForward: measures the PRE-Slice-3b router "+
-			"decode+re-encode hop, which no longer exists (BroadcastRawEvent "+
-			"forwards verbatim). Historical baseline evidence only — never "+
-			"quote these numbers as an 'after' result.")
-
-	// Two representative payloads: the smallest and by far most frequent event
-	// on a streaming turn (message.delta), and a fat one (tool.call.finished).
-	delta, err := json.Marshal(event.NewMessageDelta("11111111-2222-3333-4444-555555555555", "assistant", "Hello, world"))
-	if err != nil {
-		b.Fatalf("marshal delta fixture: %v", err)
-	}
-	finished, err := json.Marshal(event.NewToolCallFinishedSpill(
-		"11111111-2222-3333-4444-555555555555", "call-1",
-		json.RawMessage(`{"path":"/tmp/x","limit":200}`),
-		strings.Repeat("result line\n", 40), false, nil, "", 0, "",
-	))
-	if err != nil {
-		b.Fatalf("marshal finished fixture: %v", err)
-	}
-
-	fixtures := []struct {
-		name string
-		raw  json.RawMessage
-	}{
-		{"message_delta", delta},
-		{"tool_call_finished", finished},
-	}
-
-	for _, f := range fixtures {
-		b.Run(f.name, func(b *testing.B) {
-			b.ReportAllocs()
-			b.SetBytes(int64(len(f.raw)))
-			for b.Loop() {
-				ev, derr := benchDecodeGoferEvent(f.raw)
-				if derr != nil {
-					b.Fatal(derr)
-				}
-				out, merr := json.Marshal(ev)
-				if merr != nil {
-					b.Fatal(merr)
-				}
-				if len(out) == 0 {
-					b.Fatal("empty re-encode")
-				}
-			}
-		})
-	}
-}
-
-// benchGoferEventWire mirrors the SHAPE of internal/wirestream's (unexported)
-// goferEventWire — the envelope every gofer/event notification carries — for
-// the kinds this benchmark decodes. It is a replica, not the production type;
-// see BenchmarkEventForward's honesty note.
-//
-// It is NOT field-for-field identical to production and does not need to be:
-// only the fields the benchmarked kinds actually carry affect the measurement.
-// Fields outside that set are present to keep the decode shape representative.
-// Re-check this type if the wire envelope changes.
-type benchGoferEventWire struct {
-	Type      string `json:"type"`
-	SessionID string `json:"session_id"`
-
-	Err   string `json:"error"`
-	Fatal bool   `json:"fatal"`
-	Title string `json:"title"`
-
-	StopReason string         `json:"stop_reason"`
-	Usage      provider.Usage `json:"usage"`
-	// Pointer, matching production — a value here would decode a null `cost`
-	// into a zero struct rather than nil. Neither benchmarked kind carries a
-	// cost field, so this does not affect the recorded numbers, but the replica
-	// should not diverge from the type it stands in for.
-	Cost *provider.Cost `json:"cost"`
-
-	Kind    string            `json:"kind"`
-	Text    string            `json:"text"`
-	Content string            `json:"content"`
-	Meta    map[string]string `json:"meta"`
-
-	ID          string          `json:"id"`
-	Name        string          `json:"name"`
-	Input       json.RawMessage `json:"input"`
-	Delta       string          `json:"delta"`
-	Result      string          `json:"result"`
-	IsError     bool            `json:"is_error"`
-	Diagnostics []string        `json:"diagnostics"`
-	SpillPath   string          `json:"spill_path"`
-	SpillBytes  int64           `json:"spill_bytes"`
-	SpillSHA256 string          `json:"spill_sha256"`
-}
-
-// benchDecodeGoferEvent mirrors wirestream's handleGoferEvent decode-and-rebuild
-// for the kinds this benchmark exercises.
-func benchDecodeGoferEvent(raw json.RawMessage) (event.Event, error) {
-	var w benchGoferEventWire
-	if err := json.Unmarshal(raw, &w); err != nil {
-		return nil, err
-	}
-	switch w.Type {
-	case event.KindMessageDelta:
-		return event.NewMessageDelta(w.SessionID, event.MessageKind(w.Kind), w.Text), nil
-	case event.KindToolCallFinished:
-		return event.NewToolCallFinishedSpill(w.SessionID, w.ID, w.Input, w.Result, w.IsError, w.Diagnostics, w.SpillPath, w.SpillBytes, w.SpillSHA256), nil
-	default:
-		return nil, fmt.Errorf("bench: unhandled event kind %q", w.Type)
-	}
 }

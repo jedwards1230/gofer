@@ -79,13 +79,44 @@ So the baseline's **14 allocs/op** (`message.delta`) and **17 allocs/op**
 (`tool.call.finished`) are not the "before" of a faster version of the same
 operation. They are the cost of an operation that **is no longer performed** on
 the forwarding path. The honest statement is *this work is no longer done* — not
-a percentage improvement.
+a percentage improvement. Those two figures are kept below (§3) as the labelled
+historical record of what the pre-3b hop cost; the benchmark that produced them
+has been deleted, because it modeled the removed decode in a self-contained way
+and so would happily keep reporting ~14/17 forever.
 
-> **Do not re-run `BenchmarkEventForward` and quote it as an "after" number.** It
-> models the decode+re-encode in a self-contained way, so it still reports ~14/17
-> — but it is now measuring a path production does not take. Measuring the real
-> forwarding path (and deleting this model) is tracked separately; until then,
-> the baseline's allocations section describes removed work, not current work.
+### What the real path costs now
+
+Measured by `BenchmarkBroadcastRawEvent` (`internal/daemon/broadcast_bench_test.go`)
+— **production code, not a model**: a real daemon, a real session, and N real
+WebSocket peers attached via `session/load`, with `BroadcastRawEvent` fanning
+the frame out to all of them. Same machine as above, `go1.25.6 darwin/arm64`,
+Apple M2 Pro.
+
+| Payload | peers=1 | peers=8 | peers=32 |
+|---|--:|--:|--:|
+| `message.delta` (125 B) | 15 allocs/op | 64 | 232 |
+| `tool.call.finished` + spill (673 B) | 15 allocs/op | 64 | 232 |
+
+**The two payload shapes cost exactly the same, at every peer count.** That
+equality is the result, and it is the thing the old numbers cannot say. The
+removed decode+re-encode cost *more* for the fatter event (17 vs 14) precisely
+because it interpreted every field; a path that forwards bytes verbatim cannot
+care how many fields an event has. Byte counts still differ (1.0 kB/op vs
+1.6 kB/op at one peer) — the frame is copied, just never parsed.
+
+What remains is ~8 allocations of fixed per-event cost plus **~7 per attached
+peer**: the JSON-RPC notification envelope `peer.writeJSON` marshals around the
+verbatim params, and the WebSocket frame write. That per-peer term is not new —
+it was paid before Slice 3b too, and it is not event encoding. Reproduced
+identically across runs (allocs/op is a count; the `ns/op` column in the same
+runs moved by up to 2×, which is the usual reason counts are the tier that
+carries claims here).
+
+> **Read these as an upper bound on the daemon-side cost.** Go's allocation
+> accounting is process-wide and the benchmark's peers are in-process, so their
+> own frame reads land in the measured window. The drain loops are kept as lean
+> as possible (raw byte copy, no JSON decode) to keep that share small; a real
+> client pays its read allocations on another machine.
 
 ## 3. Roster latency — collapsed, and now genuinely flat
 
@@ -131,8 +162,19 @@ git checkout 5051675
 GOFER_BENCH_LOAD_NOTE="<describe machine load>" \
 GOFER_BENCH_OUT=fleet.txt GOFER_BENCH_FRAMES_OUT=frames.txt \
   go test -tags workerbench -run 'TestWorkerFleetBenchmark|TestRosterWireFrameCount' -v -timeout 30m ./internal/router/
-go test -tags workerbench -run '^$' -bench BenchmarkEventForward -benchmem ./internal/router/
 ```
+
+The fan-out allocation figures in §2 are a separate, untagged benchmark in the
+package that owns the path (no fleet, no `git checkout` — it measures current
+`HEAD`):
+
+```bash
+go test -run '^$' -bench BenchmarkBroadcastRawEvent -benchmem ./internal/daemon/
+```
+
+The pre-3b allocation figures in the INDICATIVE §3 below are **not**
+reproducible by re-running anything: the benchmark that modeled that hop was
+deleted with the hop. They stand as a stamped historical record at `5051675`.
 
 ## How to read these numbers
 
@@ -265,11 +307,20 @@ Recorded for context under the load stated above. The *shape* is the signal;
 absolute values are not. Do not tune against these, and do not let a conclusion
 rest on them.
 
-### 3. Allocations per forwarded event — MODELED, not measured in production
+### 3. Allocations per forwarded event — HISTORICAL RECORD of the pre-3b hop
 
-This measures the **router's second hop**: decoding a worker's `gofer/event`
+> **This section is the "before", and only the before.** It records what the
+> **router's second hop cost at `5051675`**, before Slice 3b removed it. The
+> current cost of the real forwarding path is in
+> [§2](#2-fan-out-allocations--work-eliminated-not-reduced) above; do not quote
+> anything here as an "after" number. `BenchmarkEventForward`, which produced
+> these figures, has been **deleted** — it modeled the decode in a
+> self-contained way and so kept reporting these same numbers after the code
+> they described was gone.
+
+This measured the **router's second hop**: decoding a worker's `gofer/event`
 envelope into a typed `event.Event` and re-encoding it. That is the cost the M6
-worker split introduced and that a marshal-once bridge removes.
+worker split introduced and that the marshal-once bridge removed.
 
 > **Common misconception, worth stating plainly:** this is **not** the
 > daemon→client hop, and it does **not** scale with subscriber count.
@@ -277,20 +328,21 @@ worker split introduced and that a marshal-once bridge removes.
 > the bytes for every peer (`internal/daemon/handlers.go`). Marshal-once already
 > exists at that hop; the router's re-encode is what is new.
 
-> **Indicative, not authoritative:** it **models** the production decoder rather
-> than calling it. gofer's real decoder is unexported in `internal/wirestream`,
-> which this harness may not modify, so `benchGoferEventWire` mirrors the
-> envelope's *shape* for the kinds benchmarked. It is not field-for-field
-> identical and does not need to be — but it can drift, so re-check it if the
-> wire envelope changes. Measuring the real path is queued for post-3b.
+> **Indicative, not authoritative:** it **modeled** the production decoder
+> rather than calling it. gofer's real decoder is unexported in
+> `internal/wirestream`, which that harness could not modify, so
+> `benchGoferEventWire` mirrored the envelope's *shape* for the kinds
+> benchmarked. That modeling is precisely why it outlived the code it described,
+> and why the replacement in §2 drives production code instead.
 
 | Payload | ns/op | B/op | allocs/op |
 |---|---:|---:|---:|
 | `message.delta` | 2850 | 1209 | **14** |
 | `tool.call.finished` | 11321 | 3824 | **17** |
 
-**Compare a post-3b run against 14 and 17 allocs/op.** A real marshal-once
-implementation should land meaningfully below these and above zero.
+**14 vs 17 is the part worth carrying forward:** the fatter event cost more
+because the hop interpreted every field. The verbatim path in §2 costs the same
+for both — the clearest statement available that the interpretation is gone.
 
 There is deliberately **no "forward verbatim" comparison row**. Rebinding a
 `json.RawMessage` compiles to nothing measurable — `b.Loop` does not protect a
@@ -385,10 +437,12 @@ at the top. Outcome in brief:
 2. **Fan-out allocations: the measured work is gone from the path**, not reduced.
    `BroadcastRawEvent` forwards verbatim with no `json.Marshal`, so the 14/17
    figures describe an operation production no longer performs there.
+3. **The real path is now measured directly.** `BenchmarkBroadcastRawEvent`
+   (`internal/daemon/broadcast_bench_test.go`, untagged so CI compiles it)
+   drives the production fan-out to 1/8/32 real attached peers: **15 / 64 / 232
+   allocs/op, identical for a 125 B `message.delta` and a 673 B
+   `tool.call.finished`** — see §2. The modeling benchmark that could not tell
+   those apart, `BenchmarkEventForward`, was deleted in the same change; its
+   figures survive as the labelled historical record in §3.
 
-**Still outstanding — measure allocations on the real path.** The
-`BenchmarkEventForward` model is now measuring a path production does not take,
-so it can no longer serve as evidence about current behaviour and should be
-replaced by an end-to-end measurement through the real bridge, then deleted
-rather than kept alongside it. That is tracked separately; until it lands, this
-document's allocation numbers describe **removed work only**.
+Nothing outstanding.
