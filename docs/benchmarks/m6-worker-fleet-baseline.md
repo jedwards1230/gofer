@@ -203,35 +203,47 @@ if the number is noise). Publishing it beside 2850 ns would also read as a
 | 25 | 2.00 / 1.79 / 2.40 / 4.68 | 1.96 / 1.88 / 2.21 / 2.59 |
 | 50 | 4.17 / 3.67 / 4.47 / 10.38 | 5.06 / 3.62 / 4.56 / 22.79 |
 
-**Cost is essentially LINEAR in fleet size from N≈12 upward** — one RPC per
-worker, as the frame count says. Per-segment slopes (`dlog(mean)/dlog(workers)`;
-1.0 = linear):
+> ## ⚠️ This table cannot support a scaling claim — in either direction
+>
+> Do not derive "it scales linearly", "super-linearly", or "sub-linearly" from
+> these numbers. **The data is too noisy at this sample size to establish any of
+> them.** Two runs on the same commit and machine give:
+>
+> | Segment | Run 1 | Run 2 |
+> |---|---:|---:|
+> | 1 → 2 | 1.08 | 0.94 |
+> | 2 → 12 | 1.33 | 0.98 |
+> | 12 → 25 | 0.92 | 0.93 |
+> | 25 → 50 | 1.04 | 1.24 |
+>
+> (per-segment `dlog(mean)/dlog(workers)`; 1.0 would be linear)
+>
+> Individual segments move by up to 0.35 between runs and disagree on which side
+> of 1.0 they fall. **Any scaling story told from this table is a story about
+> noise.**
+>
+> **Two ways this has already gone wrong**, both recorded so they are not
+> repeated:
+> 1. An earlier draft quoted the **first-to-last ratio** — mean latency rises
+>    ×65.3 from N=1 to N=50 — and called it super-linear growth. That is an
+>    artifact of anchoring at N=1, where fixed per-call overhead dominates and
+>    then amortizes away; the amortization is the *opposite* of a scaling worry.
+> 2. The obvious correction — "so it's linear, or even sub-linear" — is the same
+>    mistake with the sign flipped. Run 2 does not reproduce Run 1's segments.
+>
+> **The authoritative statement about how roster cost scales is the frame count
+> in §1** (exactly N, an integer, reproducible), *not* this wall clock. And the
+> argument for the roster cache is the structural one above — serial iteration ×
+> a 15 s per-worker timeout — which needs no curve at all.
+>
+> `render()` prints per-segment slopes rather than a first-to-last ratio so the
+> ×65-style misreading is harder to make. Reproducing the numbers across runs
+> before quoting any of them is still on the reader.
 
-| Segment | Slope |
-|---|---:|
-| 1 → 2 | 1.08 |
-| 2 → 12 | 1.33 |
-| 12 → 25 | **0.92** (sub-linear) |
-| 25 → 50 | 1.04 |
-
-> **Do not quote a first-to-last ratio here.** Mean latency rises ×65.3 from N=1
-> to N=50, which looks super-linear but is an artifact of anchoring at N=1, where
-> fixed per-call overhead dominates and then amortizes away. The amortization is
-> the *opposite* of a scaling worry. An earlier draft of this document made
-> exactly that error; `render()` now prints per-segment slopes so the misreading
-> is harder to repeat.
-
-**These slopes are themselves noisy — do not over-read them either.** A second
-run on the same commit and machine produced 0.94 / 0.98 / 0.93 / 1.24 for the
-same four segments. The qualitative conclusion is unchanged (roughly linear, no
-runaway), but no individual segment figure is stable to two digits. That is the
-indicative tier behaving exactly as labelled — and it is why **the real argument
-for the roster cache is the structural one above (serial iteration × a 15 s
-per-worker timeout), not this curve.**
-
-For contrast, the same second run reproduced the **allocations** in §3 *exactly*
-(14 and 17 allocs/op) while its ns/op and B/op drifted — which is the clearest
-demonstration in this document of why the tiers are drawn where they are.
+For contrast, that same second run reproduced the **allocations** in §3 *exactly*
+(14 and 17 allocs/op) while every wall-clock figure here moved. That is the
+clearest demonstration in this document of why the tiers are drawn where they
+are: counts reproduce, durations do not.
 
 `List`'s max of 22.79 ms at N=50 is a single outlier against a p90 of 4.56 ms — a
 tail figure not worth reading closely.
