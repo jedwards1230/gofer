@@ -268,6 +268,12 @@ func TestClientPromptedSessionDeliversEachEventOnce(t *testing.T) {
 // built by the supervisor's NewSession callback, which runs inside daemon.New's
 // own call graph — the daemon does not exist yet when the callback is defined.
 // Exactly the same chicken-and-egg the router solves with SetEventRelay.
+//
+// Being package-level, it holds ONE daemon for the whole test binary: it must not
+// be used from a t.Parallel() test. The mutex makes each access safe but cannot
+// keep two concurrent tests from overwriting each other's target, so a parallel
+// test would relay into whichever daemon happened to register last. Every test
+// here is serial today, which is the only reason this is sound.
 var inlineRelayTarget struct {
 	mu sync.Mutex
 	d  *daemon.Daemon
