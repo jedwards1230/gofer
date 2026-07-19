@@ -71,6 +71,15 @@ type SessionInfo struct {
 
 	Created time.Time // session start
 	Updated time.Time // last activity — the recency sort key
+
+	// BinaryVersion is the gofer build running this session's process. Under M6
+	// process isolation each session runs in its own worker, so a daemon upgrade
+	// leaves already-running sessions finishing on the OLD build while new ones
+	// start on the new one. The roster renders it only when it DIFFERS from the
+	// app's own version (see [Overview.binaryMark]) — that skew is the whole
+	// signal, and stamping an identical version on every row would be noise.
+	// Empty for an offline row (no process) and from any pre-M6 daemon.
+	BinaryVersion string
 }
 
 // CreateOptions configures [Supervisor.Create]. The zero value is the

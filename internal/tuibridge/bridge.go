@@ -120,5 +120,9 @@ func toTUI(s supervisor.SessionInfo) tui.SessionInfo {
 		Artifacts: s.Artifacts,
 		Created:   s.Created,
 		Updated:   s.Updated,
+		// Live-only under M6: an in-process supervisor leaves it empty (there is
+		// no separate worker process to have its own build), a router stamps it
+		// from the owning worker's gofer/hello.
+		BinaryVersion: s.BinaryVersion,
 	}
 }

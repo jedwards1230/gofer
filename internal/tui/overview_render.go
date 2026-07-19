@@ -261,10 +261,29 @@ func (o Overview) row(s SessionInfo, width int, showStatus bool) string {
 	// The colored status word rides the summary column in the flat view; padTo
 	// measures display width (ANSI-aware), so the color codes don't skew the
 	// column — the #61 lesson, guarded by the styled-golden + color-layout tests.
+	// The binary-skew mark rides it too, for the same reason: it is styled, so it
+	// must be composed BEFORE the single padTo that sizes the column.
+	//
+	// The mark LEADS the summary text rather than trailing it. Trailing reads
+	// more naturally but makes the mark the first thing truncate() eats in a
+	// narrow terminal — and the mark is the anomaly signal, so it is exactly what
+	// must survive. A summary is prose and degrades gracefully; a half-rendered
+	// version string ("(v0.2…") tells an operator nothing.
+	mark := o.binaryMark(s)
 	summary := o.theme.MutedStyle().Render(padTo(s.Summary, summaryW))
+	if mark != "" {
+		summary = padTo(o.theme.WarnStyle().Render(mark+" ")+o.theme.MutedStyle().Render(s.Summary), summaryW)
+	}
 	if showStatus {
 		word := effectiveStatus(s).String()
-		styled := o.statusColorFor(effectiveStatus(s)).Render(word) + o.theme.MutedStyle().Render(" · "+s.Summary)
+		styled := o.statusColorFor(effectiveStatus(s)).Render(word)
+		// Only when there IS a mark: styling an empty string still emits the
+		// style's escape codes, which would change every unskewed row's bytes and
+		// break the styled goldens for a mark nobody can see.
+		if mark != "" {
+			styled += o.theme.WarnStyle().Render(" " + mark)
+		}
+		styled += o.theme.MutedStyle().Render(" · " + s.Summary)
 		summary = padTo(styled, summaryW)
 	}
 
@@ -275,6 +294,32 @@ func (o Overview) row(s SessionInfo, width int, showStatus bool) string {
 		return o.theme.AccentStyle().Render(line)
 	}
 	return line
+}
+
+// binaryMark renders a session's [SessionInfo.BinaryVersion] as a warn-colored
+// row marker — "(v0.4.1)" — when, and only when, it differs from the version
+// this app is running. [Overview.row] places it ahead of the summary text so it
+// survives truncation in a narrow terminal.
+//
+// Under M6 process isolation each session runs in its own worker process, so a
+// daemon upgrade does not migrate live sessions: they finish their turns on the
+// binary they started with while new sessions come up on the new one. This mark
+// is how that drain becomes visible to an operator instead of being a raw-wire
+// fact (design §11's "session/list shows mixed binaryVersions"). It is
+// deliberately CONDITIONAL: in the overwhelmingly common all-matching case an
+// identical version stamped on every row carries no information and costs the
+// summary column real estate, so only the anomaly renders. `gofer ps` shows the
+// version unconditionally in its own BINARY column for the full picture.
+//
+// An empty version — an offline row, or any pre-M6 daemon that never sends the
+// field — marks nothing rather than rendering as a difference from the app's
+// version, which would light up every offline row in the --all view. Likewise a
+// meta with no version of its own has nothing to compare against.
+func (o Overview) binaryMark(s SessionInfo) string {
+	if s.BinaryVersion == "" || o.meta.Version == "" || s.BinaryVersion == o.meta.Version {
+		return ""
+	}
+	return " (v" + s.BinaryVersion + ")"
 }
 
 // statusColorFor returns the state color a session's effective status renders
