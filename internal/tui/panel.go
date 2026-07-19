@@ -14,6 +14,7 @@ package tui
 import (
 	"context"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -446,7 +447,7 @@ func (a App) handleModelSelect() (tea.Model, tea.Cmd) {
 			// zero-value config — that would overwrite config.json and drop
 			// the user's permissions/telemetry settings. Surface it and abort,
 			// preserving the on-disk state (mirrors the SaveConfig-error path).
-			a.status = "couldn't load config: " + err.Error()
+			a.setStatus(sevDanger, "couldn't load config: "+err.Error())
 			a.panel = nil
 			return a, nil
 		}
@@ -455,29 +456,32 @@ func (a App) handleModelSelect() (tea.Model, tea.Cmd) {
 	cfg.Session.Model = selected
 	if a.commandEnv.SaveConfig != nil {
 		if err := a.commandEnv.SaveConfig(cfg); err != nil {
-			a.status = "couldn't save default model: " + err.Error()
+			a.setStatus(sevDanger, "couldn't save default model: "+err.Error())
 			a.panel = nil
 			return a, nil
 		}
 	}
 
 	// Make the write visible where the user reads the default: the roster
-	// header (and the attach screen's, which renders the same meta). Guarded on
-	// the backend, because the header is only ours to update when this process
-	// owns the default — attached to a daemon it truthfully shows the DAEMON's,
-	// which this write did not change (see [App.defaultModelScope]).
+	// header (and the attach screen's, which renders the same meta). On the
+	// LOCAL backend that is immediate and unconditional — this process owns the
+	// default. On the daemon path the header shows the DAEMON's default, which
+	// only the daemon can answer, so it is refreshed asynchronously from the
+	// gofer/hello probe [App.probeDaemonDefaultCmd] dispatches below (issue
+	// #162 — before that probe existed the header simply stayed stale forever).
 	if !a.commandEnv.DaemonBacked {
 		a.over = a.over.WithDefaultModel(selected)
 	}
 
 	sess := a.panel.model.sess
+	a.panel = nil
+
 	if sess == nil {
 		// The overview: no running session to swap, only the default.
-		a.status = a.withDefaultReach(
+		a.setStatus(a.defaultReachSeverity(sevOK), a.withDefaultReach(
 			"Default model set to "+modelmeta.DisplayName(selected)+".",
-			"Default saved; attached daemon adopts it unless pinned.")
-		a.panel = nil
-		return a, nil
+			"Default saved; attached daemon adopts it unless pinned."))
+		return a, a.probeDaemonDefaultCmd(outcomeDefaultOnly, selected)
 	}
 
 	if modelProvider(sess.Model) != modelProvider(selected) {
@@ -486,25 +490,27 @@ func (a App) handleModelSelect() (tea.Model, tea.Cmd) {
 		// daemon-attached wording drops that clause outright rather than
 		// qualifying it — a caveat can be truncated off an 80-column status
 		// line, and an overclaim that survives truncation is exactly the bug.
+		//
+		// Warn either way: the default WAS written, but the thing the user was
+		// most likely looking at — the running session — did not move.
 		if a.commandEnv.DaemonBacked {
-			a.status = a.withDefaultReach(
+			a.setStatus(sevWarn, a.withDefaultReach(
 				"Live model swap needs the same provider — this session keeps its model.",
-				"Provider differs — session keeps its model; default saved.")
+				"Provider differs — session keeps its model; default saved."))
 		} else {
-			a.status = "Live model swap needs the same provider — default set for new sessions; this session keeps its model."
+			a.setStatus(sevWarn, "Live model swap needs the same provider — default set for new sessions; this session keeps its model.")
 		}
-		a.panel = nil
-		return a, nil
+		return a, a.probeDaemonDefaultCmd(outcomeProviderMismatch, selected)
 	}
 
 	// The live swap dispatched below applies on either backend — over the wire
 	// on the daemon path, in-process on the local one — so this half of the
 	// message is unconditional. Only the DEFAULT's reach differs.
-	a.status = a.withDefaultReach(
+	a.setStatus(a.defaultReachSeverity(sevOK), a.withDefaultReach(
 		"Model set to "+modelmeta.DisplayName(selected)+".",
-		"Model set for this session; daemon adopts the default unless pinned.")
-	a.panel = nil
+		"Model set for this session; daemon adopts the default unless pinned."))
 	sessionID, sup := sess.ID, a.sup
+	probe := a.probeDaemonDefaultCmd(outcomeLiveSwap, selected)
 	return a, func() tea.Msg {
 		// A defensive backstop, not the primary guard: the client-side
 		// provider check above already keeps this call same-provider on the
@@ -514,8 +520,151 @@ func (a App) handleModelSelect() (tea.Model, tea.Cmd) {
 		// (App.Update) turns any error into the same transient status note
 		// rather than a crash.
 		err := sup.SetModel(context.Background(), sessionID, selected)
-		return opDoneMsg{err: err}
+		if err != nil || probe == nil {
+			// A failed swap is the whole story; the probe would only talk over
+			// it. opDoneMsg stays the ONLY route to danger for an op result.
+			return opDoneMsg{err: err}
+		}
+		// Sequenced INSIDE this command rather than tea.Batch'd alongside it on
+		// purpose: both are RPCs to the same daemon, the probe is only
+		// meaningful once the swap has settled, and a Batch would fan out two
+		// messages where the second must win.
+		return probe()
 	}
+}
+
+// modelSelectOutcome records what a committed /model select did to the SESSION,
+// so [App.applyDaemonDefault] can pick a status note that stays true about both
+// halves of the action once the daemon's answer about the DEFAULT arrives.
+type modelSelectOutcome int
+
+const (
+	// outcomeDefaultOnly is a select made from the overview: no session was
+	// attached or peeked, so only the default was written.
+	outcomeDefaultOnly modelSelectOutcome = iota
+	// outcomeProviderMismatch is a select whose provider differs from the
+	// attached session's, so the running session kept its model.
+	outcomeProviderMismatch
+	// outcomeLiveSwap is a same-provider select that also hot-swapped the
+	// attached session's live model.
+	outcomeLiveSwap
+)
+
+// daemonDefaultProbedMsg carries the attached daemon's CURRENT default model,
+// read back off gofer/hello after a /model write ([App.probeDaemonDefaultCmd]).
+// daemonDefault is "" whenever the answer is UNKNOWN — the probe failed, the
+// daemon predates gofer/hello, or it resolved no default at all — which is a
+// distinct state from "the daemon reports a different model", and the two must
+// not be conflated: unknown keeps the hedged note, different means pinned.
+type daemonDefaultProbedMsg struct {
+	outcome       modelSelectOutcome
+	selected      string
+	daemonDefault string
+}
+
+// daemonProbeTimeout bounds the post-write gofer/hello probe. It is a package
+// constant rather than a config knob because the probe is a single handshake
+// RPC to an already-open connection — there is no deployment where a user would
+// reasonably want to wait longer, and the cost of giving up is only that the
+// note stays hedged (see [daemonDefaultProbedMsg]). Mirrors
+// [modelcatalog.DefaultDiscoveryTimeout]'s shape for the same reason.
+const daemonProbeTimeout = 3 * time.Second
+
+// probeDaemonDefaultCmd asks the attached daemon what its default model
+// CURRENTLY is, so the header and the status note can both stop guessing
+// (issue #162). It returns nil — no probe, nothing to refine — on the local
+// backend, or when the process wiring supplied no probe
+// ([CommandEnv.DaemonDefaultModel] is nil, which is also how a daemon
+// predating gofer/hello is reported; see cmd/gofer's selectTUIBackend).
+//
+// It is a tea.Cmd, NOT part of the synchronous select handling, because it is a
+// network call: running it inline would block the Update loop for as long as
+// the daemon takes to answer.
+func (a App) probeDaemonDefaultCmd(outcome modelSelectOutcome, selected string) tea.Cmd {
+	if !a.commandEnv.DaemonBacked || a.commandEnv.DaemonDefaultModel == nil {
+		return nil
+	}
+	probe := a.commandEnv.DaemonDefaultModel
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), daemonProbeTimeout)
+		defer cancel()
+		model, err := probe(ctx)
+		if err != nil {
+			// Every failure collapses to "unknown", which leaves the hedged
+			// note handleModelSelect already set standing. A header detail must
+			// never turn into an error the user has to act on.
+			model = ""
+		}
+		return daemonDefaultProbedMsg{outcome: outcome, selected: selected, daemonDefault: model}
+	}
+}
+
+// applyDaemonDefault folds the probed daemon default back into the app: it
+// refreshes the roster header from the DAEMON's own answer — the value every
+// session that daemon creates without an explicit model will use — and replaces
+// the hedged "adopts it unless pinned" note with a definitive one.
+//
+// The two cases the pre-probe wording could not tell apart (see
+// [App.withDefaultReach]):
+//
+//   - ADOPTED — the daemon now reports exactly what was just written, so the
+//     write reached it and the next session it creates uses it.
+//   - PINNED — the daemon reports something else (it was started with an
+//     explicit --model, which stays authoritative for its lifetime), so the
+//     write reaches only future daemons. The header still moves, to the pinned
+//     value: that is the truth about what the daemon runs, and showing the
+//     never-to-be-used selected id there would be the same overclaim in a
+//     second place.
+//
+// An unknown answer (daemonDefault == "") changes nothing at all.
+//
+// Every note here is STANDALONE rather than a base note plus a suffix, and none
+// interpolates a model id: the status line is truncated to the terminal width
+// (App.render), so a qualification that gets cut off leaves exactly the
+// unqualified overclaim behind, and an arbitrarily long model id is precisely
+// what pushes one over the edge. TestDaemonDefaultNotesFitTheWidthFloor pins
+// this.
+func (a App) applyDaemonDefault(msg daemonDefaultProbedMsg) App {
+	if msg.daemonDefault == "" {
+		return a
+	}
+	a.over = a.over.WithDefaultModel(msg.daemonDefault)
+
+	adopted := msg.daemonDefault == msg.selected
+	switch msg.outcome {
+	case outcomeProviderMismatch:
+		// Warn regardless: the running session did not move either way.
+		if adopted {
+			a.setStatus(sevWarn, "Provider differs — session keeps its model; daemon took the default.")
+		} else {
+			a.setStatus(sevWarn, "Provider differs — session keeps its model; daemon is pinned.")
+		}
+	case outcomeLiveSwap:
+		if adopted {
+			a.setStatus(sevOK, "Model set for this session; the daemon took the new default.")
+		} else {
+			a.setStatus(sevWarn, "Model set for this session; the daemon is pinned to another default.")
+		}
+	default: // outcomeDefaultOnly
+		if adopted {
+			a.setStatus(sevOK, "Default model saved; the attached daemon adopted it.")
+		} else {
+			a.setStatus(sevWarn, "Default saved; the attached daemon is pinned to another model.")
+		}
+	}
+	return a
+}
+
+// defaultReachSeverity downgrades an otherwise-unqualified success to a caveat
+// on the daemon path, where [App.withDefaultReach]'s wording is hedged by
+// construction ("adopts it unless pinned" is a statement the TUI cannot yet
+// back up). Once the probe lands, [App.applyDaemonDefault] replaces both the
+// note and this severity with a definitive one.
+func (a App) defaultReachSeverity(local statusSeverity) statusSeverity {
+	if a.commandEnv.DaemonBacked {
+		return sevWarn
+	}
+	return local
 }
 
 // withDefaultReach appends to note whatever qualification the persisted
@@ -533,18 +682,19 @@ func (a App) handleModelSelect() (tea.Model, tea.Cmd) {
 // restart. A daemon started with an explicit --model is pinned: that flag stays
 // authoritative for its lifetime and the write reaches only future daemons.
 //
-// This TUI cannot currently tell those two apart, so the daemon-attached
+// SYNCHRONOUSLY, this TUI cannot tell those two apart, so the daemon-attached
 // wording is deliberately chosen to be TRUE UNDER BOTH: "adopts it unless
 // pinned" claims no effect that might not have occurred, and concedes none
 // that did. Asserting "unchanged until restart" (the pre-fix wording) is now
 // simply false for the unpinned case, which is the common one.
 //
-// PINNED/UNPINNED PROBE (follow-up): re-probing gofer/hello after the write and
-// comparing HelloResult.DefaultModel to the selected id distinguishes them —
-// equal means adopted, different means pinned — because hello now answers live
-// from the same accessor session/new uses rather than a startup snapshot. That
-// probe is a network call, so it belongs in a tea.Cmd, not in this pure
-// synchronous function; it is not wired here.
+// It is no longer the LAST word, though. This function stays pure and
+// synchronous — it is called on the Update loop — and the pinned/unpinned
+// question is settled asynchronously by [App.probeDaemonDefaultCmd], whose
+// gofer/hello answer [App.applyDaemonDefault] turns into a definitive note
+// (issue #162). What this function returns is therefore the note the user reads
+// for the few milliseconds before that lands, and the note that STAYS if the
+// probe cannot answer.
 //
 // Each branch returns a STANDALONE string rather than composing note+suffix.
 // The status line is truncated to the terminal width (App.render), and a

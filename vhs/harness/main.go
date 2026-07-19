@@ -23,6 +23,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"sync/atomic"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -57,7 +58,7 @@ type step struct {
 // vocabulary is spelled out, so the two never drift apart. Slugs follow
 // `<area>-<view>[-<state>]`, kebab-case: transcript-* (the attach scenes),
 // roster-* (the overview scene), panel-* (the command-panel scenes).
-const scenarioHelp = "transcript-tool-call | transcript-approval | roster-overview | panel-status-overview | panel-status | panel-config | panel-model | panel-model-empty"
+const scenarioHelp = "transcript-tool-call | transcript-approval | roster-overview | panel-status-overview | panel-status | panel-config | panel-model | panel-model-empty | panel-model-daemon-refresh"
 
 func main() {
 	scenario := flag.String("scenario", "transcript-tool-call", "scripted scene to play: "+scenarioHelp)
@@ -85,6 +86,8 @@ func main() {
 		model = commandViewApp(cannedCommandEnv())
 	case "panel-model-empty":
 		model = commandViewApp(emptyCommandEnv())
+	case "panel-model-daemon-refresh":
+		model = commandViewApp(daemonRefreshCommandEnv())
 	default:
 		fmt.Fprintf(os.Stderr, "harness: unknown scenario %q (want %s)\n", *scenario, scenarioHelp)
 		os.Exit(2)
@@ -257,6 +260,37 @@ func cannedCommandEnv() tui.CommandEnv {
 func emptyCommandEnv() tui.CommandEnv {
 	env := cannedCommandEnv()
 	env.Auth = func() ([]tui.ProviderAuth, error) { return nil, nil }
+	return env
+}
+
+// daemonRefreshCommandEnv is the [tui.CommandEnv] panel-model-daemon-refresh
+// reads: cannedCommandEnv marked DAEMON-BACKED, with a stub gofer/hello probe
+// standing in for a reachable, UNPINNED `gofer daemon`.
+//
+// It is what makes issue #162 visually demonstrable in a LIVE process. The tape
+// screenshots the header, types a /model change, and screenshots the header
+// again — one continuous run, no restart — and the two frames must differ. The
+// probe answers with whatever id it is asked about, which is exactly how an
+// unpinned daemon behaves: it re-reads its default per session/new, so asked
+// straight after the write it reports the value just written.
+//
+// The probe is an in-process closure, so this scene performs ZERO network IO by
+// construction — no daemon is dialed and no credential is read.
+func daemonRefreshCommandEnv() tui.CommandEnv {
+	env := cannedCommandEnv()
+	env.DaemonBacked = true
+	var adopted atomic.Pointer[string]
+	env.SaveConfig = func(c config.Config) error {
+		model := c.Session.Model
+		adopted.Store(&model)
+		return nil
+	}
+	env.DaemonDefaultModel = func(context.Context) (string, error) {
+		if m := adopted.Load(); m != nil {
+			return *m, nil
+		}
+		return "claude-fable-5", nil // the daemon's pre-change default
+	}
 	return env
 }
 

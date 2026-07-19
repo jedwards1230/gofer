@@ -284,7 +284,40 @@ func handleSessionNew(d *Daemon, ctx context.Context, _ *peer, params json.RawMe
 		return nil, appError(err)
 	}
 	d.log.Info("session created", "session", info.ID)
-	return acp.NewSessionResponse{SessionID: info.ID}, nil
+	return newSessionResult{
+		NewSessionResponse: acp.NewSessionResponse{SessionID: info.ID},
+		Meta:               &newSessionMeta{Model: info.Model},
+	}, nil
+}
+
+// newSessionResult is the session/new response: ACP's own
+// [acp.NewSessionResponse] plus gofer's `_meta` extension. ACP reserves `_meta`
+// for exactly this — implementation-specific data an unaware client ignores —
+// so carrying the assigned model there keeps the response conformant, needs no
+// change to the SDK's shared wire types, and honors the repo's contract-only
+// consumption invariant.
+//
+// It exists because the ACP response carries only the session id. A client that
+// let the daemon choose the model — the NORMAL path, session/new with no model
+// — therefore had no way to learn what it actually got, so
+// internal/daemonbridge's Create could only echo back the model it had
+// REQUESTED (the empty string), and the roster row it returned could never
+// carry the real one (issue #162, defect 2).
+type newSessionResult struct {
+	acp.NewSessionResponse
+	Meta *newSessionMeta `json:"_meta,omitempty"`
+}
+
+// newSessionMeta is [newSessionResult]'s `_meta` payload. The key is namespaced
+// the same way gofer's own methods are (gofer/*), so it cannot collide with
+// another ACP implementation's extension data.
+type newSessionMeta struct {
+	// Model is the model the daemon ASSIGNED to the new session: the client's
+	// requested model when it sent one, else the daemon's own resolved default
+	// (see the resolution above). Empty only when the daemon could not resolve
+	// one at all. A client that sees no `_meta` at all is talking to a daemon
+	// predating this field and falls back to whatever it requested.
+	Model string `json:"gofer/model,omitempty"`
 }
 
 // handleSessionLoad reopens a persisted session and replays its folded

@@ -167,7 +167,7 @@ func (a App) dispatchSlash(buf string) (App, tea.Cmd) {
 	name, args := parseSlash(buf)
 	cmd, ok := a.registry.Lookup(name)
 	if !ok {
-		a.status = "unknown command: /" + name
+		a.setStatus(sevDanger, "unknown command: /"+name)
 		return a, nil
 	}
 	return cmd.Run(a, args)

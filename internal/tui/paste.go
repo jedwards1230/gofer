@@ -43,7 +43,7 @@ func (a App) handlePaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
-	a.status = ""
+	a.clearStatus()
 	// A paste mutates the buffer under the selection just like a key press
 	// does, so it clears an active/frozen mouse selection for the same reason
 	// (docs/TUI.md's "clear the selection on the next click / a key press").
@@ -64,7 +64,8 @@ func (a App) handlePaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if clipped {
-		a.status = fmt.Sprintf("paste clipped to %d bytes (tui.max_paste_bytes)", a.pasteLimitBytes())
+		// A caveat, not a failure: the paste DID land, just truncated.
+		a.setStatus(sevWarn, fmt.Sprintf("paste clipped to %d bytes (tui.max_paste_bytes)", a.pasteLimitBytes()))
 	}
 	// A pasted "/mod" is as much an active command token as a typed one, so
 	// the autocomplete menu re-syncs off a paste exactly as it does after

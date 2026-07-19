@@ -33,6 +33,12 @@ type fakeSup struct {
 	createdCwd []string
 	sent       []string
 	ops        []string
+
+	// setModelErr, when non-nil, is what SetModel returns — the failed-op path
+	// a test needs to prove opDoneMsg's error still wins over anything the
+	// /model select would otherwise report (see model_select_probe_test.go).
+	// The call is still recorded in ops either way.
+	setModelErr error
 }
 
 func newFakeSup(roster []tui.SessionInfo) *fakeSup {
@@ -102,7 +108,7 @@ func (f *fakeSup) SetModel(_ context.Context, id, model string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.ops = append(f.ops, "set-model:"+id+":"+model)
-	return nil
+	return f.setModelErr
 }
 
 // Reply is a no-op here: the approval prompt it answers needs the unexported

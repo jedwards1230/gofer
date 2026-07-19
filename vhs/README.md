@@ -33,6 +33,12 @@ Tape/scenario names follow one slug schema, `<area>-<view>[-<state>]`
   populated model list and the ✓ active-model mark.
 - `panel-model-empty.tape` — the Model tab with zero authenticated providers:
   the empty-list state and its "/login" hint.
+- `panel-model-daemon-refresh.tape` — issue #162's before/after: a
+  daemon-backed roster whose header adopts a new default model **mid-run**.
+  Screenshots the header, types the `/model` change, screenshots it again —
+  one continuous process, no restart — as `panel-model-daemon-refresh-before`
+  / `-after`. The daemon is an in-process stub probe, so the scene performs no
+  network IO.
 
 Run: `scripts/tui-vhs.sh [slug...]` (no arg = all tapes, e.g.
 `scripts/tui-vhs.sh panel-status panel-config`). It prebuilds

@@ -565,6 +565,9 @@ human-eye check of real rendered frames, `vhs/` holds on-demand
 - `roster-overview` — the roster with mixed states, showing the status words
   in color (yellow working/awaiting vs green finished) — the state that now
   lives only in color.
+- `panel-model-daemon-refresh` — the #162 before/after: a daemon-backed
+  roster whose header adopts a new default model mid-run, captured as two
+  screenshots of one continuous process (`-before` / `-after`).
 - `panel-status-overview` — the command panel opened via `/status` with no
   session attached (Session rows read "—"). `panel-status` — the same tab
   attached to a session, showing real session identity and both provider auth
@@ -634,7 +637,34 @@ ArgHint, Hidden, Run}` and `Registry` (name/alias → `Command`). Both submit
 paths — the overview dispatch bar and the attach input — parse a leading `/`
 at Enter time (`/name arg…`, whitespace-split) and dispatch through the
 registry instead of creating/sending a prompt; an unmatched name sets the
-transient status line. `panel.go` holds the command panel: a bottom overlay
+transient status line.
+
+**The transient status line carries a severity, not just text** (#161). Every
+write goes through `App.setStatus(sev, note)`, which sets the text and its
+`statusSeverity` together so the two cannot drift, and `App.render` styles the
+footer from it:
+
+| Severity | Style | Means | Examples |
+|---|---|---|---|
+| `sevOK` | `OKStyle` (green) | unqualified success | *"Default model set to X."*, *"…the daemon adopted it."* |
+| `sevWarn` | `WarnStyle` (yellow) | it worked, with a caveat | cross-provider pick, a pinned daemon, a clipped paste |
+| `sevDanger` | `DangerStyle` (red) | the operation failed | `opDoneMsg`'s error path, config read/write errors, unknown command |
+
+`opDoneMsg`'s error path is the **only** route to danger for an operation
+result. The zero value is `sevDanger` on purpose — it is the pre-#161
+behavior, so a write that forgets a severity degrades to the old rendering
+rather than silently claiming success — and `App.clearStatus` resets it so a
+stale color can never outlive the note it described.
+
+Before this, *every* note rendered in `DangerStyle`, so a successful `/model`
+change was painted the same red as an HTTP 400 and a user reasonably read the
+success as a failure. The severities are pinned by **styled** goldens
+(`testkit.AssertGoldenStyled` / `testkit.TagANSI` under
+`testkit.ColorTheme`), never plain Ascii ones: `theme.Test` forces
+`termenv.Ascii`, which emits no escapes at all, so an Ascii golden is blind to
+color by construction and would assert nothing here.
+
+`panel.go` holds the command panel: a bottom overlay
 (`App.panel`, nil = closed) composed over whichever screen `App` is showing,
 routed with the same precedence as the approval overlay — `panel > approval >
 active screen > global` — and closed by Esc, sized to whatever the active
@@ -732,7 +762,34 @@ running session on its model (a session's provider is fixed at creation) and
 sets a status note instead: *"Live model swap needs the same provider —
 default set for new sessions; this session keeps its model."* Either way,
 Enter is a committing action: it closes the panel, leaving the outcome in the
-transient status line. Effort-adjust (←/→) stays deferred (no SDK backing) —
+transient status line.
+
+**On a daemon-backed roster the outcome is confirmed, not guessed** (#162).
+The header shows the DAEMON's default model, which this process cannot
+recompute, so after a committed write App dispatches a `gofer/hello` re-probe
+in a `tea.Cmd` (`App.probeDaemonDefaultCmd`, over
+`CommandEnv.DaemonDefaultModel` — a network call, so never inline on the
+Update loop) and folds the answer back in `App.applyDaemonDefault`:
+
+| Daemon reports | Header | Note |
+|---|---|---|
+| the model just written | moves to it | *"…the attached daemon adopted it."* (ok) |
+| a different model (started with `--model`, so pinned) | moves to the **pinned** model | *"…the attached daemon is pinned to another model."* (warn) |
+| nothing — probe failed, or a daemon predating `gofer/hello` | unchanged | the hedged *"adopts it unless pinned"* wording stands |
+
+The header previously updated only on the local backend and was otherwise a
+startup snapshot, so a daemon-attached user saw no evidence at all that a
+`/model` change had worked. It now updates **in the running process, with no
+restart**. Every note above is a standalone string that fits the 80-column
+floor and names no model id: the status line is width-truncated, and a caveat
+truncated off the right edge leaves exactly the unqualified overclaim behind.
+
+The same run also fixed the roster row: `session/new`'s response carries the
+model the daemon ASSIGNED in ACP's reserved `_meta`, under the
+gofer-namespaced key `gofer/model`, so `daemonbridge.Create` reports what the
+session actually runs instead of echoing the (normally empty) requested model.
+
+Effort-adjust (←/→) stays deferred (no SDK backing) —
 and has no room on the Model tab regardless, since ←/→ are already claimed by
 the panel host for tab switching.
 

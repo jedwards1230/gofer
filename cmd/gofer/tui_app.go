@@ -126,6 +126,14 @@ func selectTUIBackend(ctx context.Context, df *daemonFlags, cwd, root string, st
 		// wrappers above are unchanged either way, since auth.json/config.json
 		// are always this machine's.
 		env.DaemonBacked = true
+		// The live re-read of that daemon's default, for AFTER a /model write:
+		// the header seeded below is a one-shot startup snapshot, and without
+		// this the TUI would keep showing it until the process restarted
+		// (issue #162). Bound to this connection, so it answers about the same
+		// daemon the roster comes from.
+		env.DaemonDefaultModel = func(ctx context.Context) (string, error) {
+			return daemonDefaultModelErr(ctx, c)
+		}
 		return tuiBackend{
 			sup:   b,
 			close: b.Close,
@@ -190,11 +198,47 @@ func selectTUIBackend(ctx context.Context, df *daemonFlags, cwd, root string, st
 // as it did before this existed. Non-fatal by design — a header detail must
 // never keep the roster from opening.
 func daemonDefaultModel(ctx context.Context, c *daemon.Client) string {
+	model, _ := daemonDefaultModelErr(ctx, c)
+	return model
+}
+
+// daemonDefaultModelErr is daemonDefaultModel keeping the error, for
+// [tui.CommandEnv.DaemonDefaultModel]: the TUI re-reads the daemon's default
+// after a /model write and needs to tell "the daemon says X" from "the daemon
+// could not answer" (issue #162).
+//
+// A daemon predating gofer/hello ([daemon.ErrHelloUnsupported]) is NOT an
+// error here — it is a known, permanent "this daemon cannot answer", reported
+// as the same empty/no-error unknown a daemon that resolved no default gives.
+// Both leave the TUI on its hedged, no-probe wording. Any other failure is
+// returned so the caller can decide; the TUI collapses it to unknown too,
+// which is why this is the only place the distinction is drawn.
+func daemonDefaultModelErr(ctx context.Context, c *daemon.Client) (string, error) {
 	hello, err := c.Hello(ctx)
-	if err != nil {
-		return ""
+	return classifyHelloDefault(hello.DefaultModel, err)
+}
+
+// classifyHelloDefault turns a gofer/hello result into the (model, error) pair
+// [tui.CommandEnv.DaemonDefaultModel] is specified in terms of.
+//
+// It is split out from its single caller purely as a TEST SEAM, and a load
+// bearing one: the branch that matters is [daemon.ErrHelloUnsupported], and
+// reaching it through the real client would mean hand-rolling a JSON-RPC peer
+// that deliberately omits gofer/hello — a pre-hello daemon no longer exists to
+// build. Left inline, the one rule this function encodes would be untested.
+func classifyHelloDefault(model string, err error) (string, error) {
+	switch {
+	case err == nil:
+		return model, nil
+	case errors.Is(err, daemon.ErrHelloUnsupported):
+		// A permanent "this daemon cannot answer", not a failure. Reported as
+		// the same unknown a daemon with no resolved default gives, so the TUI
+		// stays on its hedged no-probe wording rather than showing the user an
+		// error they cannot act on.
+		return "", nil
+	default:
+		return "", err
 	}
-	return hello.DefaultModel
 }
 
 // modelDiscoveryClient and modelDiscoveryBaseURL are the transport production

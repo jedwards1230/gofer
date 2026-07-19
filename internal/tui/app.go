@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/jedwards1230/agent-sdk-go/event"
 
@@ -49,6 +50,43 @@ const (
 	scrollPageLines  = 10
 	scrollWheelLines = 2
 )
+
+// statusSeverity is what a transient status note MEANS, which is the only
+// thing that decides its color (issue #161). Before this existed every note
+// rendered in [theme.Theme.DangerStyle], so "Default model set." was visually
+// identical to "openai: http 400" and a user reasonably read a success as a
+// failure.
+//
+// The zero value is [sevDanger] deliberately: it is the historical behavior,
+// so a status write that forgets a severity degrades to the pre-#161 rendering
+// rather than silently claiming success. Clearing a.status resets it here too,
+// so a stale severity can never outlive the note it described.
+type statusSeverity int
+
+const (
+	// sevDanger is an operation that FAILED: a Supervisor op error, a
+	// config read/write error, an unknown command. [opDoneMsg]'s error path
+	// is the only route to danger for an op RESULT.
+	sevDanger statusSeverity = iota
+	// sevWarn is a caveat: the action did something, but not everything the
+	// user might expect (a cross-provider pick that can't hot-swap, a
+	// default the attached daemon is pinned against, a clipped paste).
+	sevWarn
+	// sevOK is an unqualified success.
+	sevOK
+)
+
+// style resolves the severity to the theme style the status footer renders in.
+func (s statusSeverity) style(th theme.Theme) lipgloss.Style {
+	switch s {
+	case sevOK:
+		return th.OKStyle()
+	case sevWarn:
+		return th.WarnStyle()
+	default:
+		return th.DangerStyle()
+	}
+}
 
 // App is gofer's TUI root: the bubbletea [tea.Model] that ties the
 // overview/peek/attach screens together, enforces the navigation contract
@@ -108,6 +146,15 @@ type App struct {
 
 	status string // transient error/status line, cleared on the next key press
 
+	// statusSev is how a.status is COLORED (issue #161). The status line is
+	// the only feedback channel several actions have — notably /model — so
+	// rendering a success in the same red as an HTTP 400 actively tells the
+	// user their successful action failed. Every write to a.status goes
+	// through [App.setStatus], which sets both fields together; the zero
+	// value is [sevDanger] because a cleared status renders nothing at all
+	// and because every pre-severity note was an error path.
+	statusSev statusSeverity
+
 	// scroll is the active screen's manual scroll-back offset into its
 	// header+content region — 0 (the default) is tail-to-latest: the
 	// overview follows the selection and the attach transcript tails new
@@ -153,6 +200,22 @@ func NewApp(th theme.Theme, sup Supervisor, meta OverviewMeta, env CommandEnv) A
 		a.over.selectedID = meta.AttachSessionID
 	}
 	return a
+}
+
+// setStatus sets the transient status line and the severity it renders in
+// together, so the two can never drift apart (issue #161: a note whose text
+// says "set" and whose color says "failed" is worse than either alone). Every
+// write to a.status goes through here.
+func (a *App) setStatus(sev statusSeverity, note string) {
+	a.status = note
+	a.statusSev = sev
+}
+
+// clearStatus drops the transient status line, resetting the severity with it
+// so a stale color can never outlive the note it described.
+func (a *App) clearStatus() {
+	a.status = ""
+	a.statusSev = sevDanger
 }
 
 // rosterTickMsg fires [App.fetchRoster] again on the polling interval.
@@ -426,7 +489,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case rosterMsg:
 		if msg.err != nil {
-			a.status = msg.err.Error()
+			a.setStatus(sevDanger, msg.err.Error())
 		} else {
 			a.over = a.over.WithSessions(msg.sessions)
 		}
@@ -440,7 +503,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil // user moved on before the subscribe resolved
 		}
 		if msg.err != nil {
-			a.status = msg.err.Error()
+			a.setStatus(sevDanger, msg.err.Error())
 			return a, nil
 		}
 		a.sub = msg.sub
@@ -464,7 +527,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case createdMsg:
 		if msg.err != nil {
-			a.status = msg.err.Error()
+			a.setStatus(sevDanger, msg.err.Error())
 			return a, nil
 		}
 		a.scr = screenAttach
@@ -472,9 +535,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case opDoneMsg:
 		if msg.err != nil {
-			a.status = msg.err.Error()
+			a.setStatus(sevDanger, msg.err.Error())
 		}
 		return a, nil
+
+	case daemonDefaultProbedMsg:
+		// The attached daemon's answer to "what is your default model NOW",
+		// read back after a /model write (panel.go). It refreshes the header
+		// and upgrades the hedged status note to a definitive one — the whole
+		// point being that neither needs a restart to become true (issue #162).
+		return a.applyDaemonDefault(msg), nil
 
 	case modelsLoadedMsg:
 		// The /model picker's background catalog load landing (panel.go). It
@@ -490,7 +560,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a.handlePaste(msg)
 
 	case tea.KeyPressMsg:
-		a.status = ""
+		a.clearStatus()
 		// Any key press clears an active/frozen mouse selection — docs/TUI.md's
 		// "clear the selection on the next click / a key press" contract (a
 		// fresh click already clears it via handleMouseClick installing a new
@@ -858,7 +928,7 @@ func (a App) frameLayout() frameLayout {
 
 	var footer string
 	if a.status != "" {
-		footer = truncate(a.theme.DangerStyle().Render(a.status), a.width)
+		footer = truncate(a.statusSev.style(a.theme).Render(a.status), a.width)
 		h--
 	}
 

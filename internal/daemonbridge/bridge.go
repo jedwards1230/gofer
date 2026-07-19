@@ -170,9 +170,14 @@ func (s *Supervisor) Send(ctx context.Context, sessionID, prompt string) error {
 // Create starts a new session via session/new. opts.Model, when non-empty, is
 // forwarded on the request and the daemon honors it for the new session (see
 // internal/daemon's handleSessionNew); an empty opts.Model resolves to the
-// daemon's own configured default. Either way opts.Model is also carried
-// directly onto the returned row so the roster reflects what was requested
-// before the next poll confirms it. When prompt is non-empty, Create kicks
+// daemon's own configured default. Either way the returned row carries the
+// model the daemon ASSIGNED, read off the response's `_meta` (see
+// [newSessionResponse]), so the roster shows what the session actually runs
+// before the next poll confirms it.
+//
+// It used to carry opts.Model — the REQUEST — instead, which on the normal path
+// (no model sent, daemon picks its default) is the empty string, so the row
+// could never show the real model (issue #162). When prompt is non-empty, Create kicks
 // off [Supervisor.Send] in the background (the same fire-and-forget path a
 // subsequent Send call would take) and returns a minimal row immediately; the
 // App's 1s roster poll refreshes it with the daemon's authoritative state.
@@ -189,7 +194,7 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts tui.CreateO
 	if err != nil {
 		return tui.SessionInfo{}, fmt.Errorf("daemonbridge: create: %w", err)
 	}
-	var resp acp.NewSessionResponse
+	var resp newSessionResponse
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return tui.SessionInfo{}, fmt.Errorf("daemonbridge: decode %s response: %w", acp.MethodSessionNew, err)
 	}
@@ -198,7 +203,7 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts tui.CreateO
 	now := time.Now()
 	info := tui.SessionInfo{
 		ID:      resp.SessionID,
-		Model:   opts.Model,
+		Model:   resp.assignedModel(opts.Model),
 		Cwd:     opts.Cwd,
 		Status:  tui.StatusNeedsInput,
 		Created: now,
@@ -211,6 +216,33 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts tui.CreateO
 		}
 	}
 	return info, nil
+}
+
+// newSessionResponse is the session/new response as this bridge reads it:
+// ACP's [acp.NewSessionResponse] plus the daemon's gofer-namespaced `_meta`
+// extension carrying the model it ASSIGNED (see internal/daemon's
+// newSessionResult). Decoding it is what lets [Supervisor.Create] report what
+// the session actually runs instead of echoing what it asked for.
+type newSessionResponse struct {
+	acp.NewSessionResponse
+	Meta struct {
+		Model string `json:"gofer/model"`
+	} `json:"_meta"`
+}
+
+// assignedModel is the model the new session actually runs: the daemon's own
+// answer, falling back to requested — the model this client asked for — when
+// the daemon sent no `_meta` at all.
+//
+// The fallback is ONLY for a daemon predating the field. It must never be read
+// as "the request is as good as the response": on the normal path requested is
+// "" (the TUI sends no model and lets the daemon decide), which is exactly why
+// echoing it left the roster row modelless (issue #162, defect 2).
+func (r newSessionResponse) assignedModel(requested string) string {
+	if r.Meta.Model != "" {
+		return r.Meta.Model
+	}
+	return requested
 }
 
 // Kill calls gofer/kill.
