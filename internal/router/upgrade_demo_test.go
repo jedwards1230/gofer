@@ -1,28 +1,47 @@
 package router
 
-// upgrade_demo_test.go is M6's milestone criterion (design §11), end to end:
+// upgrade_demo_test.go is M6's milestone criterion (design §11), end to end.
+// The criterion, verbatim: "upgrade the daemon binary mid-turn; the running
+// session finishes uninterrupted on the old worker; the next session/new runs
+// the new binary; session/list shows mixed binaryVersions." All four clauses are
+// asserted below, so THE §11 CRITERION IS MET.
+//
+// What this test covers, in order:
 //
 //	upgrade the daemon MID-TURN
-//	  -> the old worker FINISHES its mid-flight turn, on the OLD binary
+//	  -> the old worker FINISHES its mid-flight turn, on the OLD binary   [§11]
+//	  -> that turn's tail is RECOVERABLE: it comes back as folded history
+//	     on a re-attach, so nothing is durably lost
 //	  -> its next turn's tail STREAMS LIVE to a merely-ATTACHED client of the
-//	     new daemon
-//	  -> the next session/new runs the NEW binary
-//	  -> session/list shows MIXED binaryVersions
+//	     new daemon                                                    [slice 3b]
+//	  -> the next session/new runs the NEW binary                         [§11]
+//	  -> session/list shows MIXED binaryVersions                          [§11]
 //
-// The streaming step is the one that only became possible in slice 3b, and it is
-// verified by mutation: dropping the SetEventRelay call makes the tail never
-// arrive.
+// The live-streaming step is the one that only became possible in slice 3b, and
+// it is verified by mutation: dropping the SetEventRelay call makes the tail
+// never arrive.
 //
-// # Why the streaming turn is a FRESH one, not the mid-flight turn
+// # A related property, deferred: live streaming of the PRE-upgrade turn's tail
 //
-// A worker has NO continuous broker drain outside a session/prompt handler —
-// internal/daemon/handlers.go's advertiseModelChange states this explicitly. The
-// connection that drove the pre-upgrade turn is severed BY the upgrade, so that
-// turn's own tail is published to the worker's broker and fanned out to nobody:
-// the worker never puts it on the wire. No amount of router-side bridging can
-// forward a frame that was never sent, and closing that gap would need a
-// standing observer inside internal/worker — out of scope for this slice, and
-// recorded here rather than papered over.
+// The criterion above never asked for the pre-upgrade turn's events to stream
+// live to an attached client, and they do not. A worker has NO continuous broker
+// drain outside a session/prompt handler — internal/daemon/handlers.go's
+// advertiseModelChange states this explicitly — and the connection that drove
+// the pre-upgrade turn is severed BY the upgrade, so that turn's tail is
+// published to the worker's broker and never put on the wire at all. No amount
+// of router-side bridging can forward a frame that was never sent.
+//
+// It is NOT durably lost, though, and the test asserts as much: the worker
+// journals the tail, and it returns as folded history on the session's next
+// session/load. The gap is "not streamed live", not "gone" — a re-attaching
+// client sees the complete transcript.
+//
+// Closing the live half would need a standing observer on the WORKER side (in
+// internal/daemon, which the worker runs via daemon.New/Serve), gated behind a
+// Config flag beside ReplayPendingPermissionsOnAttach, and relying on exactly
+// the promptHandlerActive guard this slice shipped to keep it from double-
+// delivering against a real prompt handler. Deferred deliberately, recorded here
+// and in internal/router/doc.go rather than papered over.
 //
 // What the bridge DOES fix is the hop it owns. The router receives a worker's
 // events for a turn the ROUTER drives (rtr.Send, over the router's own
@@ -90,20 +109,27 @@ const demoWait = 20 * time.Second
 type gatedTailSession struct {
 	id       string
 	callID   string
+	root     string
 	broker   *event.Broker
 	approver loop.Approver
 	released chan struct{}
+	// journalErr carries a failure from the pre-upgrade turn's journal write, so
+	// the test fails on it rather than silently asserting against a journal that
+	// was never appended to.
+	journalErr chan error
 	// turns counts Prompt calls, so only the FIRST one gates.
 	turns atomic.Int64
 }
 
-func newGatedTailSession(id, callID string, approver loop.Approver) *gatedTailSession {
+func newGatedTailSession(id, callID, root string, approver loop.Approver) *gatedTailSession {
 	return &gatedTailSession{
-		id:       id,
-		callID:   callID,
-		broker:   event.NewBroker(event.WithReplay(64)),
-		approver: approver,
-		released: make(chan struct{}, 1),
+		id:         id,
+		callID:     callID,
+		root:       root,
+		broker:     event.NewBroker(event.WithReplay(64)),
+		approver:   approver,
+		released:   make(chan struct{}, 1),
+		journalErr: make(chan error, 1),
 	}
 }
 
@@ -125,6 +151,11 @@ func (s *gatedTailSession) Close() error             { s.broker.Close(); return 
 // test looks for in a gofer/event frame at the attached client.
 const demoTailText = "finished on the old binary"
 
+// demoPreUpgradeTail is the PRE-upgrade turn's own assistant content: the tail
+// that is not streamed live (its driving connection was severed by the upgrade)
+// but IS journaled, and so must come back as folded history on a re-attach.
+const demoPreUpgradeTail = "resolved after the upgrade, on the old binary"
+
 // Prompt gates the FIRST turn on the permission approver — the mid-flight state
 // the upgrade has to survive — and runs every later turn straight through. The
 // second turn is the one whose tail the event bridge must carry (see the test's
@@ -141,6 +172,25 @@ func (s *gatedTailSession) Prompt(ctx context.Context, text string) error {
 			return err
 		}
 		s.broker.Publish(event.NewPermissionResolved(s.id, s.callID, reply.Verdict, "human"))
+
+		// THE PRE-UPGRADE TURN'S TAIL. Published to the broker, and JOURNALED —
+		// modelling what a real runner does, which is what makes this tail
+		// recoverable rather than lost. Nothing is draining the broker at this
+		// point (the connection that drove this turn was severed by the upgrade),
+		// so these events never reach the wire; the journal is the only path by
+		// which a client can ever see them, and the test asserts exactly that.
+		//
+		// The journal write happens BEFORE released fires, so the test's re-attach
+		// below is ordered strictly after it — no sleep, no polling.
+		s.broker.Publish(event.NewMessageStarted(s.id, event.MessageText))
+		s.broker.Publish(event.NewMessageFinished(s.id, event.MessageText, demoPreUpgradeTail))
+		if jerr := journalAssistantMessage(s.root, s.id, demoPreUpgradeTail); jerr != nil {
+			select {
+			case s.journalErr <- jerr:
+			default:
+			}
+		}
+
 		s.broker.Publish(event.NewTurnFinished(s.id, "end_turn", provider.Usage{}))
 		s.released <- struct{}{}
 		return nil
@@ -152,6 +202,60 @@ func (s *gatedTailSession) Prompt(ctx context.Context, text string) error {
 	s.broker.Publish(event.NewMessageFinished(s.id, event.MessageText, demoTailText))
 	s.broker.Publish(event.NewTurnFinished(s.id, "end_turn", provider.Usage{}))
 	return nil
+}
+
+// createSessionJournal creates the on-disk journal a real worker's runner leaves
+// for id under root, with the session_meta entry every fold needs. It uses
+// CreateWithID because a worker pins its session uuid rather than minting one
+// (design Option A), so the journal's id must match the id the router adopts.
+//
+// The router reads history from DISK ([Supervisor.History]), never from the
+// worker, so this file is the only thing standing between a severed turn's tail
+// and oblivion — which is precisely the property under test.
+func createSessionJournal(t *testing.T, root, cwd, id string) {
+	t.Helper()
+	store, err := session.NewFileStore(session.WithRoot(root))
+	if err != nil {
+		t.Fatalf("session.NewFileStore: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	j, err := store.CreateWithID(context.Background(), session.Slugify(cwd), id)
+	if err != nil {
+		t.Fatalf("store.CreateWithID(%s): %v", id, err)
+	}
+	if _, err := j.Append(session.NewMetaEntry(cwd)); err != nil {
+		t.Fatalf("append meta entry: %v", err)
+	}
+	if err := j.Close(); err != nil {
+		t.Fatalf("close journal: %v", err)
+	}
+}
+
+// journalAssistantMessage appends text to id's journal as an assistant message —
+// the journal write a real runner performs as it emits the message.
+//
+// It opens and closes a THROWAWAY store per call, mirroring what
+// [Supervisor.History] does on the read side, so the entry is durably on disk by
+// the time this returns and a subsequent History fold is guaranteed to see it.
+func journalAssistantMessage(root, id, text string) error {
+	store, err := session.NewFileStore(session.WithRoot(root))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = store.Close() }()
+
+	j, err := store.Open(context.Background(), id)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = j.Close() }()
+
+	_, err = j.Append(session.NewMessageEntry(provider.Message{
+		Role:    provider.RoleAssistant,
+		Content: []provider.ContentBlock{{Type: provider.BlockText, Text: text}},
+	}))
+	return err
 }
 
 // watchClient starts the SINGLE collector on c's notification stream, splitting
@@ -176,14 +280,27 @@ func watchClient(c *daemon.Client) (texts <-chan string, askIDs <-chan string) {
 		for n := range c.Notifications() {
 			switch n.Method {
 			case "gofer/event":
+				// "text" is a live message.delta's field; "content" is a settled
+				// message.finished's. History replay emits only the latter (see
+				// internal/daemon's historyEvents), so a collector that read just
+				// "text" would be blind to exactly the folded-history frames the
+				// re-attach assertion depends on.
 				var p struct {
-					Text string `json:"text"`
+					Text    string `json:"text"`
+					Content string `json:"content"`
 				}
-				if err := json.Unmarshal(n.Params, &p); err != nil || p.Text == "" {
+				if err := json.Unmarshal(n.Params, &p); err != nil {
+					continue
+				}
+				body := p.Text
+				if body == "" {
+					body = p.Content
+				}
+				if body == "" {
 					continue
 				}
 				select {
-				case textCh <- p.Text:
+				case textCh <- body:
 				default:
 				}
 			case "gofer/permission_requested":
@@ -227,13 +344,18 @@ func TestUpgradeMidTurnMixedBinaryVersions(t *testing.T) {
 	shortRuntimeDir(t)
 	root := t.TempDir()
 	oldSessionID := uuid.Must(uuid.NewV7()).String()
+	sessionCwd := t.TempDir()
 	const callID = "demo-call-1"
+
+	// The journal a real worker's runner would have created for this session. It
+	// is what makes the pre-upgrade turn's tail recoverable after the upgrade.
+	createSessionJournal(t, root, sessionCwd, oldSessionID)
 
 	// ---- THE OLD WORLD: a worker on the OLD binary, holding a turn at its gate.
 
 	gatedCh := make(chan *gatedTailSession, 1)
 	build := func(_ context.Context, opts runner.Options) (supervisor.Session, error) {
-		g := newGatedTailSession(oldSessionID, callID, opts.Approver)
+		g := newGatedTailSession(oldSessionID, callID, root, opts.Approver)
 		gatedCh <- g
 		return g, nil
 	}
@@ -385,6 +507,39 @@ func TestUpgradeMidTurnMixedBinaryVersions(t *testing.T) {
 	case <-time.After(demoWait):
 		t.Fatal("the mid-flight turn never completed after the reply routed through the upgraded daemon")
 	}
+	select {
+	case jerr := <-gated.journalErr:
+		t.Fatalf("the pre-upgrade turn failed to journal its tail: %v", jerr)
+	default:
+	}
+
+	// ---- AND THAT TURN'S TAIL IS NOT DURABLY LOST.
+	//
+	// This is the property the file header claims and this phase pins. The
+	// pre-upgrade turn's tail was published to the worker's broker with nothing
+	// draining it — its driving connection was severed by the upgrade — so it
+	// never reached the wire and no attached client saw it live. But the worker
+	// JOURNALED it, so it comes back as folded history the moment anyone
+	// re-attaches: [Supervisor.History] reads the journal from disk through a
+	// throwaway store (never asking the worker), the daemon projects that fold
+	// into gofer/event history frames, and session/load replays them before its
+	// response.
+	//
+	// A FRESH client is used rather than the attached one, because that is the
+	// real scenario: an operator whose client went away with the old daemon comes
+	// back and expects the complete transcript. Ordering is strict, not timed —
+	// the journal write completes before released fires above, so the fold read
+	// below cannot race it.
+	reattached, err := daemon.Dial(ctx, newAddr, "")
+	if err != nil {
+		t.Fatalf("re-attach dial: %v", err)
+	}
+	t.Cleanup(func() { _ = reattached.Close() })
+	recovered, _ := watchClient(reattached)
+	if _, err := reattached.Call(ctx, acp.MethodSessionLoad, acp.LoadSessionRequest{SessionID: oldSessionID, Cwd: sessionCwd}); err != nil {
+		t.Fatalf("re-attach to the adopted session: %v", err)
+	}
+	awaitText(t, recovered, demoPreUpgradeTail, "the pre-upgrade turn's tail, recovered from the journal")
 
 	// ---- AND ITS NEXT TURN'S TAIL STREAMS LIVE THROUGH THE BRIDGE.
 	//
