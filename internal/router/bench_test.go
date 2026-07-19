@@ -1051,14 +1051,32 @@ func startCountingWorker(t *testing.T, id string, frames *atomic.Int64) {
 // Allocations per forwarded event
 // ---------------------------------------------------------------------------
 
+// ############################################################################
+// # STOP — THIS BENCHMARK MEASURES A PATH PRODUCTION NO LONGER TAKES.        #
+// #                                                                          #
+// # It reports a real-looking number (~14 and ~17 allocs/op) for the router's #
+// # decode-then-re-encode hop. Since Slice 3b that hop is GONE:              #
+// # Daemon.BroadcastRawEvent (internal/daemon/event_relay.go) forwards the    #
+// # worker's gofer/event params VERBATIM — there is no json.Marshal on the    #
+// # forwarding path at all.                                                   #
+// #                                                                          #
+// # So this is retained ONLY as historical evidence of what the pre-3b path   #
+// # cost. It is the "before" in docs/benchmarks/m6-worker-fleet-baseline.md.  #
+// # NEVER quote it as an "after" number, and never conclude anything about    #
+// # current behaviour from it — it will happily produce a number regardless.  #
+// #                                                                          #
+// # Replacing it with an end-to-end measurement of the REAL forwarding path,  #
+// # and deleting this, is tracked as follow-up work.                          #
+// ############################################################################
+//
 // BenchmarkEventForward measures the per-event allocation cost of the ROUTER's
 // second hop — decoding a worker's gofer/event envelope into a typed
 // event.Event and re-encoding it — using the testing framework's own per-op
 // allocation accounting (b.ReportAllocs), a far more stable instrument than a
 // wall clock, which on this path is dominated by socket time.
 //
-// This is the cost the M6 worker split introduced and that a marshal-once /
-// forward-verbatim bridge removes. Note it is NOT the daemon→client hop:
+// This is the cost the M6 worker split introduced and that the marshal-once /
+// forward-verbatim bridge removed. Note it is NOT the daemon→client hop:
 // daemon.broadcastGoferEvent already marshals once per event and reuses the
 // bytes for every peer (internal/daemon/handlers.go), so nothing here scales
 // with subscriber count.
@@ -1078,6 +1096,17 @@ func startCountingWorker(t *testing.T, id string, frames *atomic.Int64) {
 // carry, and must be re-checked if the wire type changes. The re-encode half IS
 // the production call (json.Marshal of the same concrete event).
 func BenchmarkEventForward(b *testing.B) {
+	// Written to stderr rather than b.Logf: benchmark logs only surface under
+	// -v, and someone running a plain `go test -bench` would otherwise see a
+	// real-looking allocs/op figure for a path production no longer takes. The
+	// noise is acceptable — this file only builds under the workerbench tag, so
+	// the only readers are people who deliberately ran this benchmark.
+	fmt.Fprintln(os.Stderr,
+		"WARNING BenchmarkEventForward: measures the PRE-Slice-3b router "+
+			"decode+re-encode hop, which no longer exists (BroadcastRawEvent "+
+			"forwards verbatim). Historical baseline evidence only — never "+
+			"quote these numbers as an 'after' result.")
+
 	// Two representative payloads: the smallest and by far most frequent event
 	// on a streaming turn (message.delta), and a fat one (tool.call.finished).
 	delta, err := json.Marshal(event.NewMessageDelta("11111111-2222-3333-4444-555555555555", "assistant", "Hello, world"))
