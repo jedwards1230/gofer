@@ -427,6 +427,18 @@ func TestSessionLoadReplaysGoferEventHistory(t *testing.T) {
 	}
 
 	loader := dial(t, context.Background(), url, nil)
+	// The prompt response above rides turn.finished, which the broker publishes
+	// BEFORE the runner's consume goroutine has necessarily appended the turn —
+	// so the fold can still hold only the user message here. Wait for the turn
+	// to be journaled before loading, so the daemon provably reads a COMPLETE
+	// fold: the journal is append-only, so a fold observed whole stays whole.
+	// The three blocks are the user's text, the assistant's reasoning and its
+	// text — exactly the six frames asserted below. See awaitFoldComplete's doc.
+	awaitFoldComplete(t, sup, sid, 3)
+	// Bracket the load with a fold snapshot on each side, so a short replay
+	// reports whether the history was already incomplete AT READ TIME or whether
+	// complete frames went missing in delivery. See foldProbe's doc.
+	probe := newFoldProbe(t, sup, sid)
 	loadResp := loader.request(acp.MethodSessionLoad, acp.LoadSessionRequest{SessionID: sid, Cwd: cwd})
 	if loadResp.Error != nil {
 		t.Fatalf("session/load error: %+v", loadResp.Error)
@@ -465,11 +477,13 @@ drain:
 		"message.started", "message.finished", // assistant text
 	}
 	if len(gotKinds) != len(wantKinds) {
-		t.Fatalf("got %d gofer/event history frames = %v, want %d (%v)", len(gotKinds), gotKinds, len(wantKinds), wantKinds)
+		t.Fatalf("got %d gofer/event history frames = %v, want %d (%v)%s",
+			len(gotKinds), gotKinds, len(wantKinds), wantKinds, probe.diagnosis(gotKinds))
 	}
 	for i, want := range wantKinds {
 		if gotKinds[i] != want {
-			t.Errorf("gofer/event history frame %d: type = %q, want %q", i, gotKinds[i], want)
+			t.Errorf("gofer/event history frame %d: type = %q, want %q%s",
+				i, gotKinds[i], want, probe.diagnosis(gotKinds))
 		}
 	}
 }
