@@ -98,12 +98,23 @@ const loadChanBuffer = 16
 //
 // The sink runs ON the demuxer goroutine, so whatever it does — including a
 // client WebSocket write — is synchronous with this session's reconstruction: a
-// wedged client stalls it. That blast radius is exactly ONE session, because one
-// worker is one connection is one Reconstructor (M6 §3), which is the isolation
-// property working as intended. A hand-off channel would decouple them at the
-// cost of the single-goroutine wire-ordering guarantee this core's whole replay
-// argument rests on (see reconstruct.go's package-level ordering proof), and is
-// deliberately NOT used.
+// wedged client stalls it. That blast radius is bounded to ONE session, because
+// one worker is one connection is one Reconstructor (M6 §3), which is the
+// isolation property working as intended.
+//
+// Within that one session, though, the radius is WIDER than its event stream:
+// it is the session's whole CONTROL PLANE. This goroutine is also the sole
+// drainer of the connection's [daemon.Client] notification channel, so while it
+// is stalled in a sink the client's readLoop blocks on that full channel and
+// every Call over the connection hangs with it — gofer/roster, gofer/kill,
+// gofer/archive, session/prompt. A stalled sink does not merely silence the
+// session; it makes the session unkillable over its own socket. Sinks must
+// therefore bound whatever they do here: the daemon's relays do, via
+// [github.com/jedwards1230/gofer/internal/daemon]'s relayWriteTimeout.
+//
+// A hand-off channel would decouple them at the cost of the single-goroutine
+// wire-ordering guarantee this core's whole replay argument rests on (see
+// reconstruct.go's package-level ordering proof), and is deliberately NOT used.
 type EventSink func(sessionID string, raw json.RawMessage, ev event.Event)
 
 // Option configures a [Reconstructor] at construction. Options exist because

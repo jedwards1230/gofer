@@ -1,6 +1,10 @@
 package daemon
 
-import "github.com/jedwards1230/agent-sdk-go/event"
+import (
+	"context"
+
+	"github.com/jedwards1230/agent-sdk-go/event"
+)
 
 // PermissionRelay is the daemon-side permission fan-out an ADOPTED session's
 // standing watcher drives (docs/milestones/M6-process-isolation.md §7). An
@@ -56,7 +60,15 @@ func (d *Daemon) RequestPermission(sessionID string, pe event.PermissionRequeste
 	}
 	if d.recordPermRoute(pe.ID, sessionID) {
 		d.recordPendingPerm(pe.ID, params)
-		d.broadcastPermission(d.ctx, sessionID, methodGoferPermissionRequested, params)
+		// Bounded like the event relay's fan-outs, and for the identical reason:
+		// this runs on the router's per-worker demuxer goroutine, so an unbounded
+		// write to a stalled peer wedges that whole session's control plane (see
+		// [relayWriteTimeout]). The route and pending payload are recorded ABOVE
+		// the broadcast, so a client that misses the timed-out notification still
+		// gets the request on its next attach via the replay-on-attach path.
+		ctx, cancel := context.WithTimeout(d.ctx, relayWriteTimeout)
+		defer cancel()
+		d.broadcastPermission(ctx, sessionID, methodGoferPermissionRequested, params)
 	}
 }
 
@@ -68,7 +80,10 @@ func (d *Daemon) RequestPermission(sessionID string, pe event.PermissionRequeste
 func (d *Daemon) ResolvePermission(sessionID string, pe event.PermissionResolved) {
 	d.clearPermRoute(pe.ID)
 	if d.clearPendingPerm(pe.ID) {
-		d.broadcastPermission(d.ctx, sessionID, methodGoferPermissionResolved, permissionResolvedParams{
+		// Bounded — same goroutine, same wedge (see [relayWriteTimeout]).
+		ctx, cancel := context.WithTimeout(d.ctx, relayWriteTimeout)
+		defer cancel()
+		d.broadcastPermission(ctx, sessionID, methodGoferPermissionResolved, permissionResolvedParams{
 			SessionID: sessionID,
 			ID:        pe.ID,
 			Verdict:   string(pe.Verdict),

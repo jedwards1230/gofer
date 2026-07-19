@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 
 	"github.com/jedwards1230/agent-sdk-go/acp"
@@ -97,8 +98,12 @@ func (d *Daemon) BroadcastRawEvent(sessionID string, raw json.RawMessage) {
 	if d.promptHandlerActive(sessionID) {
 		return
 	}
+	// Bounded: this runs on the router's demuxer goroutine, which must not be
+	// blocked by a stalled client (see [relayWriteTimeout]).
+	ctx, cancel := context.WithTimeout(d.ctx, relayWriteTimeout)
+	defer cancel()
 	for _, pr := range d.peersForSession(sessionID) {
-		if werr := pr.notify(d.ctx, methodGoferEvent, raw); werr != nil {
+		if werr := pr.notify(ctx, methodGoferEvent, raw); werr != nil {
 			// Session id only — never the frame (it may carry prompt/message
 			// content); see handleFrame's redaction rule.
 			d.log.Debug("gofer/event relay: peer notify failed", "session", sessionID, "err", werr)
@@ -126,8 +131,12 @@ func (d *Daemon) BroadcastSessionUpdate(sessionID string, ev event.Event) {
 	if !ok {
 		return
 	}
+	// Bounded for the same reason as [Daemon.BroadcastRawEvent]: same goroutine,
+	// same wedge (see [relayWriteTimeout]).
+	ctx, cancel := context.WithTimeout(d.ctx, relayWriteTimeout)
+	defer cancel()
 	for _, pr := range d.peersForSession(sessionID) {
-		if werr := pr.notify(d.ctx, acp.MethodSessionUpdate, notif); werr != nil {
+		if werr := pr.notify(ctx, acp.MethodSessionUpdate, notif); werr != nil {
 			d.log.Debug("session/update relay: peer notify failed", "session", sessionID, "err", werr)
 		}
 	}
