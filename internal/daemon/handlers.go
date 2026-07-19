@@ -556,7 +556,7 @@ func handleSessionSetConfigOption(d *Daemon, ctx context.Context, _ *peer, param
 	// model actually changed — the same snapshot this response returns to the
 	// caller, so a second attached client (a phone changing what a laptop sees)
 	// tracks the new model live.
-	d.advertiseModelChange(ctx, req.SessionID, prevModel, current)
+	d.advertiseModelChange(req.SessionID, prevModel, current)
 	return acp.SetConfigOptionResponse{
 		ConfigOptions: []acp.ConfigOption{modelConfigOption(current, d.authedProviders())},
 	}, nil
@@ -720,7 +720,7 @@ func handleSessionPrompt(d *Daemon, ctx context.Context, p *peer, params json.Ra
 				// handleSessionLoad's replay).
 				if d.recordPermRoute(pe.ID, op.SessionID) {
 					d.recordPendingPerm(pe.ID, reqParams)
-					d.broadcastPermission(ctx, op.SessionID, methodGoferPermissionRequested, reqParams)
+					d.broadcastPermission(op.SessionID, methodGoferPermissionRequested, reqParams)
 				}
 				// ALSO ask every attached ACP peer via the spec-ACP
 				// session/request_permission REQUEST, so a pure ACP client (a
@@ -745,7 +745,7 @@ func handleSessionPrompt(d *Daemon, ctx context.Context, p *peer, params json.Ra
 				// dedup signal; the pending entry is dropped only here). For a
 				// single-observer turn this is always true, so behavior is unchanged.
 				if d.clearPendingPerm(pe.ID) {
-					d.broadcastPermission(ctx, op.SessionID, methodGoferPermissionResolved, permissionResolvedParams{
+					d.broadcastPermission(op.SessionID, methodGoferPermissionResolved, permissionResolvedParams{
 						SessionID: op.SessionID,
 						ID:        pe.ID,
 						Verdict:   string(pe.Verdict),
@@ -764,7 +764,7 @@ func handleSessionPrompt(d *Daemon, ctx context.Context, p *peer, params json.Ra
 			// (see below): every event that reaches this point is fanned,
 			// unconditionally, before any of this loop's return/continue
 			// branches.
-			d.broadcastGoferEvent(ctx, op.SessionID, e)
+			d.broadcastGoferEvent(op.SessionID, e)
 
 			if notif, ok := acp.ToSessionUpdate(op.SessionID, e); ok {
 				// The user-message echo (a settled event.MessageUser projects
@@ -828,12 +828,27 @@ func handleSessionPrompt(d *Daemon, ctx context.Context, p *peer, params json.Ra
 //
 // origin is matched by pointer identity and handled exactly once, so it is
 // never double-delivered even though it is also in the snapshot.
+//
+// The two rules also differ in the CONTEXT they write under, and that split is
+// the point of ctx being origin-only:
+//   - origin's write uses ctx, this turn's request context. Its cancellation
+//     (origin disconnecting, the turn ending) closing origin's own connection is
+//     harmless — that connection is already going away, and the fatal-write rule
+//     above aborts the turn on it regardless.
+//   - every other peer's write uses a fresh bound off the daemon's base context
+//     (see [relayWriteTimeout]). coder/websocket closes the whole connection when
+//     a write's context is cancelled, so writing to peer B under peer A's request
+//     context would let A disconnecting mid-turn tear down B's healthy
+//     connection — for an M6 router that peer is frequently the link to a live
+//     worker, marking a running session offline.
 func (d *Daemon) broadcastUpdate(ctx context.Context, sessionID string, origin *peer, notif any, isUserEcho bool) *rpcError {
+	fanCtx, cancel := context.WithTimeout(d.ctx, relayWriteTimeout)
+	defer cancel()
 	for _, pr := range d.peersForSession(sessionID) {
 		if pr == origin {
 			continue // origin handled below with its distinct echo/error rules
 		}
-		if werr := pr.notify(ctx, acp.MethodSessionUpdate, notif); werr != nil {
+		if werr := pr.notify(fanCtx, acp.MethodSessionUpdate, notif); werr != nil {
 			// DEBUG, not WARN: a peer disconnecting mid-turn is routine, not a
 			// daemon fault. Session id only — never the notif (prompt/message
 			// content); see handleFrame's redaction rule.
@@ -858,7 +873,14 @@ func (d *Daemon) broadcastUpdate(ctx context.Context, sessionID string, origin *
 // and a wedged observer must never abort a turn nor stop delivery to the other
 // peers. The peer set is snapshotted under the registry RLock and released
 // before any notify runs (see peersForSession).
-func (d *Daemon) broadcastPermission(ctx context.Context, sessionID, method string, params any) {
+//
+// It OWNS the context every write runs under (see [relayWriteTimeout]) rather
+// than taking one from its caller: no peer here has origin semantics, and a
+// caller's context is a peer's request context — writing under it would let that
+// peer's disconnect close a DIFFERENT peer's connection.
+func (d *Daemon) broadcastPermission(sessionID, method string, params any) {
+	ctx, cancel := context.WithTimeout(d.ctx, relayWriteTimeout)
+	defer cancel()
 	for _, pr := range d.peersForSession(sessionID) {
 		if werr := pr.notify(ctx, method, params); werr != nil {
 			// Session id + method only — never the params (tool input/spec);
@@ -980,19 +1002,22 @@ func (d *Daemon) askPeerPermission(ctx context.Context, pr *peer, sessionID, cal
 // concern. The peer set is snapshotted under the registry RLock and released
 // before any notify runs (see peersForSession).
 //
+// Like [Daemon.broadcastPermission] it owns its write context rather than
+// borrowing a peer's (see [relayWriteTimeout]).
+//
 // It deliberately does NOT delegate to [Daemon.BroadcastRawEvent] even though
 // the two loops are otherwise identical: that method is the M6 relay, and its
 // double-delivery guard suppresses exactly the case this function IS — a live
 // prompt handler fanning out its own turn — so delegating would silence every
-// turn a client drives. The two also differ in the context they write under
-// (this one is scoped to the request; the relay has no request and uses the
-// daemon's).
-func (d *Daemon) broadcastGoferEvent(ctx context.Context, sessionID string, e event.Event) {
+// turn a client drives.
+func (d *Daemon) broadcastGoferEvent(sessionID string, e event.Event) {
 	raw, err := json.Marshal(e)
 	if err != nil {
 		d.log.Debug("gofer/event broadcast: marshal failed", "session", sessionID, "kind", e.Kind(), "err", err)
 		return
 	}
+	ctx, cancel := context.WithTimeout(d.ctx, relayWriteTimeout)
+	defer cancel()
 	for _, pr := range d.peersForSession(sessionID) {
 		if werr := pr.notify(ctx, methodGoferEvent, json.RawMessage(raw)); werr != nil {
 			// Session id + kind only — never the marshaled event (may carry
@@ -1031,7 +1056,7 @@ func (d *Daemon) broadcastGoferEvent(ctx context.Context, sessionID string, e ev
 // direct fan-out both deliver the snapshot; a config_option_update is an
 // authoritative, idempotent full snapshot (not a delta), so a duplicate is a
 // harmless re-render.
-func (d *Daemon) advertiseModelChange(ctx context.Context, sessionID, prev, current string) {
+func (d *Daemon) advertiseModelChange(sessionID, prev, current string) {
 	if current == "" || current == prev {
 		return
 	}
@@ -1042,9 +1067,9 @@ func (d *Daemon) advertiseModelChange(ctx context.Context, sessionID, prev, curr
 		d.log.Debug("config option update: emit failed", "session", sessionID, "err", err)
 	}
 	ev := event.NewConfigOptionsUpdated(sessionID, opts)
-	d.broadcastGoferEvent(ctx, sessionID, ev)
+	d.broadcastGoferEvent(sessionID, ev)
 	if notif, ok := acp.ToSessionUpdate(sessionID, ev); ok {
-		d.broadcastConfigOptionUpdate(ctx, sessionID, notif)
+		d.broadcastConfigOptionUpdate(sessionID, notif)
 	}
 }
 
@@ -1058,7 +1083,12 @@ func (d *Daemon) advertiseModelChange(ctx context.Context, sessionID, prev, curr
 // only logged — a wedged observer must never fail the model-change RPC. The peer
 // set is snapshotted under the registry RLock and released before any notify runs
 // (see peersForSession).
-func (d *Daemon) broadcastConfigOptionUpdate(ctx context.Context, sessionID string, notif any) {
+//
+// Like [Daemon.broadcastPermission] it owns its write context rather than
+// borrowing the model-change RPC caller's (see [relayWriteTimeout]).
+func (d *Daemon) broadcastConfigOptionUpdate(sessionID string, notif any) {
+	ctx, cancel := context.WithTimeout(d.ctx, relayWriteTimeout)
+	defer cancel()
 	for _, pr := range d.peersForSession(sessionID) {
 		if werr := pr.notify(ctx, acp.MethodSessionUpdate, notif); werr != nil {
 			// Session id only — never the notif (carries no message content here,
@@ -1192,6 +1222,6 @@ func handleGoferSetModel(d *Daemon, ctx context.Context, _ *peer, params json.Ra
 	// session/set_config_option route. Best-effort post-change read: an
 	// unreadable model just suppresses the advertisement (see advertiseModelChange).
 	current, _ := d.sessionModel(ctx, req.SessionID)
-	d.advertiseModelChange(ctx, req.SessionID, prevModel, current)
+	d.advertiseModelChange(req.SessionID, prevModel, current)
 	return struct{}{}, nil
 }

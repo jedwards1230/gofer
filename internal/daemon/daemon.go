@@ -60,11 +60,23 @@ const pingInterval = 30 * time.Second
 // pingTimeout bounds a single ping round trip.
 const pingTimeout = 10 * time.Second
 
-// relayWriteTimeout bounds ONE relay fan-out — every peer write [EventRelay]
-// or [PermissionRelay] performs for a single observed event — so a stalled
-// client cannot wedge the caller that drives it.
+// relayWriteTimeout bounds ONE fan-out — every peer write performed for a
+// single observed event, whether by [EventRelay]/[PermissionRelay] or by
+// [handleSessionPrompt]'s own per-turn broadcasts — so a stalled client cannot
+// wedge the caller that drives it.
 //
-// It exists because those relays are called SYNCHRONOUSLY on an M6 router's
+// It is ALSO what gives every NON-ORIGIN peer write a context the write path
+// owns instead of one borrowed from another peer. coder/websocket's Write
+// registers a context.AfterFunc that CLOSES THE WHOLE CONNECTION when the
+// write's context is cancelled, so fanning out to peer B under peer A's request
+// context means A disconnecting mid-turn tears down B's healthy connection. In
+// M6's geometry B is frequently a router's link to a live worker, so a client
+// hanging up would mark a running session offline. Deriving from d.ctx breaks
+// that coupling: it is cancelled only on daemon shutdown, when closing IS
+// correct. The one deliberate exception is the ORIGIN peer's write in
+// [Daemon.broadcastUpdate] — see its doc.
+//
+// It exists because the relays are called SYNCHRONOUSLY on an M6 router's
 // per-worker wirestream demuxer goroutine, and that goroutine is the sole
 // drainer of its [Client.notifications] channel. Without a deadline the chain
 // is: one client whose TCP connection is stalled-but-open blocks the relay
