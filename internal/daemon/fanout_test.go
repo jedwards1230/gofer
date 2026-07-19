@@ -427,6 +427,10 @@ func TestSessionLoadReplaysGoferEventHistory(t *testing.T) {
 	}
 
 	loader := dial(t, context.Background(), url, nil)
+	// Bracket the load with a fold snapshot on each side, so a short replay
+	// reports whether the history was already incomplete AT READ TIME or whether
+	// complete frames went missing in delivery. See foldProbe's doc.
+	probe := newFoldProbe(t, sup, sid)
 	loadResp := loader.request(acp.MethodSessionLoad, acp.LoadSessionRequest{SessionID: sid, Cwd: cwd})
 	if loadResp.Error != nil {
 		t.Fatalf("session/load error: %+v", loadResp.Error)
@@ -465,11 +469,13 @@ drain:
 		"message.started", "message.finished", // assistant text
 	}
 	if len(gotKinds) != len(wantKinds) {
-		t.Fatalf("got %d gofer/event history frames = %v, want %d (%v)", len(gotKinds), gotKinds, len(wantKinds), wantKinds)
+		t.Fatalf("got %d gofer/event history frames = %v, want %d (%v)%s",
+			len(gotKinds), gotKinds, len(wantKinds), wantKinds, probe.diagnosis(gotKinds))
 	}
 	for i, want := range wantKinds {
 		if gotKinds[i] != want {
-			t.Errorf("gofer/event history frame %d: type = %q, want %q", i, gotKinds[i], want)
+			t.Errorf("gofer/event history frame %d: type = %q, want %q%s",
+				i, gotKinds[i], want, probe.diagnosis(gotKinds))
 		}
 	}
 }

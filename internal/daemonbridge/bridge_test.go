@@ -178,16 +178,33 @@ func twoTurnFauxProvider() provider.Provider {
 // out or the subscription closes early.
 func drainEvents(t *testing.T, sub *event.Subscription, n int) []event.Event {
 	t.Helper()
+	return drainEventsDiag(t, sub, n, nil)
+}
+
+// drainEventsDiag is [drainEvents] with an optional diagnosis hook appended to
+// its failure messages. A history-replay drain passes a [foldProbe]'s
+// diagnosis so a short or stalled replay reports what the fold contained AT
+// READ TIME — which distinguishes a replay that was short at the SOURCE from
+// one whose events went astray in DELIVERY. diag is called only on the failure
+// path, and receives the events drained so far.
+func drainEventsDiag(t *testing.T, sub *event.Subscription, n int, diag func([]event.Event) string) []event.Event {
+	t.Helper()
 	out := make([]event.Event, 0, n)
+	note := func() string {
+		if diag == nil {
+			return ""
+		}
+		return diag(out)
+	}
 	for i := 0; i < n; i++ {
 		select {
 		case e, ok := <-sub.C:
 			if !ok {
-				t.Fatalf("subscription closed after %d/%d events", i, n)
+				t.Fatalf("subscription closed after %d/%d events%s", i, n, note())
 			}
 			out = append(out, e)
 		case <-time.After(defaultWait):
-			t.Fatalf("timed out waiting for event %d/%d", i, n)
+			t.Fatalf("timed out waiting for event %d/%d%s", i, n, note())
 		}
 	}
 	return out
@@ -412,6 +429,14 @@ func TestAttachReplaysHistory(t *testing.T) {
 	// connection's notifications) — its Subscribe must trigger a
 	// session/load to backfill them, since the session itself stayed live
 	// server-side (b1.Close only tore down the client connection).
+	//
+	// Snapshot the fold immediately before that Subscribe, so a short or stalled
+	// replay below reports whether the history was already incomplete AT READ
+	// TIME. This test advances on the EVENT stream (Send is fire-and-forget — it
+	// never waits for the session/prompt response), so it is the drain most
+	// exposed to the asynchronous journaling window. See foldProbe's doc.
+	probe := newFoldProbe(t, sup, info.ID)
+
 	b2 := newBridge(t, url)
 	sub2, err := b2.Subscribe(context.Background(), info.ID)
 	if err != nil {
@@ -426,12 +451,15 @@ func TestAttachReplaysHistory(t *testing.T) {
 	// started/finished pair, no synthesized deltas — 6 events. No
 	// TurnStarted/TurnFinished (a history replay carries no turn-lifecycle
 	// boundary of its own — see loadHistory's doc).
-	history := drainEvents(t, sub2, 6)
+	history := drainEventsDiag(t, sub2, 6, func(got []event.Event) string {
+		return probe.diagnosis(eventKinds(got))
+	})
 	next := wantMessage(t, "history", history, 0, event.MessageUser, "hi")
 	next = wantMessage(t, "history", history, next, event.MessageReasoning, "The user said hello. I'll greet them back.")
 	next = wantMessage(t, "history", history, next, event.MessageText, "Hello! How can I help you today?")
 	if next != len(history) {
-		t.Errorf("history: %d trailing event(s) after both messages, want none", len(history)-next)
+		t.Errorf("history: %d trailing event(s) after both messages, want none%s",
+			len(history)-next, probe.diagnosis(eventKinds(history)))
 	}
 
 	// A live turn sent on the reattached bridge lands strictly after the

@@ -210,24 +210,34 @@ func TestPromptAfterLoadStreams(t *testing.T) {
 	// replay notification that preceded it on the socket is already sitting in
 	// c.notifications. Draining after the synchronous request therefore cannot
 	// observe a partially-arrived replay, whatever the fold did.
+	//
+	// The fold bracket below is instrumentation, not an oracle: it never gates
+	// the drain (that stays count-free, per the paragraph above) — it only
+	// records what the daemon had available to replay, so a failure here reports
+	// whether the history was short AT READ TIME. See foldProbe's doc.
+	probe := newFoldProbe(t, sup, sid)
 	loadResp := c.request(acp.MethodSessionLoad, acp.LoadSessionRequest{SessionID: sid, Cwd: cwd})
 	if loadResp.Error != nil {
 		t.Fatalf("session/load error: %+v", loadResp.Error)
 	}
 	if drained := drainNotifications(c); drained == 0 {
-		t.Fatal("expected at least one replay notification from the settled turn")
+		t.Fatalf("expected at least one replay notification from the settled turn%s", probe.diagnosis(nil))
 	}
 
 	resp2, texts2 := drivePrompt(t, c, sid, "hi again", 1)
 	if got := promptStopReason(t, resp2); got != acp.StopReasonEndTurn {
 		t.Errorf("prompt #2 (post-load) StopReason = %q, want %q", got, acp.StopReasonEndTurn)
 	}
+	// A surplus/short replay above surfaces HERE first (a leftover replay
+	// notification is captured as prompt #2's content), so the fold bracket is
+	// reported on these assertions too — that is where the earlier ~0.5% flake
+	// actually failed.
 	if len(texts2) != 1 || texts2[0] != "turn-two-reply" {
-		t.Fatalf("prompt #2 (post-load) texts = %+v, want [turn-two-reply]", texts2)
+		t.Fatalf("prompt #2 (post-load) texts = %+v, want [turn-two-reply]%s", texts2, probe.diagnosis(texts2))
 	}
 	for _, txt := range texts2 {
 		if txt == texts1[0] {
-			t.Errorf("prompt #2 (post-load) re-emitted prompt #1's content: %q", txt)
+			t.Errorf("prompt #2 (post-load) re-emitted prompt #1's content: %q%s", txt, probe.diagnosis(texts2))
 		}
 	}
 }
