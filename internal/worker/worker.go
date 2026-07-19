@@ -18,8 +18,8 @@
 // SESSION uuid. But the worker does not itself mint that uuid — the router
 // pre-generates it and passes it as --session so it can key those files BEFORE
 // the worker starts. The worker therefore treats --session as REQUIRED and pins
-// it as its session id via [PinnedIDGen]; see that helper for why the store's
-// first id draw is the session id.
+// it as its session id via the SDK's runner.Options.SessionID seam, which the
+// store adopts verbatim while entry ids keep coming from the store default.
 //
 // # Router restart survival (adoption)
 //
@@ -106,7 +106,8 @@ type Options struct {
 	// Supervisor is the single-session supervisor the worker hosts. The caller
 	// builds it (root/model/permissions/telemetry) and hands it over; Serve
 	// closes it on shutdown. Required. The caller is responsible for building it
-	// with a [PinnedIDGen] factory so its one session adopts Session as its id.
+	// with a factory that sets runner.Options.SessionID so its one session adopts
+	// Session as its id.
 	Supervisor *supervisor.Supervisor
 	// Session is the pinned session uuid the router pre-generated (design Option
 	// A). It keys the worker's socket ([daemon.WorkerSocketPath]), endpoint file

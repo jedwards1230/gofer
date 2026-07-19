@@ -112,15 +112,16 @@ func runSessionWorker(ctx context.Context, args []string, stdout, stderr io.Writ
 	sup, err := supervisor.New(supervisor.Config{
 		Root:        rootDir,
 		Permissions: cfg.Engine,
-		// Pin the sole session's id to --session (design Option A): the factory
-		// installs a stateful IDGen whose first draw is the pinned uuid (the
-		// session id) and whose later draws are fresh UUIDv7 entry ids. This is
-		// the BRIDGE isolated in worker.PinnedIDGen; when the SDK grows a proper
-		// runner.Options.SessionID seam it collapses to a one-liner. Omitting the
-		// shared-store injection here (unlike the default factory) lets runner.New
-		// build its own store honoring opts.IDGen.
+		// Pin the sole session's id to --session (design Option A) through the
+		// SDK's pre-assigned-session-id seam: runner.New creates the session with
+		// this exact id, leaving entry-id generation on the store default.
+		// SessionID is honored regardless of store injection — CreateWithID is a
+		// session.Store interface method, so runner.New calls it on whatever store
+		// it has. This factory simply omits the injection because the worker owns a
+		// single session and lets runner.New build its own FileStore over the same
+		// root; the omission is incidental to the pinning, not load-bearing for it.
 		NewSession: func(ctx context.Context, opts runner.Options) (supervisor.Session, error) {
-			opts.IDGen = worker.PinnedIDGen(*session)
+			opts.SessionID = *session
 			return runner.New(ctx, opts)
 		},
 		// Attach a per-session telemetry observer at registration — mirrors
