@@ -59,9 +59,12 @@ GOFER_BENCH_OUT=fleet.txt GOFER_BENCH_FRAMES_OUT=frames.txt \
 ```
 
 Allocations on the event fan-out path are measured **separately and untagged**,
-in `internal/daemon` where the code under test lives — it spawns nothing and
-needs no gate beyond `-bench`, so CI compiles it on every push and it cannot
-drift out of sync with the path it measures:
+in `internal/daemon` where the code under test lives. It spawns no processes, so
+it needs no build tag: `Benchmark*` functions are not executed by `go test ./...`
+at all — only by an explicit `-bench` — so leaving it untagged costs CI no
+runtime while making CI **compile** it on every push. That is the point. Its
+tagged predecessor survived the deletion of the very code it described precisely
+because nothing ever built it.
 
 ```bash
 go test -run '^$' -bench BenchmarkBroadcastRawEvent -benchmem ./internal/daemon/

@@ -106,9 +106,6 @@ func BenchmarkBroadcastRawEvent(b *testing.B) {
 				for b.Loop() {
 					d.BroadcastRawEvent(sid, p.raw)
 				}
-				// Stop the clock before the fixture's cleanup tears the peers
-				// down, so teardown never lands inside a measured window.
-				b.StopTimer()
 			})
 		}
 	}
@@ -137,12 +134,17 @@ func newBroadcastBenchFixture(b *testing.B, peers int) (*daemon.Daemon, string) 
 		b.Fatal("session/new returned an empty sessionId")
 	}
 
+	attached := make([]*benchPeer, 0, peers)
 	for range peers {
 		p := dialBenchPeer(b, url)
 		p.call(b, acp.MethodSessionLoad, acp.LoadSessionRequest{SessionID: newResp.SessionID, Cwd: cwd}, nil)
 		p.drain()
+		attached = append(attached, p)
 	}
 	waitBenchPeerCount(b, d, newResp.SessionID, peers)
+	// Registration is not delivery: prove a frame actually reaches every peer
+	// before measuring the cost of sending them.
+	assertBenchDelivery(b, d, newResp.SessionID, attached)
 	return d, newResp.SessionID
 }
 
@@ -173,6 +175,9 @@ type benchPeer struct {
 	conn *websocket.Conn
 	ctx  context.Context
 	idc  atomic.Int64
+	// frames counts inbound frames seen by [benchPeer.drain]; read by
+	// [assertBenchDelivery] to prove the fan-out actually delivers.
+	frames atomic.Int64
 }
 
 func dialBenchPeer(b *testing.B, url string) *benchPeer {
@@ -237,10 +242,15 @@ func (p *benchPeer) call(b *testing.B, method string, params any, out any) {
 	}
 }
 
-// drain consumes inbound frames forever, discarding them without decoding. A
-// peer that does not drain would fill its socket buffer and turn the fan-out
-// into a measurement of [relayWriteTimeout] instead of of the write path. The
-// goroutine exits when the connection closes at benchmark cleanup.
+// drain consumes inbound frames forever, discarding them without decoding but
+// COUNTING them. A peer that does not drain would fill its socket buffer and
+// turn the fan-out into a measurement of [relayWriteTimeout] instead of of the
+// write path. The goroutine exits when the connection closes at benchmark
+// cleanup.
+//
+// The count exists so the fixture can prove frames actually arrive — see
+// [assertBenchDelivery]. Incrementing an atomic per frame is far cheaper than
+// the decode this client deliberately avoids.
 func (p *benchPeer) drain() {
 	go func() {
 		buf := make([]byte, 32*1024)
@@ -252,6 +262,46 @@ func (p *benchPeer) drain() {
 			if _, err := io.CopyBuffer(io.Discard, r, buf); err != nil {
 				return
 			}
+			p.frames.Add(1)
 		}
 	}()
+}
+
+// assertBenchDelivery broadcasts one probe frame and blocks until every peer has
+// received something, failing the benchmark if any peer does not.
+//
+// This closes the hole that this whole task exists to fix. [Daemon.BroadcastRawEvent]
+// logs peer-notify failures at Debug and SWALLOWS them, so without this check a
+// change that made every write fail would leave the benchmark completing
+// happily, reporting a plausible per-peer slope for work that never happened —
+// the same class of defect as the modelled benchmark this one replaces, just
+// one level subtler. Measuring a fan-out without proving the fan-out occurred
+// is not a measurement.
+//
+// It runs during fixture setup, before the measured loop, so it costs the
+// reported numbers nothing.
+func assertBenchDelivery(b *testing.B, d *daemon.Daemon, sessionID string, peers []*benchPeer) {
+	b.Helper()
+	probe, err := json.Marshal(event.NewMessageDelta(benchSessionID, "assistant", "probe"))
+	if err != nil {
+		b.Fatalf("marshal delivery probe: %v", err)
+	}
+	d.BroadcastRawEvent(sessionID, probe)
+
+	deadline := time.Now().Add(defaultWait)
+	for {
+		delivered := 0
+		for _, p := range peers {
+			if p.frames.Load() > 0 {
+				delivered++
+			}
+		}
+		if delivered == len(peers) {
+			return
+		}
+		if time.Now().After(deadline) {
+			b.Fatalf("delivery probe reached %d of %d peers; the fan-out is not delivering, so any number this benchmark reports is meaningless", delivered, len(peers))
+		}
+		time.Sleep(time.Millisecond)
+	}
 }

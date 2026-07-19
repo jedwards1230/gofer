@@ -27,8 +27,14 @@ that does not match the machine and fleet settings above is not a comparison.
 # RESULTS: before → after Slice 3b
 
 Measured after the marshal-once event bridge and push-based roster cache landed.
-**After-run commit `2e3c721`**, same machine, same fleet size (50/50), machine
-idle both times — the run conditions match, so the comparison is valid.
+
+**Provenance differs by section — check the one you are quoting.** The fleet
+figures (roster RPCs, latency, RSS, spawn — §1, §3, §4) were measured at
+**`2e3c721`**, same machine and same fleet size (50/50) as the baseline, machine
+idle both times, so that comparison is like-for-like. The real-path allocation
+figures (§2) came later, from the change that added `BenchmarkBroadcastRawEvent`
+— **based on `96072d2`** — because the benchmark did not exist at `2e3c721`. Same
+machine throughout.
 
 ## 1. Roster RPCs — the claim, confirmed
 
@@ -86,53 +92,87 @@ and so would happily keep reporting ~14/17 forever.
 
 ### What the real path costs now
 
+**The decode is gone by construction — that is the proof; the numbers below
+corroborate it.** `Daemon.BroadcastRawEvent` (`internal/daemon/event_relay.go`)
+takes a `json.RawMessage` and hands those bytes to each peer without ever
+unmarshaling them, and the only `json.Marshal` reachable on that path is
+`peer.writeJSON`'s JSON-RPC *envelope* — confirmed by `pprof -peek`, which
+attributes 100% of `json.Marshal` calls to that one caller. Reading the code
+settles it; measurement then agrees.
+
 Measured by `BenchmarkBroadcastRawEvent` (`internal/daemon/broadcast_bench_test.go`)
 — **production code, not a model**: a real daemon, a real session, and N real
 WebSocket peers attached via `session/load`, with `BroadcastRawEvent` fanning
-the frame out to all of them. Same machine as above, `go1.25.6 darwin/arm64`,
-Apple M2 Pro.
+the frame out to all of them. Measured on the branch that added the benchmark,
+based on **`96072d2`**; same machine as above, `go1.25.6 darwin/arm64`, Apple
+M2 Pro. The benchmark asserts a probe frame reaches every peer before measuring,
+so a silently non-delivering fan-out fails rather than reporting a number.
 
 | Payload | peers=1 | peers=8 | peers=32 |
 |---|--:|--:|--:|
 | `message.delta` (125 B) | 15 allocs/op | 64 | 232 |
 | `tool.call.finished` + spill (673 B) | 15 allocs/op | 64 | 232 |
 
-**The two payload shapes cost exactly the same, at every peer count.** That
-equality is the result, and it is the thing the old numbers cannot say. The
+**The two payload shapes cost exactly the same, at every peer count** — and the
 removed decode+re-encode cost *more* for the fatter event (17 vs 14) precisely
-because it interpreted every field; a path that forwards bytes verbatim cannot
-care how many fields an event has. Byte counts still differ (1.0 kB/op vs
-1.6 kB/op at one peer) — the frame is copied, just never parsed.
+because it interpreted every field. So the equality discriminates against the
+measured alternative, which is why it is worth recording.
+
+> Do not read the equality as *proving* verbatim forwarding on its own. Identical
+> allocation counts are consistent with verbatim forwarding, but allocation
+> counts are quantized by buffer size classes, so two payloads could share a
+> count for unrelated reasons. The structural argument above is what proves it;
+> this is corroboration.
+
+Byte counts still differ (1.0 kB/op vs 1.6 kB/op at one peer), which is the
+expected signature of moving bytes rather than interpreting them. (Precisely:
+`json.Marshal` of a `RawMessage` runs `compact()`, so the bytes *are* walked —
+but only to validate and strip whitespace, never decoded into typed values.)
 
 What remains is ~8 allocations of fixed per-event cost plus **~7 per attached
 peer** (arithmetic from the three peer counts above: 15 → 64 → 232). That
 per-peer term is not new — it was paid before Slice 3b too — and, importantly,
 **it is not event encoding.**
 
-Where it actually goes, from `go tool pprof -sample_index=alloc_objects` over the
-`message_delta/peers=8` run — **measured, not read off the call site**:
+Where it actually goes, from `go tool pprof -sample_index=alloc_objects` over one
+`message_delta/peers=8` run — **measured, not read off the call site**. Figures
+are **flat (self) percentages**, so they do not nest and must not be summed with
+any `cum` column; rounded to whole percent because a single run does not support
+more precision:
 
-| Site | share of alloc objects |
-|---|--:|
-| `context.AfterFunc` | 22.5% |
-| `websocket.(*Conn).setupWriteTimeout` | 18.4% |
-| `encoding/json.Marshal` | 15.5% |
-| benchmark's own peer drain (`io` read path) | 14.0% |
-| `context` cancel/deadline plumbing (`propagateCancel`, `Done`, `WithDeadlineCause`) | 8.7% |
+| Site (flat/self) | share of alloc objects | scales with |
+|---|--:|---|
+| `context.AfterFunc` | 22% | **peers** |
+| `websocket.(*Conn).setupWriteTimeout` | 18% | **peers** |
+| `encoding/json.Marshal` (JSON-RPC envelope) | 16% | **peers** |
+| benchmark's own peer drain (`io` read path) | 14% | peers (not daemon cost) |
+| `context.(*cancelCtx).propagateCancel` / `Done` | 7% | **peers** |
+| `context.WithDeadlineCause` | 3% | **per broadcast**, not per peer |
 
 **The dominant per-peer cost is the per-write deadline and context machinery,
-not the JSON envelope** — roughly half the allocations versus `json.Marshal`'s
-~15%. An earlier draft of this section attributed the per-peer term to "the
-JSON-RPC envelope marshal and the WebSocket frame write," inferred from reading
-`peer.writeJSON`. That was reasonable and it was wrong in its emphasis; the
-profile is why this table exists. (Note `encoding/json.Marshal` here is the
-JSON-RPC *notification envelope* around the already-serialized params — the
-event body itself is still forwarded verbatim, which is what the payload-shape
-equality above demonstrates.)
+not the JSON envelope** — `AfterFunc` plus `setupWriteTimeout` alone are ~40% of
+allocations, against `json.Marshal`'s ~16%.
 
-Allocation counts reproduced identically across runs; the `ns/op` column in the
-same runs moved by up to 2×, which is the usual reason counts are the tier that
-carries claims here.
+Two attributions in this table were wrong in earlier drafts, both recorded rather
+than quietly fixed:
+
+1. The per-peer term was first attributed to "the JSON-RPC envelope marshal and
+   the WebSocket frame write," **inferred from reading `peer.writeJSON`**. The
+   profile shows that emphasis is backwards. Inference is why this table exists.
+2. `context.WithDeadlineCause` was first listed inside the per-peer group. It
+   comes from the single `context.WithTimeout` in `BroadcastRawEvent`
+   (`event_relay.go`), which runs **once per broadcast** — so it belongs to the
+   ~8-alloc fixed intercept, not the ~7-per-peer slope. The table is introduced
+   as "where the per-peer term goes," so miscategorizing it there mattered.
+
+`encoding/json.Marshal` here is the JSON-RPC *notification envelope* around the
+already-serialized params, not the event body — `pprof -peek` attributes 100% of
+its calls to `peer.writeJSON`.
+
+Allocation counts reproduced **identically** across runs. `ns/op` in the same
+runs moved by roughly 1.1–1.4× (e.g. `message_delta/peers=1` at 6423 and 7331
+ns/op on two runs), which is the usual reason counts are the tier that carries
+claims here.
 
 > **Read these as an upper bound on the daemon-side cost.** Go's allocation
 > accounting is process-wide and the benchmark's peers are in-process, so their
@@ -463,8 +503,10 @@ at the top. Outcome in brief:
    the cache's one-time warm-up (`2N+1` total) reported separately rather than
    amortized into a per-call figure.
 2. **Fan-out allocations: the measured work is gone from the path**, not reduced.
-   `BroadcastRawEvent` forwards verbatim with no `json.Marshal`, so the 14/17
-   figures describe an operation production no longer performs there.
+   `BroadcastRawEvent` forwards the event body verbatim, with **no `json.Marshal`
+   of the event body** — the only marshal left on that path is the per-peer
+   JSON-RPC envelope. So the 14/17 figures describe an operation production no
+   longer performs there.
 3. **The real path is now measured directly.** `BenchmarkBroadcastRawEvent`
    (`internal/daemon/broadcast_bench_test.go`, untagged so CI compiles it)
    drives the production fan-out to 1/8/32 real attached peers: **15 / 64 / 232
