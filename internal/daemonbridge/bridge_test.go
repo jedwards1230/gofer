@@ -430,11 +430,19 @@ func TestAttachReplaysHistory(t *testing.T) {
 	// session/load to backfill them, since the session itself stayed live
 	// server-side (b1.Close only tore down the client connection).
 	//
+	// This test advances on the EVENT stream, which reaches turn.finished before
+	// the runner's consume goroutine has necessarily appended the turn — so wait
+	// for the turn to be journaled before reattaching, and the session/load that
+	// Subscribe triggers provably reads a COMPLETE fold (the journal is
+	// append-only, so a fold observed whole stays whole). The three blocks are
+	// the user's text, the assistant's reasoning and its text — exactly the six
+	// events asserted below. See awaitFoldComplete's doc.
+	awaitFoldComplete(t, sup, info.ID, 3)
+
 	// Snapshot the fold immediately before that Subscribe, so a short or stalled
-	// replay below reports whether the history was already incomplete AT READ
-	// TIME. This test advances on the EVENT stream (Send is fire-and-forget — it
-	// never waits for the session/prompt response), so it is the drain most
-	// exposed to the asynchronous journaling window. See foldProbe's doc.
+	// replay below still reports whether the history was incomplete AT READ TIME.
+	// The wait above should make that impossible; the bracket stays so that if it
+	// ever happens anyway, the failure is conclusive on sight. See foldProbe's doc.
 	probe := newFoldProbe(t, sup, info.ID)
 
 	b2 := newBridge(t, url)

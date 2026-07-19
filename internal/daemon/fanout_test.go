@@ -427,6 +427,14 @@ func TestSessionLoadReplaysGoferEventHistory(t *testing.T) {
 	}
 
 	loader := dial(t, context.Background(), url, nil)
+	// The prompt response above rides turn.finished, which the broker publishes
+	// BEFORE the runner's consume goroutine has necessarily appended the turn —
+	// so the fold can still hold only the user message here. Wait for the turn
+	// to be journaled before loading, so the daemon provably reads a COMPLETE
+	// fold: the journal is append-only, so a fold observed whole stays whole.
+	// The three blocks are the user's text, the assistant's reasoning and its
+	// text — exactly the six frames asserted below. See awaitFoldComplete's doc.
+	awaitFoldComplete(t, sup, sid, 3)
 	// Bracket the load with a fold snapshot on each side, so a short replay
 	// reports whether the history was already incomplete AT READ TIME or whether
 	// complete frames went missing in delivery. See foldProbe's doc.

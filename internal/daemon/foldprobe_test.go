@@ -62,6 +62,102 @@ type foldProbe struct {
 	before string
 }
 
+// awaitFoldComplete blocks until sid's folded history is COMPLETE — it holds
+// wantBlocks content blocks, exactly the ones the caller is about to assert are
+// replayed — and only then returns, so the caller's session/load reads a fold
+// that is already whole.
+//
+// # Why this strengthens the assertion rather than papering over a race
+//
+// A history-replay test asserts across an asynchronous boundary: the user
+// message is appended synchronously by Prompt, while the turn's assistant and
+// tool entries are appended later by the SDK runner's consume goroutine (see
+// [foldProbe]'s doc for that window). A test that loads without synchronising
+// against that boundary is asserting a coincidence — "the fold happened to be
+// complete when the daemon read it" — which is a claim about TIMING, not about
+// the system.
+//
+// Establishing completeness FIRST converts it into a claim about the system.
+// The journal is APPEND-ONLY — [session.Journal.Append] only ever extends the
+// entry log and Fold walks HEAD back to the root — so a fold observed complete
+// STAYS complete. Observing completeness once is therefore sufficient: every
+// later read, including the daemon's own read inside the load this call
+// precedes, is necessarily complete too. The replay assertion that follows then
+// proves what the daemon guarantees, not what the scheduler happened to do.
+//
+// This is NOT a sleep, a retry, or a poll, and must not be "simplified" into
+// one. It blocks on an observable signal — [supervisor.Supervisor.WatchRoster],
+// which pushes a snapshot on every roster change — and advances on the one
+// transition that means the turn is journaled: the session reporting
+// [supervisor.StatusNeedsInput]. That status is only ever published by the
+// pump AFTER Session.Prompt returns, and Runner.Prompt returns only after its
+// awaitJournaled barrier, i.e. after consume has appended the run's entries.
+// The fold is then read exactly ONCE and required to be complete: if that
+// inference above is ever wrong, this fails loudly here instead of degrading
+// into a flake at the replay assertion.
+//
+// Call it only after the turn being replayed has been observed to finish;
+// before dispatch, a session is legitimately idle with nothing journaled yet.
+func awaitFoldComplete(t *testing.T, sup *supervisor.Supervisor, sid string, wantBlocks int) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), defaultWait)
+	defer cancel()
+
+	roster, err := sup.WatchRoster(ctx)
+	if err != nil {
+		t.Fatalf("WatchRoster: %v", err)
+	}
+	for {
+		select {
+		case snap, ok := <-roster:
+			if !ok {
+				t.Fatalf("roster watch closed before session %s reported needs-input\n  fold: %s",
+					sid, describeFold(t, sup, sid))
+			}
+			if !needsInput(snap, sid) {
+				continue
+			}
+			if got := foldBlocks(t, sup, sid); got != wantBlocks {
+				t.Fatalf("session %s reported needs-input holding %d folded content block(s), want %d"+
+					"\n  fold: %s\n  (needs-input means the runner's journaling barrier has passed, so the"+
+					"\n   fold must already be whole here. See awaitFoldComplete's doc.)",
+					sid, got, wantBlocks, describeFold(t, sup, sid))
+			}
+			return
+		case <-ctx.Done():
+			t.Fatalf("timed out after %s waiting for session %s to report needs-input\n  fold: %s",
+				defaultWait, sid, describeFold(t, sup, sid))
+		}
+	}
+}
+
+// needsInput reports whether snap holds sid with an idle pump and an empty
+// queue — the transition [awaitFoldComplete] waits on.
+func needsInput(snap []supervisor.SessionInfo, sid string) bool {
+	for _, s := range snap {
+		if s.ID == sid {
+			return s.Status == supervisor.StatusNeedsInput
+		}
+	}
+	return false
+}
+
+// foldBlocks counts the content blocks across a session's folded history — one
+// per started/finished pair a history replay emits.
+func foldBlocks(t *testing.T, sup *supervisor.Supervisor, sid string) int {
+	t.Helper()
+	msgs, err := sup.History(context.Background(), sid)
+	if err != nil {
+		t.Fatalf("History(%s): %v", sid, err)
+	}
+	n := 0
+	for _, m := range msgs {
+		n += len(m.Content)
+	}
+	return n
+}
+
 // newFoldProbe captures the pre-load fold snapshot. Call it immediately before
 // issuing session/load.
 func newFoldProbe(t *testing.T, sup *supervisor.Supervisor, sid string) *foldProbe {
