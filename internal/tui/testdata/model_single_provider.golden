@@ -1,3 +1,4 @@
+Model id: (type any id, listed or not)
 anthropic:
     Fable 5 (claude-fable-5) · 1M context · $10/$50 per Mtok
     Haiku 4.5 (claude-haiku-4-5) · 200K context · $1/$5 per Mtok

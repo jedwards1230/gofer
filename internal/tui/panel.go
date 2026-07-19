@@ -50,12 +50,20 @@ var panelTabs = []panelTab{
 
 // panelHeight is the fixed number of rows the command panel occupies in the
 // lower region of whichever screen it overlays: 4 fixed rows (two rules, the
-// tab bar, the footer) plus up to panelBodyRows for the active tab's body —
-// sized for /status's worst realistic case (two providers, both config
-// layers present; gofer supports at most two providers today, see
-// runner.SupportedProviders).
+// tab bar, the footer) plus up to panelBodyRows for the active tab's body.
+// The binding case is the Model tab with both providers authenticated: its
+// free-text entry line plus two provider headers plus the catalog's eight
+// rows (gofer supports at most two providers today, see
+// runner.SupportedProviders). /status's worst realistic case (two providers,
+// both config layers present) fits inside the same budget. A tab whose body
+// is shorter is not padded to it — [commandPanel.Height] reserves only the
+// rows actually rendered. The Model tab's typed-candidate line can push one
+// row past the budget mid-typing; that is deliberate, since it costs the last
+// catalog row only while the user is typing an id rather than browsing the
+// list, and growing the overlay permanently would cost the roster above it a
+// row on every open.
 const (
-	panelBodyRows = 10
+	panelBodyRows = 11
 	panelHeight   = panelBodyRows + 4
 )
 
@@ -131,14 +139,23 @@ func (p commandPanel) handleKey(msg tea.KeyPressMsg) commandPanel {
 
 // handleEscape applies one Esc press to the panel, reporting whether it was
 // consumed by the active tab's own state (ok=false, the panel stays open —
-// e.g. the Config tab clearing a filter or canceling an in-progress edit,
-// [configView.handleEscape]) or should close the panel (ok=true, every other
-// tab, and the Config tab once it has no more state of its own to clear).
+// the Config tab clearing a filter or canceling an in-progress edit
+// ([configView.handleEscape]), or the Model tab discarding a half-typed model
+// id ([modelPickerView.handleEscape])) or should close the panel (ok=true:
+// the Status tab, and either of the other two once it has no state of its own
+// left to clear).
 func (p commandPanel) handleEscape() (commandPanel, bool) {
-	if p.active == panelConfig {
+	switch p.active {
+	case panelConfig:
 		cfg, consumed := p.cfg.handleEscape()
 		if consumed {
 			p.cfg = cfg
+			return p, false
+		}
+	case panelModel:
+		model, consumed := p.model.handleEscape()
+		if consumed {
+			p.model = model
 			return p, false
 		}
 	}
@@ -233,11 +250,15 @@ func (p commandPanel) Height(width int) int {
 }
 
 // footerText returns the active tab's footer hint. The Config tab's search
-// list has its own key contract (filter/select/edit), so it overrides the
-// default "switch tabs / close" hint every other tab shows.
+// list and the Model tab's free-text entry each have their own key contract,
+// so both override the default "switch tabs / close" hint the read-only
+// Status tab shows.
 func (p commandPanel) footerText() string {
-	if p.active == panelConfig {
+	switch p.active {
+	case panelConfig:
 		return "Type to filter · Enter/↓ to select · ↑ to tabs · Esc to clear"
+	case panelModel:
+		return "Type a model id · ↑/↓ to browse · Enter to select · Esc to clear"
 	}
 	return "←/→ to switch tabs · esc to close"
 }
@@ -305,7 +326,12 @@ func (a App) handlePanelKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 // handleModelSelect applies Enter on the Model tab: the coupled /model
 // select (docs/projects/gofer-m4-command-views-plan.md §4b). It always
-// persists the highlighted row's id as the session.model config default —
+// persists the selected id — the highlighted row's, or the free-text entry's
+// when no row is highlighted ([modelPickerView.selectedModel]) — as the
+// session.model config default. That id may be one the compiled-in registry
+// does not carry, which is fine: [provider.Resolve] decides what can run, and
+// modelProvider below (the only thing this function asks about the id) reads
+// through it.
 // this alone is possible with zero providers authenticated, so it keeps
 // Enter auth-independent (§5) even when there is nothing else to do. When a
 // session is attached or peeked (a.panel.model.sess, captured at open time —
@@ -393,9 +419,11 @@ func (a App) handleModelSelect() (tea.Model, tea.Cmd) {
 // binary's registry), which handleModelSelect reads as a provider mismatch —
 // so swapping between two models of the SAME provider would silently decline
 // the live swap and only set the new-session default. Resolve infers the
-// provider from the id's shape, keeping the swap available. The picker itself
-// still lists only registered ids (see modelpicker.go), which is why the
-// metadata paths stay on Lookup.
+// provider from the id's shape, keeping the swap available — which is exactly
+// the path the picker's free-text entry takes, since a typed id need not be
+// registered at all (see modelpicker.go). The picker's own metadata rendering
+// branches on [provider.ModelInfo.Unregistered] instead, so an inferred record
+// never presents its zero-value pricing or context window as fact.
 func modelProvider(id string) string {
 	info, err := provider.Resolve(id)
 	if err != nil {
