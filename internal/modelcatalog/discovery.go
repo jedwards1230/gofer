@@ -3,9 +3,11 @@ package modelcatalog
 // discovery.go holds the live model-discovery layer that sits above the static
 // floor in modelcatalog.go: the options that enable it, the credential
 // plumbing that feeds it, and the fallback rule. The HTTP call, JSON shape, and
-// visibility filter belong to internal/openaimodels; this file owns everything
-// on gofer's side of that boundary. See the package doc for why there are two
-// sources and why the floor can never be skipped.
+// the visibility rule belong to the SDK's provider.ModelLister (implemented by
+// provider/openai); this file owns everything on gofer's side of that boundary
+// — which credential is used, how long the call may take, what a failure means,
+// and how a listing entry becomes a picker row. See the package doc for why
+// there are two sources and why the floor can never be skipped.
 
 import (
 	"context"
@@ -15,9 +17,10 @@ import (
 	"time"
 
 	"github.com/jedwards1230/agent-sdk-go/auth"
+	"github.com/jedwards1230/agent-sdk-go/provider"
+	"github.com/jedwards1230/agent-sdk-go/provider/openai"
 
 	"github.com/jedwards1230/gofer/internal/modelmeta"
-	"github.com/jedwards1230/gofer/internal/openaimodels"
 )
 
 // CodexClientVersion is the value sent for the listing's client_version query
@@ -36,6 +39,13 @@ import (
 // real vendor client release on the theory that a genuine version is the least
 // likely to be rejected or to receive a narrowed listing. Revisit it if
 // discovery starts failing or starts omitting models known to exist.
+//
+// The SDK carries its own default for this parameter, and today the two values
+// agree. gofer still passes this one explicitly ([openai.WithCodexClientVersion]):
+// the agreement is a coincidence of the current release, not a contract, and the
+// choice of what version gofer claims to be is gofer's to make and to revisit
+// against gofer's own evidence — not something to inherit silently on the next
+// SDK bump.
 const CodexClientVersion = "0.144.3"
 
 // DefaultDiscoveryTimeout bounds live discovery, including the credential
@@ -68,8 +78,12 @@ func newOptions(opts []Option) options {
 // WithDiscovery enables live discovery against the Codex listing.
 //
 // Production callers pass WithDiscovery(nil, ""): a nil client means
-// http.DefaultClient and an empty base URL means [openaimodels.DefaultBaseURL].
-// Tests pass a pinned transport and an httptest URL.
+// http.DefaultClient and an empty base URL means the SDK's own OAuth route (the
+// Codex backend), since the adapter derives the base URL from the credential
+// kind when none is given. Tests pass a pinned transport and an httptest URL —
+// the override redirects the host only, leaving the credential-kind routing and
+// therefore the wire contract intact, which is what makes a test against a local
+// server exercise the real Codex path.
 //
 // Discovery is OPT-IN, and deliberately so. A lookup with no options performs
 // no network call of any kind, which means no test — present or future — can
@@ -106,11 +120,18 @@ func WithTimeout(d time.Duration) Option {
 // because every one of them means the same thing to the caller: fall back to
 // the static floor. Callers do not branch on which failure occurred.
 //
-// An empty listing is treated as a failure on purpose, even though
-// openaimodels correctly reports it as a success with zero models. A 200
-// carrying no models would otherwise produce an empty picker, which is the
-// exact outcome the floor exists to prevent; a vendor returning nothing is
-// indistinguishable from one that is broken, and a stale list beats no list.
+// An empty listing is treated as a failure on purpose, even though the SDK
+// correctly reports it as a success with zero models. A 200 carrying no models
+// would otherwise produce an empty picker, which is the exact outcome the floor
+// exists to prevent; a vendor returning nothing is indistinguishable from one
+// that is broken, and a stale list beats no list.
+//
+// The call itself is the SDK's [provider.ModelLister], which owns the endpoint,
+// the required client_version parameter, the response shape, and the
+// visibility-to-Hidden normalization. gofer supplies the three things that are
+// its own policy and cannot be delegated: the credential (already resolved and
+// refreshed here, so the adapter re-resolves nothing), the deadline, and the
+// rule that says a failure means the floor.
 func discoverCodex(ctx context.Context, root string, o options) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, o.timeout)
 	defer cancel()
@@ -120,26 +141,42 @@ func discoverCodex(ctx context.Context, root string, o options) ([]Model, error)
 		return nil, err
 	}
 
-	found, err := openaimodels.List(ctx, o.httpc, openaimodels.Request{
-		BaseURL:       o.baseURL,
-		Token:         token,
-		AccountID:     accountID,
-		ClientVersion: CodexClientVersion,
-	})
+	// The credential is handed over as a static source rather than the auth
+	// store itself, even though auth.Store satisfies the interface. Two reasons,
+	// both load-bearing: the refresh above has already happened under this
+	// function's deadline (see codexCredential), so a second resolution would be
+	// redundant work on a latency-sensitive path; and pinning Kind to OAuth here
+	// keeps the adapter on the Codex wire contract, which is the only one this
+	// function is about. Passing the store would let a non-OAuth entry silently
+	// re-route the call to the public API's differently-shaped listing instead
+	// of failing the kind check codexCredential performs.
+	lister := openai.New("", provider.StaticCredentialSource{Cred: provider.Credential{
+		Kind:    provider.CredOAuth,
+		Token:   token,
+		Account: accountID,
+	}},
+		openai.WithHTTPClient(o.httpc),
+		openai.WithBaseURL(o.baseURL),
+		openai.WithCodexClientVersion(CodexClientVersion),
+	)
+
+	found, err := lister.ListModels(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("discover codex models: %w", err)
 	}
 
-	// Selectable drops the vendor's "hide" entries and fails OPEN on any
-	// visibility value it does not recognize, so a future vocabulary change
-	// cannot silently empty the list.
-	found = openaimodels.Selectable(found)
-	if len(found) == 0 {
-		return nil, errors.New("discover codex models: listing offered no selectable models")
-	}
-
 	out := make([]Model, 0, len(found))
 	for _, m := range found {
+		// Hidden is the vendor's "do not offer this in a picker" marker, and the
+		// SDK sets it ONLY on an exact "hide" — every other visibility value,
+		// including one neither gofer nor the SDK has ever seen, arrives as
+		// false and is kept. That fail-OPEN direction is the whole point: if an
+		// unrecognized marker meant hidden, the day the vendor renames its
+		// visible value the picker would silently go empty. Showing a model the
+		// vendor tucks away is far cheaper, and such a model is still routable.
+		if m.Hidden {
+			continue
+		}
 		out = append(out, Model{
 			ID:       m.ID,
 			Provider: providerOpenAI,
@@ -153,6 +190,17 @@ func discoverCodex(ctx context.Context, root string, o options) ([]Model, error)
 			// would be the same class of error as inventing a price.
 			ContextWindow: m.ContextWindow,
 		})
+	}
+	// One check covers both empty cases, which mean the same thing downstream: a
+	// vendor that listed nothing at all, and one whose entire listing was marked
+	// hidden. Either way there is no picker to build, so the floor takes over.
+	//
+	// Pricing is absent from Model by construction, so nothing above could have
+	// carried one across even if the SDK had offered it — which it does not: a
+	// ModelLister record's Pricing is unconditionally zero, and zero here would
+	// mean UNKNOWN, never free.
+	if len(out) == 0 {
+		return nil, errors.New("discover codex models: listing offered no selectable models")
 	}
 	return out, nil
 }

@@ -39,8 +39,18 @@ const (
 	// registry: the full registered-model catalog, each entry stamped with the
 	// host's per-provider availability (see handleGoferModels). Deliberately
 	// gofer-namespaced, NOT the unstable ACP providers/* surface — a remote
-	// client (e.g. an iOS ACP client populating a model picker) reads it to
-	// learn which models it may pass to session/new's model param. Read-only.
+	// client (e.g. an iOS ACP client populating a model picker) reads it for the
+	// real context windows and pricing behind each id. Read-only.
+	//
+	// It is a metadata CATALOG, not the admission list, and deliberately
+	// under-reports what the daemon will run: this list is built with
+	// provider.Lookup (registry membership), while every admission gate —
+	// session/new, gofer/set_model, `gofer daemon install -m` — uses
+	// provider.Resolve, which infers the provider from the id's shape. So a
+	// model newer than this binary's registry is absent here yet perfectly
+	// runnable, and a client may validly pass an id this method never listed
+	// (PRD "Model admission vs metadata"). Only an id matching no provider
+	// family at all is rejected.
 	methodGoferModels = "gofer/models"
 
 	// methodGoferPermissionRequested / methodGoferPermissionResolved are the

@@ -180,6 +180,22 @@ type modelInfoDTO struct {
 	// credential for this model's provider. A remote client cannot see the
 	// host's auth state itself, so the daemon stamps it (see handleGoferModels).
 	Available bool `json:"available"`
+	// Unregistered mirrors [provider.ModelInfo.Unregistered]: the SDK synthesized
+	// this record rather than reading it from its registry. When true, the
+	// sibling metadata — ContextWindow, MaxOutput, Pricing — is UNKNOWN, not
+	// zero. A client must render those as unavailable ("—"), never as a free or
+	// already-exhausted model; a percent-of-context gauge divided by a zero
+	// ContextWindow is a bug, not a full bar.
+	//
+	// The polarity is load-bearing, NOT a style choice — do not invert it. With
+	// omitempty the key is absent in the common SAFE case (registered, metadata
+	// real) and present only in the DANGEROUS one, so a lenient client reading
+	// `obj["unregistered"] ?? false` is correct in BOTH branches. The positive
+	// spelling (a `pricingKnown`) carries the same information with the opposite
+	// failure mode: it would be omitted exactly when metadata IS known, so the
+	// same `?? false` default would report every registered model as unknown.
+	// Defaults must fall on the safe side of the wire.
+	Unregistered bool `json:"unregistered,omitempty"`
 }
 
 // modelPricingDTO is the tagged wire projection of [provider.Pricing] (per-Mtok
@@ -192,24 +208,41 @@ type modelPricingDTO struct {
 	CacheWrite float64 `json:"cacheWrite,omitempty"`
 }
 
-// toModelInfoDTOs projects the SDK provider registry into the gofer/models
-// wire shape, sorted by (provider, id) for a stable client-facing order
-// (provider.Models() is unordered). authed reports which provider ids the
-// daemon host is authenticated for; a model whose provider is absent is
-// marked Available:false. A registry id whose Lookup fails is skipped
-// defensively (provider.Models() only ever yields registered ids).
+// toModelInfoDTOs gathers the SDK provider registry and projects it into the
+// gofer/models wire shape (see toModelInfoDTOsFrom for the projection itself).
+// A registry id whose Lookup fails is skipped defensively (provider.Models()
+// only ever yields registered ids).
 func toModelInfoDTOs(authed map[string]bool) []modelInfoDTO {
 	ids := provider.Models()
-	out := make([]modelInfoDTO, 0, len(ids))
+	infos := make([]provider.ModelInfo, 0, len(ids))
 	for _, id := range ids {
 		info, ok := provider.Lookup(id)
 		if !ok {
 			continue
 		}
+		infos = append(infos, info)
+	}
+	return toModelInfoDTOsFrom(infos, authed)
+}
+
+// toModelInfoDTOsFrom projects [provider.ModelInfo] records into the
+// gofer/models wire shape, sorted by (provider, id) for a stable client-facing
+// order (provider.Models() is unordered). authed reports which provider ids the
+// daemon host is authenticated for; a model whose provider is absent is marked
+// Available:false.
+//
+// Split out from its sole production caller on purpose: taking the records as a
+// parameter is the seam that lets a test drive the projection with a synthesized
+// record (notably one carrying Unregistered, which the live registry never
+// yields) without mutating the process-wide registry. Inlining it back would
+// silently delete that coverage.
+func toModelInfoDTOsFrom(infos []provider.ModelInfo, authed map[string]bool) []modelInfoDTO {
+	out := make([]modelInfoDTO, 0, len(infos))
+	for _, info := range infos {
 		out = append(out, modelInfoDTO{
 			ID:            info.ID,
 			Provider:      info.Provider,
-			DisplayName:   modelmeta.DisplayName(id),
+			DisplayName:   modelmeta.DisplayName(info.ID),
 			ContextWindow: info.ContextWindow,
 			MaxOutput:     info.MaxOutput,
 			Pricing: modelPricingDTO{
@@ -218,8 +251,9 @@ func toModelInfoDTOs(authed map[string]bool) []modelInfoDTO {
 				CacheRead:  info.Pricing.CacheRead,
 				CacheWrite: info.Pricing.CacheWrite,
 			},
-			Reasoning: info.Reasoning,
-			Available: authed[info.Provider],
+			Reasoning:    info.Reasoning,
+			Available:    authed[info.Provider],
+			Unregistered: info.Unregistered,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {

@@ -64,10 +64,51 @@ func TestCatalogPrefersLiveDiscovery(t *testing.T) {
 	}
 }
 
+// TestCatalogVisibilityFilterFailsOpen states, by name, the rule the golden
+// encodes structurally: a model is dropped ONLY on an explicit "hide". Every
+// other visibility value is KEPT — the known-visible "list", a value from
+// outside the vocabulary either gofer or the SDK has seen, and an absent field.
+//
+// The direction is the point. Fail-CLOSED here (drop anything not recognized as
+// visible) would work perfectly until the vendor renamed "list", at which moment
+// every model would vanish from the picker at once — and, because a discovery
+// returning nothing selectable degrades to the floor, it would present as the
+// silent, hard-to-attribute "discovery mysteriously stopped working" rather than
+// as a failure. Fail-OPEN's worst case is showing a model the vendor's own
+// picker tucks away, which is still routable.
+//
+// The expected set is deliberately unlike the static floor, so this cannot pass
+// against a fallback.
+func TestCatalogVisibilityFilterFailsOpen(t *testing.T) {
+	root := oauthRoot(t)
+	const mixedVisibility = `{"models":[
+		{"slug":"gpt-5.7-nova","display_name":"GPT-5.7 Nova","visibility":"list"},
+		{"slug":"codex-auto-review","display_name":"Codex Auto Review","visibility":"hide"},
+		{"slug":"gpt-5.9-quasar","display_name":"GPT-5.9 Quasar","visibility":"experimental"},
+		{"slug":"gpt-6.0-vega","display_name":"GPT-6.0 Vega"}
+	]}`
+	srv, httpc := listingServer(t, http.StatusOK, mixedVisibility)
+
+	got, err := modelcatalog.Catalog(context.Background(), root, "openai",
+		modelcatalog.WithDiscovery(httpc, srv.URL))
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+
+	want := []string{"gpt-5.7-nova", "gpt-5.9-quasar", "gpt-6.0-vega"}
+	if !slices.Equal(ids(got), want) {
+		t.Fatalf("Catalog = %v, want %v: only an explicit \"hide\" may be dropped", ids(got), want)
+	}
+	if slices.Contains(ids(got), "codex-auto-review") {
+		t.Error(`the "hide" entry survived; an explicit hide marker must be honored`)
+	}
+}
+
 // TestCatalogFallsBackToFloor is the hard requirement: every way discovery can
 // fail must degrade to the static floor — never an empty list, never an error.
-// The 200-with-zero-models case is the subtle one: openaimodels correctly
-// reports it as a success, so only this layer can turn it into a fallback.
+// The 200-with-zero-models case is the subtle one: the SDK's listing correctly
+// reports it as a success with zero models, so only this layer can turn it into
+// a fallback.
 func TestCatalogFallsBackToFloor(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -80,6 +121,14 @@ func TestCatalogFallsBackToFloor(t *testing.T) {
 		{"malformed body", http.StatusOK, `{"models":[{"slug":`},
 		{"200 with zero models", http.StatusOK, `{"models":[]}`},
 		{"200 with only hidden models", http.StatusOK, `{"models":[{"slug":"codex-auto-review","visibility":"hide"}]}`},
+		// A 200 whose body carries no "models" key at all — most plausibly the
+		// public API's differently-shaped listing arriving on the Codex route.
+		// The SDK distinguishes this from an empty catalogue (an absent key is
+		// an error there, where an empty array is a success), which the old
+		// in-tree client did not. The distinction is invisible from here on
+		// purpose: this layer treats every discovery failure alike, so both
+		// spellings of "nothing usable came back" land on the same floor.
+		{"200 with no models key", http.StatusOK, `{}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -357,8 +406,11 @@ func TestCatalogNeverCallsARealVendorHost(t *testing.T) {
 // TestModelDeclaresNoPricingField guards the "no pricing, ever" rule
 // structurally. The vendor sends no price for subscription models, so there is
 // nothing to render but UNKNOWN; a field added here would be a place for a
-// fabricated $0 to live, and a renderer would dutifully show it as fact. This
-// mirrors openaimodels' own guard on its Model type.
+// fabricated $0 to live, and a renderer would dutifully show it as fact.
+//
+// The SDK enforces the same rule on its side — a ModelLister record's Pricing is
+// unconditionally zero — but that is its guarantee, not gofer's. This type is
+// what the picker renders, so the guard belongs here too.
 func TestModelDeclaresNoPricingField(t *testing.T) {
 	rt := reflect.TypeOf(modelcatalog.Model{})
 	for i := range rt.NumField() {
