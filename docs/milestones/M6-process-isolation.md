@@ -47,7 +47,7 @@ Net effect: the two hops speak one protocol (the public client wire), and each t
 **Per-worker endpoint convention.** Mirror the daemon's own endpoint-file precedent (`cmd/gofer/daemon.go`, `internal/daemon/endpoint.go`). Each worker writes, atomically at startup, `<runtime>/gofer-<uid>/workers/<uuid>.json` (mode 0600) advertising `{addr: unix://…/<uuid>.sock, pid, binaryVersion, wireVersion, startedAt}` and removes it on clean exit. (`acpProtocolVersion` is **not** listed here: it is advertised/confirmed via the `gofer/hello` handshake in §6, not negotiated at ACP `initialize` — which today does not run at all.) `<runtime>` follows the same scheme the daemon socket already uses (`$XDG_RUNTIME_DIR/gofer-<uid>…`, with the daemon's existing macOS fallback).
 
 **Discovery on router start.** Scan `workers/`; for each endpoint file:
-1. a signal-0 liveness probe. *Correcting an earlier claim: this does not reuse `cmd/gofer/daemon.go:pidAlive` — the router's adoption scan calls `daemon.ProcessAlive` (`internal/daemon/process_unix.go:23`), a separate function whose own doc comment calls it "an exact duplicate of" `pidAlive` and flags collapsing them as a follow-up, not yet done.* **and**
+1. `pidAlive(pid)` (reuse `cmd/gofer/daemon.go:pidAlive` — signal-0 probe) **and**
 2. dial + `gofer/hello` handshake (reuse `daemon.Probe` shape).
 
 Both pass → **adopt**: open a `daemon.Client` to the worker, wrap it in the router's `daemonbridge`-shaped remote supervisor, pull the worker's `SessionInfo` into the roster, re-subscribe to its event stream (must-deliver replay §6 re-surfaces any open permission request). Either fails → **stale**: unlink the endpoint file (best-effort), treat the session as offline/resumable.
@@ -57,7 +57,7 @@ Both pass → **adopt**: open a `daemon.Client` to the worker, wrap it in the ro
 | Situation | Detection | Action |
 |---|---|---|
 | Stale socket (file present, no listener) | dial refused | unlink file; session offline |
-| Dead worker, live socket file (pid gone) | `daemon.ProcessAlive` false | unlink file; session offline |
+| Dead worker, live socket file (pid gone) | `pidAlive` false | unlink file; session offline |
 | Live pid, unresponsive worker | handshake timeout | leave file; mark degraded, do **not** route prompts; kill path reaps |
 | Two routers racing | router endpoint guard (`guardLiveEndpoint`, already exists) | second router fails fast ("already running") — one router owns the roster |
 | Duplicate worker for one session id | per-session lockfile (below) | second worker fails to acquire → exits |
@@ -90,7 +90,7 @@ The one genuinely new cost is the **second hop** (worker→router→client vs da
 1. Workers are **short-lived** — one session each. The max skew a router must tolerate is bounded by the *longest running session*, not by release cadence.
 2. A skewed in-flight session only needs to **finish**, not accept new work. So the router must forward-support only the **observe + permission-reply + terminal-event subset** across a version gap — which the additive event wire already is — and may **refuse to route a *new prompt* to a version-skewed worker**, letting the current turn finish and the next prompt wait for a fresh worker on the router's own binary.
 
-*Correcting an earlier claim: the shipped policy is not a numbered "N-1" window — it's exact-match-or-bust on the wire axis, unlimited on the binary axis, and the two axes are independent.* `internal/router/skew.go`'s own doc comment says so directly: "Binary comparison is EXACT, not N-1." `classifySkew` (`internal/router/skew.go:81-92`) checks `wireVersion` first: ANY mismatch — not specifically one version behind — puts the worker in `skewWire`, and `skewClass.refusesNewWork()` (`skew.go:60-62`) refuses new work for `skewWire` alone. A `binaryVersion` mismatch with a *matching* wire version (`skewBinary`) is fully routable, with no cap on how far the binaries have drifted — that unlimited tolerance is exactly the session-pinning behavior a rolling upgrade needs. So there is no window to widen: full routing requires the current wire, period, and binary skew was never restricted in the first place. Governance rides the **existing** promote-if-stable policy + additive-field discipline — `daemonbridge` already tolerates unknown methods (silently dropped) and additive fields.
+Recommended policy: router supports the current wire fully and **N-1 for the observe/reply/finish subset only**. Start at N-0 full + skew-observe-only (Phase 3), widen if ever needed. Governance rides the **existing** promote-if-stable policy + additive-field discipline — `daemonbridge` already tolerates unknown methods (silently dropped) and additive fields.
 
 ## 7. Permissions across processes
 
@@ -159,6 +159,6 @@ Slots as the **next** gofer milestone after M5 (ACP featureset), pushing ecosyst
 
 ---
 
-**Implementation pointers (code-verified):** boundary seam is `internal/supervisor/types.go:59` (`Session` interface) + `supervisor.go:51-55` (injectable factories); the reusable cross-process template is `handleGoferEvent`, extracted during M6 from `daemonbridge` into `internal/wirestream/reconstruct.go` (this pointer originally named `internal/daemonbridge/reconstruct.go`, which no longer exists); the fan-out to preserve is `internal/daemon/handlers.go:broadcastGoferEvent`/`broadcastPermission`; the adoption primitives to mirror are `internal/daemon.ProcessAlive` (the router's actual liveness probe, `internal/daemon/process_unix.go:23`) + `cmd/gofer/daemon.go:guardLiveEndpoint` (the daemon's own singleton guard, which still uses the separate, not-yet-collapsed `pidAlive`) + `internal/daemon/endpoint.go`.
+**Implementation pointers (code-verified):** boundary seam is `internal/supervisor/types.go:59` (`Session` interface) + `supervisor.go:51-55` (injectable factories); the reusable cross-process template is `handleGoferEvent`, extracted during M6 from `daemonbridge` into `internal/wirestream/reconstruct.go` (this pointer originally named `internal/daemonbridge/reconstruct.go`, which no longer exists); the fan-out to preserve is `internal/daemon/handlers.go:broadcastGoferEvent`/`broadcastPermission`; the adoption primitives to mirror are `cmd/gofer/daemon.go:pidAlive`/`guardLiveEndpoint` + `internal/daemon/endpoint.go`.
 
 Two facts verified against the code: (1) the SDK journal has **no** cross-process flock (only `auth.lock` exists) → single-writer-per-session is a gofer-side `<uuid>.lock`, not an SDK freebie; (2) there is **no** version in any handshake today → version negotiation is built into the gofer-native wire from day one (endpoint file + `gofer/hello`), not inherited from ACP.
