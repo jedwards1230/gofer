@@ -40,17 +40,24 @@ UI.
 **Overview** — one row per session (a session = a task, titled by the work).
 A row may be a whole fan-out hierarchy; it collapses to aggregate state,
 agent count, and whether approvals are pending, and expands inline to the
-subagent tree. `space` peek · `enter` attach · `a` approve · `n` new ·
-`ctrl-x` kill (running; confirm; subtree interrupted) or archive (finished).
-Journals are never deleted — `gofer ps --all` lists archived sessions.
+subagent tree. `↑`/`↓` move the selection · `tab` switches view · `enter`
+peek · `→` attach · `ctrl-x` kill (running; subtree interrupted) or archive
+(finished), acting immediately on the selected row. `enter`, `→` and
+`ctrl-x` take these meanings only while the dispatch bar is empty; every
+other key types into it, and `enter` on non-empty text starts a new session
+— or dispatches a `/` command. Journals are never deleted — `gofer ps --all`
+lists archived sessions.
 
 **Peek** — a summary card for one session: its title, a one-line
 waiting/status line, and a `❯ reply` input. `up`/`down` move the roster
 selection (the card follows); `enter` opens (attaches) or, with reply text,
-sends the reply; `space` closes back to the overview; `ctrl+x` deletes. Peek
+sends the reply; `space` closes back to the overview; `ctrl+x` kills a
+running session or archives a finished one, as on the overview. Peek
 carries no transcript tail — it is a roster-only projection.
 
-**Attach** — full transcript + input; `esc` detaches back to overview.
+**Attach** — full transcript + input. `esc` interrupts the in-flight turn;
+`←` on an empty input backs out to the overview (with text, it moves the
+cursor).
 
 Every screen — overview, attach's transcript, its approval prompts, and its
 command-menu/panel overlays — opens with the same two-line identity header:
