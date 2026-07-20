@@ -418,7 +418,7 @@ compaction entries, HEAD) share a single row renderer. Fork/branch/compact
 are first-class: the session is an append-only tree and context is
 fold(root→head), so a "what if" fork costs nothing.
 
-## Subagent sessions (M6, not yet built)
+## Subagent sessions (M7, not yet built)
 
 Design intent only — lands with M6's subagents-first-class work. A subagent
 is **not a black box within a turn** — it is a real child session
