@@ -438,7 +438,23 @@ func (a App) handleModelSelect() (tea.Model, tea.Cmd) {
 	if selected == "" {
 		return a, nil
 	}
+	return a.applyModelSelection(selected, a.panel.model.sess)
+}
 
+// applyModelSelection is the commit half of [App.handleModelSelect], split
+// out so `/model <id>` (command.go) reaches the SAME config write, the same
+// header refresh, the same daemon probe, and the same status notes as picking
+// a row in the panel — rather than a parallel implementation that drifts. The
+// two callers differ only in where selected and sess come from: the picker
+// reads them off the open panel, the string form takes the typed id and
+// [App.currentSessionInfo] (which is the same value openPanel hands the panel
+// as sess, so the two paths see identical session state).
+//
+// selected is assumed non-empty and already admitted by [provider.Resolve] —
+// both callers gate on that before calling in, and they differ in what an
+// unroutable id does (the picker no-ops, `/model <id>` reports it), so the
+// decision stays with them.
+func (a App) applyModelSelection(selected string, sess *SessionInfo) (App, tea.Cmd) {
 	var cfg config.Config
 	if a.commandEnv.Config != nil {
 		c, err := a.commandEnv.Config()
@@ -473,7 +489,6 @@ func (a App) handleModelSelect() (tea.Model, tea.Cmd) {
 		a.over = a.over.WithDefaultModel(selected)
 	}
 
-	sess := a.panel.model.sess
 	a.panel = nil
 
 	if sess == nil {

@@ -743,6 +743,34 @@ value or as `context unknown` / `pricing unknown`, guarded on both the
 an incomplete registry row can put a fabricated price or limit on screen as
 fact.
 
+**`/model <id>` skips the picker entirely** (`runModel`, command.go — issue
+#165). `/model` declares `ArgHint: "[id]"`, which the autocomplete popup
+renders and appends a trailing space for, so the UI actively invites the
+argument; before this it was wired to the args-discarding `openPanel` and
+threw the id away without a word. With an argument the command now applies
+that id directly and never opens the panel, routing through the *same*
+`App.applyModelSelection` the picker's Enter uses — one config write, one
+header refresh, one daemon probe, one set of status notes, shared by both
+paths rather than reimplemented per path. Bare `/model` still opens the
+picker, unchanged.
+
+Admission for the string form is `provider.Resolve` **alone** — deliberately
+the same rule as the free-text entry line above, so the two ways of typing an
+id cannot disagree. An id Resolve routes but the compiled-in catalog does not
+list applies: the catalog is a vendor listing that goes stale, comes back
+empty, or is unreachable offline, and gating on it would break the string
+override in precisely the situations it exists for. What Resolve *rejects*
+gets a `sevDanger` note naming the id, never a silently-opened picker. Since
+`parseSlash` splits on whitespace and no model id contains a space, `/model a
+b` is rejected by argument count rather than silently applying `a`.
+
+The declared-`ArgHint`-but-discarded-args defect is guarded **generally**, not
+for `/model` specifically: `TestArgHintCommandsConsumeArgs`
+(command_args_test.go) iterates `newBuiltinRegistry().List()` and fails any
+command that advertises an argument yet behaves identically with and without
+one, so a future command that repeats the mistake fails without anyone
+extending the test.
+
 **Enter couples the select** (`App.handleModelSelect`,
 panel.go — the pure `modelPickerView` has no IO seam, so App intercepts Enter
 one level up, ahead of `commandPanel.handleKey`, whenever the Model tab is
@@ -795,7 +823,7 @@ the panel host for tab switching.
 
 - **P0**: user markdown commands (`~/.gofer/commands` + project
   `.gofer/commands`, with `$1`, `$ARGUMENTS`, `${1:-def}`, `${@:N}`
-  substitution + frontmatter description/argument-hint) · `/model [id]` ·
+  substitution + frontmatter description/argument-hint) ·
   `/new` · `/quit` · `/resume` (picker) · `/compact [instructions]`
   (block-if-busy) · `/yolo` permission-mode toggle (dual-bound command +
   key; ships before autonomous tool use) · `/help` rendered from the live

@@ -10,9 +10,12 @@ package tui
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/jedwards1230/agent-sdk-go/provider"
 )
 
 // Command is one entry in the slash-command [Registry]: a name plus the
@@ -123,7 +126,7 @@ func newBuiltinRegistry() Registry {
 		Name:    "model",
 		ArgHint: "[id]",
 		Summary: "Pick the active/default model",
-		Run:     openPanel(panelModel),
+		Run:     runModel,
 	})
 	return r
 }
@@ -144,6 +147,49 @@ func openPanel(tab commandPanelTab) func(App, []string) (App, tea.Cmd) {
 		}
 		return a, nil
 	}
+}
+
+// runModel is /model's [Command.Run]: bare `/model` opens the picker exactly
+// as before, while `/model <id>` applies that id directly and never opens the
+// panel. It deliberately does NOT use [openPanel] — openPanel discards its
+// args, which is correct for the genuinely argument-less /status and /config
+// but is the whole of issue #165 for a command that declares an ArgHint. The
+// declared-hint-vs-discarded-args defect is guarded generally by
+// TestArgHintCommandsConsumeArgs (command_args_test.go), not by this
+// function's shape.
+//
+// The direct path routes into [App.applyModelSelection] — the same commit
+// path Enter in the picker takes — so a string id and a picked row produce
+// identical config writes, header refreshes, daemon probes, and status notes.
+//
+// Admission is [provider.Resolve] alone, matching the picker's typed-entry
+// rule ([modelPickerView.selectedModel]): an id Resolve can route but the
+// compiled-in catalog doesn't list still applies. The catalog is a vendor
+// listing that goes stale, comes back empty, or is unreachable offline, and
+// gating on it would break the string override in exactly the situations it
+// exists for. What Resolve REJECTS is reported as a danger note here rather
+// than silently opening the picker — the picker's own quiet no-op on an
+// unroutable typed entry is a different surface (the reason is already on
+// screen there) and stays as it is.
+func runModel(a App, args []string) (App, tea.Cmd) {
+	if len(args) == 0 {
+		return openPanel(panelModel)(a, args)
+	}
+	// parseSlash splits on whitespace and no model id contains a space, so
+	// more than one argument is always a mistake. Reject it by name instead
+	// of joining or silently taking args[0]: "/model takes one id, got 2" is
+	// actionable, whereas applying the first token would quietly set a model
+	// the user did not ask for.
+	if len(args) > 1 {
+		a.setStatus(sevDanger, "/model takes a single model id — got "+strconv.Itoa(len(args))+" arguments")
+		return a, nil
+	}
+	id := args[0]
+	if _, err := provider.Resolve(id); err != nil {
+		a.setStatus(sevDanger, "can't use model "+strconv.Quote(id)+": "+err.Error())
+		return a, nil
+	}
+	return a.applyModelSelection(id, a.currentSessionInfo())
 }
 
 // parseSlash splits a submitted "/name arg…" buffer into its command token
