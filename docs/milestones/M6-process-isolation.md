@@ -1,6 +1,6 @@
 # Per-Session Process Isolation — Design (M6)
 
-> gofer milestone — **shipped**, behind the still-opt-in, off-by-default `gofer daemon --workers` flag. Merged to `main` via #114 and 15+ follow-on slice PRs; Phases 0-3 and most of Phase 4 are complete (§11). Detached per-session worker processes behind a thin router daemon, so the daemon and CLI can be upgraded in place while live turns finish uninterrupted on the binary that started them. Two Phase-4 polish items remain open: offline `resume` spawning a fresh worker ([#139](https://github.com/jedwards1230/gofer/issues/139)) and cost/usage aggregation + graceful drain ([#140](https://github.com/jedwards1230/gofer/issues/140)).
+> gofer milestone — **shipped**, behind the still-opt-in, off-by-default `gofer daemon --workers` flag. Merged to `main` via #114 and 15+ follow-on slice PRs; Phases 0-3 are complete, Phase 4 (lifecycle polish) is where the remaining work lives (§11). Detached per-session worker processes behind a thin router daemon, so the daemon and CLI can be upgraded in place while live turns finish uninterrupted on the binary that started them. Phase 4's two headline items remain open: offline `resume` spawning a fresh worker ([#139](https://github.com/jedwards1230/gofer/issues/139)) and cost/usage aggregation + graceful drain ([#140](https://github.com/jedwards1230/gofer/issues/140)).
 
 ## 1. Goal & the one-line thesis
 
@@ -47,7 +47,7 @@ Net effect: the two hops speak one protocol (the public client wire), and each t
 **Per-worker endpoint convention.** Mirror the daemon's own endpoint-file precedent (`cmd/gofer/daemon.go`, `internal/daemon/endpoint.go`). Each worker writes, atomically at startup, `<runtime>/gofer-<uid>/workers/<uuid>.json` (mode 0600) advertising `{addr: unix://…/<uuid>.sock, pid, binaryVersion, wireVersion, startedAt}` and removes it on clean exit. (`acpProtocolVersion` is **not** listed here: it is advertised/confirmed via the `gofer/hello` handshake in §6, not negotiated at ACP `initialize` — which today does not run at all.) `<runtime>` follows the same scheme the daemon socket already uses (`$XDG_RUNTIME_DIR/gofer-<uid>…`, with the daemon's existing macOS fallback).
 
 **Discovery on router start.** Scan `workers/`; for each endpoint file:
-1. `pidAlive(pid)` (reuse `cmd/gofer/daemon.go:pidAlive` — signal-0 probe) **and**
+1. a signal-0 liveness probe. *Correcting an earlier claim: this does not reuse `cmd/gofer/daemon.go:pidAlive` — the router's adoption scan calls `daemon.ProcessAlive` (`internal/daemon/process_unix.go:23`), a separate function whose own doc comment calls it "an exact duplicate of" `pidAlive` and flags collapsing them as a follow-up, not yet done.* **and**
 2. dial + `gofer/hello` handshake (reuse `daemon.Probe` shape).
 
 Both pass → **adopt**: open a `daemon.Client` to the worker, wrap it in the router's `daemonbridge`-shaped remote supervisor, pull the worker's `SessionInfo` into the roster, re-subscribe to its event stream (must-deliver replay §6 re-surfaces any open permission request). Either fails → **stale**: unlink the endpoint file (best-effort), treat the session as offline/resumable.
@@ -57,7 +57,7 @@ Both pass → **adopt**: open a `daemon.Client` to the worker, wrap it in the ro
 | Situation | Detection | Action |
 |---|---|---|
 | Stale socket (file present, no listener) | dial refused | unlink file; session offline |
-| Dead worker, live socket file (pid gone) | `pidAlive` false | unlink file; session offline |
+| Dead worker, live socket file (pid gone) | `daemon.ProcessAlive` false | unlink file; session offline |
 | Live pid, unresponsive worker | handshake timeout | leave file; mark degraded, do **not** route prompts; kill path reaps |
 | Two routers racing | router endpoint guard (`guardLiveEndpoint`, already exists) | second router fails fast ("already running") — one router owns the roster |
 | Duplicate worker for one session id | per-session lockfile (below) | second worker fails to acquire → exits |
@@ -90,7 +90,7 @@ The one genuinely new cost is the **second hop** (worker→router→client vs da
 1. Workers are **short-lived** — one session each. The max skew a router must tolerate is bounded by the *longest running session*, not by release cadence.
 2. A skewed in-flight session only needs to **finish**, not accept new work. So the router must forward-support only the **observe + permission-reply + terminal-event subset** across a version gap — which the additive event wire already is — and may **refuse to route a *new prompt* to a version-skewed worker**, letting the current turn finish and the next prompt wait for a fresh worker on the router's own binary.
 
-Recommended policy: router supports the current wire fully and **N-1 for the observe/reply/finish subset only**. Start at N-0 full + skew-observe-only (Phase 3), widen if ever needed. Governance rides the **existing** promote-if-stable policy + additive-field discipline — `daemonbridge` already tolerates unknown methods (silently dropped) and additive fields.
+*Correcting an earlier claim: the shipped policy is not a numbered "N-1" window — it's exact-match-or-bust on the wire axis, unlimited on the binary axis, and the two axes are independent.* `internal/router/skew.go`'s own doc comment says so directly: "Binary comparison is EXACT, not N-1." `classifySkew` (`internal/router/skew.go:81-92`) checks `wireVersion` first: ANY mismatch — not specifically one version behind — puts the worker in `skewWire`, and `skewClass.refusesNewWork()` (`skew.go:60-62`) refuses new work for `skewWire` alone. A `binaryVersion` mismatch with a *matching* wire version (`skewBinary`) is fully routable, with no cap on how far the binaries have drifted — that unlimited tolerance is exactly the session-pinning behavior a rolling upgrade needs. So there is no window to widen: full routing requires the current wire, period, and binary skew was never restricted in the first place. Governance rides the **existing** promote-if-stable policy + additive-field discipline — `daemonbridge` already tolerates unknown methods (silently dropped) and additive fields.
 
 ## 7. Permissions across processes
 
@@ -139,13 +139,13 @@ The gate stays with the turn — **in the worker.** The round trip:
 
 Each phase lands shippable value on its own.
 
-*Correcting an earlier claim: only Phase 0 was marked shipped below. Phases 1-3 have since shipped too, and most of Phase 4 has — only the two items called out under Phase 4 remain open.*
+*Correcting an earlier claim: only Phase 0 was marked shipped below. Phases 1-3 have since shipped too. Phase 4 has not — its two headline items are open, tracked below.*
 
 - **Phase 0 — prerequisite (shipped):** build-version identification (`vX.Y.Z` / VCS-derived pseudo-versions) + the daemon/CLI version-mismatch warning. Feeds the endpoint file's `binaryVersion` and `gofer/hello`.
 - **Phase 1 — worker behind a flag; router must outlive it (shipped).** Extract the daemon's concrete `*supervisor.Supervisor` dependency to an **interface** (the methods `handlers.go` calls). Add `gofer session-worker` = a single-session `daemon.Serve` over a unix socket. Add a router-side remote supervisor (daemonbridge-shaped) that spawns one worker per `session/new` and proxies. As landed, this phase alone was **not detached yet** — worker was an ordinary child; if the router died, the worker died (documented) — until Phase 2 added detachment. Ships: **crash isolation**. *Demo:* `kill -9` a worker; the daemon and every other session survive; the killed session shows offline and resumes.
 - **Phase 2 — detach + adoption (shipped).** `Setsid`; per-worker endpoint files + `<uuid>.lock`; router scans and adopts on startup; router stops signalling workers on shutdown; reaper handles zombies; the §4 failure matrix. *Demo:* restart the daemon while a session sits idle-attached; it survives and re-adopts; peers reconnect to live state.
 - **Phase 3 — version skew + the hot-upgrade story (shipped — this is the milestone criterion).** `gofer/hello` handshake + endpoint version fields; router negotiates; the in-flight-only compat subset + skew tests; a skewed worker is observed + reply-able + allowed to finish, but new prompts route to a fresh worker. *Demo (the milestone criterion):* upgrade the daemon binary mid-turn; the running session finishes uninterrupted on the old worker; the next `session/new` runs the new binary; `session/list` shows mixed `binaryVersion`s. Proven by the M6 upgrade-demo test.
-- **Phase 4 — lifecycle completeness (polish) (partially shipped).** `resume` spawns a fresh worker — **not yet, open as** [#139](https://github.com/jedwards1230/gofer/issues/139); cost/usage aggregation across workers and graceful worker drain on `gofer daemon uninstall` — **not yet, open as** [#140](https://github.com/jedwards1230/gofer/issues/140); roster reconciliation edge cases.
+- **Phase 4 — lifecycle completeness (polish) (open).** `resume` spawns a fresh worker — **not yet, open as** [#139](https://github.com/jedwards1230/gofer/issues/139); cost/usage aggregation across workers and graceful worker drain on `gofer daemon uninstall` — **not yet, open as** [#140](https://github.com/jedwards1230/gofer/issues/140); roster reconciliation edge cases — **status not independently verified during this sweep**, so left unmarked rather than claimed done.
 
 **Riskiest phase: Phase 1** — relocating the pump + gate into the worker and rewiring the daemon's supervisor to a remote proxy (the interface extraction).
 
@@ -159,6 +159,6 @@ Slots as the **next** gofer milestone after M5 (ACP featureset), pushing ecosyst
 
 ---
 
-**Implementation pointers (code-verified):** boundary seam is `internal/supervisor/types.go:59` (`Session` interface) + `supervisor.go:51-55` (injectable factories); the reusable cross-process template is `handleGoferEvent`, extracted during M6 from `daemonbridge` into `internal/wirestream/reconstruct.go` (this pointer originally named `internal/daemonbridge/reconstruct.go`, which no longer exists); the fan-out to preserve is `internal/daemon/handlers.go:broadcastGoferEvent`/`broadcastPermission`; the adoption primitives to mirror are `cmd/gofer/daemon.go:pidAlive`/`guardLiveEndpoint` + `internal/daemon/endpoint.go`.
+**Implementation pointers (code-verified):** boundary seam is `internal/supervisor/types.go:59` (`Session` interface) + `supervisor.go:51-55` (injectable factories); the reusable cross-process template is `handleGoferEvent`, extracted during M6 from `daemonbridge` into `internal/wirestream/reconstruct.go` (this pointer originally named `internal/daemonbridge/reconstruct.go`, which no longer exists); the fan-out to preserve is `internal/daemon/handlers.go:broadcastGoferEvent`/`broadcastPermission`; the adoption primitives to mirror are `internal/daemon.ProcessAlive` (the router's actual liveness probe, `internal/daemon/process_unix.go:23`) + `cmd/gofer/daemon.go:guardLiveEndpoint` (the daemon's own singleton guard, which still uses the separate, not-yet-collapsed `pidAlive`) + `internal/daemon/endpoint.go`.
 
 Two facts verified against the code: (1) the SDK journal has **no** cross-process flock (only `auth.lock` exists) → single-writer-per-session is a gofer-side `<uuid>.lock`, not an SDK freebie; (2) there is **no** version in any handshake today → version negotiation is built into the gofer-native wire from day one (endpoint file + `gofer/hello`), not inherited from ACP.
