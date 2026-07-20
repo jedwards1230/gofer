@@ -39,9 +39,10 @@ and still block a release.
 (`.github/workflows/vhs-capture.yml`) fires on PRs touching `internal/tui/**`,
 `vhs/**`, or `scripts/tui-vhs.sh`: it renders every `vhs/*.tape` and embeds the
 frames inline in the job summary and a sticky PR comment, so TUI changes can be
-eyeballed without pulling the branch. Frames are published to a per-PR
-`vhs-captures-pr-<n>` branch cut from `main`, deleted when the PR closes
-(`vhs-capture-cleanup.yml`). This is **not** a required check —
+eyeballed without pulling the branch. Frames are published under
+`vhs/snapshots/` on a per-PR `vhs-captures-pr-<n>` branch cut from `main`,
+deleted when the PR closes (`vhs-capture-cleanup.yml`). This is **not** a
+required check —
 it complements, never gates. Fork PRs get a read-only token and degrade to a
 `vhs-frames` artifact upload instead of a push+comment.
 

@@ -46,7 +46,9 @@ system (component contracts, slash commands, plugin UI);
 
 ```bash
 go build ./... && go vet ./... && go test ./...   # the CI gate
+go vet -tags workerbench ./...                     # also on the PR lane
 golangci-lint run                                  # lint, zero tolerance
+go test -race ./...                                # push/tags lane only, not PRs
 go run ./cmd/gofer demo                            # offline faux-provider stream
 ```
 
@@ -79,3 +81,24 @@ go run ./cmd/gofer demo                            # offline faux-provider strea
   behind the SDK's permission guard.
 - `internal/telemetry/` — OpenTelemetry (traces/metrics/log-correlation) off
   the Event/Op stream; the only otel importer.
+- `internal/router/` — the M6 thin router daemon: roster aggregation, client
+  fan-out, discovery, and the ACP surface, spawning one worker per session.
+  See its package doc.
+- `internal/worker/` — the per-session `gofer session-worker`: owns the
+  runner, pump, gate, journal, and broker for exactly one session. It builds
+  an `internal/daemon` with `MaxSessions: 1` — a worker IS a single-session
+  daemon.
+- `internal/wirestream/` — reconstructs a remote session's typed event stream
+  from lossless `gofer/event` envelopes; `Subscribe`/`SubscribeLive` plus the
+  `WithEventSink` push seam the router fans out through.
+- `internal/daemonbridge/` — adapts a reachable daemon to the supervisor
+  interface the TUI and `run`/`resume` consume, so a client path is identical
+  local or remote.
+- `internal/modelcatalog/` — answers "which models can THIS credential reach,
+  and what should gofer default to?". Needed because OpenAI routes by
+  credential *kind* (an API key and a ChatGPT-OAuth token serve different
+  model families), which the SDK's provider-id-only view gets wrong. A static
+  floor plus a live discovery layer above it, with a fallback rule when the
+  live listing is unavailable. A leaf over the SDK.
+- `internal/modelmeta/` — display naming for model ids (`DisplayName`, e.g.
+  `claude-sonnet-5` → `Sonnet 5`).
