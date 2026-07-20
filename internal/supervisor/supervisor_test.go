@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -484,5 +485,104 @@ func assertEventKind(t *testing.T, sub *event.Subscription, kind string) {
 		case <-time.After(2 * time.Second):
 			t.Fatalf("timed out waiting for %s", kind)
 		}
+	}
+}
+
+// awaitSessionError drains sub for up to 2s and returns the first
+// event.SessionError it sees, or nil if the stream goes quiet first. It exists
+// because the pump's failure path is only observable as an event — nothing
+// reads the lastErr field it also writes.
+func awaitSessionError(t *testing.T, sub *event.Subscription) *event.SessionError {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case e, ok := <-sub.C:
+			if !ok {
+				return nil
+			}
+			if se, isErr := e.(event.SessionError); isErr {
+				return &se
+			}
+		case <-deadline:
+			return nil
+		}
+	}
+}
+
+// TestSupervisor_PromptErrorEmitsSessionError asserts a failed turn reaches
+// subscribers as a session.error on the session's own stream.
+//
+// This is the only delivery path for a journal write failure. The SDK reports
+// that class of error solely as Prompt's return value — never as an event of
+// its own — and since agent-sdk-go v0.14.1, Prompt takes and CLEARS it at the
+// turn boundary, so Close no longer reports it either. If the pump drops the
+// error, a session keeps serving a normal-looking transcript while entries are
+// missing from the JSONL, surfacing only later, on resume, as agent amnesia.
+func TestSupervisor_PromptErrorEmitsSessionError(t *testing.T) {
+	h := newHarness(t)
+
+	entry, err := h.sup.Create(context.Background(), "", supervisor.CreateOptions{Cwd: "/proj", Model: "m"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	fs := h.session(entry.ID)
+	sub := fs.Events()
+	defer sub.Close()
+
+	if err := h.sup.Send(context.Background(), entry.ID, "hello"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if got := fs.waitStarted(t); got != "hello" {
+		t.Fatalf("dispatched text = %q, want hello", got)
+	}
+
+	// The shape of a journal write failure as Prompt returns it.
+	fs.finish(t, errors.New("runner: append user message: disk full"))
+
+	se := awaitSessionError(t, sub)
+	if se == nil {
+		t.Fatal("no session.error emitted for a failed turn: the error reached no subscriber, and nothing reads lastErr")
+	}
+	if !strings.Contains(se.Err, "disk full") {
+		t.Errorf("session.error Err = %q, want it to carry the underlying failure", se.Err)
+	}
+	if se.Fatal {
+		t.Error("session.error Fatal = true, want false: a failed turn does not end the session")
+	}
+
+	// The session stays live and usable — a failed turn is reported, not terminal.
+	waitForStatus(t, h.sup, entry.ID, supervisor.StatusNeedsInput)
+}
+
+// TestSupervisor_InterruptEmitsNoSessionError is the negative half: a
+// cancelled turn is the expected outcome of Interrupt/Kill/Archive, not a
+// failure, so it must not be reported as one. Without this, the emit above
+// could be written unconditionally and every Ctrl-C would raise a spurious
+// error to every attached client.
+func TestSupervisor_InterruptEmitsNoSessionError(t *testing.T) {
+	h := newHarness(t)
+
+	entry, err := h.sup.Create(context.Background(), "", supervisor.CreateOptions{Cwd: "/proj", Model: "m"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	fs := h.session(entry.ID)
+	sub := fs.Events()
+	defer sub.Close()
+
+	if err := h.sup.Send(context.Background(), entry.ID, "hello"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	fs.waitStarted(t)
+
+	// Interrupt cancels turnCtx, so the fake's Prompt returns context.Canceled.
+	if err := h.sup.Interrupt(context.Background(), entry.ID); err != nil {
+		t.Fatalf("Interrupt: %v", err)
+	}
+	waitForStatus(t, h.sup, entry.ID, supervisor.StatusNeedsInput)
+
+	if se := awaitSessionError(t, sub); se != nil {
+		t.Errorf("session.error emitted for a cancelled turn (Err=%q); cancellation is expected, not a failure", se.Err)
 	}
 }
