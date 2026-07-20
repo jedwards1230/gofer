@@ -5,9 +5,9 @@ The SDK owns loop/provider/session/permission testing (see agent-sdk-go's
 
 | Layer | Type | CI | Approach |
 |---|---|---|---|
-| TUI | unit + golden | every push | two tiers: (1) `Update(msg)` → assert model state (the majority); (2) `x/exp/golden` vs `testdata/*.golden` for the few render-critical components, lipgloss direct — **no PTY**, fully deterministic. The `testkit` harness pins fixed sizes, forces `termenv.Ascii`, and uses `theme.Test()` |
-| daemon · ws/ACP | integ | every push | real in-process daemon over a WebSocket / JSON-RPC 2.0 (ACP) transport; a real ws client drains `session/update` notifications and asserts a liveness window (no-event-for-N-ms = still open) |
-| binary e2e | e2e | gated | build the real binary, spawn N clients against a temp socket (race regression). Skipped under `-short` and on Windows; runs on the full (push) lane |
+| TUI | unit + golden | every push | two tiers: (1) `Update(msg)` → assert model state (the majority); (2) the repo's own `testkit` helpers (`AssertGolden`/`AssertGoldenStyled`) vs `testdata/*.golden` for the few render-critical components, lipgloss direct — **no PTY**, fully deterministic. `testkit` pins fixed sizes, forces `termenv.Ascii`, and uses `theme.Test()` |
+| daemon · ws/ACP | integ | every push | real in-process daemon over a WebSocket / JSON-RPC 2.0 (ACP) transport; a real ws client drains `session/update` notifications. Deadlines in this suite are failure timeouts — a test fails if an expected event does not arrive in time |
+| process isolation | integ | every push | real detached `session-worker` processes over unix sockets: `cmd/gofer/session_worker_test.go` covers the worker entrypoint and its pinned session id; `internal/router/crashisolation_test.go` covers a killed worker leaving the router and its other sessions intact |
 
 ## Rules
 
@@ -29,16 +29,19 @@ The SDK owns loop/provider/session/permission testing (see agent-sdk-go's
 
 ## CI
 
-Fast PR lane (unit + golden); `go test -race` runs on push to main and
-release tags (`.github/workflows/ci.yml`). The e2e socket test runs on the
-push lane now that the M2 daemon has landed.
+Fast PR lane on every PR (`.github/workflows/ci.yml`): `go build ./...`,
+`go vet ./...`, `go test ./...`, a separate `go vet -tags workerbench ./...`
+for the benchmark-tagged files, and `golangci-lint`. `go test -race ./...`
+runs only on push to main and release tags, so a race can pass the PR lane
+and still block a release.
 
 **Visual capture (advisory).** A separate lane
 (`.github/workflows/vhs-capture.yml`) fires on PRs touching `internal/tui/**`,
 `vhs/**`, or `scripts/tui-vhs.sh`: it renders every `vhs/*.tape` and embeds the
 frames inline in the job summary and a sticky PR comment, so TUI changes can be
-eyeballed without pulling the branch. Frames are published to the orphan
-`vhs-captures` branch under `pr-<n>/<sha>/`. This is **not** a required check —
+eyeballed without pulling the branch. Frames are published to a per-PR
+`vhs-captures-pr-<n>` branch cut from `main`, deleted when the PR closes
+(`vhs-capture-cleanup.yml`). This is **not** a required check —
 it complements, never gates. Fork PRs get a read-only token and degrade to a
 `vhs-frames` artifact upload instead of a push+comment.
 

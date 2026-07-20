@@ -115,7 +115,7 @@ stream, so scripts and CI never hit the TUI.
 | **M3 · guardrails** ✅ | permission engine + approvals UX, sandboxed exec, headless mode |
 | **M4 · command views** ✅ | slash dispatcher, `/status`/`/config`/`/model` panels, autocomplete, TUI redesign |
 | **M5 · ACP v1 featureset expansion** 🚧 in flight | cross-repo ACP conformance push — `usage_update` on `session/update`, `diff` and `plan` pass-through, `session/set_config_option` + `session/list` (shipped); rich content blocks, resume, model discovery + `set_model`, capability stretch (titles, commands/mode) still landing |
-| **M6 · process isolation** ✅ | detached per-session `gofer session-worker` processes behind a thin router daemon; upgrade the binary mid-turn without interrupting live sessions. Opt-in, off by default (`gofer daemon --workers`) |
+| **M6 · process isolation** ✅ Phases 0-3 | detached per-session `gofer session-worker` processes behind a thin router daemon; upgrade the binary mid-turn without interrupting live sessions. Opt-in, off by default (`gofer daemon --workers`). Phase 4 (offline resume, cost aggregation, graceful drain) still open |
 | M7 · ecosystem | MCP servers, SKILL.md skills, out-of-process plugins, subagents first-class |
 | M8 · auto + polish | auto mode with reviewer pipeline, CC-asset import, multi-machine discovery |
 

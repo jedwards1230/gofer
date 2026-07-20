@@ -13,9 +13,14 @@ Go ≥ 1.25 and `golangci-lint`.
 ```bash
 go build ./...
 go vet ./...
+go vet -tags workerbench ./...
 go test ./...
 golangci-lint run
 ```
+
+`go test -race ./...` runs on push to `main` and on release tags rather than
+on the PR lane, so run it locally before anything touching concurrency — a
+race can pass every PR check and still block a release.
 
 ## Hard rules
 

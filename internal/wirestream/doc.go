@@ -25,4 +25,14 @@
 // that backlog replay — a genuine live-only stream, for a consumer (the M6
 // router's SubscribeLive) that has already sourced any needed history another
 // way and wants only new events from the point of subscription forward.
+//
+// # The push seam
+//
+// Subscribing is not the only consumer surface. [WithEventSink] installs an
+// [EventSink] on the Reconstructor at construction, so each reconstructed
+// frame is handed out as it is decoded — the verbatim wire bytes plus the
+// already-decoded event, without a second decode. This is the seam the M6
+// router uses to fan a worker-hosted turn out to its own attached clients
+// (see internal/router's event bridge); a subscription would not do, because
+// the router relays on behalf of clients it does not itself read for.
 package wirestream
