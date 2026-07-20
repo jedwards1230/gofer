@@ -101,9 +101,78 @@ The fuller pipeline trace (which rail matched, what the sandbox said, what the
 reviewer decided) and the richer action set (`edit cmd`, `why?`) land later; M3
 ships the inline allow/deny/remember prompt above.
 
+**Richer provenance (backlog).** Once the ACP permission request carries it,
+the prompt should render the request's full provenance rather than just the
+tool and its args: the **gating hook** that raised it (e.g. `PreToolUse:Bash`),
+the human **reason** and the **policy** that matched, a copy-paste **override
+hint** carrying its `[plugin:x]` provenance so a grant can be reproduced outside
+the TUI, and the call's **attribution** ("from the `<agent>` agent" when a
+subagent issued it). Two affordances ride the action row — `Tab` to amend the
+call before allowing, `ctrl+e` to explain why it was gated — but both need new
+SDK permission-outcome variants (an amended-input reply and an explain request)
+before the TUI can offer them; see the agent-sdk-go design backlog. Until the
+request carries these fields the prompt renders exactly the tool/args form
+above.
+
 **Remember-as-rule** — a grant never widens silently: the prompt offers
 exact / prefix / broad patterns, but dangerous commands are force-downgraded
 to exact-match regardless, scoped (agent/global) and TTL'd.
+
+## Structured question / decision tool (M7, not yet built)
+
+Design intent only. An agent that needs a **decision** — not a tool approval,
+but "which of these should I do?" — deserves a first-class prompt distinct from
+the permission dialog above. Like an approval it renders inline in the footer,
+commandeering it while unresolved; unlike one it carries the agent's own
+question and options rather than a tool call.
+
+**Single question** — a title chip, the bold question, numbered options each
+with a dim rationale sub-line, a free-text row to answer off-menu, and an escape
+row that hands the turn back to the conversation:
+
+```
+ ────────────────────────────────────────────────
+ decision   Pick a migration strategy
+
+ Which approach should I take?
+
+   1  In-place ALTER
+        fastest, but locks the table for the duration
+   2  Shadow table + backfill
+        online, but doubles disk until cutover
+
+   › Type something.
+   ↳ Chat about this
+
+ Enter to select · ↑/↓ to navigate · Esc to cancel
+```
+
+**Multi question** — a tabbed stepper strips across the top; `Tab` switches
+between questions, each with its own option list, and a right-side reference box
+shows the focused option's detail. `n` opens a notes field on that option:
+
+```
+ ────────────────────────────────────────────────
+ ←   □ Q1    □ Q2    ✔ Submit   →
+
+ Q1   Which database?
+
+   1  Postgres           ┌─ reference ───────────────┐
+   2  SQLite             │ Postgres: the focused      │
+                         │ option's detail renders    │
+   › Type something.     │ here.                      │
+   ↳ Chat about this     └────────────────────────────┘
+                                press n to add notes
+
+ Enter to select · ↑/↓ to navigate · n to add notes ·
+ Tab to switch questions · Esc to cancel
+```
+
+Both forms need a **structured-question ACP message type** the daemon can relay
+and the client can render — a decision request distinct from
+`permission.requested`, carrying the question(s), their options, and per-option
+rationale/reference — so this stays deferred until that lands; see the
+agent-sdk-go design backlog.
 
 ## Roster & navigation (M2)
 
@@ -418,6 +487,31 @@ compaction entries, HEAD) share a single row renderer. Fork/branch/compact
 are first-class: the session is an append-only tree and context is
 fold(root→head), so a "what if" fork costs nothing.
 
+## Checkpoint / rewind + versioned changes (open design question)
+
+Exploratory — not committed. gofer sessions are **already event-sourced
+JSONL**, which makes two directions cheap to reach for and worth designing
+together:
+
+- **Checkpoint / rewind.** Beyond trivial named scrollback anchors, a real
+  checkpoint model — mark a point, keep working, then rewind the session and
+  its context back to it — folded straight out of the append-only journal, in
+  the spirit of Claude Code's "Rewind code (checkpoints)". The fork tree above
+  already makes a "what if" branch free; a checkpoint is that same machinery
+  pointed at *undo* rather than *explore*.
+- **Versioned working-tree changes (jj-style).** A Jujutsu-style substrate
+  where each change an agent makes to the working tree is a first-class,
+  addressable diff — so an individual change within a session can be reverted or
+  cherry-picked without unwinding everything after it, and a rewind of the
+  conversation and a rewind of the code stay in step.
+
+This **subsumes** the reference's lightweight "timeline label chips", which are
+only named anchors: reversible checkpoints plus versioned changes are the
+direction with the leverage, and named anchors fall out of them for free. Left
+open — whether the change substrate is gofer-native atop the JSONL journal or
+leans on a task/checkpoint seam from the SDK; see the agent-sdk-go design
+backlog.
+
 ## Subagent sessions (M7, not yet built)
 
 Design intent only — lands with M6's subagents-first-class work. A subagent
@@ -447,6 +541,36 @@ row renderer and the id-tracked selection/windowing the M2 roster already
 established — a child session is just a session, so no new navigation model is
 needed, only the parent→child link and the indent.
 
+**Tool-call attribution (SDK-gated).** When a tool event carries an
+originating-agent id, its transcript block should name the source —
+`ToolName(args) · from the <agent> agent` — alongside the existing human
+caption, so a transcript that interleaves a parent's and its subagents' calls
+reads unambiguously. It falls back to the current un-attributed rendering when
+the event carries no agent id, so it is purely additive; surfacing that id on
+the tool event is an SDK change — see the agent-sdk-go design backlog.
+
+## Monitor / background tasks (M8 — goal)
+
+A first-class **goal**, not a non-goal: a long-running background task the
+daemon can spawn and *persist* — keyed by a task id, surviving attach/detach
+(and daemon restart) rather than dying with the turn or the client that started
+it. In the transcript it reads as its own block —
+
+```
+● Monitor(deploy/rollout) → task 0192a1b2 · persistent
+```
+
+— and the live task surfaces in the roster/fleet view alongside sessions, so an
+operator sees what is still running without attaching. It fits the "visible
+artifacts over hidden state" tenet: the task is an on-disk, greppable thing, not
+in-memory client state.
+
+**Open — the persistence substrate.** Whether the task-id/persistence machinery
+is a **task-handle seam from the SDK** or is built **gofer-native** atop
+resumable sessions + the JSONL journal is deliberately left open (a monitor may
+well *be* a session under the hood). Decide the SDK-vs-gofer boundary when the
+work is scheduled — see the agent-sdk-go design backlog.
+
 ## Responsive layout
 
 Not yet built — design intent only. Once it lands, the root layout picks
@@ -458,6 +582,27 @@ a no-op; see `settings.go`). Components only implement `View(w, h)` and
 reflow — they never know which layout they're in. In split mode, rail
 selection drives the detail pane (read along without attaching); `f` promotes
 the pane to fullscreen; focus moves between panes.
+
+## Status line & context bar (backlog)
+
+**Post-turn activity summary.** The attach footer's status line today shows only
+`usage=<in>/<out>` and cost (`Model.statusLine`, model.go) — the one thing that
+surfaces nowhere else. It should *also* render a one-line human digest of what
+the turn did — "Read 4 files, ran 2 shell commands, recalled 1 memory" —
+aggregated app-side by tallying tool-call events off the same stream the
+transcript already consumes. No new contract is needed: the substrate (the
+per-turn tool-call events) already exists; this is a rendering that counts it.
+
+**Configurable context bar (statusline-style).** A user-customizable bottom bar
+composed of named **segments** — model, context-remaining (`Ctx: 359.2k`), git
+branch, working-tree diff-stat (`(+6,-1)`), session state, token/cost — with the
+segment **set, order, and format** all configurable, explicitly in the spirit of
+Claude Code's `statusLine` setting: the user supplies a command or template and
+the shell renders it, rather than gofer baking in a fixed bar. It wires into the
+existing settings registry under `tui.*` (`settings.go`) like every other knob,
+and **degrades to the current muted `model · cwd` line** when unconfigured, so
+the default view is unchanged. Prefer this configurable model over a fixed
+powerline-style bar — the point is that the operator decides what the bar says.
 
 ## Package layout & contracts
 
@@ -519,6 +664,8 @@ tui/
   if a genuinely massive transcript ever makes wheel scroll feel slow),
   animations beyond one shared spinner, a second theme, raw-ANSI subprocess
   remapping.
+- **Non-goal (for now)**: voice input ("hold space to speak") — no analogue in
+  gofer's model and no demand; revisit only if it resurfaces.
 
 ## How the TUI is tested
 
@@ -832,7 +979,12 @@ session actually runs instead of echoing the (normally empty) requested model.
 
 Effort-adjust (←/→) stays deferred (no SDK backing) —
 and has no room on the Model tab regardless, since ←/→ are already claimed by
-the panel host for tab switching.
+the panel host for tab switching. The concrete dependency is a runtime
+`Runner.SetEffort` paralleling the `Runner.SetModel` that `Supervisor.SetModel`
+already rides on; once the SDK grows it (see the agent-sdk-go design backlog)
+the control becomes actionable — a persisted `session.effort` default plus a
+same-session hot-swap on the same terms as the model — needing only a spot on
+the tab that ←/→ don't already own.
 
 - **P0**: user markdown commands (`~/.gofer/commands` + project
   `.gofer/commands`, with `$1`, `$ARGUMENTS`, `${1:-def}`, `${@:N}`
