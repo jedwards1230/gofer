@@ -6,14 +6,18 @@ navigation, and phone-driven sessions over ACP — built in Go on
 [`agent-sdk-go`](https://github.com/jedwards1230/agent-sdk-go). (Tool-call
 approvals reach your phone over ACP; see the [roadmap](#roadmap).)
 
-> **Status: M4 — command views.** On top of M3's daemon + permission engine +
-> approvals relay (sandboxed containment narrowing what needs a human, a
-> tool-call approval fanning out to every attached client), M4 adds a slash
-> dispatcher and command panel: `/status` (per-provider auth), `/config` (a
-> settings registry backed by `config.Save`), and `/model` (a picker that
-> hot-swaps a live session's model), with autocomplete and a chat-style
-> redesign — bottom-anchored layout, mouse-wheel scroll, cursor-aware input,
-> click-drag selection with OSC 52 copy. `gofer exec` runs headless one-shots;
+> **Status: M6 — process isolation — shipped; M5 in flight.** M6 runs each
+> session in its own detached `gofer session-worker` process behind a thin
+> router daemon, so the daemon and CLI can be upgraded in place while live
+> turns finish on the binary that started them. It is opt-in and **off by
+> default** — enable it with `gofer daemon --workers`. M5 (ACP v1 featureset
+> expansion) is in progress alongside it: `usage_update` and the `diff`/`plan`
+> pass-throughs are on the ACP surface; rich content blocks, resume, and model
+> discovery are still landing. Earlier milestones stand: M3's permission engine
+> + approvals relay and M4's slash dispatcher and command panel — `/status`
+> (per-provider auth), `/config` (a settings registry backed by `config.Save`),
+> and `/model` (a picker that hot-swaps a live session's model), with
+> autocomplete and a chat-style redesign. `gofer exec` runs headless one-shots;
 > `gofer daemon install` runs it as a service; OpenTelemetry export is off by
 > default. `gofer run`/`resume` route through a daemon or fall back
 > in-process; `gofer ps`/`kill`/`archive` manage the roster; `gofer demo`
@@ -110,9 +114,10 @@ stream, so scripts and CI never hit the TUI.
 | **M2 · the daemon** ✅ | supervisor, roster, overview⇄peek⇄attach TUI, native ACP over WebSocket, bearer auth |
 | **M3 · guardrails** ✅ | permission engine + approvals UX, sandboxed exec, headless mode |
 | **M4 · command views** ✅ | slash dispatcher, `/status`/`/config`/`/model` panels, autocomplete, TUI redesign |
-| **M5 · ACP v1 featureset expansion** ⏳ next | cross-repo ACP conformance push — `usage_update` on `session/update` (shipped), rich content/tool-call blocks, session methods, model discovery + `set_model`, capability stretch (titles, plan, commands/mode) |
-| M6 · ecosystem | MCP servers, SKILL.md skills, out-of-process plugins, subagents first-class |
-| M7 · auto + polish | auto mode with reviewer pipeline, CC-asset import, multi-machine discovery |
+| **M5 · ACP v1 featureset expansion** 🚧 in flight | cross-repo ACP conformance push — `usage_update` on `session/update`, `diff` and `plan` pass-through, `session/set_config_option` + `session/list` (shipped); rich content blocks, resume, model discovery + `set_model`, capability stretch (titles, commands/mode) still landing |
+| **M6 · process isolation** ✅ Phases 0-3 | detached per-session `gofer session-worker` processes behind a thin router daemon; upgrade the binary mid-turn without interrupting live sessions. Opt-in, off by default (`gofer daemon --workers`). Phase 4 (offline resume, cost aggregation, graceful drain) still open |
+| M7 · ecosystem | MCP servers, SKILL.md skills, out-of-process plugins, subagents first-class |
+| M8 · auto + polish | auto mode with reviewer pipeline, CC-asset import, multi-machine discovery |
 
 ## License
 

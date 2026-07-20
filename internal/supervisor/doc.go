@@ -44,8 +44,9 @@
 // [Supervisor.Kill] interrupts any in-flight turn, drops the session from
 // the roster, emits session.killed on its event stream, and closes it.
 // [Supervisor.Archive] drops a session that has already finished its work —
-// it rejects (returns [ErrRunning]) a session with a turn in flight, so a
-// caller must kill a running session rather than archive it. Both keep the
+// it rejects (returns [ErrRunning]) a session with a turn in flight OR with
+// prompts still queued behind it, so a caller must kill a session that is
+// still working rather than archive it. Both keep the
 // on-disk journal: gofer's hard invariant (docs/CLAUDE.md) is that journals
 // are never deleted, only the roster forgets them.
 //

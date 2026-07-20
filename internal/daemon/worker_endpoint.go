@@ -29,8 +29,12 @@ import (
 // versions are per-user runtime state that other users have no business
 // reading.
 type WorkerEndpoint struct {
-	// Addr is the worker's listen address — `unix://<WorkersDir>/<uuid>.sock`
-	// (see [WorkerSocketPath]) — that the router dials to adopt the worker.
+	// Addr is the worker's listen address — `unix://<WorkersDir>/<hash>.sock`,
+	// where <hash> is a prefix of the sha256 of the session uuid (see
+	// [WorkerSocketPath], which hashes rather than truncating the uuid to stay
+	// inside the unix-socket path limit) — that the router dials to adopt the
+	// worker. The uuid appears verbatim in the sibling `<uuid>.lock` and
+	// `<uuid>.json` names, but NOT in the socket name.
 	Addr string `json:"addr"`
 	// PID is the worker process's own pid, used by the router's adoption scan
 	// for a signal-0 liveness probe (`pidAlive`) before it bothers to dial.

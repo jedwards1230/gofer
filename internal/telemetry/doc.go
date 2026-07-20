@@ -20,7 +20,9 @@
 //     tool calls within a turn are tracked independently. An erroring call
 //     sets the span's status to Error and a tool.error=true attribute — never
 //     the tool's result text.
-//   - turn.finished records the turns/tokens/cost/error metrics, stamps
+//   - turn.finished records the turns/tokens/cost metrics (errors are not
+//     among them — they come from session.error and erroring tool calls),
+//     stamps
 //     stop_reason on the turn span, and ends it — defensively ending any
 //     still-open model/tool child spans first.
 //   - session.error adds a session.error span event (attr fatal only) to the

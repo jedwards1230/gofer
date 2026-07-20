@@ -472,9 +472,10 @@ func (m Model) transcriptLines(width int) []string {
 }
 
 // View renders the transcript and the footer (status + input, or the
-// approval prompt) at the given size. Width wraps nothing (M1's virtualized
-// transcript and stable-prefix markdown cache from docs/TUI.md land later); a
-// line longer than width is truncated. Height keeps only the most recent
+// approval prompt) at the given size. Transcript body lines wrap to width
+// ([transcriptLines] runs each rendered line through [wrap]); list, status
+// and roster rows still clamp with truncate, which is deliberate — a roster
+// row should not reflow. Height keeps only the most recent
 // lines, tailing the transcript like a live attach. Carries no identity
 // header or scroll offset — the plain golden tests that call this directly
 // render the transcript alone; [App.render] goes through ViewWithMenu.
