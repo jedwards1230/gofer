@@ -106,9 +106,12 @@ func runExec(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	}
 
 	_, runErr := sdkexec.Run(ctx, r, promptText, sdkexec.Options{Out: stdout, OutputSchema: schema})
-	// sdkexec.Run never closes the session — join Close's error (e.g. a
-	// journal-write failure the background consumer observed) with any run
-	// error so neither is silently dropped.
+	// sdkexec.Run never closes the session, so Close is ours to call. Keep the
+	// join: runErr carries any journal-write failure a turn boundary already
+	// reported, and Close carries whatever residual failure no turn boundary
+	// could — a fault in the final drain. Both are real and neither subsumes
+	// the other, so collapsing this to a bare Close would silently drop the
+	// first and returning runErr alone would drop the second.
 	return errors.Join(runErr, r.Close())
 }
 

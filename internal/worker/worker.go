@@ -303,8 +303,12 @@ func Serve(ctx context.Context, opts Options) error {
 		// HTTP server. Both are best-effort under the bounded context.
 		_ = d.Shutdown(shutdownCtx)
 		serveErr := srv.Shutdown(shutdownCtx)
-		if cerr := opts.Supervisor.Close(); cerr != nil && serveErr == nil {
-			serveErr = fmt.Errorf("worker: close supervisor: %w", cerr)
+		// Join rather than only-if-nil: Close still reports any residual
+		// journal write error no Prompt turn boundary already consumed, and
+		// discarding it because the shutdown itself also failed drops signal
+		// exactly when a half-written journal is most likely.
+		if cerr := opts.Supervisor.Close(); cerr != nil {
+			serveErr = errors.Join(serveErr, fmt.Errorf("worker: close supervisor: %w", cerr))
 		}
 		_ = daemon.RemoveWorkerEndpoint(sessionID)
 		_ = release()
@@ -323,8 +327,11 @@ func Serve(ctx context.Context, opts Options) error {
 		} else if err != nil {
 			err = fmt.Errorf("worker: serve %s: %w", addr, err)
 		}
-		if cerr := opts.Supervisor.Close(); cerr != nil && err == nil {
-			err = fmt.Errorf("worker: close supervisor: %w", cerr)
+		// Joined for the same reason as the clean-shutdown path above: an
+		// abnormal exit is precisely when a residual journal write error is
+		// worth keeping, not discarding behind the serve failure.
+		if cerr := opts.Supervisor.Close(); cerr != nil {
+			err = errors.Join(err, fmt.Errorf("worker: close supervisor: %w", cerr))
 		}
 		return err
 	}

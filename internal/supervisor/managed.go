@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -96,10 +97,14 @@ type managed struct {
 	// maintained by watchPermissions and surfaced as SessionInfo.Pending.
 	pending int
 	// lastErr is the most recent turn's Prompt error, kept for diagnostics
-	// only (see [Supervisor.LastError]). Provider/loop errors already reach
-	// subscribers as session.error events on the session's own stream, and a
-	// cancelled turn is expected — so the pump never treats a Prompt error
-	// as a supervisor-level failure.
+	// only (see [Supervisor.LastError]). It is a snapshot, not a delivery
+	// mechanism: the pump emits a session.error onto the session's own stream
+	// for every non-cancelled failure, and that emit — not this field — is
+	// what reaches subscribers. Provider/loop errors additionally surface as
+	// session.error from inside the loop, but a journal write failure does
+	// not, which is why the pump's emit is unconditional rather than filtered
+	// to a particular error class. A cancelled turn is expected, so the pump
+	// never treats a Prompt error as a supervisor-level failure.
 	lastErr error
 }
 
@@ -259,6 +264,28 @@ func (m *managed) pump() {
 		m.turnCancel = nil
 		m.updated = m.clock()
 		m.mu.Unlock()
+
+		// Surface the failure on the session's own stream so every observer —
+		// TUI, ACP peers, telemetry — sees it. lastErr above is only a
+		// diagnostic snapshot and nothing reads it, so this emit is the only
+		// thing that actually reaches a user. It matters most for a journal
+		// write failure: the SDK reports that solely as Prompt's return value,
+		// never as an event of its own, so dropping it here would let a session
+		// keep serving a normal-looking transcript while entries are missing
+		// from the JSONL — surfacing only later, on resume, as agent amnesia.
+		//
+		// A cancelled turn is the expected outcome of Interrupt/Kill/Archive,
+		// not a failure, so it is not reported. Emitted outside m.mu for the
+		// same reason as enqueue's emit: a must-deliver publish can block on
+		// backpressure, and this file's lock discipline forbids blocking
+		// Session calls under m.mu.
+		//
+		// Non-fatal: a failed turn does not end the session — the pump stays
+		// live and the next queued prompt still runs.
+		if err != nil && !errors.Is(err, context.Canceled) {
+			m.sess.Emit(event.NewSessionError(m.id, err.Error(), false))
+		}
+
 		// turn.finished: cost and Updated changed even if the next loop
 		// iteration immediately re-dispatches or goes idle.
 		m.notify()

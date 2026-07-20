@@ -20,7 +20,8 @@ type sessionDriver interface {
 	Events() *event.Subscription
 	// Prompt runs one turn for text, streaming events to subscribers.
 	Prompt(ctx context.Context, text string) error
-	// Close drains journaling and returns any accumulated write error.
+	// Close drains journaling and returns any residual write error that no
+	// Prompt turn boundary already reported.
 	Close() error
 	// ID returns the session id (for the resume hint on interrupt).
 	ID() string
@@ -46,9 +47,12 @@ func driveSession(ctx context.Context, r sessionDriver, prompt string, asJSON bo
 	promptErr := make(chan error, 1)
 	go func() {
 		// Close after the turn settles, whatever the outcome: it waits for the
-		// journaling consumer to drain and returns any journal-write error it
-		// observed. Fold that in so a failed persist is never silently dropped —
-		// the caller must know if the session did not fully save.
+		// journaling consumer to drain. Keep both halves of the join — Prompt
+		// reports any journal-write failure observed up to its turn boundary,
+		// and Close reports only what is left over from the final drain. Each
+		// covers a window the other cannot, so dropping either would let a
+		// failed persist through silently, and the caller must know if the
+		// session did not fully save.
 		perr := r.Prompt(ctx, prompt)
 		promptErr <- errors.Join(perr, r.Close())
 	}()
