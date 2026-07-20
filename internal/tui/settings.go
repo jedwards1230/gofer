@@ -10,7 +10,7 @@ package tui
 // config_view.go's use of Get/Set). Namespacing (session.*, tui.*,
 // telemetry.*, and eventually plugin.<name>.*) is a registration-time
 // concern: a plugin can add rows under plugin.<name>.<key> once plugin
-// loading exists (M5) without this type changing shape.
+// loading exists (M7) without this type changing shape.
 
 import "github.com/jedwards1230/gofer/internal/config"
 

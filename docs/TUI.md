@@ -461,6 +461,12 @@ the pane to fullscreen; focus moves between panes.
 
 ## Package layout & contracts
 
+> Target structure, partially built. `layout/`, `theme/` and `testkit/` exist
+> as packages today; `screens/`, `components/` and `keymap/` do not — those
+> concerns currently live in flat files directly under `internal/tui/`
+> (`app.go`, `command.go`, `config_view.go`, …). The contracts below describe
+> the intended decomposition, not the present tree.
+
 ```
 tui/
   app.go        root tea.Model: screen stack + dialog stack + global keys
@@ -706,7 +712,7 @@ Config)` — indented JSON, mode 0600,
 atomic (temp file + rename). `settings.go` adds the setting registry: a
 `[]Setting{Key, Label, Kind, Options, Get(Config), Set(Config, val) Config}`
 table parallel to the command registry, namespaced (`session.*`, `tui.*`,
-`telemetry.*`, and — once plugin loading lands in M6 — `plugin.<name>.*`
+`telemetry.*`, and — once plugin loading lands in M7 — `plugin.<name>.*`
 without a schema change) so adding a setting is one row; `Kind` picks the edit
 affordance (bool/enum/string). `config_view.go` is the real `/config` body: a
 search list (`Search settings…` filter box, `Label … value` rows) where ↓/Enter
