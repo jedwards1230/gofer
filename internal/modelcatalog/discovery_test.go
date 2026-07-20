@@ -219,9 +219,19 @@ func TestCatalogDiscoveryTimeoutFallsBackToFloor(t *testing.T) {
 
 // TestCatalogDiscoverySendsCredentialAndClientVersion locks the wiring this
 // package owns: the bearer token and ChatGPT account id come out of the auth
-// store, and the REQUIRED client_version is on the query. Omitting
+// store, and the REQUIRED client_version is the one gofer chose. Omitting
 // client_version is itself an HTTP 400, so a regression here would present as
 // "discovery mysteriously always falls back".
+//
+// The client_version is asserted against a value INJECTED by the test, not
+// against modelcatalog.CodexClientVersion. That distinction is the whole point
+// of this test after #167: gofer's constant and the SDK's own default
+// client_version are the same string today, so asserting the constant reaches
+// the wire cannot tell "gofer explicitly sent its version" apart from "gofer
+// sent nothing and the SDK filled in its identical default". A version distinct
+// from BOTH can: if gofer stopped passing its own value, the SDK default would
+// arrive instead of the injected sentinel and this test would fail — which is
+// exactly the plumbing regression the assertion must be able to catch.
 func TestCatalogDiscoverySendsCredentialAndClientVersion(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("ANTHROPIC_API_KEY", "")
@@ -231,6 +241,14 @@ func TestCatalogDiscoverySendsCredentialAndClientVersion(t *testing.T) {
 		Access: "tok-abc",
 		Extra:  map[string]string{"chatgpt_account_id": "acct-123"},
 	})
+
+	// A sentinel deliberately unlike any real release string, so it cannot
+	// coincide with either gofer's CodexClientVersion or the SDK's default —
+	// only gofer's plumbing carrying the injected value can put it on the wire.
+	const wantVersion = "gofer-test-sentinel-0.0.0"
+	if wantVersion == modelcatalog.CodexClientVersion {
+		t.Fatalf("sentinel %q must differ from the package constant to be distinguishable", wantVersion)
+	}
 
 	var gotAuth, gotAccount, gotVersion string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -243,7 +261,8 @@ func TestCatalogDiscoverySendsCredentialAndClientVersion(t *testing.T) {
 	defer srv.Close()
 
 	if _, err := modelcatalog.Catalog(context.Background(), root, "openai",
-		modelcatalog.WithDiscovery(pinnedClient(t, srv), srv.URL)); err != nil {
+		modelcatalog.WithDiscovery(pinnedClient(t, srv), srv.URL),
+		modelcatalog.WithClientVersion(wantVersion)); err != nil {
 		t.Fatalf("Catalog: %v", err)
 	}
 
@@ -253,8 +272,34 @@ func TestCatalogDiscoverySendsCredentialAndClientVersion(t *testing.T) {
 	if gotAccount != "acct-123" {
 		t.Errorf("ChatGPT-Account-Id = %q, want the stored account id", gotAccount)
 	}
+	if gotVersion != wantVersion {
+		t.Errorf("client_version = %q, want the injected %q — gofer must carry its own version to the wire, not inherit the SDK default", gotVersion, wantVersion)
+	}
+}
+
+// TestCatalogDiscoveryDefaultsToGoferClientVersion covers the other half of the
+// seam: with no override, the version on the wire is gofer's own
+// CodexClientVersion. Paired with the injected-sentinel test above, this pins
+// both facts the #167 coupling needed — the default IS gofer's constant, and
+// the value that reaches the wire is whatever gofer chose rather than the SDK's.
+func TestCatalogDiscoveryDefaultsToGoferClientVersion(t *testing.T) {
+	root := oauthRoot(t)
+
+	var gotVersion string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotVersion = r.URL.Query().Get("client_version")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(liveBody))
+	}))
+	defer srv.Close()
+
+	if _, err := modelcatalog.Catalog(context.Background(), root, "openai",
+		modelcatalog.WithDiscovery(pinnedClient(t, srv), srv.URL)); err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+
 	if gotVersion != modelcatalog.CodexClientVersion || gotVersion == "" {
-		t.Errorf("client_version = %q, want %q (the listing REQUIRES it)", gotVersion, modelcatalog.CodexClientVersion)
+		t.Errorf("client_version = %q, want gofer's default %q (the listing REQUIRES it)", gotVersion, modelcatalog.CodexClientVersion)
 	}
 }
 
