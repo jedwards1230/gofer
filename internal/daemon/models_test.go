@@ -27,6 +27,11 @@ type modelInfoWire struct {
 	} `json:"pricing"`
 	Reasoning bool `json:"reasoning"`
 	Available bool `json:"available"`
+	// Unregistered mirrors the DTO's omitempty flag: absent on the wire for a
+	// registered model, present only for a synthesized record whose metadata is
+	// unknown. Decoded here so the endpoint test can assert the key's ABSENCE
+	// rather than being structurally blind to it.
+	Unregistered bool `json:"unregistered,omitempty"`
 }
 
 // requestModels dials the daemon at url, calls gofer/models, and decodes the
@@ -140,6 +145,51 @@ func TestGoferModelsFieldsAvailabilityAndSort(t *testing.T) {
 	}
 	if !sonnet.Available {
 		t.Error("claude-sonnet-5 Available = false, want true (anthropic authed)")
+	}
+}
+
+// TestGoferModelsOmitsUnregisteredKey asserts at the ENDPOINT that no model
+// gofer/models serves today carries an "unregistered" key: every registered
+// model's metadata is real, so the omitempty safe case must fire all the way
+// out to the wire. Decoding to a bool cannot tell absent from false, so this
+// inspects the raw JSON keys.
+//
+// This is the standing regression twin of the one-time measurement that the
+// flag is a zero-byte wire diff today: if a future SDK ships a synthesized
+// record through provider.Models(), this fails loudly rather than letting a
+// zero context window reach a client as though it were a real limit.
+func TestGoferModelsOmitsUnregisteredKey(t *testing.T) {
+	sup := newTestSupervisor(t, fauxProvider)
+	_, url := newTestDaemonWithConfig(t, sup, daemon.Config{
+		DefaultModel: "faux",
+		AuthedProviders: func() (map[string]bool, error) {
+			return map[string]bool{"anthropic": true}, nil
+		},
+	})
+
+	c := dial(t, context.Background(), url, nil)
+	resp := c.request("gofer/models", nil)
+	if resp.Error != nil {
+		t.Fatalf("gofer/models error: %+v", resp.Error)
+	}
+	var raw []map[string]json.RawMessage
+	if err := json.Unmarshal(resp.Result, &raw); err != nil {
+		t.Fatalf("unmarshal models: %v", err)
+	}
+	if len(raw) == 0 {
+		t.Fatal("gofer/models returned no entries")
+	}
+	for _, obj := range raw {
+		id := string(obj["id"])
+		if _, present := obj["unregistered"]; present {
+			t.Errorf("model %s carries an \"unregistered\" key; every model served today is registered", id)
+		}
+		// The metadata a client renders must be real, not a placeholder.
+		for _, k := range []string{"contextWindow", "maxOutput"} {
+			if _, present := obj[k]; !present {
+				t.Errorf("model %s missing %s; registered models must carry real limits", id, k)
+			}
+		}
 	}
 }
 
