@@ -1,8 +1,13 @@
 // Package daemon hosts a [supervisor.Supervisor] behind a WebSocket listener
 // speaking the Agent Client Protocol (ACP) v1 over JSON-RPC 2.0, plus a small
 // set of gofer-native control methods (namespaced "gofer/*") for the CLI
-// client. It is the M2 daemon: the process an ACP client (an editor, or an
-// iOS app on the tailnet) and gofer's own CLI both connect to.
+// client. It serves two roles. As the M2 daemon it is the process an ACP
+// client (an editor, or an iOS app on the tailnet) and gofer's own CLI both
+// connect to. Under M6 process isolation the same code is also the
+// single-session worker: [internal/worker] builds one with
+// [Config.MaxSessions] of 1 over a unix socket, so a worker IS a
+// single-session daemon (worker.go:254). Nothing here is router-aware —
+// the router reaches a worker as an ordinary client of this package.
 //
 // # Transport ownership
 //
