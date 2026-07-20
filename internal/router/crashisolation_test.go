@@ -34,6 +34,15 @@ const (
 	// gofer/hello and its endpoint file — the seam a version-skew test uses to
 	// make a worker look like it came from a different build.
 	envWorkerVersion = "GOFER_ROUTER_TEST_VERSION"
+	// envWorkerSessionOverride, when non-empty, makes the faux worker pin its
+	// SESSION CONTENT (the id its runner adopts, and therefore the id it echoes
+	// back on session/new) to a DIFFERENT value than envWorkerSession — which
+	// still keys the worker's socket/endpoint/lock files, exactly like the real
+	// `gofer session-worker` always does. This reproduces the one way the two
+	// can legitimately diverge in the field (a broken pinning bridge on the
+	// worker binary), without touching how the router discovers/dials the
+	// worker. See TestCreateRefusesSessionIDMismatch.
+	envWorkerSessionOverride = "GOFER_ROUTER_TEST_SESSION_OVERRIDE"
 	// envParkedProcess re-execs the test binary as an INERT process that just
 	// blocks until it is signalled. It backs [parkedPID]: a test that plants a
 	// fake worker endpoint needs a REAL, live, killable pid to advertise that is
@@ -130,10 +139,17 @@ func runFauxWorker() {
 	if sessionID == "" {
 		os.Exit(2) // the router must pass --session (via env in this seam)
 	}
+	// pinnedID is the id the worker's session actually adopts and echoes back on
+	// session/new. It matches sessionID (the file-keying id) unless the seam
+	// stamped a deliberate override — see envWorkerSessionOverride.
+	pinnedID := sessionID
+	if override := os.Getenv(envWorkerSessionOverride); override != "" {
+		pinnedID = override
+	}
 	sup, err := supervisor.New(supervisor.Config{
 		Root: root,
 		NewSession: func(ctx context.Context, opts runner.Options) (supervisor.Session, error) {
-			opts.SessionID = sessionID
+			opts.SessionID = pinnedID
 			opts.Model = "faux"
 			opts.Provider = faux.New(multiTurnScript())
 			return runner.New(ctx, opts)
@@ -178,6 +194,13 @@ type fauxWorkerOptions struct {
 	// endpoint file. Empty leaves the worker unidentified, which is what a
 	// worker built before version reporting looks like.
 	Version string
+	// SessionIDOverride, when non-empty, makes the worker's session adopt (and
+	// echo back on session/new) THIS id instead of the router-pinned uuid —
+	// simulating a worker whose pinning bridge is broken. The worker's
+	// socket/endpoint/lock files stay keyed by the pinned uuid regardless (see
+	// envWorkerSessionOverride) — only the in-protocol session/new response
+	// diverges, which is the exact shape router.go's mismatch guard exists for.
+	SessionIDOverride string
 }
 
 // fauxWorkerSeam returns a Config.NewWorkerCmd that re-execs this test binary as
@@ -198,6 +221,7 @@ func fauxWorkerSeamOpts(root string, opts fauxWorkerOptions) func(ctx context.Co
 			envWorkerRoot+"="+root,
 			envWorkerSession+"="+sessionID,
 			envWorkerVersion+"="+opts.Version,
+			envWorkerSessionOverride+"="+opts.SessionIDOverride,
 		)
 		// Stdio is left unset here — daemon.SpawnDetached redirects the worker's
 		// stdout+stderr (including the handshake line) to its per-worker log file.
