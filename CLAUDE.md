@@ -103,3 +103,8 @@ go run ./cmd/gofer demo                            # offline faux-provider strea
   live listing is unavailable. A leaf over the SDK.
 - `internal/modelmeta/` — display naming for model ids (`DisplayName`, e.g.
   `claude-sonnet-5` → `Sonnet 5`).
+- `internal/usercmd/` — user-authored markdown slash commands: discovery under
+  `<root>/commands` + `<cwd>/.gofer/commands`, the two-key frontmatter reader,
+  and the `$1`/`$ARGUMENTS`/`${1:-def}`/`${@:N}` substitution engine. A leaf
+  (stdlib only) so the rules are table-tested without a terminal; the TUI only
+  adapts a loaded command into a dispatcher entry.

@@ -1006,6 +1006,49 @@ time like every other tab — `sess` off `App.currentSessionInfo`, and `/stats`
 additionally the overview's reference `Now()` (so elapsed output stays
 deterministic in goldens) and `Roster()` (the snapshot it sums).
 
+**Built (M5 markdown commands)**: `internal/usercmd` turns a saved prompt file
+into a slash command. It walks `<store-root>/commands/` (user scope — the
+resolved `--root`, not a hardcoded `~/.gofer`) and `<cwd>/.gofer/commands/`
+(project scope), both threaded in from `CommandEnv`, taking every `.md` file
+recursively; a nested file is namespaced with `:`, so
+`commands/git/review.md` is `/git:review`. An optional `---`-delimited header
+carries two keys — `description` (the popup's summary) and `argument-hint`
+(the `[arg]` beside the name); unknown keys are ignored and a malformed header
+degrades to "no frontmatter" plus a warning rather than losing the command.
+Running one submits its expanded body through `App.doSend` — the same
+`Supervisor.Send` a hand-typed prompt takes, never a second send path — and
+refuses with a status note (rather than silently dropping the prompt) when
+there is no attached session or the body expands to nothing.
+
+Arguments substitute into the body at dispatch time, in a **single pass**: a
+substituted value is never rescanned, so an argument containing `$ARGUMENTS`
+is inserted literally instead of injecting tokens into the prompt.
+
+| Token | Expands to |
+|---|---|
+| `$ARGUMENTS` | every argument, space-joined, in order |
+| `$N` / `${N}` | the Nth argument (1-based); missing → empty |
+| `${N:-default}` | the Nth argument, or `default` when missing or empty |
+| `${@:N}` | arguments N through the end, space-joined |
+| `$$` | a literal `$` |
+
+Tokens are recognized inside a word (`internal/$1/doc.go`), `$N` consumes a
+maximal digit run (`$12` is the twelfth argument — brace it as `${1}2` for the
+other reading), and any `$` that doesn't start a recognized token stays
+literal. `internal/usercmd`'s package doc is the full contract, including the
+`${@:0}` and out-of-range answers.
+
+`Registry` became **layered** to hold this: `CommandSource` ranks
+`extension > markdown > builtin` (docs' long-standing intended order), each
+layer is replaceable wholesale, and a name resolves by rank — so a
+`status.md` genuinely overrides the builtin `/status`, taking its aliases with
+it, and a project file overrides a same-named user file. The extension tier is
+reserved and asserted but not populated (plugin `registerCommand` is P1). The
+markdown layer is reloaded at `NewApp` and on the closed→open edge of the
+autocomplete popup — once per `/` typed, never per keystroke and never inside
+`Registry.matching` — so a file written while the TUI runs appears the next
+time the popup opens.
+
 Deferred (issue #175): true per-message / per-tool-call token attribution
 (needs SDK per-item usage granularity absent from v0.14.2, which reports usage
 only at the turn and session level — rendering a synthesized per-message
@@ -1014,10 +1057,7 @@ line ("read N files, ran M commands") the issue flags as M8 polish (needs
 per-tool-call tallying off the event stream this roster-snapshot projection
 doesn't consume).
 
-- **P0**: user markdown commands (`~/.gofer/commands` + project
-  `.gofer/commands`, with `$1`, `$ARGUMENTS`, `${1:-def}`, `${@:N}`
-  substitution + frontmatter description/argument-hint) ·
-  `/new` · `/quit` · `/resume` (picker) · `/compact [instructions]`
+- **P0**: `/new` · `/quit` · `/resume` (picker) · `/compact [instructions]`
   (block-if-busy) · `/yolo` permission-mode toggle (dual-bound command +
   key; ships before autonomous tool use) · `/help` rendered from the live
   keymap · `!` / `!!` shell escape (`!!` runs but excludes output from model
