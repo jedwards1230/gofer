@@ -325,6 +325,7 @@ func (m commandMenu) Lines(width int) []string {
 func (a App) syncMenu() (App, tea.Cmd) {
 	if a.panel != nil {
 		a.menu = commandMenu{}
+		a.menuToken = false
 		return a, nil
 	}
 	var buf inputBuffer
@@ -335,8 +336,32 @@ func (a App) syncMenu() (App, tea.Cmd) {
 		buf = a.sess.input
 	default:
 		a.menu = commandMenu{}
+		a.menuToken = false
 		return a, nil
 	}
+	// Reload the registry's markdown layer on the closed→open EDGE of the
+	// command token — the moment the user types "/" — not on every sync.
+	// syncMenu runs after every key press, so reloading unconditionally would
+	// walk the commands directories once per keystroke; reloading never would
+	// leave a file written after startup permanently invisible. See
+	// [App.reloadUserCommands].
+	//
+	// This deliberately gates on [commandToken] — the `/`-only narrowing of
+	// [activeToken] — and NOT on activeToken itself. There are no markdown
+	// commands behind `@`, so an `@` mention must neither trigger the directory
+	// walk nor latch menuToken: latching it would make the "/" the user types
+	// next look like a continuation rather than an edge, and silently skip the
+	// reload that "/" is supposed to get.
+	_, _, active := commandToken(buf.String(), buf.Cursor())
+	if active && !a.menuToken {
+		a = a.reloadUserCommands()
+	}
+	a.menuToken = active
+
+	// The `@` half of the same grammar: an active mention token is what kicks
+	// off the cwd enumeration, off the Update loop (filemention.go). It is the
+	// file-candidate mirror of the markdown reload above — the same "once per
+	// token, not once per keystroke" discipline, a different source.
 	app, cmd := a.syncFileCandidates(buf)
 	a = app
 	a.menu = newInputMenu(a.theme, a.registry, a.files.paths, buf.String(), buf.Cursor())

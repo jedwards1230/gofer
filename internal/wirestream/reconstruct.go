@@ -455,11 +455,24 @@ func (r *Reconstructor) handleGoferEvent(raw json.RawMessage) {
 	case event.KindMessageFinished:
 		ev = event.NewMessageFinishedMeta(w.SessionID, w.Kind, w.Content, w.Meta)
 	case event.KindToolCallStarted:
-		ev = event.NewToolCallStarted(w.SessionID, w.ID, w.Name, w.Input)
+		// Agent is assigned AFTER construction because the SDK carries it that
+		// way too — it is set on the built event at emit time rather than taken
+		// as a constructor argument (see event.ToolCallStarted.Agent's doc), so
+		// mirroring that here keeps the reconstruction field-for-field faithful
+		// to what the daemon marshalled. Dropping it would silently
+		// un-attribute every subagent tool call for a remote client (the TUI's
+		// approval prompt reads it to say "from the `<agent>` agent").
+		started := event.NewToolCallStarted(w.SessionID, w.ID, w.Name, w.Input)
+		started.Agent = w.Agent
+		ev = started
 	case event.KindToolCallDelta:
-		ev = event.NewToolCallDelta(w.SessionID, w.ID, w.Delta)
+		delta := event.NewToolCallDelta(w.SessionID, w.ID, w.Delta)
+		delta.Agent = w.Agent
+		ev = delta
 	case event.KindToolCallFinished:
-		ev = event.NewToolCallFinishedSpill(w.SessionID, w.ID, w.Input, w.Result, w.IsError, w.Diagnostics, w.SpillPath, w.SpillBytes, w.SpillSHA256)
+		finished := event.NewToolCallFinishedSpill(w.SessionID, w.ID, w.Input, w.Result, w.IsError, w.Diagnostics, w.SpillPath, w.SpillBytes, w.SpillSHA256)
+		finished.Agent = w.Agent
+		ev = finished
 	default:
 		// permission.* (excluded from gofer/event by contract — see
 		// methodGoferEvent's doc) or an unknown/future kind: protocol-drift
@@ -512,16 +525,21 @@ type goferEventWire struct {
 	Meta    map[string]string `json:"meta"`
 
 	// tool.call.started / tool.call.delta / tool.call.finished
-	ID          string          `json:"id"`
-	Name        string          `json:"name"`
-	Input       json.RawMessage `json:"input"`
-	Delta       string          `json:"delta"`
-	Result      string          `json:"result"`
-	IsError     bool            `json:"is_error"`
-	Diagnostics []string        `json:"diagnostics"`
-	SpillPath   string          `json:"spill_path"`
-	SpillBytes  int64           `json:"spill_bytes"`
-	SpillSHA256 string          `json:"spill_sha256"`
+	ID    string          `json:"id"`
+	Name  string          `json:"name"`
+	Input json.RawMessage `json:"input"`
+	Delta string          `json:"delta"`
+	// Agent is the originating agent id all three tool-call kinds carry
+	// (omitempty on the wire — an un-attributed call simply has no "agent"
+	// key, which decodes to ""). handleGoferEvent assigns it after
+	// construction, matching how the SDK sets it.
+	Agent       string   `json:"agent"`
+	Result      string   `json:"result"`
+	IsError     bool     `json:"is_error"`
+	Diagnostics []string `json:"diagnostics"`
+	SpillPath   string   `json:"spill_path"`
+	SpillBytes  int64    `json:"spill_bytes"`
+	SpillSHA256 string   `json:"spill_sha256"`
 }
 
 // handlePermissionRequested reconstructs a gofer/permission_requested

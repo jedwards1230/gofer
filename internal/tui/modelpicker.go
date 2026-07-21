@@ -34,10 +34,14 @@ package tui
 // intercepts Enter ahead of this pure value's own handleKey, since a value
 // type has no IO seam to make the daemon/config calls itself.
 // [modelPickerView.selectedModel] is the seam between them: the highlighted
-// row's id at Enter time. Effort-adjust (←/→) is deferred — the SDK carries
-// no per-model effort levels ([provider.ModelInfo.Reasoning] is a bool) —
-// and ←/→ are already claimed by the panel host for tab switching (panel.go's
-// commandPanel.handleKey), so there is no room to bind them here regardless.
+// row's id at Enter time.
+//
+// Reasoning effort is NOT adjusted here. It landed as its own Thinking tab
+// (effortpicker.go, /thinking) rather than as a ←/→ modifier on this one: ←/→
+// are claimed by the panel host for tab switching (panel.go's
+// commandPanel.handleKey), and effort is an orthogonal axis with its own
+// capability rule — which that tab reads off the model THIS tab reports as
+// active (see [activeModelFor], shared by both).
 import (
 	"fmt"
 	"sort"
@@ -483,22 +487,36 @@ func authedProviders(env CommandEnv) []ProviderAuth {
 	return out
 }
 
-// activeModel resolves the model the ✓ mark applies to: the attached/peeked
-// session's own override, else the persisted session.model config default
-// (env.Config, read the same lazy non-fatal way statusView's
+// activeModel resolves the model the ✓ mark applies to — see [activeModelFor],
+// which owns the precedence rule.
+func (v modelPickerView) activeModel() string {
+	return activeModelFor(v.env, v.sess, v.defaultModel)
+}
+
+// activeModelFor resolves WHICH MODEL a command-panel tab is talking about:
+// the attached/peeked session's own override, else the persisted session.model
+// config default (env.Config, read the same lazy non-fatal way statusView's
 // settingSourcesLine reads it), else the roster header's resolved default
 // (defaultModel — the overview's resolveOverviewModel result, threaded in at
 // open time).
-func (v modelPickerView) activeModel() string {
-	if v.sess != nil && v.sess.Model != "" {
-		return v.sess.Model
+//
+// It is a package function rather than a method because two tabs need the same
+// answer from the same three inputs: the Model tab's ✓ mark, and the Thinking
+// tab's reasoning-capability gate (effortpicker.go), which must judge the model
+// the runner will actually use. A second copy of this precedence would let the
+// two disagree about which model is active — and the Thinking tab disagreeing
+// is precisely how it would come to offer levels [runner.Runner.SetEffort]
+// rejects.
+func activeModelFor(env CommandEnv, sess *SessionInfo, defaultModel string) string {
+	if sess != nil && sess.Model != "" {
+		return sess.Model
 	}
-	if v.env.Config != nil {
-		if cfg, err := v.env.Config(); err == nil && cfg.Session.Model != "" {
+	if env.Config != nil {
+		if cfg, err := env.Config(); err == nil && cfg.Session.Model != "" {
 			return cfg.Session.Model
 		}
 	}
-	return v.defaultModel
+	return defaultModel
 }
 
 // handleKey applies one key press: ↓/↑ move the row highlight; Backspace

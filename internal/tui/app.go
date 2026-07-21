@@ -10,6 +10,7 @@ import (
 
 	"github.com/jedwards1230/agent-sdk-go/event"
 
+	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/tui/layout"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
@@ -129,6 +130,15 @@ type App struct {
 	// (filemention.go), refreshed once per mention off the Update loop.
 	files fileCandidates
 
+	// menuToken records whether the last [App.syncMenu] found an active
+	// command token in the live buffer. It exists only to detect the
+	// closed→open EDGE, which is when the registry's markdown layer is
+	// reloaded from disk ([App.reloadUserCommands]) — once per "/" typed
+	// rather than once per keystroke. It tracks the `/` token specifically
+	// (see syncMenu): an `@` mention has no markdown layer to reload, and
+	// latching this on one would eat the next `/`'s edge.
+	menuToken bool
+
 	// menu is the slash-command autocomplete popup (command_menu.go): closed
 	// (zero value) whenever the overview dispatch bar / attach input's
 	// buffer has no active command token, kept in sync by [App.syncMenu]
@@ -207,6 +217,10 @@ func NewApp(th theme.Theme, sup Supervisor, meta OverviewMeta, env CommandEnv) A
 		registry:   newBuiltinRegistry(),
 		commandEnv: env,
 	}
+	// Markdown commands are a registry LAYER above the builtins (command.go's
+	// CommandSource), loaded once here and refreshed when the autocomplete
+	// popup opens — see App.reloadUserCommands for the reload contract.
+	a = a.reloadUserCommands()
 	// `gofer attach <id>`: open straight into the session's attach screen and
 	// pre-select it in the roster, so backing out with ← lands on it. The
 	// subscription is kicked off in Init.
@@ -439,6 +453,24 @@ func (a App) mouseEnabled() bool {
 		return true
 	}
 	return cfg.TUI.MouseEnabled()
+}
+
+// approvalBodyLines reports the effective tui.approval_body_lines setting
+// (config.TUI.ApprovalBodyLineLimit — default
+// config.DefaultApprovalBodyLines), read off a.commandEnv.Config() on every
+// call, the same "always current, never a stale snapshot" contract
+// autoscrollEnabled/mouseEnabled/pasteLimitBytes follow. It caps the inline
+// approval prompt's command-body rows (see renderApprovalPrompt). A nil
+// Config closure or a read error both fall through to the default.
+func (a App) approvalBodyLines() int {
+	if a.commandEnv.Config == nil {
+		return config.DefaultApprovalBodyLines
+	}
+	cfg, err := a.commandEnv.Config()
+	if err != nil {
+		return config.DefaultApprovalBodyLines
+	}
+	return cfg.TUI.ApprovalBodyLineLimit()
 }
 
 // currentSessionInfo returns the roster snapshot for whichever session is
@@ -761,7 +793,12 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if txt, ok := a.over.TakeSubmitted(); ok {
 			// composePrompt folds any pending `!` shell output in ahead of
 			// the user's text — see shell.go for why `!!` cannot reach here.
-			cmd = a.doCreate(a.composePrompt(txt))
+			// On its own line, not inlined into the doCreate call: it mutates
+			// a (marking the folded runs consumed), and a statement makes that
+			// mutation ordered with respect to the call rather than resting on
+			// operand-evaluation order.
+			prompt := a.composePrompt(txt)
+			cmd = a.doCreate(prompt)
 		}
 		return a, cmd
 
@@ -923,8 +960,10 @@ func (a App) handleAttachKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// wants to see the reply as it streams in — snap back to the tail.
 			a.scroll = 0
 			// composePrompt folds any pending `!` shell output in ahead of
-			// the user's text — see shell.go for why `!!` cannot reach here.
-			cmd = a.doSend(a.sessID, a.composePrompt(txt))
+			// the user's text — see shell.go for why `!!` cannot reach here,
+			// and handleOverviewKey for why this is its own statement.
+			prompt := a.composePrompt(txt)
+			cmd = a.doSend(a.sessID, prompt)
 		}
 		return a, cmd
 	}
@@ -1063,7 +1102,15 @@ func (a App) render() string {
 		// Model.view joins it to the transcript as one scrollable region
 		// (a.scroll), so it tails off the top for a long enough conversation
 		// exactly like the oldest messages do.
-		body = a.sess.ViewWithMenu(a.width, fl.h, fl.menuLines, attachHeaderLines(a.theme, a.over.meta, a.width), a.scroll)
+		//
+		// WithApprovalBodyLines plumbs the tui.approval_body_lines cap into
+		// the render on a LOCAL copy of the model (render has a value
+		// receiver, so nothing here reaches App's own state): the setting is
+		// read fresh on every frame, so a /config edit re-caps the next render
+		// rather than the next process start, and a.sess never carries a stale
+		// snapshot of it.
+		body = a.sess.WithApprovalBodyLines(a.approvalBodyLines()).
+			ViewWithMenu(a.width, fl.h, fl.menuLines, attachHeaderLines(a.theme, a.over.meta, a.width), a.scroll)
 	default:
 		body = a.over.ViewWithMenu(a.width, fl.h, fl.menuLines, a.scroll, a.panel != nil)
 	}

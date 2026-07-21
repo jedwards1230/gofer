@@ -321,6 +321,47 @@ func TestSessionLoadSettleTimeout(t *testing.T) {
 	}
 }
 
+// TestTUIApprovalBodyLineLimit covers the resolver for the inline approval
+// prompt's body row cap: unset and non-positive values fall back to the
+// default (a zero-row body would hide the very call being approved — unlike
+// tui.max_paste_bytes, 0 is NOT "unlimited" here), an explicit positive value
+// is taken as the cap. The round trip through Save/Load pins that an explicit
+// value actually survives on disk.
+func TestTUIApprovalBodyLineLimit(t *testing.T) {
+	n := func(v int) *int { return &v }
+	tests := []struct {
+		name string
+		in   *int
+		want int
+	}{
+		{"unset resolves to default", nil, config.DefaultApprovalBodyLines},
+		{"zero resolves to default", n(0), config.DefaultApprovalBodyLines},
+		{"negative resolves to default", n(-5), config.DefaultApprovalBodyLines},
+		{"explicit value is the cap", n(4), 4},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tui := config.TUI{ApprovalBodyLines: tt.in}
+			if got := tui.ApprovalBodyLineLimit(); got != tt.want {
+				t.Fatalf("ApprovalBodyLineLimit() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+
+	dir := t.TempDir()
+	path := config.DefaultPath(dir)
+	if err := config.Save(path, config.Config{TUI: config.TUI{ApprovalBodyLines: n(30)}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if limit := got.TUI.ApprovalBodyLineLimit(); limit != 30 {
+		t.Fatalf("ApprovalBodyLineLimit() after Save/Load = %d, want 30", limit)
+	}
+}
+
 // TestDaemonDrainTimeout covers the resolver for the graceful-shutdown drain
 // bound: unset and non-positive values fall back to the default, an explicit
 // positive value is taken as a millisecond bound.
@@ -343,6 +384,48 @@ func TestDaemonDrainTimeout(t *testing.T) {
 				t.Fatalf("DrainTimeout() = %s, want %s", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestSessionSubagentDepthLimit covers the subagent depth cap's resolver.
+// Unset (0) MUST mean "use the default", never "no children allowed" — an
+// existing config file has no such key, and reading it as a zero cap would
+// refuse every subagent create on upgrade.
+func TestSessionSubagentDepthLimit(t *testing.T) {
+	tests := []struct {
+		name string
+		in   int
+		want int
+	}{
+		{"unset resolves to default", 0, config.DefaultMaxSubagentDepth},
+		{"negative resolves to default", -3, config.DefaultMaxSubagentDepth},
+		{"explicit cap wins", 2, 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := config.Session{MaxSubagentDepth: tt.in}
+			if got := s.SubagentDepthLimit(); got != tt.want {
+				t.Fatalf("SubagentDepthLimit() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestLoadParsesSubagentDepth pins the config KEY itself: an operator raising
+// the cap edits session.max_subagent_depth, so a rename would silently return
+// every daemon to the default.
+func TestLoadParsesSubagentDepth(t *testing.T) {
+	dir := t.TempDir()
+	path := config.DefaultPath(dir)
+	if err := os.WriteFile(path, []byte(`{"session":{"max_subagent_depth":9}}`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	c, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := c.Session.SubagentDepthLimit(); got != 9 {
+		t.Fatalf("SubagentDepthLimit() = %d, want 9", got)
 	}
 }
 

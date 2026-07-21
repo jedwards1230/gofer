@@ -24,11 +24,20 @@ import (
 // *Supervisor) always take it before mu here, so the two locks have one fixed
 // order and cannot deadlock.
 type managed struct {
-	sess      Session
-	id        string
-	project   string
-	model     string
-	cwd       string
+	sess    Session
+	id      string
+	project string
+	model   string
+	cwd     string
+	// parentID/agent/depth are this session's subagent link (see [sessionMeta]):
+	// the spawning session's id, the agent identity its tool events are stamped
+	// with, and its depth in the tree. Set once in newManaged — from Create's
+	// resolved options or, on resume, from the on-disk sidecar — and never
+	// mutated afterward, so (like id/project/cwd above) they are read without
+	// holding mu.
+	parentID  string
+	agent     string
+	depth     int
 	createdAt time.Time
 	clock     func() time.Time
 	// notify pushes a fresh roster snapshot to WatchRoster subscribers. The
@@ -68,6 +77,13 @@ type managed struct {
 	submitCh chan struct{}
 
 	mu sync.Mutex
+	// effort is the session's current reasoning effort ("", "low", "medium",
+	// "high"), seeded from the runner's construction-time
+	// Params.Thinking.Effort and updated by [Supervisor.SetEffort]. It is
+	// bookkeeping only — the runner owns the value it actually sends — kept
+	// here for the same reason model is: the [Session] interface exposes no
+	// accessor, and info must be able to report it.
+	effort string
 	// state is the session's current pump run-state, read by info (which
 	// derives SessionStatus) and by Archive to reject archiving a running
 	// session.
@@ -115,14 +131,18 @@ type managed struct {
 // join later. Calling it here, rather than after publish, closes the race
 // where a concurrent Kill/Archive could otherwise observe a live session
 // with no teardown stashed yet (see Config.OnRegister's doc).
-func newManaged(sess Session, model string, now time.Time, clock func() time.Time, notify func(), cwd string, gate *loop.Gate, onRegister func(sess Session) (stop func())) *managed {
+func newManaged(sess Session, model, effort string, now time.Time, clock func() time.Time, notify func(), cwd string, gate *loop.Gate, meta sessionMeta, onRegister func(sess Session) (stop func())) *managed {
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &managed{
 		sess:       sess,
 		id:         sess.ID(),
 		project:    filepath.Base(filepath.Dir(sess.JournalPath())),
 		model:      model,
+		effort:     effort,
 		cwd:        cwd,
+		parentID:   meta.ParentID,
+		agent:      meta.Agent,
+		depth:      meta.Depth,
 		createdAt:  now,
 		updated:    now,
 		clock:      clock,
@@ -163,6 +183,7 @@ func (m *managed) info() SessionInfo {
 		Title:       title,
 		Status:      status,
 		Model:       m.model,
+		Effort:      m.effort,
 		Cost:        report.Cost,
 		Usage:       report.Usage,
 		Pending:     m.pending,
@@ -173,6 +194,9 @@ func (m *managed) info() SessionInfo {
 		Queued:      len(m.queue),
 		Live:        true,
 		Cwd:         m.cwd,
+		ParentID:    m.parentID,
+		Agent:       m.agent,
+		Depth:       m.depth,
 	}
 }
 

@@ -23,16 +23,21 @@ import (
 // pending server-side (e.g. a matching [event.PermissionResolved] from
 // another attached client, or a later re-attach to the same session, can
 // still surface or settle it).
+//
+// 1/2 are aliases for allow/deny because the prompt itself renders the
+// choices numbered ("1. [a] Yes   2. [d] No" — see renderApprovalPrompt): a
+// rendered affordance that did nothing when pressed would be a lie, and
+// numbered answers are the reflex a confirm prompt trains.
 func (a App) handleApprovalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.Key()
 	switch {
 	case key.Mod.Contains(tea.ModCtrl) && key.Code == 'c':
 		return a, tea.Quit
 
-	case key.Text == "a" || key.Text == "y":
+	case key.Text == "a" || key.Text == "y" || key.Text == "1":
 		return a.resolveApproval(true)
 
-	case key.Text == "d" || key.Text == "n":
+	case key.Text == "d" || key.Text == "n" || key.Text == "2":
 		return a.resolveApproval(false)
 
 	case key.Text == "r":

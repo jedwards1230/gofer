@@ -244,3 +244,116 @@ func TestEmailAddressDoesNotOpenTheMentionPopup(t *testing.T) {
 		t.Fatalf("a mid-word @ opened the mention popup, got:\n%s", got)
 	}
 }
+
+// --- reconciliation with the markdown-command layer (#197) ---------------
+//
+// The two features share one seam: syncMenu detects an active token to
+// reload the registry's markdown layer, and this branch generalized that
+// token grammar to `@`. The reload must stay a `/`-only edge, and a markdown
+// command's send must fold pending `!` output exactly as a typed prompt does.
+
+// TestMentionTokenDoesNotReloadTheMarkdownLayer covers the reload edge's `@`
+// half: an `@` mention must not trigger the markdown layer's directory walk.
+// Nothing behind `@` is a command, so the walk would be pure waste on a
+// keystroke path — and, as the observable proof here, it would surface the
+// skipped-file warning of a bad command file during a mention that has
+// nothing to do with commands.
+//
+// A deliberately unloadable command file (a space in the name) is the probe:
+// [App.reloadUserCommands] is the only thing that raises its warning note, so
+// the note's presence IS the reload. The `/` half at the end is the must-fire
+// twin — without it this test would still pass if the note could never appear
+// at all.
+func TestMentionTokenDoesNotReloadTheMarkdownLayer(t *testing.T) {
+	const warning = "skipped 1 command file"
+
+	env, userDir, _ := newUserCmdEnv(t)
+	seedUserCmd(t, userDir, "my review.md", "body") // unloadable: space in the name
+	if err := os.WriteFile(filepath.Join(env.Cwd, "main.go"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newUserCmdModel(t, newFakeSup(tui.GoldenRoster()), env)
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach; also clears the startup note
+
+	// Asserted after ONE key press, not a typed run: Update clears the status
+	// line at the top of every key press, so the note a reload raises lives
+	// for exactly the frame that raised it. Typing "@mai" and checking at the
+	// end would find an empty status either way and prove nothing.
+	m = press(t, m, tea.KeyPressMsg{Text: "@"})
+	if got := content(m); strings.Contains(got, warning) {
+		t.Fatalf("an `@` mention reloaded the markdown layer (its skipped-file warning fired):\n%s", got)
+	}
+
+	// Must-fire twin: the same probe, one key press, on the `/` edge — which
+	// SHOULD reload. Without this the assertion above would still pass if the
+	// note could never appear at all.
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyBackspace})
+	m = press(t, m, tea.KeyPressMsg{Text: "/"})
+	if got := content(m); !strings.Contains(got, warning) {
+		t.Fatalf("the `/` edge did not reload the markdown layer, so the `@` assertion above proves nothing:\n%s", got)
+	}
+}
+
+// TestUserCommandFoldsPendingShellOutput holds usercmds.go to its own
+// promise ("there is no second send path, so a markdown command can never
+// diverge from a typed one") now that a typed prompt carries pending `!`
+// output: /cmd must fold it too, and must still withhold a `!!` run.
+func TestUserCommandFoldsPendingShellOutput(t *testing.T) {
+	t.Setenv("SHELL", "/bin/sh")
+	env, userDir, _ := newUserCmdEnv(t)
+	for name, content := range map[string]string{"payload.txt": shellPayload, "secret.txt": shellWithheld} {
+		if err := os.WriteFile(filepath.Join(env.Cwd, name), []byte(content+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seedUserCmd(t, userDir, "review.md", "review what I just ran")
+
+	sup := newFakeSup(tui.GoldenRoster())
+	m := newUserCmdModel(t, sup, env)
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach
+
+	m = dispatchSlash(t, m, "!cat payload.txt")
+	m = dispatchSlash(t, m, "!!cat secret.txt")
+	if len(sup.sent) != 0 {
+		t.Fatalf("a shell escape reached Send: %v", sup.sent)
+	}
+
+	dispatchSlash(t, m, "/review")
+	if len(sup.sent) != 1 {
+		t.Fatalf("expected one Send from the markdown command, got %v", sup.sent)
+	}
+	sent := sup.sent[0]
+	if !strings.Contains(sent, shellPayload) {
+		t.Errorf("sent = %q, want the pending `!` output folded in — a markdown command must not diverge from a typed prompt", sent)
+	}
+	if strings.Contains(sent, shellWithheld) {
+		t.Fatalf("sent = %q — a `!!` run reached the model through the markdown command path", sent)
+	}
+	if !strings.Contains(sent, "review what I just ran") {
+		t.Errorf("sent = %q, want the expanded command body", sent)
+	}
+}
+
+// TestShellOutputIsFoldedIntoOnlyOnePrompt covers consumption across two REAL
+// submits through Update (not just composePrompt in isolation): the mutation
+// composePrompt makes has to survive on the App the handler returns.
+func TestShellOutputIsFoldedIntoOnlyOnePrompt(t *testing.T) {
+	sup := newFakeSup(tui.GoldenRoster())
+	m := shellApp(t, sup)
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach
+
+	m = dispatchSlash(t, m, "!cat payload.txt")
+	m = dispatchSlash(t, m, "first")
+	_ = dispatchSlash(t, m, "second")
+
+	if len(sup.sent) != 2 {
+		t.Fatalf("expected two Sends, got %v", sup.sent)
+	}
+	if !strings.Contains(sup.sent[0], shellPayload) {
+		t.Fatalf("first prompt = %q, want the shell output folded in", sup.sent[0])
+	}
+	if strings.Contains(sup.sent[1], shellPayload) {
+		t.Fatalf("second prompt = %q — the same run's output was sent twice", sup.sent[1])
+	}
+}

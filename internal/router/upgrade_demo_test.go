@@ -145,6 +145,7 @@ func (s *gatedTailSession) EventsLive() *event.Subscription {
 func (s *gatedTailSession) Emit(e event.Event)       { s.broker.Publish(e) }
 func (s *gatedTailSession) Cost() session.CostReport { return session.CostReport{} }
 func (s *gatedTailSession) SetModel(string) error    { return nil }
+func (s *gatedTailSession) SetEffort(string) error   { return nil }
 func (s *gatedTailSession) Close() error             { s.broker.Close(); return nil }
 
 // demoTailText is the assistant content the released turn emits — the marker the

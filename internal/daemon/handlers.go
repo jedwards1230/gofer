@@ -20,14 +20,21 @@ import (
 // gofer-native control methods, namespaced so they never collide with an ACP
 // method name. They serve the CLI client (a later PR): roster/ps mirror
 // [supervisor.Supervisor.Roster]/[supervisor.Supervisor.List], kill/archive
-// mirror the lifecycle operations, and set_model mirrors
-// [supervisor.Supervisor.SetModel].
+// mirror the lifecycle operations, and set_model / set_effort mirror
+// [supervisor.Supervisor.SetModel] / [supervisor.Supervisor.SetEffort].
 const (
 	methodGoferRoster   = "gofer/roster"
 	methodGoferPS       = "gofer/ps"
 	methodGoferKill     = "gofer/kill"
 	methodGoferArchive  = "gofer/archive"
 	methodGoferSetModel = "gofer/set_model"
+
+	// methodGoferSetEffort is the effort-axis twin of gofer/set_model: it
+	// changes a session's reasoning effort for its next turn. Deliberately
+	// gofer-native (not the SDK's session.set_effort op) so it mirrors
+	// set_model's shape hop for hop — model- and effort-setting are the same
+	// kind of control-plane mutation and travel the same road.
+	methodGoferSetEffort = "gofer/set_effort"
 
 	// methodGoferFleet is gofer-native fleet-wide usage: the summed Cost/Usage
 	// across every LIVE session, aggregated by the hosted supervisor (see
@@ -126,6 +133,8 @@ var methodTable = map[string]methodHandler{
 	methodGoferSetModel: handleGoferSetModel,
 	methodGoferModels:   handleGoferModels,
 	methodGoferHello:    handleGoferHello,
+
+	methodGoferSetEffort: handleGoferSetEffort,
 
 	methodPermissionReply: handlePermissionReply,
 }
@@ -271,7 +280,7 @@ func handleSessionNew(d *Daemon, ctx context.Context, _ *peer, params json.RawMe
 	if rerr != nil {
 		return nil, rerr
 	}
-	var req acp.NewSessionRequest
+	var req NewSessionRequest
 	if err := json.Unmarshal(params, &req); err != nil {
 		return nil, invalidParams(fmt.Errorf("acp: decode %s params: %w", acp.MethodSessionNew, err))
 	}
@@ -301,45 +310,43 @@ func handleSessionNew(d *Daemon, ctx context.Context, _ *peer, params json.RawMe
 			return nil, appError(fmt.Errorf("session limit reached (max %d)", d.cfg.MaxSessions))
 		}
 	}
-	info, err := d.sup.Create(ctx, "", supervisor.CreateOptions{Cwd: cwd, Model: model})
+	parentID, agentID, _ := req.Meta.SubagentLink()
+	info, err := d.sup.Create(ctx, "", supervisor.CreateOptions{
+		Cwd:      cwd,
+		Model:    model,
+		ParentID: parentID,
+		Agent:    agentID,
+	})
 	if err != nil {
+		// A gofer/parent naming no session is a bad client PARAMETER, so it
+		// answers -32602 rather than a generic application error — the same
+		// treatment an unresolvable cwd already gets above. ErrDepthExceeded
+		// deliberately stays an application error: the parameter is well-formed and
+		// names a real session; it is the daemon's own policy that refuses.
+		if errors.Is(err, supervisor.ErrNoParent) {
+			return nil, invalidParams(err)
+		}
 		return nil, appError(err)
 	}
-	d.log.Info("session created", "session", info.ID)
-	return newSessionResult{
+	// Only log the subagent keys when there IS a link: every ordinary root create
+	// would otherwise carry two empty attributes on every line.
+	logArgs := []any{"session", info.ID}
+	if info.ParentID != "" {
+		logArgs = append(logArgs, "parent", info.ParentID)
+	}
+	if info.Agent != "" {
+		logArgs = append(logArgs, "agent", info.Agent)
+	}
+	d.log.Info("session created", logArgs...)
+	return NewSessionResponse{
 		NewSessionResponse: acp.NewSessionResponse{SessionID: info.ID},
-		Meta:               &newSessionMeta{Model: info.Model},
+		Meta: &NewSessionMeta{
+			Model:    info.Model,
+			ParentID: info.ParentID,
+			Agent:    info.Agent,
+			Depth:    info.Depth,
+		},
 	}, nil
-}
-
-// newSessionResult is the session/new response: ACP's own
-// [acp.NewSessionResponse] plus gofer's `_meta` extension. ACP reserves `_meta`
-// for exactly this — implementation-specific data an unaware client ignores —
-// so carrying the assigned model there keeps the response conformant, needs no
-// change to the SDK's shared wire types, and honors the repo's contract-only
-// consumption invariant.
-//
-// It exists because the ACP response carries only the session id. A client that
-// let the daemon choose the model — the NORMAL path, session/new with no model
-// — therefore had no way to learn what it actually got, so
-// internal/daemonbridge's Create could only echo back the model it had
-// REQUESTED (the empty string), and the roster row it returned could never
-// carry the real one (issue #162, defect 2).
-type newSessionResult struct {
-	acp.NewSessionResponse
-	Meta *newSessionMeta `json:"_meta,omitempty"`
-}
-
-// newSessionMeta is [newSessionResult]'s `_meta` payload. The key is namespaced
-// the same way gofer's own methods are (gofer/*), so it cannot collide with
-// another ACP implementation's extension data.
-type newSessionMeta struct {
-	// Model is the model the daemon ASSIGNED to the new session: the client's
-	// requested model when it sent one, else the daemon's own resolved default
-	// (see the resolution above). Empty only when the daemon could not resolve
-	// one at all. A client that sees no `_meta` at all is talking to a daemon
-	// predating this field and falls back to whatever it requested.
-	Model string `json:"gofer/model,omitempty"`
 }
 
 // handleSessionLoad reopens a persisted session and replays its folded
@@ -1340,5 +1347,29 @@ func handleGoferSetModel(d *Daemon, ctx context.Context, _ *peer, params json.Ra
 	// unreadable model just suppresses the advertisement (see advertiseModelChange).
 	current, _ := d.sessionModel(ctx, req.SessionID)
 	d.advertiseModelChange(req.SessionID, prevModel, current)
+	return struct{}{}, nil
+}
+
+// handleGoferSetEffort answers gofer/set_effort {sessionId, effort}, changing
+// the session's reasoning effort for its next turn (see
+// [supervisor.Supervisor.SetEffort]). [supervisor.ErrNotLive] (unknown session),
+// [supervisor.ErrInvalidEffort] (a level outside the unified vocabulary), and
+// the SDK's own non-reasoning-model rejection all surface as clear application
+// errors naming the offending value — the concrete sentinel types do not cross
+// the wire (see internal/daemonbridge's SetEffort doc), the messages do.
+//
+// Unlike [handleGoferSetModel] it advertises nothing afterwards: effort is not
+// one of the ACP config options this daemon publishes (see
+// [handleSessionSetConfigOption], which offers "model" only), so there is no
+// config_option_update for a client to reconcile against.
+func handleGoferSetEffort(d *Daemon, ctx context.Context, _ *peer, params json.RawMessage) (any, *rpcError) {
+	req, rerr := decodeSetEffortParams(params)
+	if rerr != nil {
+		return nil, rerr
+	}
+	if err := d.sup.SetEffort(ctx, req.SessionID, req.Effort); err != nil {
+		return nil, appError(err)
+	}
+	d.log.Info("session effort set", "session", req.SessionID, "effort", req.Effort)
 	return struct{}{}, nil
 }

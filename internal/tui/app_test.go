@@ -39,6 +39,10 @@ type fakeSup struct {
 	// /model select would otherwise report (see model_select_probe_test.go).
 	// The call is still recorded in ops either way.
 	setModelErr error
+
+	// setEffortErr is setModelErr's effort-axis twin: what SetEffort returns,
+	// for the failed-op path. The call is still recorded in ops either way.
+	setEffortErr error
 }
 
 func newFakeSup(roster []tui.SessionInfo) *fakeSup {
@@ -109,6 +113,17 @@ func (f *fakeSup) SetModel(_ context.Context, id, model string) error {
 	defer f.mu.Unlock()
 	f.ops = append(f.ops, "set-model:"+id+":"+model)
 	return f.setModelErr
+}
+
+// SetEffort records the call the same way SetModel does. The effort is
+// recorded verbatim, so the CLEAR call ("") is distinguishable from no call at
+// all — it shows up as a trailing-colon "set-effort:<id>:" entry rather than
+// being invisible.
+func (f *fakeSup) SetEffort(_ context.Context, id, effort string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ops = append(f.ops, "set-effort:"+id+":"+effort)
+	return f.setEffortErr
 }
 
 // Reply is a no-op here: the approval prompt it answers needs the unexported

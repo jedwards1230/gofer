@@ -87,7 +87,12 @@ func (a Adapter) Create(ctx context.Context, prompt string, opts tui.CreateOptio
 	if model == "" && a.defaultModel != nil {
 		model = a.defaultModel(ctx)
 	}
-	info, err := a.sup.Create(ctx, prompt, supervisor.CreateOptions{Model: model, Cwd: opts.Cwd})
+	info, err := a.sup.Create(ctx, prompt, supervisor.CreateOptions{
+		Model:    model,
+		Cwd:      opts.Cwd,
+		ParentID: opts.ParentID,
+		Agent:    opts.Agent,
+	})
 	if err != nil {
 		return tui.SessionInfo{}, err
 	}
@@ -123,6 +128,14 @@ func (a Adapter) SetModel(ctx context.Context, sessionID, model string) error {
 	return a.sup.SetModel(ctx, sessionID, model)
 }
 
+// SetEffort passes through to the supervisor's own SetEffort. An in-process
+// caller gets back the real [supervisor.ErrInvalidEffort] sentinel unwrapped
+// (errors.Is works directly), unlike a daemon-backed
+// [daemonbridge.Supervisor], which only ever sees a plain messaged error.
+func (a Adapter) SetEffort(ctx context.Context, sessionID, effort string) error {
+	return a.sup.SetEffort(ctx, sessionID, effort)
+}
+
 // Reply answers a pending permission request by routing straight to the
 // supervisor's own Reply, which resolves the session's loop.Gate — see
 // internal/supervisor's Reply doc. ctx is accepted to satisfy
@@ -147,6 +160,7 @@ func toTUI(s supervisor.SessionInfo) tui.SessionInfo {
 		Summary:   s.Summary,
 		Status:    tui.SessionStatus(s.Status),
 		Model:     s.Model,
+		Effort:    s.Effort,
 		Cwd:       s.Cwd,
 		Cost:      s.Cost,
 		Usage:     s.Usage,
@@ -158,5 +172,11 @@ func toTUI(s supervisor.SessionInfo) tui.SessionInfo {
 		// no separate worker process to have its own build), a router stamps it
 		// from the owning worker's gofer/hello.
 		BinaryVersion: s.BinaryVersion,
+		// The subagent link. Zero for a root session — which is every session
+		// created without an explicit parent, so this mapping is inert for the
+		// existing roster.
+		ParentID: s.ParentID,
+		Agent:    s.Agent,
+		Depth:    s.Depth,
 	}
 }
