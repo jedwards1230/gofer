@@ -207,17 +207,25 @@ the last row onto option 1 is how a stray press sends the wrong answer);
 `1`-`9` answer with that option directly; `Enter` resolves the focused row (an
 option answers with it, `Type something.` opens its editor and a **second**
 `Enter` submits, `Chat about this` answers with the chat hatch); `Esc` leaves
-typing mode, or — when not typing — dismisses the prompt **without** answering,
-leaving the request open server-side for a re-attach to replay; `ctrl+c` quits.
-While typing, the hint reads `Enter to submit · Esc to cancel` and every
-unclaimed key goes to the shared input keymap, so digits type digits. `j`/`k`
-are deliberately unbound — every list here is arrow-only, and vi keys would
-fight the free-text row.
+typing mode, or — when not typing — **cancels the request**, answering every
+question in it (including the ones the single-question prompt doesn't render)
+with `cancelled`; `ctrl+c` quits. While typing, the hint reads
+`Enter to submit · Esc to cancel` and every unclaimed key goes to the shared
+input keymap, so digits type digits. `j`/`k` are deliberately unbound — every
+list here is arrow-only, and vi keys would fight the free-text row.
 
-Answering is an optimistic local dismiss, exactly like an approval: the
-matching `UpdateResolved` arriving a moment later finds nothing pending. A
-request another peer answers (or an interrupted turn drops) clears the prompt
-the same way, with no answer sent from here.
+`Esc` cancels rather than merely closing the prompt because there is nothing to
+come back to: unlike a permission request — which leaves a transcript badge and
+replays off the event stream on re-attach — a decision has neither, so a prompt
+closed without resolving would leave the agent's turn blocked forever with
+nothing on screen pointing at it. `cancelled` is a first-class outcome the model
+is told about and can act on, not an error.
+
+Resolving (an answer or a cancel) is an optimistic local dismiss, exactly like
+an approval: the matching `UpdateResolved` arriving a moment later finds nothing
+pending. A request another peer answers, or one an interrupted turn drops,
+clears the prompt the same way with no answer sent from here — as does the
+session ending, which closes its gate (and with it every decision subscription).
 
 ### Multi question (not yet built)
 
@@ -252,6 +260,14 @@ both methods today (`Decisions` returns a closed subscription,
 daemon and an answer back in needs the `gofer/permission_requested` +
 `permission.reply` treatment, which is the follow-up PR for #173. Against the
 in-process supervisor the round trip is live.
+
+**And deferred with it**: decisions from **background sessions**. The App
+subscribes decisions only for the session it is *attached* to (`app.go`,
+alongside the event subscription), so an unattached session calling `ask_user`
+gets `ErrNoClient` and is told to continue in prose — even with the TUI open on
+another session. Fixing that is the same daemon-relay work: once a decision
+travels the wire as its own message, every connected peer sees it, and the
+roster can surface "needs a decision" the way it surfaces a pending approval.
 
 ## Roster & navigation (M2)
 
