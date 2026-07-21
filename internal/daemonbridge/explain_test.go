@@ -82,7 +82,7 @@ func assertExplainThenReplyStillResolves(t *testing.T, b *daemonbridge.Superviso
 		t.Fatalf("second ExplainPermission (%s): %v", hop, err)
 	}
 
-	if err := b.Reply(context.Background(), sessionID, pr.ID, true, false); err != nil {
+	if err := b.Reply(context.Background(), sessionID, pr.ID, tui.PermissionDecision{Allow: true}); err != nil {
 		t.Fatalf("Reply (%s): %v", hop, err)
 	}
 	after := drainEvents(t, sub, 1)

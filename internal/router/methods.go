@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -164,16 +165,23 @@ func (s *Supervisor) SetEffort(ctx context.Context, sessionID, effort string) er
 // The op carries no session id (the worker resolves the request by call id at
 // its own gate), but the router still looks the handle up by sessionID to reach
 // the right worker's connection.
+//
+// An amended allow's replacement input rides the hop as the same optional
+// "input" member the daemon's own permission.reply accepts (see
+// internal/daemon's permissionReplyParams) — a router-backed session must
+// amend identically to an in-process one — and stays `omitempty` so a plain
+// allow/deny reaches the worker as the exact bytes it did before amend.
 func (s *Supervisor) Reply(sessionID string, op event.PermissionReply) error {
 	h, ok := s.get(sessionID)
 	if !ok {
 		return fmt.Errorf("router: reply %s: %w", sessionID, ErrNotLive)
 	}
 	params := struct {
-		ID       string        `json:"id"`
-		Verdict  event.Verdict `json:"verdict"`
-		Remember bool          `json:"remember,omitempty"`
-	}{ID: op.ID, Verdict: op.Verdict, Remember: op.Remember}
+		ID       string          `json:"id"`
+		Verdict  event.Verdict   `json:"verdict"`
+		Remember bool            `json:"remember,omitempty"`
+		Input    json.RawMessage `json:"input,omitempty"`
+	}{ID: op.ID, Verdict: op.Verdict, Remember: op.Remember, Input: op.Input}
 	if err := h.client.Notify(methodPermissionReply, params); err != nil {
 		return fmt.Errorf("router: reply %s: %w", sessionID, err)
 	}

@@ -354,19 +354,26 @@ func (s *Supervisor) ExplainPermission(ctx context.Context, sessionID, callID st
 // the logical operation; the write's lifetime is owned by [daemon.Client.Notify]
 // (which takes no context), so a caller cancellation cannot close the shared
 // daemon link mid-write.
-func (s *Supervisor) Reply(ctx context.Context, sessionID, id string, allow, remember bool) error {
+//
+// An amended allow ([tui.PermissionDecision.Input]) adds an "input" member
+// carrying the replacement tool input. It is `omitempty` on purpose: a plain
+// allow/deny must put the EXACT same bytes on the wire as it did before amend
+// existed, so a daemon too old to know the member is unaffected by this
+// change (pinned by TestReplyPlainAllowOmitsInput).
+func (s *Supervisor) Reply(ctx context.Context, sessionID, id string, d tui.PermissionDecision) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	verdict := event.VerdictDeny
-	if allow {
+	if d.Allow {
 		verdict = event.VerdictAllow
 	}
 	params := struct {
-		ID       string        `json:"id"`
-		Verdict  event.Verdict `json:"verdict"`
-		Remember bool          `json:"remember,omitempty"`
-	}{ID: id, Verdict: verdict, Remember: remember}
+		ID       string          `json:"id"`
+		Verdict  event.Verdict   `json:"verdict"`
+		Remember bool            `json:"remember,omitempty"`
+		Input    json.RawMessage `json:"input,omitempty"`
+	}{ID: id, Verdict: verdict, Remember: d.Remember, Input: d.Input}
 	if err := s.client.Notify(methodPermissionReply, params); err != nil {
 		return fmt.Errorf("daemonbridge: reply %s (session %s): %w", id, sessionID, err)
 	}

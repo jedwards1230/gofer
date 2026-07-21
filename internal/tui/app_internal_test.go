@@ -47,12 +47,16 @@ type internalFakeSup struct {
 }
 
 // replyCall records one Supervisor.Reply invocation for the approval
-// prompt's behavioral tests to assert against.
+// prompt's behavioral tests to assert against. input is the amended tool
+// input the decision carried, held as a string so a replyCall stays
+// comparable with == (a json.RawMessage is a slice and is not); "" is the
+// plain allow/deny path's nil Input.
 type replyCall struct {
 	sessionID string
 	id        string
 	allow     bool
 	remember  bool
+	input     string
 }
 
 // explainCall records one Supervisor.ExplainPermission invocation — the
@@ -99,10 +103,16 @@ func (f *internalFakeSup) Archive(context.Context, string) error           { ret
 func (f *internalFakeSup) SetModel(context.Context, string, string) error  { return nil }
 func (f *internalFakeSup) SetEffort(context.Context, string, string) error { return nil }
 
-func (f *internalFakeSup) Reply(_ context.Context, sessionID, id string, allow, remember bool) error {
+func (f *internalFakeSup) Reply(_ context.Context, sessionID, id string, d PermissionDecision) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.replies = append(f.replies, replyCall{sessionID: sessionID, id: id, allow: allow, remember: remember})
+	f.replies = append(f.replies, replyCall{
+		sessionID: sessionID,
+		id:        id,
+		allow:     d.Allow,
+		remember:  d.Remember,
+		input:     string(d.Input),
+	})
 	return nil
 }
 

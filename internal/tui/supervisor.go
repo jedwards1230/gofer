@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/jedwards1230/agent-sdk-go/acp"
@@ -114,6 +115,31 @@ type CreateOptions struct {
 	Agent string
 }
 
+// PermissionDecision is a human's answer to a pending permission request:
+// the verdict, whether to remember it, and — for an amend-before-approve —
+// the replacement tool input the call runs with instead of the model's
+// original arguments. It mirrors the SDK's event.PermissionReply.
+//
+// It is a struct rather than a third positional argument on [Supervisor.Reply]
+// because the three fields are one decision: a six-parameter, two-bool
+// signature reads the same at the call site whichever way the bools are
+// ordered, and this one is answered by a human under time pressure.
+type PermissionDecision struct {
+	Allow    bool
+	Remember bool
+	// Input, when non-nil, is the replacement tool input for an amended
+	// allow. It is honored only with Allow; a nil Input is the plain
+	// allow/deny path, byte-identical to before amend existed.
+	//
+	// The SDK does NOT re-run the permission guard over it — see
+	// loop.awaitApproval, which substitutes it into the call after the guard
+	// already evaluated the model's original arguments, and substitutes it
+	// BEFORE calling Grant, so a remembered amend pins the amended call. The
+	// approval prompt says both out loud (see approval.go's warning lines);
+	// nothing on this path may imply otherwise.
+	Input json.RawMessage
+}
+
 // Supervisor is the client-side view of the daemon the TUI drives. Every
 // method is an Op or a read a remote ACP client could equally issue: the TUI
 // holds no back channel the protocol doesn't expose.
@@ -174,16 +200,19 @@ type Supervisor interface {
 	// cross the daemon wire.
 	SetEffort(ctx context.Context, sessionID, effort string) error
 
-	// Reply answers a pending permission request identified by id: allow or
-	// deny it, and — when remember is true — persist the verdict as a
-	// standing grant for future matching calls (the SDK's
-	// loop.RuleGuard/Grant path). The inline approval prompt's key handling
-	// (see app.go/dialog.go) is the sole caller. sessionID scopes the reply
-	// to the session the prompt was raised for; a daemon-backed Supervisor
-	// need not put it on the wire itself (see internal/daemonbridge's
-	// contract: the daemon resolves a permission request by id alone), but
-	// an in-process one routes through it directly.
-	Reply(ctx context.Context, sessionID, id string, allow, remember bool) error
+	// Reply answers a pending permission request identified by id with d:
+	// allow or deny it, and — when d.Remember is true — persist the verdict
+	// as a standing grant for future matching calls (the SDK's
+	// loop.RuleGuard/Grant path). A non-nil d.Input is an amend: the call
+	// runs with that input instead of the model's, and a remembered amend
+	// grants the AMENDED call (see [PermissionDecision.Input]). The inline
+	// approval prompt's key handling (see app.go/dialog.go) is the sole
+	// caller. sessionID scopes the reply to the session the prompt was
+	// raised for; a daemon-backed Supervisor need not put it on the wire
+	// itself (see internal/daemonbridge's contract: the daemon resolves a
+	// permission request by id alone), but an in-process one routes through
+	// it directly.
+	Reply(ctx context.Context, sessionID, id string, d PermissionDecision) error
 
 	// ExplainPermission asks why the identified still-pending tool call was
 	// gated. It is READ-ONLY: it never resolves the request, so the prompt

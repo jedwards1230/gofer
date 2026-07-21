@@ -62,6 +62,13 @@ type pendingApproval struct {
 	// added, so transcriptLines can suppress it while the prompt is showing
 	// (the prompt already repeats the tool + args line).
 	badgeIdx int
+
+	// amend is the open inline amend editor (amend.go), or nil when the
+	// prompt is showing its ordinary decision row. While it is non-nil the
+	// prompt renders the editor in place of that row and EVERY key press
+	// goes to the editor (see App.handleApprovalKey), so `a`/`d`/`r` type
+	// characters rather than resolving the request.
+	amend *amendEditor
 }
 
 // commandKeys are the spec keys renderApprovalPrompt treats as "the body of
@@ -79,14 +86,25 @@ var commandKeys = []string{"command", "cmd", "script", "file_path", "path"}
 // guard's decision trace), the question with its numbered action row, and a
 // dim footer hint carrying the cancel key, the explain key, and the session
 // id. bodyLimit caps the body's rows (config.TUI.ApprovalBodyLineLimit — the
-// gated call's text must never push the question off the frame).
+// gated call's text must never push the question off the frame), and caps the
+// amend editor's visible rows too when one is open.
+//
+// With p.amend set (Tab — see amend.go) the numbered action row and the hint
+// line are replaced by the inline editor, its cursor line, and its warning;
+// everything above them — header, attribution, body, and whichever rationale
+// applies — renders identically either way.
 //
 // collapsed drops the rationale to its opening paragraph plus a pointer at
 // ctrl+e, for a frame too short to show the whole block without squeezing the
 // transcript out of existence (see [Model.promptLines], which decides). What
 // it never collapses is the header, the command body, the question, the action
 // row, or the hint: a user must always be able to see what they are allowing
-// and how to answer it.
+// and how to answer it. The amend editor is likewise never collapsible — the
+// collapse only ever shortens the RATIONALE, so an open editor keeps every
+// line of its text, its cursor, and its warning in every frame size (pinned by
+// TestAmendEditorSurvivesTheShortFrameCollapse). Collapsing the one warning
+// that says an amended call is not re-run through the rules, or the line the
+// user is typing on, would be the two worst rows in this block to lose.
 //
 // No leading blank line — [App.render]'s [layout.TopPadding] already supplies
 // the frame's top margin, and Model.View stacks this block directly onto
@@ -121,14 +139,88 @@ func renderApprovalPrompt(th theme.Theme, p pendingApproval, width, bodyLimit in
 	lines = append(lines, approvalBodyLines(th, p, width, bodyLimit)...)
 	lines = append(lines, "", rationaleHeaderLine(th, p))
 	lines = append(lines, rationaleLines(th, p, width, collapsed)...)
+	// While the amend editor is open it REPLACES the decision row and the
+	// hint line — the header, attribution, body, and rationale above stay,
+	// so the user can still see what they are amending and why it was gated.
+	// The rationale above is whichever form applies (local, collapsed, or the
+	// agent's own answer): amending changes what is being decided, not why it
+	// was gated.
+	if p.amend != nil {
+		return append(lines, amendLines(th, p, width, bodyLimit)...)
+	}
 	lines = append(lines,
 		"",
 		"Do you want to proceed?",
 		fmt.Sprintf("  1. [a] Yes   2. [d] No   ·   [r] remember: %s", rememberLabel(p.remember)),
 		"",
-		th.MutedStyle().Render("esc cancel · ctrl+e explain · session "+p.session),
+		th.MutedStyle().Render("tab amend · esc cancel · ctrl+e explain · session "+p.session),
 	)
 	return lines
+}
+
+// The amend editor's two warning sentences. They are the UI half of a real
+// SDK property and must never be softened into a claim of safety:
+// loop.awaitApproval substitutes event.PermissionReply.Input into the call
+// AFTER the guard already evaluated the model's original arguments, and it
+// substitutes it BEFORE calling Grant — so an amended allow is a human
+// override the rules never saw, and a REMEMBERED amended allow pins the
+// edited call as the standing grant. Nothing here may suggest the edit is
+// validated, re-run through the rules, or in any way vetted.
+const (
+	warnAmendOverride = "Warning: an amended command does not go back through the permission rules. " +
+		"Approving it is a manual override — the call runs exactly what you leave here."
+	warnAmendRemember = "Remember is on, so the standing grant will pin the edited command, not the model's original."
+)
+
+// amendCursorGlyph is the block the editor draws at the cursor — the same
+// marker the attach input uses (see [Model.inputLine]), so a cursor reads
+// identically on both text surfaces.
+const amendCursorGlyph = "▏"
+
+// amendLines renders the open amend editor in place of the prompt's decision
+// row: a label naming the spec key being edited, the edited text with a
+// visible cursor on the focused line, the persistent warning above, and the
+// editor's own key hints.
+//
+// limit caps the VISIBLE editor rows with the same config-derived budget the
+// body uses (config.TUI.ApprovalBodyLineLimit). Unlike the body, an over-cap
+// editor scrolls rather than collapsing its tail into "… +N more lines":
+// truncating could hide the very line being typed on, and a cursor you
+// cannot see is unusable. The hidden lines are still announced, above and
+// below, so the visible window never reads as the whole command.
+func amendLines(th theme.Theme, p pendingApproval, width, limit int) []string {
+	ed := *p.amend
+
+	lines := []string{"", "Amending `" + ed.key + "`:"}
+	start, end := ed.visibleLines(limit)
+	if start > 0 {
+		lines = append(lines, th.MutedStyle().Render(fmt.Sprintf("  … +%d lines above", start)))
+	}
+	for i := start; i < end; i++ {
+		glyph := ""
+		if i == ed.cursorLine {
+			glyph = amendCursorGlyph
+		}
+		lines = append(lines, "  "+ed.lines[i].Render(glyph))
+	}
+	if hidden := len(ed.lines) - end; hidden > 0 {
+		lines = append(lines, th.MutedStyle().Render(fmt.Sprintf("  … +%d lines below", hidden)))
+	}
+
+	warns := []string{warnAmendOverride}
+	if p.remember {
+		warns = append(warns, warnAmendRemember)
+	}
+	lines = append(lines, "")
+	for _, w := range warns {
+		for _, l := range wrap(w, width) {
+			lines = append(lines, th.WarnStyle().Render(l))
+		}
+	}
+	return append(lines,
+		"",
+		th.MutedStyle().Render("ctrl+s approve edited · esc cancel · enter newline · remember: "+rememberLabel(p.remember)),
+	)
 }
 
 // approvalTitle renders the prompt's header text: the raw tool name (never
@@ -247,6 +339,12 @@ func rationaleHeaderLine(th theme.Theme, p pendingApproval) string {
 // deliberately the FIRST paragraph that survives: the reason is what a
 // decision actually turns on, while the policy detail and the escape hatch are
 // reference material a user can pull up when they want it.
+//
+// With the amend editor open that pointer names the key sequence that
+// actually works from there: ctrl+e inside the editor is jump-to-end-of-line,
+// not explain (see [App.handleAmendKey]), so the collapsed rationale says to
+// leave the editor first rather than advertising a key that would silently do
+// something else.
 func rationaleLines(th theme.Theme, p pendingApproval, width int, collapsed bool) []string {
 	paras := rationaleParagraphs(p)
 	if collapsed && len(paras) > 1 {
@@ -259,7 +357,11 @@ func rationaleLines(th theme.Theme, p pendingApproval, width int, collapsed bool
 		lines = append(lines, indentWrap(para, width)...)
 	}
 	if collapsed {
-		lines = append(lines, th.MutedStyle().Render("  … ctrl+e to explain"))
+		hint := "  … ctrl+e to explain"
+		if p.amend != nil {
+			hint = "  … esc, then ctrl+e to explain"
+		}
+		lines = append(lines, th.MutedStyle().Render(hint))
 	}
 	return lines
 }

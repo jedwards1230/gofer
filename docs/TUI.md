@@ -81,8 +81,9 @@ shown twice; once answered, the footer returns and the badge becomes visible
 again. It reads as a confirm prompt — a rule, an attributed `<tool> command`
 header, the call's own description and body, a plain-English rationale, the
 question, and the action row, keyed `a`/`d`/`r` (`r` toggles remember, `1`/`2`
-alias allow/deny), `ctrl+e` explains (read-only — see below), `esc` dismisses
-without answering (the request stays pending; a re-attach re-surfaces it):
+alias allow/deny), `tab` amends the call before allowing and `ctrl+e` explains
+why it was gated (read-only — both below), `esc` dismisses without answering
+(the request stays pending; a re-attach re-surfaces it):
 
 ```
  ────────────────────────────────────────────────
@@ -109,7 +110,7 @@ without answering (the request stays pending; a re-attach re-surfaces it):
  Do you want to proceed?
    1. [a] Yes   2. [d] No   ·   [r] remember: off
 
- esc cancel · ctrl+e explain · session 0192a1b2-…
+ tab amend · esc cancel · ctrl+e explain · session 0192a1b2-…
 ```
 
 The header's attribution clause is omitted entirely for an un-attributed call
@@ -168,14 +169,53 @@ collapses to its opening paragraph plus a muted `… ctrl+e to explain`. The
 header, the call's body, the question, the action row, and the hint line are
 **never** collapsed. Set the key to `0` to never collapse at all.
 
+**`Tab` — amend the call before allowing — what ships.** `Tab` opens an inline
+editor prefilled with the gated call's command body (the same
+`command`/`cmd`/`script`/`file_path`/`path` value the prompt displays), in
+place of the decision row; the header, attribution, body, and rationale stay
+above it. `ctrl+s` approves the EDITED call, `esc` returns to the prompt with
+the request still pending and the call untouched, `enter` inserts a line
+break, and every other key edits — `a`/`d`/`r`/`1`/`2` type characters rather
+than answering, which is the only sane behavior for a text field. Within a
+line the app's ordinary text keymap applies (word motion, `ctrl+a`/`ctrl+e`,
+`ctrl+w`/`ctrl+u`/`ctrl+k`); `←`/`→` cross line boundaries and `↑`/`↓` move
+between lines. The visible editor is capped by the same
+`tui.approval_body_lines` budget as the body, but it SCROLLS to keep the
+cursor line in view rather than truncating it away. A call whose spec carries
+no command-ish key (a structured edit payload, a search query object) has
+nothing sensible to edit, so `Tab` there is a no-op with a status note saying
+so.
+
+Two properties of an amend are load-bearing, and the editor states both on
+screen rather than burying them here:
+
+- **An amended call is NOT re-run through the permission rules.** The SDK
+  substitutes the replacement input into the call *after* the guard already
+  evaluated the model's original arguments (`loop.awaitApproval`) — approving
+  an edit is a deliberate human override, and the prompt says exactly that in
+  the warn style, never anything implying the edit was examined.
+- **A remembered amend pins the EDITED call.** The SDK substitutes the input
+  *before* calling `Grant`, so `r` + `Tab` + `ctrl+s` makes the command you
+  typed the standing grant, not the one the model proposed. The warning adds
+  that sentence whenever remember is on.
+
+The reply carries the call's **full original input** with only the edited key
+replaced (`tui.Model.AmendedInput`) — `event.PermissionReply.Input` is
+substituted wholesale, so a reply carrying just the command would erase every
+other argument (a `timeout`, a working directory). The same replacement input
+crosses every path a plain verdict does: in-process (`tuibridge`), over the
+daemon wire (`permission.reply`'s optional `input` member — `omitempty`, so a
+plain allow is byte-identical to before amend existed), through the router's
+worker hop, and from a pure ACP client answering with
+`{"outcome":"amended","optionId":…,"rawInput":…}`.
+
 **Richer provenance — what remains backlog.** The **gating hook** that raised
 the request (e.g. `PreToolUse:Bash`) and a copy-paste **override hint**
 carrying its `[plugin:x]` provenance both need fields the permission request
-doesn't carry yet. One affordance still rides the action row unadvertised —
-`Tab` to amend the call before allowing — which needs a new SDK
-permission-outcome variant (an amended-input reply) before the TUI can offer
-it; see the agent-sdk-go design backlog. The key is not advertised on the
-prompt until its implementation lands.
+doesn't carry yet — they are the last two provenance items still missing, and
+neither key is advertised on the prompt until it lands. Both action-row
+affordances now ship: `Tab` amends (SDK `PermissionOutcomeAmended`) and
+`ctrl+e` explains (SDK `session/explain_permission`).
 
 **Remember-as-rule** — a grant never widens silently: the prompt offers
 exact / prefix / broad patterns, but dangerous commands are force-downgraded

@@ -1104,8 +1104,26 @@ func (d *Daemon) requestPermissionFromPeers(ctx context.Context, sessionID strin
 	}
 }
 
+// answeredOptionID returns the [acp.PermissionOption] id an answered outcome
+// chose, and false for a non-answer (a cancellation, or an outcome variant
+// this daemon does not model). An "amended" outcome answers exactly like a
+// "selected" one — the chosen option's kind still decides allow/deny and
+// remember — and differs only in the replacement input riding along, which
+// [acp.ToPermissionReply] projects onto the reply for the caller.
+func answeredOptionID(outcome acp.PermissionOutcome) (string, bool) {
+	switch o := outcome.(type) {
+	case acp.PermissionOutcomeSelected:
+		return o.OptionID, true
+	case acp.PermissionOutcomeAmended:
+		return o.OptionID, true
+	default:
+		return "", false
+	}
+}
+
 // askPeerPermission sends one session/request_permission request to pr and, on
-// a "selected" answer, routes it into the session's gate — the same call-id
+// a "selected" or "amended" answer, routes it into the session's gate — the
+// same call-id
 // routing the gofer-native permission.reply path uses (see handlePermissionReply),
 // so the first answer from EITHER surface wins and the gate makes any later one a
 // no-op. A "cancelled" outcome is a non-answer (the client declined to decide,
@@ -1126,11 +1144,11 @@ func (d *Daemon) askPeerPermission(ctx context.Context, pr *peer, sessionID, cal
 		d.log.Debug("session/request_permission: decode response failed", "session", sessionID, "err", err)
 		return
 	}
-	sel, ok := resp.Outcome.(acp.PermissionOutcomeSelected)
+	optionID, ok := answeredOptionID(resp.Outcome)
 	if !ok {
 		return // a cancelled outcome is a non-answer — ignore it
 	}
-	chosen, ok := findPermissionOption(options, sel.OptionID)
+	chosen, ok := findPermissionOption(options, optionID)
 	if !ok {
 		d.log.Debug("session/request_permission: unknown optionId in answer", "session", sessionID)
 		return
@@ -1263,6 +1281,11 @@ func (d *Daemon) broadcastConfigOptionUpdate(sessionID string, notif any) {
 // [Daemon.recordPermRoute]). It is a notification (no result); an unknown id or
 // an already-resolved/gone session surfaces as an error the router logs but
 // sends nowhere.
+//
+// An amended allow's replacement input (params.input) is forwarded verbatim,
+// unexamined: the daemon is a relay here, and the SDK deliberately does not
+// re-run the guard over it — the human's edit IS the decision (see
+// loop.awaitApproval).
 func handlePermissionReply(d *Daemon, _ context.Context, _ *peer, params json.RawMessage) (any, *rpcError) {
 	var req permissionReplyParams
 	if err := json.Unmarshal(params, &req); err != nil {
@@ -1275,7 +1298,12 @@ func handlePermissionReply(d *Daemon, _ context.Context, _ *peer, params json.Ra
 	if !ok {
 		return nil, invalidParamsMsg(fmt.Sprintf("%s: no outstanding permission request with id %q", methodPermissionReply, req.ID))
 	}
-	if err := d.sup.Reply(sessionID, event.PermissionReply{ID: req.ID, Verdict: req.Verdict, Remember: req.Remember}); err != nil {
+	if err := d.sup.Reply(sessionID, event.PermissionReply{
+		ID:       req.ID,
+		Verdict:  req.Verdict,
+		Remember: req.Remember,
+		Input:    req.Input,
+	}); err != nil {
 		return nil, appError(err)
 	}
 	// Clean up eagerly, mirroring the PermissionResolved event-stream path

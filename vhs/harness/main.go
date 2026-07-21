@@ -342,7 +342,9 @@ func (s *vhsSupervisor) SetModel(context.Context, string, string) error { return
 
 func (s *vhsSupervisor) SetEffort(context.Context, string, string) error { return nil }
 
-func (s *vhsSupervisor) Reply(context.Context, string, string, bool, bool) error { return nil }
+func (s *vhsSupervisor) Reply(context.Context, string, string, tui.PermissionDecision) error {
+	return nil
+}
 
 // ExplainPermission answers with a canned rationale: no tape drives ctrl+e
 // (these scenes are about the command panel), and a scene that later does
