@@ -67,14 +67,16 @@ func (s *Supervisor) SubscribeLive(ctx context.Context, sessionID string) (*even
 }
 
 // Interrupt cancels sessionID's in-flight turn by forwarding session/cancel to
-// its worker — a notification, per ACP. The bounded context keeps a wedged
-// worker socket from blocking the handler.
+// its worker — a notification, per ACP.
 //
-// ctx is read exactly once, by the admission check below; the write runs under
-// an owned bound (see [wireCallCtx]). Interrupt is the likeliest trigger for
-// that hazard in practice — Ctrl-C then quit cancels the peer request that
-// carried the session/cancel — and borrowing here would have let the quit
-// destroy the router's link to a still-healthy worker.
+// ctx is read exactly once, by the admission check below; the write's lifetime
+// is owned by [daemon.Client.Notify], which takes no context and derives its own
+// bound (see clientWriteTimeout) so a wedged worker socket cannot block the
+// handler AND a caller cancellation cannot tear the shared worker link down.
+// Interrupt is the likeliest trigger for that hazard in practice — Ctrl-C then
+// quit cancels the peer request that carried the session/cancel — and borrowing
+// its ctx for the write would have let the quit destroy the router's link to a
+// still-healthy worker.
 func (s *Supervisor) Interrupt(ctx context.Context, sessionID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -83,9 +85,7 @@ func (s *Supervisor) Interrupt(ctx context.Context, sessionID string) error {
 	if !ok {
 		return fmt.Errorf("router: interrupt %s: %w", sessionID, ErrNotLive)
 	}
-	cctx, cancel := wireCallCtx()
-	defer cancel()
-	if err := h.client.Notify(cctx, acp.MethodSessionCancel, acp.CancelNotification{SessionID: sessionID}); err != nil {
+	if err := h.client.Notify(acp.MethodSessionCancel, acp.CancelNotification{SessionID: sessionID}); err != nil {
 		return fmt.Errorf("router: interrupt %s: %w", sessionID, err)
 	}
 	return nil
@@ -127,24 +127,23 @@ func (s *Supervisor) SetModel(ctx context.Context, sessionID, model string) erro
 }
 
 // Reply answers a pending permission request by forwarding permission.reply to
-// the owning worker as a bare notification. It takes no context in the interface
-// signature, so it derives a BOUNDED one from context.Background — a wedged
-// worker socket must not block the reply forever. The op carries no session id
-// (the worker resolves the request by call id at its own gate), but the router
-// still looks the handle up by sessionID to reach the right worker's connection.
+// the owning worker as a bare notification. The write's lifetime is owned by
+// [daemon.Client.Notify], which takes no context and derives its own bound (see
+// clientWriteTimeout), so a wedged worker socket cannot block the reply forever.
+// The op carries no session id (the worker resolves the request by call id at
+// its own gate), but the router still looks the handle up by sessionID to reach
+// the right worker's connection.
 func (s *Supervisor) Reply(sessionID string, op event.PermissionReply) error {
 	h, ok := s.get(sessionID)
 	if !ok {
 		return fmt.Errorf("router: reply %s: %w", sessionID, ErrNotLive)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), replyCallTimeout)
-	defer cancel()
 	params := struct {
 		ID       string        `json:"id"`
 		Verdict  event.Verdict `json:"verdict"`
 		Remember bool          `json:"remember,omitempty"`
 	}{ID: op.ID, Verdict: op.Verdict, Remember: op.Remember}
-	if err := h.client.Notify(ctx, methodPermissionReply, params); err != nil {
+	if err := h.client.Notify(methodPermissionReply, params); err != nil {
 		return fmt.Errorf("router: reply %s: %w", sessionID, err)
 	}
 	return nil

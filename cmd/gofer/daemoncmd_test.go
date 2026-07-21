@@ -348,7 +348,7 @@ func TestArchiveRunningSessionTellsUserToKillFirst(t *testing.T) {
 
 	// Unblock the turn so the daemon-side goroutine settles cleanly before
 	// the httptest server (and its supervisor) tear down.
-	if err := c.Notify(ctx, "session/cancel", map[string]string{"sessionId": sess.SessionID}); err != nil {
+	if err := c.Notify("session/cancel", map[string]string{"sessionId": sess.SessionID}); err != nil {
 		t.Fatalf("session/cancel: %v", err)
 	}
 	<-promptDone

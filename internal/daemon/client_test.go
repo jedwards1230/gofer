@@ -119,7 +119,7 @@ func TestClientArchiveRunningRejected(t *testing.T) {
 		t.Errorf("archive-while-running message = %q, want it to mention %q", callErr.Message, "running")
 	}
 
-	if err := c.Notify(context.Background(), acp.MethodSessionCancel, acp.CancelNotification(sess)); err != nil {
+	if err := c.Notify(acp.MethodSessionCancel, acp.CancelNotification(sess)); err != nil {
 		t.Fatalf("session/cancel: %v", err)
 	}
 	if err := <-promptDone; err != nil {

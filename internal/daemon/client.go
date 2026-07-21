@@ -10,9 +10,28 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/coder/websocket"
 )
+
+// clientWriteTimeout bounds a single request/notification frame write on the
+// shared client connection. It exists for the SAME reason daemon's
+// [relayWriteTimeout] and router's wireCallTimeout do, and closes the SAME
+// footgun #133 fixed by hand: coder/websocket's Write registers a
+// context.AfterFunc(ctx, …c.close()), so cancelling the context handed to a
+// write destroys the WHOLE connection, not just that write. This Client's
+// connection is a LONG-LIVED link SHARED by every session a daemonbridge or
+// router drives over it, so a write that borrowed one caller's per-request
+// context would let that caller hanging up mid-write tear the shared link down
+// for everyone.
+//
+// The write path therefore OWNS its context — see [Client.writeJSON], which
+// derives its bound from c.ctx (cancelled only by [Client.Close], when tearing
+// the connection down IS correct) and takes NO caller context at all. A healthy
+// frame writes in microseconds, so 5s is orders of magnitude of headroom for a
+// slow-but-live socket while still bounding a stalled-but-open one.
+const clientWriteTimeout = 5 * time.Second
 
 // ErrNoDaemon indicates [Dial] could not reach ANY daemon at addr — refused,
 // timed out, or nothing listening — as distinct from a daemon that IS running
@@ -299,10 +318,19 @@ func (c *Client) Done() <-chan struct{} { return c.done }
 
 // Call sends a JSON-RPC request for method with params and blocks for its
 // matching response, returning the raw result on success or a *[CallError] for
-// a JSON-RPC error reply. ctx cancellation unregisters the pending call and
-// returns ctx.Err() — the daemon may still be processing the request server
-// side (Call has no way to abort it short of closing the connection or, for
-// session/prompt specifically, sending session/cancel).
+// a JSON-RPC error reply.
+//
+// ctx governs ONLY the wait for the response, never the request write. This
+// split is the structural safety property (see [clientWriteTimeout]): the frame
+// write runs under a context the write path owns, so a caller cancelling ctx —
+// even a per-peer request context borrowed from an unrelated session — cannot
+// reach, and therefore cannot close, this shared connection. The worst a
+// cancelled ctx can do is unregister THIS pending call and return ctx.Err()
+// early; the daemon may still be processing the request server side (Call has no
+// way to abort it short of closing the connection or, for session/prompt
+// specifically, sending session/cancel). This mirrors [peer.request], which
+// writes under the daemon's own context and consults its caller ctx only for the
+// response wait.
 func (c *Client) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	id := atomic.AddInt64(&c.idc, 1)
 	idJSON, err := json.Marshal(id)
@@ -331,7 +359,7 @@ func (c *Client) Call(ctx context.Context, method string, params any) (json.RawM
 		Method  string `json:"method"`
 		Params  any    `json:"params,omitempty"`
 	}{jsonrpcVersion, id, method, params}
-	if err := c.writeJSON(ctx, req); err != nil {
+	if err := c.writeJSON(req); err != nil {
 		return nil, fmt.Errorf("daemon client: write %s: %w", method, err)
 	}
 
@@ -351,30 +379,51 @@ func (c *Client) Call(ctx context.Context, method string, params any) (json.RawM
 	}
 }
 
-// Notify sends a JSON-RPC notification (no id, no response expected) — used
-// for session/cancel, the one notification gofer's CLI sends.
-func (c *Client) Notify(ctx context.Context, method string, params any) error {
+// Notify sends a JSON-RPC notification (no id, no response expected) — used for
+// session/cancel and permission.reply.
+//
+// It takes NO context, and that is deliberate structural safety, not an
+// oversight. A notification is a pure fire-and-forget write: there is no
+// response to wait for, so the ONLY role a context could play here is the
+// write's own lifetime — which MUST be owned by the write path, never borrowed
+// from a caller (see [clientWriteTimeout] and [Client.writeJSON]). Removing the
+// parameter is what makes the borrowed-context mistake non-EXPRESSIBLE for
+// notifications: there is simply nothing to pass the wrong ctx to, so the
+// incorrect version does not compile rather than merely failing review.
+func (c *Client) Notify(method string, params any) error {
 	n := struct {
 		JSONRPC string `json:"jsonrpc"`
 		Method  string `json:"method"`
 		Params  any    `json:"params,omitempty"`
 	}{jsonrpcVersion, method, params}
-	if err := c.writeJSON(ctx, n); err != nil {
+	if err := c.writeJSON(n); err != nil {
 		return fmt.Errorf("daemon client: notify %s: %w", method, err)
 	}
 	return nil
 }
 
-// writeJSON marshals v and writes it as a single WebSocket text frame, holding
-// writeMu for the duration so two goroutines calling Call/Notify concurrently
-// can never interleave two frames' bytes — mirroring [peer.writeJSON].
-func (c *Client) writeJSON(ctx context.Context, v any) error {
+// writeJSON marshals v and writes it as a single WebSocket text frame under a
+// context the write path OWNS — never a caller's. It holds writeMu for the
+// duration so two goroutines calling Call/Notify concurrently can never
+// interleave two frames' bytes (mirroring [peer.writeJSON]).
+//
+// Taking no caller context is the load-bearing safety property (see
+// [clientWriteTimeout] and [peer.request]'s matching note): the write's bound is
+// derived from c.ctx, so a [Client.Close] promptly unblocks an in-flight write —
+// the connection is going down regardless — while an ordinary caller's
+// cancellation can neither reach nor, via coder/websocket's close-on-cancel,
+// destroy this shared link. With no ctx parameter there is nothing to pass the
+// wrong thing to, so the borrowed-context mistake #133 fixed by hand cannot be
+// reintroduced at this seam.
+func (c *Client) writeJSON(v any) error {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	ctx, cancel := context.WithTimeout(c.ctx, clientWriteTimeout)
+	defer cancel()
 	return c.conn.Write(ctx, websocket.MessageText, data)
 }
 

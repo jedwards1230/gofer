@@ -498,7 +498,7 @@ func TestUpgradeMidTurnMixedBinaryVersions(t *testing.T) {
 
 	// ---- THE OLD WORKER FINISHES ITS MID-FLIGHT TURN, ON THE OLD BINARY.
 
-	if err := client.Notify(ctx, "permission.reply", map[string]any{
+	if err := client.Notify("permission.reply", map[string]any{
 		"id": callID, "verdict": string(event.VerdictAllow),
 	}); err != nil {
 		t.Fatalf("permission.reply: %v", err)
