@@ -1,6 +1,10 @@
-# CI: fast build/vet/test + lint on every PR; the race detector runs only on
-# push (merges to main and release tags) so PR feedback stays fast while any
-# data race still blocks a release.
+# CI: fast build/vet/test + lint on every PR, plus the race detector on every
+# PR and on push (merges to main and release tags). gofer is a concurrency-heavy
+# repo — its whole subject is many per-session OS processes — so a data race is
+# a first-class defect that must block a PR, not merely a release. Running -race
+# on the PR lane costs extra CI minutes but is the correct trade for this repo;
+# do not gate it back to push-only without restoring PR-time race coverage some
+# other way.
 name: CI
 
 on:
@@ -40,7 +44,6 @@ jobs:
           version: v2.11
 
   race:
-    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

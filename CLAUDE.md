@@ -48,7 +48,7 @@ system (component contracts, slash commands, plugin UI);
 go build ./... && go vet ./... && go test ./...   # the CI gate
 go vet -tags workerbench ./...                     # also on the PR lane
 golangci-lint run                                  # lint, zero tolerance
-go test -race ./...                                # push/tags lane only, not PRs
+go test -race ./...                                # PR lane + push/tags
 go run ./cmd/gofer demo                            # offline faux-provider stream
 ```
 
