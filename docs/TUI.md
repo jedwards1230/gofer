@@ -59,8 +59,10 @@ carries no transcript tail — it is a roster-only projection.
 **Attach** — full transcript + input. `esc` interrupts the in-flight turn;
 `←` on an empty input backs out — to the **parent session** when the attached
 session is a subagent, otherwise to the overview (with text, it moves the
-cursor). See [Subagent sessions](#subagent-sessions-m7--ecosystem) for the
-drill-in/drill-out pair.
+cursor); `↓` on an empty input goes the other way, to the overview with this
+session's **first spawned child** selected (a no-op when it has none). See
+[Subagent sessions](#subagent-sessions-m7--ecosystem) for the drill-in/drill-out
+pair.
 
 Every screen — overview, attach's transcript, its approval prompts, and its
 command-menu/panel overlays — opens with the same two-line identity header:
@@ -292,7 +294,10 @@ and attaches into it); `→` in an **empty** dispatch bar attaches the selected
 session (with text, it edits); `esc`
 interrupts/acts on the *active* session (never "go back"); `←` in an **empty**
 input backs out to the attached session's parent, or to the overview when it has
-none (with text, it edits); `ctrl-x` kills a running
+none (with text, it edits); `↓` in an **empty** attach input returns to the
+overview with the attached session's first spawned child selected, and does
+nothing when it has no children (with text, the key belongs to the input keymap,
+not to navigation); `ctrl-x` kills a running
 session or archives a finished one; `ctrl-t` stops the selected row's subagents;
 `ctrl-c` quits. In peek, `up`/`down` move
 the selection, `enter` opens the session (or sends the reply when the `❯` input
@@ -651,6 +656,15 @@ any subagent's whole history without losing the parent context.
   case the roster renders as a root — keeps backing out to the overview. The
   roster selection follows the drill-out, so the header, the panel's session
   views, and the next `←` all agree on where you are.
+- **Drill sideways — `↓`.** `↓` on an empty attach input returns to the overview
+  with the attached session's **first spawned child** selected; with no children
+  it does nothing. This is the key the background-agents block advertises
+  ("`↓ to manage`") and it is bound so that caption is literally true: `←` goes
+  *up* to the parent, which is not where children are managed — the roster tree
+  is, since peek, attach, `ctrl-x` and `ctrl-t` all live there. The empty-input
+  guard mirrors `←`'s, but sits in the case expression rather than the body: `←`
+  has an editing meaning to fall back on and `↓` has none, so with text pending
+  the key is left to the shared input keymap instead of being claimed here.
 - **`esc` is NOT a return key — deliberately.** The issue text asked for
   "`esc`/`←` returns to parent"; `esc` on the attach screen is an established,
   tested contract (**interrupt the in-flight turn**) and it is the only

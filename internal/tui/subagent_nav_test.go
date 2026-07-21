@@ -165,6 +165,89 @@ func TestNavAttachLeftFromRootReturnsToOverview(t *testing.T) {
 	}
 }
 
+// selectedRowLabel returns the title-column label of the roster row carrying
+// the selection caret, read off the rendered frame so it asserts what a user
+// actually sees. It reports "" when no row is selected.
+func selectedRowLabel(t *testing.T, rendered string) string {
+	t.Helper()
+	for _, line := range strings.Split(rendered, "\n") {
+		runes := []rune(line)
+		if len(runes) == 0 || runes[0] != '▸' {
+			continue
+		}
+		if label, ok := rowLabel(line); ok {
+			return label
+		}
+	}
+	return ""
+}
+
+// TestNavAttachDownSelectsFirstChild is the binding the transcript's
+// background-agents block advertises — "(↓ to manage)": ↓ on an attached
+// session with an empty input returns to the roster with that session's FIRST
+// child selected, which is where children are actually managed (peek, attach,
+// ctrl-x, ctrl-t). Landing on the overview with the PARENT still selected
+// would make the caption a lie in the same way "? shortcuts" was.
+func TestNavAttachDownSelectsFirstChild(t *testing.T) {
+	sup := newFakeSup(navTree())
+	m := newTestApp(t, sup)
+
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the root
+	if got := content(m); !strings.Contains(got, "1 background agent launched") {
+		t.Fatalf("expected the attached root to advertise its child:\n%s", got)
+	}
+
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
+
+	got := content(m)
+	if !strings.Contains(got, "enter peek") {
+		t.Fatalf("expected ↓ to return to the overview, got:\n%s", got)
+	}
+	// The child row is labelled by its agent identity (see Overview.rowLabel).
+	if label := selectedRowLabel(t, got); label != "go-developer" {
+		t.Errorf("selected row = %q; want the first spawned child %q:\n%s", label, "go-developer", got)
+	}
+}
+
+// TestNavAttachDownWithoutChildrenIsNoOp is the guard on the same key: a
+// session that spawned nothing never renders the caption, so there is nothing
+// for ↓ to honor — it must stay on the attach screen rather than navigating
+// somewhere the user didn't ask for.
+func TestNavAttachDownWithoutChildrenIsNoOp(t *testing.T) {
+	sup := newFakeSup(tui.GoldenRoster())
+	m := newTestApp(t, sup)
+
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach a childless session
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
+
+	if got := content(m); strings.Contains(got, "enter peek") {
+		t.Errorf("↓ on a childless session left the attach screen:\n%s", got)
+	}
+}
+
+// TestNavAttachDownWithTextDoesNotNavigate pins the empty-input guard: ↓ is a
+// navigation key only while the input is empty. With text pending it belongs
+// to the shared input keymap — the key is not claimed here, so whatever that
+// keymap does with it (nothing today, a history/completion move tomorrow)
+// stays available, and the half-typed prompt is never dropped by a navigation
+// the user didn't intend.
+func TestNavAttachDownWithTextDoesNotNavigate(t *testing.T) {
+	sup := newFakeSup(navTree())
+	m := newTestApp(t, sup)
+
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the root (has a child)
+	m = type_(t, m, "half a prompt")
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
+
+	got := content(m)
+	if strings.Contains(got, "enter peek") {
+		t.Fatalf("↓ with text in the input navigated to the overview:\n%s", got)
+	}
+	if !strings.Contains(got, "> half a prompt▏") {
+		t.Errorf("↓ with text disturbed the input buffer:\n%s", got)
+	}
+}
+
 // TestStopAgentsKillsDescendantsOnly is the bulk stop binding: ctrl-t on the
 // selected row issues one Supervisor.Kill per DESCENDANT — the whole subtree,
 // not just the direct children — and never for the selected session itself,

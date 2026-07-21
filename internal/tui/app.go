@@ -946,8 +946,9 @@ func (a App) handlePeekKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleAttachKey handles key presses on the full attach screen: typing and
-// submitting the input, esc to interrupt, and ← to back out to the overview
-// when the input is empty.
+// submitting the input, esc to interrupt, and — with an empty input — the two
+// back-out keys: ← to this session's parent (or the overview when it has none)
+// and ↓ to the overview with its first spawned child selected.
 func (a App) handleAttachKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.Key()
 	switch {
@@ -992,6 +993,31 @@ func (a App) handleAttachKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.sess = a.sess.MoveLeft()
+		return a, nil
+
+	case key.Code == tea.KeyDown && key.Mod == 0 && a.sess.InputEmpty():
+		// The other half of the drill-out pair, and the key the transcript's
+		// background-agents block advertises: "N background agents launched (↓ to
+		// manage)". ← goes UP the tree to the parent; children are managed on the
+		// ROSTER (peek, attach, ctrl-x, ctrl-t all live there), so ↓ returns to
+		// the overview with this session's FIRST child already selected — the
+		// caption names a key that really does land on the agents it counted.
+		//
+		// The empty-input guard rides the case expression rather than the body,
+		// unlike the bare-← case above: ← has an editing meaning of its own to
+		// fall back on (move the cursor), ↓ has none, so a non-empty input must
+		// leave the key to the shared input keymap below instead of claiming it
+		// here and swallowing whatever that keymap grows to do with it.
+		children := a.over.Children(a.sessID)
+		if len(children) == 0 {
+			// Nothing was ever advertised for a childless session (the block only
+			// renders when there ARE children), so there is nothing to honor —
+			// navigating anyway would be a surprise, not a shortcut.
+			return a, nil
+		}
+		a.over.selectedID = children[0].ID
+		a.scr = screenOverview
+		a.scroll = 0
 		return a, nil
 
 	case key.Code == tea.KeyPgUp:
