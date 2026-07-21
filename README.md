@@ -119,6 +119,10 @@ stream, so scripts and CI never hit the TUI.
 | M7 · ecosystem | MCP servers, SKILL.md skills, out-of-process plugins, subagents first-class |
 | M8 · auto + polish | auto mode with reviewer pipeline, CC-asset import, multi-machine discovery |
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for build/test/lint commands and the PR workflow.
+
 ## License
 
 [Apache-2.0](LICENSE). See [NOTICE](NOTICE) for attribution requirements.
