@@ -37,6 +37,12 @@ var (
 	errTestSetEffortFailed = errors.New("daemon refused the effort")
 )
 
+// attachedSessionID is the first row of the shared roster fixtures
+// (modelSelectRoster / GoldenRoster) — the session ↑Right or a single →
+// attaches to. Declared once for the whole tui_test package: the hot-swap
+// assertions here and the user-command send assertions both name it.
+const attachedSessionID = "0192a1b2-app0-7000-8000-000000000001"
+
 // TestThinkingArgAttachedHotSwaps is the core string-form path: `/thinking
 // high` on an attached session persists the default AND changes the running
 // session, without ever opening the picker.
