@@ -563,9 +563,30 @@ func (o Overview) dispatch(width int, hide bool) []string {
 		line = "❯ " + o.input.Render("▏")
 	}
 
-	hint := o.theme.MutedStyle().Render("enter peek · → attach · tab toggle view · ctrl-x kill · ? shortcuts")
+	hint := o.theme.MutedStyle().Render(o.hintText())
 
 	return []string{rule, truncate(line, width), truncate(hint, width)}
+}
+
+// hintText is the dispatch bar's one-line shortcut hint. A roster holding any
+// subagent (see [Overview.layout]) swaps the trailing "? shortcuts" entry for
+// the bulk stop binding; an ordinary roster's hint is byte-identical to what it
+// has always been, the same "a tree affordance costs a flat roster nothing"
+// rule the tally column and the blocked gutter follow.
+//
+// The swap is a WIDTH decision, not a taste one: the flat hint already spends
+// 67 of the 80 cells this line is budgeted at, and "ctrl-t stop agents" needs
+// 18 more, so something has to yield. "? shortcuts" is the entry that yields
+// because it is the only one naming a key nothing actually handles — "?" falls
+// through to the dispatch bar and types a literal question mark (see
+// [App.handleOverviewKey]) — while ctrl-t names a real, and destructive,
+// binding an operator needs to be able to find.
+func (o Overview) hintText() string {
+	const base = "enter peek · → attach · tab toggle view · ctrl-x kill"
+	if o.layout().tree {
+		return base + " · ctrl-t stop agents"
+	}
+	return base + " · ? shortcuts"
 }
 
 // humanAge renders a duration as a compact age string ("now", "5m", "3h",
@@ -587,12 +608,6 @@ func humanAge(d time.Duration) string {
 // "2 minutes", "3 hours", "1 day") for the peek card's status line, pluralizing
 // the unit.
 func humanDuration(d time.Duration) string {
-	plural := func(n int, unit string) string {
-		if n == 1 {
-			return fmt.Sprintf("%d %s", n, unit)
-		}
-		return fmt.Sprintf("%d %ss", n, unit)
-	}
 	switch {
 	case d < time.Minute:
 		return "just now"
@@ -603,6 +618,16 @@ func humanDuration(d time.Duration) string {
 	default:
 		return plural(int(d.Hours()/24), "day")
 	}
+}
+
+// plural renders a count with its unit, pluralized by adding an "s" past one
+// ("1 subagent", "3 subagents") — shared by [humanDuration]'s long-form units
+// and the bulk-stop status note (see [App.handleOverviewKey]).
+func plural(n int, unit string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, unit)
+	}
+	return fmt.Sprintf("%d %ss", n, unit)
 }
 
 // pad returns lines extended with blank lines to exactly n rows (never

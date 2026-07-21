@@ -43,7 +43,20 @@ const (
 	itemError
 	itemApproval
 	itemApprovalResolved
+	// itemBackgroundAgents is the block naming the subagent sessions this
+	// session spawned. Unlike every kind above it, no event produces it: a
+	// subagent is a separate session with its own journal and event stream, so
+	// the children are a ROSTER fact the app composes onto a render-local copy
+	// of the model (see [Model.WithBackgroundAgents]), never an ingested one.
+	itemBackgroundAgents
 )
+
+// spawnedAgent is one child session named by an [itemBackgroundAgents] block:
+// the name to show it under and the agent identity it runs as.
+type spawnedAgent struct {
+	name  string
+	agent string
+}
 
 // item is one entry in the transcript. Tool-only fields are zero on every
 // other kind.
@@ -56,6 +69,17 @@ type item struct {
 	toolInput  string
 	toolResult string
 	toolErr    bool
+
+	// toolAgent is itemTool-only: the agent id that ISSUED the call, carried by
+	// event.ToolCallStarted.Agent (SDK v0.17.0) and stamped by the supervisor
+	// from CreateOptions.Agent. "" — the whole single-agent world, and any
+	// pre-v0.17.0 daemon — renders the un-attributed block byte-for-byte as
+	// before (see [Model.renderToolLines]).
+	toolAgent string
+
+	// spawned is itemBackgroundAgents-only: the child sessions this session
+	// fanned out to, in roster order.
+	spawned []spawnedAgent
 
 	// approvalVerdict is itemApprovalResolved-only: the resolved
 	// event.Verdict ("allow"/"deny").
@@ -211,6 +235,12 @@ func (m Model) Ingest(e event.Event) Model {
 			kind:      itemTool,
 			toolName:  ev.Name,
 			toolInput: compactJSON(ev.Input),
+			// The attribution rides the ITEM, not just the per-call toolAgents
+			// map below: the map is dropped on ToolCallFinished (it exists to
+			// correlate a gated call to its approval prompt, a window that closes
+			// when the call runs), while the transcript block keeps naming its
+			// source for as long as the transcript exists.
+			toolAgent: ev.Agent,
 		})
 		m.toolIndex[ev.ID] = idx
 		if ev.Agent != "" {
@@ -412,6 +442,59 @@ func (m Model) ClearApprovalExplaining() Model {
 func (m Model) WithApprovalBodyLines(n int) Model {
 	m.approvalBodyLines = n
 	return m
+}
+
+// WithBackgroundAgents returns a copy of the model whose transcript ends with
+// a block naming the child sessions this one spawned — "N background agents
+// launched (↓ to manage)", then one line per child. children with no entries
+// returns the model untouched, so a session that never fanned out renders
+// byte-for-byte as it always has.
+//
+// It is a per-render composition, not an Ingest: a subagent is a separate
+// session with its own event stream, so nothing on THIS session's stream
+// announces one (there is deliberately no agent-facing spawn tool — see
+// docs/TUI.md § "Subagent sessions"). [App.render] calls it on a render-local
+// copy with the current roster's children, exactly as it does
+// [Model.WithApprovalBodyLines], so the block tracks the poll instead of
+// accumulating a stale item per frame.
+//
+// The block sits at the TAIL of the transcript rather than at the point of
+// spawn: it is a live summary of what is running now, not a historical entry,
+// and the transcript is bottom-anchored so the tail is where a reader is
+// already looking. Appending also leaves every existing item index untouched,
+// which the pending approval's badgeIdx depends on.
+func (m Model) WithBackgroundAgents(children []SessionInfo) Model {
+	if len(children) == 0 {
+		return m
+	}
+	spawned := make([]spawnedAgent, 0, len(children))
+	for _, c := range children {
+		spawned = append(spawned, spawnedAgent{name: backgroundAgentName(c), agent: c.Agent})
+	}
+	items := make([]item, 0, len(m.items)+1)
+	items = append(items, m.items...)
+	m.items = append(items, item{kind: itemBackgroundAgents, done: true, spawned: spawned})
+	return m
+}
+
+// backgroundAgentName is the name a spawned child is listed under: its own
+// title when it has one, else its agent identity, else a short form of its id.
+// A child's title is derived from the prompt its parent handed it, so it is the
+// most specific thing available — unlike the roster row, which is read as a
+// column of siblings and so leads with the agent instead (see
+// [Overview.rowLabel]). The id fallback exists because a row with neither is
+// still a session the operator has to be able to find.
+func backgroundAgentName(s SessionInfo) string {
+	switch {
+	case s.Title != "":
+		return s.Title
+	case s.Agent != "":
+		return s.Agent
+	case len(s.ID) > 8:
+		return s.ID[:8]
+	default:
+		return s.ID
+	}
 }
 
 // approvalBodyLimit resolves the effective approval-prompt body row cap:
@@ -849,6 +932,9 @@ func (m Model) renderItemLines(it item) []string {
 		}
 		return []string{markerLine(style, m.theme.GlyphAgent, "permission "+it.approvalVerdict)}
 
+	case itemBackgroundAgents:
+		return m.renderBackgroundAgentLines(it)
+
 	default: // itemAssistantText
 		// Same empty-guard as itemAssistantReasoning above: an assistant-text
 		// item with no content yet (or that resolved empty) renders nothing
@@ -862,6 +948,30 @@ func (m Model) renderItemLines(it item) []string {
 		}
 		return styledMarkerLines(style, m.theme.GlyphAgent, it.text, plainRender)
 	}
+}
+
+// attributeHeader appends the originating-agent clause to a tool block's
+// header — "ToolName(args) · from the <agent> agent", docs/TUI.md's shape — so
+// a transcript interleaving a parent's calls with its subagents' reads
+// unambiguously. An empty agent returns header untouched, which is the whole
+// fallback contract: a single-agent session (and any daemon predating the
+// SDK's Agent field) renders exactly the bytes it rendered before attribution
+// existed, with no placeholder standing in for the missing id.
+//
+// A multi-line header — a heredoc or multi-statement shell command, which
+// [summarizeToolInput] passes through verbatim — takes the clause on its FIRST
+// physical line. The attribution answers "who is running this?", which a
+// reader needs at the top of the block, not buried at the end of a script.
+func attributeHeader(header, agent string) string {
+	if agent == "" {
+		return header
+	}
+	clause := " · from the " + agent + " agent"
+	first, rest, multiline := strings.Cut(header, "\n")
+	if !multiline {
+		return header + clause
+	}
+	return first + clause + "\n" + rest
 }
 
 // renderToolLines renders a tool call as a collapsed tree block: a header
@@ -885,6 +995,7 @@ func (m Model) renderToolLines(it item) []string {
 	if summary := summarizeToolInput(it.toolInput); summary != "" {
 		header = fmt.Sprintf("%s(%s)", it.toolName, summary)
 	}
+	header = attributeHeader(header, it.toolAgent)
 	// A multi-line command (a heredoc, an inline multi-statement script) is a
 	// literal "\n" inside summary, not a rare shape for a bash tool call —
 	// styledMarkerLines splits it the same way the transcript's own text
@@ -916,6 +1027,38 @@ func (m Model) renderToolLines(it item) []string {
 	}
 	if extra := len(resultLines) - shown; extra > 0 {
 		lines = append(lines, styleBody(fmt.Sprintf("     … +%d lines", extra)))
+	}
+	return lines
+}
+
+// renderBackgroundAgentLines renders the background-agents block: a header
+// counting the sessions this one spawned, then one tree-indented line per
+// child naming it and the agent it runs as. It reuses the tool block's "   └ "
+// / "     " body indent so a reader recognizes the shape without learning a
+// second one.
+//
+// The marker is accent-styled, not one of the state colors: this block reports
+// no state of its own (its children each carry their own, on their own roster
+// rows), it is a navigational affordance — which is what the "(↓ to manage)"
+// caption points at, the roster being where a child is stopped or drilled into.
+func (m Model) renderBackgroundAgentLines(it item) []string {
+	if len(it.spawned) == 0 {
+		return nil
+	}
+	header := fmt.Sprintf("%s launched (↓ to manage)", plural(len(it.spawned), "background agent"))
+	lines := []string{markerLine(m.theme.AccentStyle(), m.theme.GlyphAgent, header)}
+	for i, s := range it.spawned {
+		label := s.name
+		// A child whose name IS its agent id (an untitled session — see
+		// backgroundAgentName) states it once, not twice.
+		if s.agent != "" && s.agent != s.name {
+			label += " · " + s.agent
+		}
+		indent := "     "
+		if i == 0 {
+			indent = "   └ "
+		}
+		lines = append(lines, indent+label)
 	}
 	return lines
 }

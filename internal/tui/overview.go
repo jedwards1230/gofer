@@ -169,6 +169,80 @@ func (o Overview) Selected() (SessionInfo, bool) {
 	return SessionInfo{}, false
 }
 
+// SessionByID returns the roster row with that id, or false when the snapshot
+// holds no such session. It is the lookup behind the attach screen's
+// drill-out (← from a child returns to its parent — see [App.parentOf]): the
+// roster is the only place the client learns a session's parent link, and a
+// polled snapshot can legitimately be missing the row it names.
+func (o Overview) SessionByID(id string) (SessionInfo, bool) {
+	if id == "" {
+		return SessionInfo{}, false
+	}
+	for _, s := range o.sessions {
+		if s.ID == id {
+			return s, true
+		}
+	}
+	return SessionInfo{}, false
+}
+
+// Children returns the roster rows spawned directly by id — one level, not the
+// whole subtree — in the same depth-first tree order the roster renders (see
+// [byTree]). The attach transcript's background-agents block lists them (see
+// [Model.WithBackgroundAgents]); a session with no children yields nil, which
+// is what makes that block absent rather than empty.
+func (o Overview) Children(id string) []SessionInfo {
+	if id == "" {
+		return nil
+	}
+	var out []SessionInfo
+	for _, s := range byTree(o.sessions) {
+		if s.ParentID == id && s.ID != id {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// Descendants returns the ids of every session BELOW id in the subagent tree —
+// children, grandchildren, and so on — in depth-first order, excluding id
+// itself. It is what the roster's bulk stop binding kills (one
+// [Supervisor.Kill] per id; see [App.doKillTree]), which is exactly why the
+// parent is not in the list: "stop the agents this session fanned out" must not
+// terminate the session the operator is supervising from.
+//
+// Like [byTree] it is cycle-safe (a visited set bounds the walk) and tolerates
+// a parent link naming a row absent from the polled snapshot: an unreachable
+// row simply isn't a descendant of anything on screen.
+func (o Overview) Descendants(id string) []string {
+	if id == "" {
+		return nil
+	}
+	// Built off the tree ordering rather than the raw snapshot so the kill order
+	// matches the order the roster shows the rows in.
+	children := make(map[string][]string, len(o.sessions))
+	for _, s := range byTree(o.sessions) {
+		if s.ParentID != "" && s.ParentID != s.ID {
+			children[s.ParentID] = append(children[s.ParentID], s.ID)
+		}
+	}
+	visited := map[string]bool{id: true}
+	var out []string
+	var walk func(parent string)
+	walk = func(parent string) {
+		for _, child := range children[parent] {
+			if visited[child] {
+				continue
+			}
+			visited[child] = true
+			out = append(out, child)
+			walk(child)
+		}
+	}
+	walk(id)
+	return out
+}
+
 // TypeRune inserts r into the dispatch-bar buffer at the cursor.
 func (o Overview) TypeRune(r rune) Overview {
 	o.input = o.input.InsertRune(r)
