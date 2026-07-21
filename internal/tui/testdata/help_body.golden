@@ -1,0 +1,11 @@
+Commands
+  /config                          View and edit settings (/cfg)
+  /help                            List commands and keys
+  /model [id]                      Pick the active/default model
+  /new                             Start a new session and attach to it
+  /quit                            Quit gofer (/exit)
+  /resume [session-id]             Reopen a session from disk
+  /stats                           Show session lifecycle and roster-wide totals
+  /status                          Show session, cwd, and provider status
+  /thinking [low|medium|high|off]  Set the reasoning effort for this session (/…
+↓ 68 more

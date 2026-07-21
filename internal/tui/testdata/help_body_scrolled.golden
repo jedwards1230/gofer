@@ -1,0 +1,11 @@
+  /usage                           Show this session's token and cost consumpti…
+  /yolo [on|off]                   Toggle guardrails for new sessions
+Global
+  ctrl+c  Quit gofer
+  ctrl+y  Toggle guardrails for new sessions (same as /yolo)
+Roster
+  ↑/↓        Move the roster selection
+  →          Attach the selected session (empty dispatch bar)
+  enter      Peek the selected session, or run what's typed
+  tab        Switch flat / grouped roster view
+↑ 10 more · ↓ 58 more

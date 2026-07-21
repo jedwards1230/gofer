@@ -577,10 +577,11 @@ func (o Overview) dispatch(width int, hide bool) []string {
 // The swap is a WIDTH decision, not a taste one: the flat hint already spends
 // 67 of the 80 cells this line is budgeted at, and "ctrl-t stop agents" needs
 // 18 more, so something has to yield. "? shortcuts" is the entry that yields
-// because it is the only one naming a key nothing actually handles — "?" falls
-// through to the dispatch bar and types a literal question mark (see
-// [App.handleOverviewKey]) — while ctrl-t names a real, and destructive,
-// binding an operator needs to be able to find.
+// because it is the only one with a second way in: "?" on an empty dispatch bar
+// opens the /help panel (see [App.handleOverviewKey]), and so does typing
+// /help, which the autocomplete popup offers on a bare "/". ctrl-t has no such
+// alternative and names a destructive binding an operator needs to be able to
+// find.
 func (o Overview) hintText() string {
 	const base = "enter peek · → attach · tab toggle view · ctrl-x kill"
 	if o.layout().tree {

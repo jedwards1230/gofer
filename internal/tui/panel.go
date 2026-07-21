@@ -37,6 +37,7 @@ const (
 	panelUsage
 	panelStats
 	panelResume
+	panelHelp
 )
 
 // panelTab pairs a commandPanelTab with its display label.
@@ -60,6 +61,7 @@ var panelTabs = []panelTab{
 	{panelUsage, "Usage"},
 	{panelStats, "Stats"},
 	{panelResume, "Resume"},
+	{panelHelp, "Help"},
 }
 
 // panelHeight is the fixed number of rows the command panel occupies in the
@@ -124,13 +126,18 @@ type commandPanel struct {
 	// three inputs as model — which is what lets it gate its rows on the same
 	// active model the Model tab marks with ✓.
 	effort effortPickerView
+
+	// help is the Help tab's state (help.go), holding the live command
+	// registry App handed the panel at open time plus its own scroll offset.
+	help helpView
 }
 
 // newCommandPanel returns a panel open on tab, rendering through th, with env
 // and the current session snapshot (nil on the overview) captured at open
 // time for the Status/Usage tabs to read, now and roster for the Stats tab,
-// and the Config/Model tabs' working state loaded from env at the same time.
-func newCommandPanel(th theme.Theme, tab commandPanelTab, env CommandEnv, sess *SessionInfo, defaultModel string, now time.Time, roster []SessionInfo) commandPanel {
+// the Config/Model tabs' working state loaded from env at the same time, and
+// reg — App's live command registry — for the Help tab to render from.
+func newCommandPanel(th theme.Theme, tab commandPanelTab, env CommandEnv, sess *SessionInfo, defaultModel string, now time.Time, roster []SessionInfo, reg Registry) commandPanel {
 	return commandPanel{
 		theme:        th,
 		active:       tab,
@@ -143,6 +150,7 @@ func newCommandPanel(th theme.Theme, tab commandPanelTab, env CommandEnv, sess *
 		model:        newModelPickerView(th, env, sess, defaultModel),
 		resume:       newResumePickerView(th, now, roster),
 		effort:       newEffortPickerView(th, env, sess, defaultModel),
+		help:         newHelpView(th, reg),
 	}
 }
 
@@ -173,6 +181,8 @@ func (p commandPanel) handleKey(msg tea.KeyPressMsg) commandPanel {
 		p.resume = p.resume.handleKey(msg)
 	case panelEffort:
 		p.effort = p.effort.handleKey(msg)
+	case panelHelp:
+		p.help = p.help.handleKey(msg)
 	}
 	return p
 }
@@ -309,6 +319,8 @@ func (p commandPanel) footerText() string {
 		return "Type to filter · ↑/↓ to browse · Enter to resume · Esc to clear"
 	case panelEffort:
 		return "↑/↓ to choose · Enter to select · Esc to close"
+	case panelHelp:
+		return "↑/↓ to scroll · ←/→ to switch tabs · esc to close"
 	}
 	return "←/→ to switch tabs · esc to close"
 }
@@ -347,6 +359,8 @@ func (p commandPanel) body(width, bodyRows int) string {
 		return p.resume.View(width, bodyRows)
 	case panelEffort:
 		return p.effort.View(width, bodyRows)
+	case panelHelp:
+		return p.help.View(width, bodyRows)
 	}
 	return ""
 }

@@ -1,0 +1,24 @@
+
+gofer v0.3.0
+claude-sonnet-5 · ~/orchestration
+1 awaiting input · 1 working · 0 completed
+
+↓ 2 more
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+Status  Config  Model  Thinking  Usage  Stats  Resume  [Help]
+────────────────────────────────────────────────────────────────────────────────
+Commands
+  /config                          View and edit settings (/cfg)
+  /help                            List commands and keys
+  /model [id]                      Pick the active/default model
+  /new                             Start a new session and attach to it
+  /quit                            Quit gofer (/exit)
+  /resume [session-id]             Reopen a session from disk
+  /stats                           Show session lifecycle and roster-wide totals
+  /status                          Show session, cwd, and provider status
+  /thinking [low|medium|high|off]  Set the reasoning effort for this session (/…
+↓ 68 more
+↑/↓ to scroll · ←/→ to switch tabs · esc to close

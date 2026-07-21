@@ -115,9 +115,18 @@ type Session struct {
 	// provider adapters emit reasoning config only when Enabled is true.
 	Effort string `json:"effort,omitempty"`
 	// PermissionMode is the default guardrail mode for new sessions: "ask"
-	// (contain-or-ask, the default) or "yolo". Not yet consumed by
-	// [Config.Engine] — it is a settings-registry knob today; wiring it into
-	// session creation lands with /yolo (see docs/TUI.md).
+	// (contain-or-ask, the default) or "yolo" (run tools without asking, and
+	// without the sandbox). Read through [Session.Mode], which resolves the
+	// empty and unrecognized cases to the fail-safe "ask".
+	//
+	// It is deliberately NOT consumed by [Config.Engine]: the engine's
+	// vocabulary is allow/ask/deny, and its allow means "contain or ask" once
+	// [loop.RuleGuard] sees it — there is no engine verdict that spells "run it
+	// uncontained". The mode therefore selects the GUARD, not the ruleset (see
+	// internal/supervisor's sessionGuard and Config.PermissionMode), and it is
+	// applied when a session is CREATED — a live session's guard is fixed at
+	// construction by runner.Options.Guard, which the SDK exposes no way to
+	// swap.
 	PermissionMode string `json:"permission_mode,omitempty"`
 
 	// MaxSubagentDepth caps how deep a subagent session tree may nest: a root
@@ -144,6 +153,33 @@ type Session struct {
 	// e.g. one blocked on a permission, which never settles). See
 	// [Session.LoadSettleTimeout].
 	LoadSettleTimeoutMS *int `json:"load_settle_timeout_ms,omitempty"`
+}
+
+// PermissionMode is the guardrail posture a new session is created with — the
+// resolved form of [Session.PermissionMode]'s free-text config value.
+type PermissionMode string
+
+const (
+	// PermissionModeAsk is gofer's default contain-or-ask posture: an
+	// allow-matched tool call runs inside the sandbox when the host can contain
+	// it, and escalates to a human when it can't.
+	PermissionModeAsk PermissionMode = "ask"
+	// PermissionModeYolo runs every tool call that no deny rule blocks, with no
+	// human in the loop and no containment. It is the /yolo toggle's on state
+	// (docs/TUI.md) and the reason [Session.Mode] fails safe: anything that
+	// isn't literally "yolo" is ask.
+	PermissionModeYolo PermissionMode = "yolo"
+)
+
+// Mode resolves [Session.PermissionMode] to a [PermissionMode]. Unset — and
+// any value this binary doesn't recognize, e.g. a mode written by a newer
+// gofer or a typo — resolves to [PermissionModeAsk]: a guardrail knob must
+// fail toward asking, never toward running unattended.
+func (s Session) Mode() PermissionMode {
+	if PermissionMode(s.PermissionMode) == PermissionModeYolo {
+		return PermissionModeYolo
+	}
+	return PermissionModeAsk
 }
 
 // DefaultLoadSettleTimeout is [Session.LoadSettleTimeoutMS]'s default: 2s. The
@@ -563,6 +599,9 @@ func (c Config) validate() error {
 // A catch-all allow rule is seeded FIRST, so a call no config rule matches
 // resolves to allow — which the guard's [loop.RuleGuard] then routes through the
 // sandbox Container (run-contained when containable, else ask a human). The
+// [Session.PermissionMode] is NOT applied here — see its doc for why the
+// guardrail posture selects a guard rather than a ruleset.
+//
 // config's own rules are appended after; because the engine evaluates deny
 // before ask before allow, a config deny or ask rule for a given tool+specifier
 // wins over the default catch-all allow, while unmatched calls keep the
