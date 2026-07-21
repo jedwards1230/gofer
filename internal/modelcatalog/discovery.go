@@ -41,11 +41,14 @@ import (
 // discovery starts failing or starts omitting models known to exist.
 //
 // The SDK carries its own default for this parameter, and today the two values
-// agree. gofer still passes this one explicitly ([openai.WithCodexClientVersion]):
-// the agreement is a coincidence of the current release, not a contract, and the
-// choice of what version gofer claims to be is gofer's to make and to revisit
-// against gofer's own evidence — not something to inherit silently on the next
-// SDK bump.
+// agree. gofer still passes this one explicitly ([openai.WithCodexClientVersion],
+// via the [WithClientVersion] default): the agreement is a coincidence of the
+// current release, not a contract, and the choice of what version gofer claims
+// to be is gofer's to make and to revisit against gofer's own evidence — not
+// something to inherit silently on the next SDK bump. Because the two strings
+// match today, a test asserting this constant reaches the wire cannot prove
+// gofer sent it rather than the SDK filling in its identical default; that is
+// what [WithClientVersion] exists to make testable.
 const CodexClientVersion = "0.144.3"
 
 // DefaultDiscoveryTimeout bounds live discovery, including the credential
@@ -61,14 +64,15 @@ const DefaultDiscoveryTimeout = 3 * time.Second
 type Option func(*options)
 
 type options struct {
-	discover bool
-	httpc    *http.Client
-	baseURL  string
-	timeout  time.Duration
+	discover      bool
+	httpc         *http.Client
+	baseURL       string
+	timeout       time.Duration
+	clientVersion string
 }
 
 func newOptions(opts []Option) options {
-	o := options{timeout: DefaultDiscoveryTimeout}
+	o := options{timeout: DefaultDiscoveryTimeout, clientVersion: CodexClientVersion}
 	for _, fn := range opts {
 		fn(&o)
 	}
@@ -98,6 +102,24 @@ func WithDiscovery(httpc *http.Client, baseURL string) Option {
 		o.discover = true
 		o.httpc = httpc
 		o.baseURL = baseURL
+	}
+}
+
+// WithClientVersion overrides the client_version query parameter for one
+// lookup, defaulting to [CodexClientVersion]. It exists so a test can inject a
+// value distinguishable from BOTH gofer's constant and the SDK's own default
+// and then assert that value reaches the wire — which proves gofer's plumbing
+// carries the version it was handed rather than silently inheriting the SDK
+// default. Because gofer's constant and the SDK default are the same string
+// today, asserting the constant alone cannot tell those two paths apart; a
+// distinct injected value can. An empty v restores the default rather than
+// sending a blank version, since the listing REQUIRES the parameter (an empty
+// client_version is itself an HTTP 400) and a caller cannot mean "send nothing".
+func WithClientVersion(v string) Option {
+	return func(o *options) {
+		if v != "" {
+			o.clientVersion = v
+		}
 	}
 }
 
@@ -157,7 +179,7 @@ func discoverCodex(ctx context.Context, root string, o options) ([]Model, error)
 	}},
 		openai.WithHTTPClient(o.httpc),
 		openai.WithBaseURL(o.baseURL),
-		openai.WithCodexClientVersion(CodexClientVersion),
+		openai.WithCodexClientVersion(o.clientVersion),
 	)
 
 	found, err := lister.ListModels(ctx)
