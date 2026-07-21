@@ -408,6 +408,27 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 	}()
 
 	serveErr := d.Serve(ctx)
+
+	// Under --workers, DRAIN before detaching: once Serve has returned (SIGINT/
+	// SIGTERM), stop admitting new sessions and wait — bounded by the configured
+	// drain timeout — for every in-flight turn to settle on its worker, so the
+	// daemon stays attached (relaying those turns' events, §5) until they finish
+	// rather than detaching mid-turn. This is the controlled first step of the M6
+	// hot-upgrade story (§11); Close (closeSup) is the separate detach step that
+	// deliberately leaves the workers running to be re-adopted (§3). A drain
+	// timeout is not fatal — we proceed to Close, the workers keep running and are
+	// re-adopted on the next start. The in-process supervisor has no router and no
+	// detached workers, so it skips straight to Close as before. ctx is already
+	// cancelled here (Serve returned because of it), so the drain runs under its
+	// own background-derived bound.
+	if routerSup != nil {
+		drainCtx, cancelDrain := context.WithTimeout(context.Background(), cfg.Daemon.DrainTimeout())
+		if derr := routerSup.Drain(drainCtx); derr != nil {
+			logger.Warn("router drain did not fully settle before shutdown; detaching anyway (workers finish detached and are re-adopted next start)", "err", derr)
+		}
+		cancelDrain()
+	}
+
 	if cerr := closeSup(); cerr != nil && serveErr == nil {
 		serveErr = fmt.Errorf("close supervisor: %w", cerr)
 	}

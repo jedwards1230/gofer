@@ -45,6 +45,46 @@ type Config struct {
 	// TUI holds gofer's own UI preferences, as opposed to Session's
 	// new-session defaults.
 	TUI TUI `json:"tui,omitempty"`
+	// Daemon holds daemon-process (as opposed to per-session) lifecycle
+	// preferences. The zero value means "unset" — each field resolves to its own
+	// default.
+	Daemon Daemon `json:"daemon,omitempty"`
+}
+
+// Daemon holds daemon-process lifecycle preferences, distinct from Session's
+// new-session defaults: they tune the daemon itself, not the sessions it hosts.
+// The zero value is fully valid — every field resolves to a built-in default.
+type Daemon struct {
+	// DrainTimeoutMS bounds, in milliseconds, how long a `--workers` daemon's
+	// graceful shutdown waits for in-flight turns to finish settling on their
+	// workers before it detaches (see the router's Drain and cmd/gofer's
+	// serveDaemonForeground). This is the M6 hot-upgrade drain window: the daemon
+	// stops admitting new sessions and lets running turns reach idle so it stays
+	// attached — relaying their events — until they finish, rather than detaching
+	// mid-turn. On timeout the daemon detaches anyway; the detached workers keep
+	// running and are re-adopted on the next start (design §3), so the bound
+	// trades a longer clean-shutdown wait against a snappier exit. nil (unset)
+	// resolves to [DefaultDrainTimeout]; a value <= 0 also resolves to the default
+	// (a zero-length drain would defeat the purpose). See [Daemon.DrainTimeout].
+	DrainTimeoutMS *int `json:"drain_timeout_ms,omitempty"`
+}
+
+// DefaultDrainTimeout is [Daemon.DrainTimeoutMS]'s default: 30s. Long enough for
+// a typical in-flight turn to reach idle so a graceful shutdown drains cleanly,
+// short enough that a session genuinely wedged mid-turn (e.g. one blocked on a
+// permission that will never be answered during shutdown) does not hold the exit
+// open indefinitely — the daemon detaches and the worker is re-adopted next
+// start regardless.
+const DefaultDrainTimeout = 30 * time.Second
+
+// DrainTimeout resolves [Daemon.DrainTimeoutMS]'s effective value:
+// [DefaultDrainTimeout] when unset or non-positive, else the explicit
+// millisecond bound.
+func (d Daemon) DrainTimeout() time.Duration {
+	if d.DrainTimeoutMS == nil || *d.DrainTimeoutMS <= 0 {
+		return DefaultDrainTimeout
+	}
+	return time.Duration(*d.DrainTimeoutMS) * time.Millisecond
 }
 
 // Session holds the defaults a new session is created with. The zero value

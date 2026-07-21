@@ -272,6 +272,27 @@
 // two Loads (adoption's and resume's) each honor the no-double-broadcast
 // invariant.
 //
+// # Graceful drain (§11 hot-upgrade)
+//
+// [Supervisor.Drain] is the controlled first step of the daemon hot-upgrade
+// story: it flips the router into a draining state (idempotent) so [Supervisor.admit]
+// refuses a new [Supervisor.Create] with [ErrDraining], then blocks — bounded by
+// its ctx — until every live handle reports idle, reusing the SAME settle signal
+// [Supervisor.AwaitSettled] uses (each handle's settleCh, poked by its watcher on
+// the needs-input transition). Draining refuses only BRAND-NEW sessions;
+// resuming an already-live session to finish its work stays allowed (Resume does
+// not run through admit).
+//
+// Drain does NOT kill workers — it is the step BEFORE [Supervisor.Close], which
+// itself deliberately leaves detached workers running to be re-adopted (§3). The
+// sequence a graceful daemon shutdown runs is: stop serving, Drain (let in-flight
+// turns settle while still attached and relaying their events), then Close
+// (detach). On a ctx timeout Drain returns ctx.Err() and the caller proceeds to
+// Close anyway: a still-working worker finishes its turn detached and is
+// re-adopted on the next start regardless. The drain window is bounded by an
+// operator-tunable timeout (config.Daemon.DrainTimeoutMS), wired in cmd/gofer's
+// serveDaemonForeground.
+//
 // # Deliberate cuts for this slice (documented, not oversights)
 //
 //   - Refusing a PROMPT on BINARY skew — which design §6's prose describes as

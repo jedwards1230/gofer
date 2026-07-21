@@ -296,6 +296,16 @@ type Supervisor struct {
 	// guard: every Create draws a FRESH uuid, so two Creates never share an id.
 	resuming map[string]struct{}
 
+	// draining marks the router as gracefully stopping: [Supervisor.Drain] set it
+	// (idempotently), and while set [Supervisor.admit] refuses a NEW Create with
+	// [ErrDraining] so no brand-new session starts while in-flight turns finish on
+	// their existing workers. Distinct from closed — draining still routes every
+	// call to a live session (resume, prompt, reply, roster), it only stops
+	// admitting new ones — and it deliberately does NOT kill workers (Close does
+	// not either; detached workers reparent to pid 1 and are re-adopted, design
+	// §3). Guarded by mu.
+	draining bool
+
 	// pending counts admitted-but-not-yet-registered spawns, so the MaxWorkers
 	// cap covers workers that are mid-fork/handshake and not yet in workers.
 	// Without it the cap would be a plain TOCTOU check — and unlike the daemon's
@@ -954,6 +964,14 @@ func (s *Supervisor) admit() error {
 	defer s.mu.Unlock()
 	if s.closed {
 		return fmt.Errorf("router: create: %w", ErrNotLive)
+	}
+	// A draining router is stopping: refuse a NEW session (an existing one still
+	// resumes — see [ErrDraining]) so in-flight turns finish without new work
+	// piling on. Checked before the capacity gate: draining is the stronger "no
+	// new sessions at all" state, and reporting it as a capacity refusal would
+	// mislead a client into retrying against a router that is going away.
+	if s.draining {
+		return fmt.Errorf("router: create: %w", ErrDraining)
 	}
 	// > 0 rather than != DefaultMaxWorkers: locally correct for ANY maxWorkers
 	// value, so a future second constructor that forgets New's normalization

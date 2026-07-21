@@ -32,6 +32,23 @@ var ErrAtCapacity = errors.New("router: worker capacity reached")
 // for that (see [Supervisor.confirmJournal]).
 var ErrResumeInProgress = errors.New("router: resume already in progress for this session")
 
+// ErrDraining is the typed error [Supervisor.admit] returns for a new
+// [Supervisor.Create] once the router has entered graceful drain
+// ([Supervisor.Drain]): the router is stopping, so it accepts no BRAND-NEW
+// session while it lets in-flight turns finish on their existing workers. Like
+// [ErrAtCapacity] it is refused BEFORE anything is forked, dialed, or written to
+// disk, so a drained Create leaves no artifact.
+//
+// It refuses NEW sessions only. Resuming an ALREADY-EXISTING session while
+// draining is deliberately still allowed ([Supervisor.Resume] does not run
+// through admit) — attaching to a session the router already hosts so it can
+// finish its work is the point of draining, not a violation of it.
+//
+// The daemon's session/new handler surfaces it as a plain JSON-RPC application
+// error (handleSessionNew wraps every Create error with appError), the same way
+// it surfaces ErrAtCapacity — a client can retry once a fresh router is up.
+var ErrDraining = errors.New("router: draining, not accepting new sessions")
+
 // ErrEmitConfigUnsupported is the typed error [Supervisor.EmitConfigOptions]
 // returns: there is no wire method for a client to make a worker emit an
 // arbitrary config-options snapshot, and it is off the crash-isolation critical
