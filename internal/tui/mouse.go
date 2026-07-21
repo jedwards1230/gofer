@@ -113,8 +113,15 @@ func (a App) transcriptRegion() (top, bottom int, ok bool) {
 		header := headerLines // attachHeaderLines always pads to this many rows
 		transcript := len(a.sess.transcriptLines(a.width))
 
+		// promptLines takes the same width AND height Model.view hands it
+		// (fl.h), through the same config-plumbed model (see
+		// [App.promptModel]): the prompt collapses its rationale when the
+		// frame is short, so measuring it at a different height — or with a
+		// different configured floor — would give a footer length the render
+		// never produced, and every highlight below it would be off by the
+		// difference.
 		var footerLen int
-		if prompt := a.sess.promptLines(a.width); prompt != nil {
+		if prompt := a.promptModel().promptLines(a.width, fl.h); prompt != nil {
 			footerLen = len(prompt)
 		} else {
 			footerLen = len(fl.menuLines) + 3 // rule, input line, rule

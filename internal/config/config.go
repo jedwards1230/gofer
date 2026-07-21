@@ -110,6 +110,17 @@ type Session struct {
 	// session creation lands with /yolo (see docs/TUI.md).
 	PermissionMode string `json:"permission_mode,omitempty"`
 
+	// MaxSubagentDepth caps how deep a subagent session tree may nest: a root
+	// session is depth 0, its child 1, and a Create naming a parent already at
+	// this depth is refused with [supervisor.ErrDepthExceeded]. It is the one
+	// guard against a runaway spawn chain, and it is config rather than a
+	// literal because the useful depth is a workflow opinion, not a property of
+	// gofer. Unset (0) — and any negative value, which is meaningless as a cap —
+	// resolves to [DefaultMaxSubagentDepth]; zero deliberately does NOT mean "no
+	// children allowed", so an existing config file keeps working unchanged. See
+	// [Session.SubagentDepthLimit].
+	MaxSubagentDepth int `json:"max_subagent_depth,omitempty"`
+
 	// LoadSettleTimeoutMS bounds, in milliseconds, how long session/load waits
 	// for a live session's in-flight turn to finish journaling before it folds
 	// and replays history (see the daemon's handleSessionLoad and issue #137). A
@@ -141,6 +152,21 @@ func (s Session) LoadSettleTimeout() time.Duration {
 		return DefaultLoadSettleTimeout
 	}
 	return time.Duration(*s.LoadSettleTimeoutMS) * time.Millisecond
+}
+
+// DefaultMaxSubagentDepth is [Session.MaxSubagentDepth]'s default: 5. Deep
+// enough for the delegation chains a supervising agent actually builds
+// (owner → worker → helper), shallow enough that a spawn loop is caught within
+// a handful of sessions rather than after it has filled the store.
+const DefaultMaxSubagentDepth = 5
+
+// SubagentDepthLimit resolves [Session.MaxSubagentDepth]'s effective value:
+// [DefaultMaxSubagentDepth] when unset or non-positive, else the explicit cap.
+func (s Session) SubagentDepthLimit() int {
+	if s.MaxSubagentDepth <= 0 {
+		return DefaultMaxSubagentDepth
+	}
+	return s.MaxSubagentDepth
 }
 
 // TUI holds gofer's own interface preferences, distinct from Session's
@@ -208,6 +234,22 @@ type TUI struct {
 	// [TUI.ApprovalBodyLineLimit] for the resolved value every caller should
 	// read.
 	ApprovalBodyLines *int `json:"approval_body_lines,omitempty"`
+
+	// ApprovalMinTranscriptRows is how many transcript rows the inline
+	// approval prompt must leave visible above itself: nil (unset) is the
+	// default [DefaultApprovalMinTranscriptRows], and any positive value is a
+	// floor. When the full prompt would leave fewer rows than this, its
+	// rationale collapses to the opening paragraph plus a "… ctrl+e to
+	// explain" pointer (see internal/tui's renderApprovalPrompt); the header,
+	// the gated call's body, the question, and the action row never collapse.
+	// The floor exists because the prompt commandeers the whole footer: at a
+	// 24-row terminal the full block leaves a two-line transcript, so the
+	// conversation that led to the gated call — the context a decision is
+	// actually made on — scrolls out of view exactly when it is needed. A
+	// *int, not a plain int, for the same reason [TUI.Autoscroll] is a *bool.
+	// See [TUI.ApprovalMinTranscriptRowFloor] for the resolved value every
+	// caller should read.
+	ApprovalMinTranscriptRows *int `json:"approval_min_transcript_rows,omitempty"`
 }
 
 // DefaultMaxPasteBytes is [TUI.MaxPasteBytes]'s default: 128 KiB, comfortably
@@ -243,6 +285,26 @@ func (t TUI) ApprovalBodyLineLimit() int {
 		return DefaultApprovalBodyLines
 	}
 	return *t.ApprovalBodyLines
+}
+
+// DefaultApprovalMinTranscriptRows is [TUI.ApprovalMinTranscriptRows]'s
+// default: 8 rows. Enough for the last exchange that led to the gated call to
+// stay readable beside the prompt on the 24-row terminal gofer's own golden
+// renders assume, and small enough that a comfortable terminal never collapses
+// the rationale at all.
+const DefaultApprovalMinTranscriptRows = 8
+
+// ApprovalMinTranscriptRowFloor resolves [TUI.ApprovalMinTranscriptRows]'s
+// effective value: [DefaultApprovalMinTranscriptRows] when unset, and also for
+// a negative stored value. An explicit 0 IS honored — unlike
+// [TUI.ApprovalBodyLineLimit]'s zero-means-default, "reserve no transcript" is
+// a coherent preference (always show the whole prompt, whatever the frame
+// height), so a user who asks for it gets it.
+func (t TUI) ApprovalMinTranscriptRowFloor() int {
+	if t.ApprovalMinTranscriptRows == nil || *t.ApprovalMinTranscriptRows < 0 {
+		return DefaultApprovalMinTranscriptRows
+	}
+	return *t.ApprovalMinTranscriptRows
 }
 
 // AutoscrollEnabled resolves [TUI.Autoscroll]'s effective value: true (the

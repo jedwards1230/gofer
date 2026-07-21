@@ -42,8 +42,9 @@ A row may be a whole fan-out hierarchy; it collapses to aggregate state,
 agent count, and whether approvals are pending, and expands inline to the
 subagent tree. `↑`/`↓` move the selection · `tab` switches view · `enter`
 peek · `→` attach · `ctrl-x` kill (running; subtree interrupted) or archive
-(finished), acting immediately on the selected row. `enter`, `→` and
-`ctrl-x` take these meanings only while the dispatch bar is empty; every
+(finished) · `ctrl-t` stop every subagent **below** the selected row, acting
+immediately on the selected row. `enter`, `→`, `ctrl-x` and `ctrl-t`
+take these meanings only while the dispatch bar is empty; every
 other key types into it, and `enter` on non-empty text starts a new session
 — or dispatches a `/` command. Journals are never deleted — `gofer ps --all`
 lists archived sessions.
@@ -56,8 +57,12 @@ running session or archives a finished one, as on the overview. Peek
 carries no transcript tail — it is a roster-only projection.
 
 **Attach** — full transcript + input. `esc` interrupts the in-flight turn;
-`←` on an empty input backs out to the overview (with text, it moves the
-cursor).
+`←` on an empty input backs out — to the **parent session** when the attached
+session is a subagent, otherwise to the overview (with text, it moves the
+cursor); `↓` on an empty input goes the other way, to the overview with this
+session's **first spawned child** selected (a no-op when it has none). See
+[Subagent sessions](#subagent-sessions-m7--ecosystem) for the drill-in/drill-out
+pair.
 
 Every screen — overview, attach's transcript, its approval prompts, and its
 command-menu/panel overlays — opens with the same two-line identity header:
@@ -76,8 +81,8 @@ shown twice; once answered, the footer returns and the badge becomes visible
 again. It reads as a confirm prompt — a rule, an attributed `<tool> command`
 header, the call's own description and body, a plain-English rationale, the
 question, and the action row, keyed `a`/`d`/`r` (`r` toggles remember, `1`/`2`
-alias allow/deny), `esc` dismisses without answering (the request stays
-pending; a re-attach re-surfaces it):
+alias allow/deny), `ctrl+e` explains (read-only — see below), `esc` dismisses
+without answering (the request stays pending; a re-attach re-surfaces it):
 
 ```
  ────────────────────────────────────────────────
@@ -90,9 +95,9 @@ pending; a re-attach re-surfaces it):
 
  Why you're being asked
 
-   No permission rule matched this call, so gofer is asking before it runs.
-   It also cannot be sandboxed on this host, so an allow rule alone will not
-   let it run unattended.
+   No permission rule matched this `bash` call, so gofer is asking before it
+   runs. It also cannot be sandboxed on this host, so an allow rule alone
+   will not let it run unattended.
 
    Policy: unmatched · containable: false (no container configured)
 
@@ -104,7 +109,7 @@ pending; a re-attach re-surfaces it):
  Do you want to proceed?
    1. [a] Yes   2. [d] No   ·   [r] remember: off
 
- esc cancel · session 0192a1b2-…
+ esc cancel · ctrl+e explain · session 0192a1b2-…
 ```
 
 The header's attribution clause is omitted entirely for an un-attributed call
@@ -127,24 +132,50 @@ rule-source parenthetical is dropped either way.
 **attribution** ("from the `<agent>` agent", correlated from the tool call's
 `event.Agent` — `event.PermissionRequested.ID` *is* the tool call id), its
 **multi-line body** (the real command text, not a one-line `cmd=…` summary),
-and a **rationale derived from the guard's decision trace**
-(`event.PermissionRequested.Trace`): why it was gated in plain English, the
-matched policy with every raw trace entry preserved, and the two escape
-hatches that actually exist — `r` to remember the call for the session, or a
-rule in `config.json`'s `permissions` array (the example specifier is built
-from the call's own first token, and is omitted rather than guessed at when
-there is no command body).
+and a **rationale**: why it was gated in plain English, the matched policy
+with every raw trace entry preserved, and the two escape hatches that actually
+exist — `r` to remember the call for the session, or a rule in `config.json`'s
+`permissions` array (the example specifier is built from the call's own first
+token, and is omitted rather than guessed at when there is no command body).
+
+**Local vs authoritative rationale.** The rationale on screen starts out
+**locally derived** from the guard's decision trace
+(`event.PermissionRequested.Trace`). **`ctrl+e`** asks the agent side for the
+**authoritative** one over ACP `session/explain_permission`, and replaces it;
+the header then reads `Why you're being asked · the agent's answer` (and
+`· explaining…` while the call is in flight, during which a second `ctrl+e` is
+a no-op). Both are produced by the same grammar — `internal/permrationale`,
+shared by the TUI's local render and the daemon's handler — so the two are
+comparable rather than differently-worded restatements. A failed explain says
+so on the status line and leaves the local rationale standing.
+
+`ctrl+e` is **read-only, and that is a contract, not an implementation
+detail**: an explain never resolves the request. The prompt stays open, the
+action row stays armed, and the human still answers — asking why must never
+cost you the ability to decide. The daemon answers from the request it already
+retains, so a client can ask as many times as it likes (`internal/daemon`'s
+`handleExplainPermission`; `internal/supervisor`'s `ExplainPermission` is the
+daemonless path). An unknown or already-resolved call id is an **error**, not
+an empty rationale — "no longer pending" and "gated for no stated reason" are
+different answers.
+
+**Height-aware collapse.** The full block runs ~22 rows, which on an 80×24
+terminal would leave a two-line transcript and scroll the identity header out
+— losing the conversation that led to the gated call exactly when it is needed
+to decide. So the prompt adapts: when the full block would leave fewer than
+`tui.approval_min_transcript_rows` (default 8) transcript rows, the rationale
+collapses to its opening paragraph plus a muted `… ctrl+e to explain`. The
+header, the call's body, the question, the action row, and the hint line are
+**never** collapsed. Set the key to `0` to never collapse at all.
 
 **Richer provenance — what remains backlog.** The **gating hook** that raised
 the request (e.g. `PreToolUse:Bash`) and a copy-paste **override hint**
 carrying its `[plugin:x]` provenance both need fields the permission request
-doesn't carry yet. Two affordances ride the action row — `Tab` to amend the
-call before allowing, `ctrl+e` to explain why it was gated — but both need new
-SDK permission-outcome variants (an amended-input reply and an explain
-request) before the TUI can offer them; see the agent-sdk-go design backlog.
-Neither key is advertised on the prompt until its implementation lands. Once
-`session/explain_permission` exists it supersedes the locally-derived
-rationale above as the source for the "why".
+doesn't carry yet. One affordance still rides the action row unadvertised —
+`Tab` to amend the call before allowing — which needs a new SDK
+permission-outcome variant (an amended-input reply) before the TUI can offer
+it; see the agent-sdk-go design backlog. The key is not advertised on the
+prompt until its implementation lands.
 
 **Remember-as-rule** — a grant never widens silently: the prompt offers
 exact / prefix / broad patterns, but dangerous commands are force-downgraded
@@ -262,8 +293,13 @@ session (with dispatch-bar text, it instead creates a session from that text
 and attaches into it); `→` in an **empty** dispatch bar attaches the selected
 session (with text, it edits); `esc`
 interrupts/acts on the *active* session (never "go back"); `←` in an **empty**
-input backs out to the overview (with text, it edits); `ctrl-x` kills a running
-session or archives a finished one; `ctrl-c` quits. In peek, `up`/`down` move
+input backs out to the attached session's parent, or to the overview when it has
+none (with text, it edits); `↓` in an **empty** attach input returns to the
+overview with the attached session's first spawned child selected, and does
+nothing when it has no children (with text, the key belongs to the input keymap,
+not to navigation); `ctrl-x` kills a running
+session or archives a finished one; `ctrl-t` stops the selected row's subagents;
+`ctrl-c` quits. In peek, `up`/`down` move
 the selection, `enter` opens the session (or sends the reply when the `❯` input
 has text), `space` closes to the overview, and `ctrl+x` deletes.
 
@@ -544,42 +580,130 @@ open — whether the change substrate is gofer-native atop the JSONL journal or
 leans on a task/checkpoint seam from the SDK; see the agent-sdk-go design
 backlog.
 
-## Subagent sessions (M7, not yet built)
+## Subagent sessions (M7 · ecosystem)
 
-Design intent only — lands with M6's subagents-first-class work. A subagent
-is **not a black box within a turn** — it is a real child session
-with its own journal, cost, and transcript, linked to its parent
-(`session.spawned` event + `parent_id`; depth ≤ 5). The overview renders the
-parent with its children indented beneath it, each child row carrying its own
-description, run duration, and cumulative token/cost tally — the same
-one-line-per-session shape as a top-level row:
+A subagent is **not a black box within a turn** — it is a real child session
+with its own journal, cost, and transcript, linked to its parent.
+
+**Built (the primitive).** `supervisor.CreateOptions{ParentID, Agent}` creates
+one: Create resolves the parent (live roster first, then the store root on
+disk), derives `Depth = parent + 1`, and refuses an unknown parent
+(`ErrNoParent`) or an over-deep chain (`ErrDepthExceeded`). The cap is config,
+not a literal — `session.max_subagent_depth`, default 5. The link is durable and
+gofer-native: it is written beside the journal as
+`<root>/sessions/<slug>/<id>.meta.json` (`{parentId, agent, depth}`), so
+`List` reports it for offline sessions and `Resume` restores a child's
+attribution. Only a session that has a parent or an agent writes a sidecar, so
+nothing changes for a root session. `ParentID`/`Agent`/`Depth` ride the roster
+wire (`parentId`/`agent`/`depth`, all omitempty) through to `tui.SessionInfo`;
+`session/new` carries the request half in ACP's `_meta` (`gofer/parent`,
+`gofer/agent`) and reports what it assigned back (plus `gofer/depth`).
+`gofer run --parent <id> --agent <name>` is the CLI spawner. WHO spawns children
+from inside a turn is still open — there is deliberately no agent-facing spawn
+tool.
+
+**Built (the render).** The overview renders the parent at the root with its
+children indented beneath it — a depth-first tree, siblings by the usual recency
+rule — each child row the same one-line-per-session shape as a top-level row,
+carrying its own summary, run duration, and token tally:
 
 ```
-● main
-  ○ tui-inline-perm-owner   Own the M3 TUI change…      5m 9s · ↓ 214.7k tokens
-  ○ sandbox-shell-fix-owner Own the M3 sandbox fix…      5m 30s · ↓ 185.3k tokens
-  ○ go-developer            Editing model.go doc comment 6m 47s · ↓ 128.0k tokens
-  ↑/↓ to select · enter to view
+~/orchestration
+▸!ship the subagent roster      Working · two workers…     41m · ↓ 214.7k tokens
+ !  tui-inline-perm-owner       Working · editing ove…   5m 9s · ↓ 214.7k tokens
+ !    go-reviewer               Needs input · reviewi…       42s · ↓ 8.4k tokens
+    go-developer                Working · running the…  6m 47s · ↓ 128.0k tokens
 ```
 
-`↑`/`↓` selects a child; `enter` navigates *into* that child's full session —
-its complete transcript, tool blocks, and approvals — exactly as if it were a
-top-level session (`esc`/`←` returns to the parent). So a supervisor watching
-one task drills into any subagent's whole history without losing the parent
-context, and an approval waiting deep in the tree still surfaces as a
-`Needs input` state on the ancestor row. This is the fan-out tree above made navigable: the tree shows
-*who is working*; entering a node shows *what they did*. It reuses the shared
-row renderer and the id-tracked selection/windowing the M2 roster already
-established — a child session is just a session, so no new navigation model is
-needed, only the parent→child link and the indent.
+- **Indent inside the title column** (2 cells per level), so every other column
+  stays aligned however deep the tree goes. A child is labelled by its **agent**
+  (`go-developer`) rather than by the title derived from its parent's prompt.
+- **Right column.** A roster holding any subagent swaps the bare age for
+  `<elapsed> · ↓ <N> tokens`; one with none renders byte-identically to before.
+  The width is one decision per render, not per row — an ordinary roster keeps
+  its full-width summary column rather than losing half of it to a tally nobody
+  asked for.
+- **Blocked rollup.** The `!` gutter marks a row whose session *or any
+  descendant* awaits the user, so an approval three levels down is visible
+  without descending. Computed once per render, not per row.
+- **Overflow.** When the tree outgrows its row budget the last visible line
+  reads `↓ N more`.
+- **The grouped view (tab) stays flat.** Its sections are status buckets and a
+  child's status is independent of its parent's, so nesting there would
+  contradict the section label; children keep their own section and are
+  identified by the agent label instead.
+- **Orphans render as roots.** The roster is a polled snapshot, so a parent can
+  legitimately be missing — no row is ever dropped or indented under a parent
+  that isn't on screen.
 
-**Tool-call attribution (SDK-gated).** When a tool event carries an
-originating-agent id, its transcript block should name the source —
-`ToolName(args) · from the <agent> agent` — alongside the existing human
-caption, so a transcript that interleaves a parent's and its subagents' calls
-reads unambiguously. It falls back to the current un-attributed rendering when
-the event carries no agent id, so it is purely additive; surfacing that id on
-the tool event is an SDK change — see the agent-sdk-go design backlog.
+The render reuses the shared row renderer and the id-tracked
+selection/windowing the M2 roster already established — a child session is just
+a session, so it needed no new navigation model, only the parent→child link and
+the indent.
+
+**Built (the navigation).** The fan-out tree is navigable: the tree shows *who
+is working*, entering a node shows *what they did*, so a supervisor drills into
+any subagent's whole history without losing the parent context.
+
+- **Drill in.** `↑`/`↓` selects a child (a child row is an ordinary roster row),
+  and `enter`/`→` opens *that child's* full session — its complete transcript,
+  tool blocks, and approvals, exactly as for a top-level session. This needed no
+  new code beyond the tree ordering; it is pinned by a test rather than
+  reimplemented.
+- **Drill out.** `←` on an empty attach input returns to the **parent's**
+  session, one level per press, walking a chain back to its root. A root session
+  — and a child whose parent is absent from the polled snapshot, the same orphan
+  case the roster renders as a root — keeps backing out to the overview. The
+  roster selection follows the drill-out, so the header, the panel's session
+  views, and the next `←` all agree on where you are.
+- **Drill sideways — `↓`.** `↓` on an empty attach input returns to the overview
+  with the attached session's **first spawned child** selected; with no children
+  it does nothing. This is the key the background-agents block advertises
+  ("`↓ to manage`") and it is bound so that caption is literally true: `←` goes
+  *up* to the parent, which is not where children are managed — the roster tree
+  is, since peek, attach, `ctrl-x` and `ctrl-t` all live there. The empty-input
+  guard mirrors `←`'s, but sits in the case expression rather than the body: `←`
+  has an editing meaning to fall back on and `↓` has none, so with text pending
+  the key is left to the shared input keymap instead of being claimed here.
+- **`esc` is NOT a return key — deliberately.** The issue text asked for
+  "`esc`/`←` returns to parent"; `esc` on the attach screen is an established,
+  tested contract (**interrupt the in-flight turn**) and it is the only
+  interrupt binding there is. Hijacking it for navigation would silently delete
+  the ability to stop a running turn — a regression dressed as a feature. The
+  return path is `←` only. Do not "fix" this.
+- **Bulk stop — `ctrl-t`.** On the roster, `ctrl-t` stops every subagent
+  *below* the selected row (the whole subtree, one `Supervisor.Kill` per
+  descendant), leaving the selected session itself running; `ctrl-x` remains the
+  way to stop one session. Kill interrupts and terminates — journals are never
+  deleted (invariant #4). A failing kill does not abort the sweep: every
+  descendant is attempted and the first error surfaces on the status line. The
+  binding avoids `ctrl-s`/`ctrl-q` (flow control), `ctrl-z` (suspend), `ctrl-b`
+  (tmux prefix), `ctrl-a`/`e`/`w`/`u`/`k`/`d` (the shared input keymap) and bare
+  letters (the dispatch bar is always typeable). The hint line gains
+  `ctrl-t stop agents` **only on a tree roster**, in place of `? shortcuts` —
+  the flat hint already spends 67 of its 80 cells, and `?` is the one entry
+  naming a key nothing handles.
+
+**Built (the transcript blocks).** Two additions, both purely additive — a
+session with no subagents renders byte-for-byte what it always did:
+
+- **Background agents.** A session that has spawned children ends its
+  transcript with `N background agents launched (↓ to manage)`, then one line
+  per child naming it and the agent it runs as. The children are a **roster**
+  fact, not an event on this session's stream (a subagent is a separate session
+  with its own journal), so the block is composed per frame from the current
+  poll (`Model.WithBackgroundAgents`) instead of ingested once and left to go
+  stale.
+- **Tool-call attribution.** `runner.Options.Agent` (SDK v0.17.0) stamps the
+  originating-agent id onto every `tool.call.*` event a session's loop emits and
+  the supervisor forwards `CreateOptions.Agent` into it, so a tool block names
+  its source: `ToolName(args) · from the <agent> agent`, alongside the existing
+  caption, and a transcript interleaving a parent's and its subagents' calls
+  reads unambiguously. An event with no agent id renders the un-attributed block
+  exactly as before — no placeholder. The attribution rides the transcript item,
+  so it outlives the per-call correlation map the approval prompt reads (that
+  map is dropped when the call finishes); the two surfaces read the same SDK
+  field independently.
 
 ## Monitor / background tasks (M8 — goal)
 

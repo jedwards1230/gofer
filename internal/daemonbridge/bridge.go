@@ -133,6 +133,9 @@ func toTUISessionInfo(d sessionInfoDTO) tui.SessionInfo {
 		Usage:         d.Usage,
 		Pending:       d.Pending,
 		BinaryVersion: d.BinaryVersion,
+		ParentID:      d.ParentID,
+		Agent:         d.Agent,
+		Depth:         d.Depth,
 		Created:       d.Created,
 		Updated:       d.Updated,
 	}
@@ -192,24 +195,31 @@ func (s *Supervisor) Send(ctx context.Context, sessionID, prompt string) error {
 // ever triggers a needless session/load for a session that, by construction,
 // has no history yet.
 func (s *Supervisor) Create(ctx context.Context, prompt string, opts tui.CreateOptions) (tui.SessionInfo, error) {
-	raw, err := s.client.Call(ctx, acp.MethodSessionNew, acp.NewSessionRequest{Cwd: opts.Cwd, Model: opts.Model})
+	raw, err := s.client.Call(ctx, acp.MethodSessionNew,
+		daemon.NewSessionRequestFor(opts.Cwd, opts.Model, opts.ParentID, opts.Agent))
 	if err != nil {
 		return tui.SessionInfo{}, fmt.Errorf("daemonbridge: create: %w", err)
 	}
-	var resp newSessionResponse
+	var resp daemon.NewSessionResponse
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return tui.SessionInfo{}, fmt.Errorf("daemonbridge: decode %s response: %w", acp.MethodSessionNew, err)
 	}
 	s.core.RegisterFresh(resp.SessionID)
 
+	// The subagent link the daemon ASSIGNED, not the one requested — Depth is
+	// computed daemon-side (parent + 1) and is not knowable here at all.
+	parentID, agentID, depth := resp.Meta.SubagentLink()
 	now := time.Now()
 	info := tui.SessionInfo{
-		ID:      resp.SessionID,
-		Model:   resp.assignedModel(opts.Model),
-		Cwd:     opts.Cwd,
-		Status:  tui.StatusNeedsInput,
-		Created: now,
-		Updated: now,
+		ID:       resp.SessionID,
+		Model:    resp.Meta.ModelOr(opts.Model),
+		Cwd:      opts.Cwd,
+		ParentID: parentID,
+		Agent:    agentID,
+		Depth:    depth,
+		Status:   tui.StatusNeedsInput,
+		Created:  now,
+		Updated:  now,
 	}
 	if prompt != "" {
 		info.Status = tui.StatusWorking
@@ -303,33 +313,6 @@ func (s *Supervisor) Resume(ctx context.Context, sessionID, cwd string) error {
 	return nil
 }
 
-// newSessionResponse is the session/new response as this bridge reads it:
-// ACP's [acp.NewSessionResponse] plus the daemon's gofer-namespaced `_meta`
-// extension carrying the model it ASSIGNED (see internal/daemon's
-// newSessionResult). Decoding it is what lets [Supervisor.Create] report what
-// the session actually runs instead of echoing what it asked for.
-type newSessionResponse struct {
-	acp.NewSessionResponse
-	Meta struct {
-		Model string `json:"gofer/model"`
-	} `json:"_meta"`
-}
-
-// assignedModel is the model the new session actually runs: the daemon's own
-// answer, falling back to requested — the model this client asked for — when
-// the daemon sent no `_meta` at all.
-//
-// The fallback is ONLY for a daemon predating the field. It must never be read
-// as "the request is as good as the response": on the normal path requested is
-// "" (the TUI sends no model and lets the daemon decide), which is exactly why
-// echoing it left the roster row modelless (issue #162, defect 2).
-func (r newSessionResponse) assignedModel(requested string) string {
-	if r.Meta.Model != "" {
-		return r.Meta.Model
-	}
-	return requested
-}
-
 // Kill calls gofer/kill.
 func (s *Supervisor) Kill(ctx context.Context, sessionID string) error {
 	if _, err := s.client.Call(ctx, methodGoferKill, map[string]string{"sessionId": sessionID}); err != nil {
@@ -399,6 +382,47 @@ func (s *Supervisor) Interrupt(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("daemonbridge: interrupt %s: %w", sessionID, err)
 	}
 	return nil
+}
+
+// explainTimeout bounds one session/explain_permission round trip. It is a
+// package constant rather than a config knob for the same reason
+// internal/tui's daemonProbeTimeout is: this is a single request answered off
+// daemon-held state (no session, no provider, no disk), so there is no
+// deployment where waiting longer would turn a failure into a success — and
+// the cost of giving up is only that the prompt keeps showing the locally
+// derived rationale it already had. What it buys is that a wedged connection
+// can never leave the approval prompt marked "explaining…" forever.
+const explainTimeout = 5 * time.Second
+
+// ExplainPermission asks the daemon why a still-pending tool call was gated,
+// via ACP session/explain_permission, and returns the daemon's authoritative
+// [acp.PermissionRationale].
+//
+// It is READ-ONLY end to end: the daemon answers from its retained copy of the
+// request without touching the gate (see internal/daemon's
+// handleExplainPermission), so the request the TUI is prompting about is still
+// pending — and still answerable by [Supervisor.Reply] — when this returns.
+//
+// An unknown or already-resolved call id, or one belonging to another session,
+// comes back as a JSON-RPC application error and therefore as a plain messaged
+// error here (the daemon wire carries no error types — see [Supervisor.SetModel]'s
+// doc), which the caller surfaces rather than mistaking for "no reason given".
+func (s *Supervisor) ExplainPermission(ctx context.Context, sessionID, callID string) (acp.PermissionRationale, error) {
+	ctx, cancel := context.WithTimeout(ctx, explainTimeout)
+	defer cancel()
+
+	raw, err := s.client.Call(ctx, acp.MethodSessionExplainPermission, acp.ExplainPermissionRequest{
+		SessionID:  sessionID,
+		ToolCallID: callID,
+	})
+	if err != nil {
+		return acp.PermissionRationale{}, fmt.Errorf("daemonbridge: explain permission %s (session %s): %w", callID, sessionID, err)
+	}
+	var resp acp.ExplainPermissionResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return acp.PermissionRationale{}, fmt.Errorf("daemonbridge: decode %s response: %w", acp.MethodSessionExplainPermission, err)
+	}
+	return resp.Rationale, nil
 }
 
 // Reply answers a pending permission request by sending [methodPermissionReply]

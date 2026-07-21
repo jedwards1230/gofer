@@ -15,9 +15,11 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/jedwards1230/agent-sdk-go/acp"
 	"github.com/jedwards1230/agent-sdk-go/event"
 
 	"github.com/jedwards1230/gofer/internal/config"
+	"github.com/jedwards1230/gofer/internal/permrationale"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
 
@@ -37,9 +39,24 @@ type pendingApproval struct {
 	// carried one).
 	agent string
 	// trace is the guard's decision trace from event.PermissionRequested.Trace
-	// — the local source for the rationale body until session/explain_permission
-	// lands.
+	// — the LOCAL source for the rationale body, derived through
+	// [permrationale.Derive], used until (and if) an explain answers with the
+	// agent's own.
 	trace []string
+
+	// explaining reports that a session/explain_permission call is in flight
+	// for this request (ctrl+e — see [App.explainApproval]). It only marks the
+	// rationale header as in-flight and makes a second ctrl+e a no-op; the
+	// request itself stays open and answerable throughout, because an explain
+	// never resolves it.
+	explaining bool
+	// rationale is the AUTHORITATIVE rationale an explain returned, or nil
+	// when none has (yet) arrived — in which case the render derives one
+	// locally from trace. Distinguishing them is the point: a user must be
+	// able to tell the agent's own answer from this client's approximation of
+	// it, so the header labels which one is on screen (see
+	// [rationaleHeaderLine]).
+	rationale *acp.PermissionRationale
 
 	// badgeIdx is the transcript index of the itemApproval badge this request
 	// added, so transcriptLines can suppress it while the prompt is showing
@@ -58,10 +75,18 @@ var commandKeys = []string{"command", "cmd", "script", "file_path", "path"}
 // renderApprovalPrompt renders p as the inline approval prompt's blank-padded
 // block at the given width: a full-width rule, an attributed "<tool> command"
 // title, the call's own description and body, a plain-English rationale
-// derived from the guard's decision trace, the question with its numbered
-// action row, and a dim footer hint carrying the cancel key and the session
+// (the agent's own once an explain has answered, else derived locally from the
+// guard's decision trace), the question with its numbered action row, and a
+// dim footer hint carrying the cancel key, the explain key, and the session
 // id. bodyLimit caps the body's rows (config.TUI.ApprovalBodyLineLimit — the
 // gated call's text must never push the question off the frame).
+//
+// collapsed drops the rationale to its opening paragraph plus a pointer at
+// ctrl+e, for a frame too short to show the whole block without squeezing the
+// transcript out of existence (see [Model.promptLines], which decides). What
+// it never collapses is the header, the command body, the question, the action
+// row, or the hint: a user must always be able to see what they are allowing
+// and how to answer it.
 //
 // No leading blank line — [App.render]'s [layout.TopPadding] already supplies
 // the frame's top margin, and Model.View stacks this block directly onto
@@ -73,7 +98,7 @@ var commandKeys = []string{"command", "cmd", "script", "file_path", "path"}
 // clipped, not wrapped. width < 1 floors to 1 (matching every other
 // component's width guard), so the rule can never strings.Repeat a negative
 // count and the wrap budget below can never go non-positive.
-func renderApprovalPrompt(th theme.Theme, p pendingApproval, width, bodyLimit int) []string {
+func renderApprovalPrompt(th theme.Theme, p pendingApproval, width, bodyLimit int, collapsed bool) []string {
 	if width < 1 {
 		width = 1
 	}
@@ -94,14 +119,14 @@ func renderApprovalPrompt(th theme.Theme, p pendingApproval, width, bodyLimit in
 
 	lines = append(lines, "")
 	lines = append(lines, approvalBodyLines(th, p, width, bodyLimit)...)
-	lines = append(lines, "", "Why you're being asked")
-	lines = append(lines, rationaleLines(p, width)...)
+	lines = append(lines, "", rationaleHeaderLine(th, p))
+	lines = append(lines, rationaleLines(th, p, width, collapsed)...)
 	lines = append(lines,
 		"",
 		"Do you want to proceed?",
 		fmt.Sprintf("  1. [a] Yes   2. [d] No   ·   [r] remember: %s", rememberLabel(p.remember)),
 		"",
-		th.MutedStyle().Render("esc cancel · session "+p.session),
+		th.MutedStyle().Render("esc cancel · ctrl+e explain · session "+p.session),
 	)
 	return lines
 }
@@ -184,88 +209,112 @@ func residualKeys(spec map[string]any, bodyKey string) []string {
 	return keys
 }
 
-// rationaleLines renders the "Why you're being asked" body: up to three
-// paragraphs derived from the guard's decision trace, each wrapped and
-// indented 2, separated by a blank row and preceded by one (the section
-// header sits directly above).
+// rationaleHeaderLine renders the "Why you're being asked" section header,
+// with a muted suffix naming WHICH rationale sits below it — the whole point
+// of ctrl+e being that a user can tell the agent's authoritative answer from
+// this client's local approximation of it, and can see when one is on its way:
 //
-// The trace is the only local source for this until the SDK grows an explain
-// request (docs/TUI.md's backlog), so the derivation is deliberately literal
-// about what it does and does not know — see [approvalRationale].
-func rationaleLines(p pendingApproval, width int) []string {
+//   - an explain in flight  -> "· explaining…"
+//   - an explain answered   -> "· the agent's answer"
+//   - neither (the default) -> no suffix; the body is the local derivation
+//
+// The plain header is the un-suffixed case on purpose: labeling the local
+// derivation ("· derived locally", say) would put a caveat on every approval
+// prompt ever shown, which is noise until a user asks for the other one.
+func rationaleHeaderLine(th theme.Theme, p pendingApproval) string {
+	const header = "Why you're being asked"
+	switch {
+	case p.explaining:
+		return header + th.MutedStyle().Render(" · explaining…")
+	case p.rationale != nil:
+		return header + th.MutedStyle().Render(" · the agent's answer")
+	default:
+		return header
+	}
+}
+
+// rationaleLines renders the "Why you're being asked" body: the rationale's
+// paragraphs, each wrapped and indented 2, separated by a blank row and
+// preceded by one (the section header sits directly above).
+//
+// The rationale is the AUTHORITATIVE one an explain returned when p carries
+// it, else one derived locally from the guard's decision trace — the same
+// grammar either way (see [permrationale.Derive]), so the two are comparable
+// rather than differently worded restatements of the same decision.
+//
+// collapsed keeps only the opening paragraph and points at ctrl+e for the
+// rest — the short-frame budget [Model.promptLines] applies. It is
+// deliberately the FIRST paragraph that survives: the reason is what a
+// decision actually turns on, while the policy detail and the escape hatch are
+// reference material a user can pull up when they want it.
+func rationaleLines(th theme.Theme, p pendingApproval, width int, collapsed bool) []string {
+	paras := rationaleParagraphs(p)
+	if collapsed && len(paras) > 1 {
+		paras = paras[:1]
+	}
+
 	var lines []string
-	for _, para := range approvalRationale(p) {
+	for _, para := range paras {
 		lines = append(lines, "")
 		lines = append(lines, indentWrap(para, width)...)
+	}
+	if collapsed {
+		lines = append(lines, th.MutedStyle().Render("  … ctrl+e to explain"))
 	}
 	return lines
 }
 
-// approvalRationale derives the rationale paragraphs from p's trace:
+// rationaleParagraphs builds the rationale's paragraphs:
 //
-//  1. Reason — what the trace actually says happened, in plain English.
-//  2. Policy — the matched rule label verbatim plus every remaining raw trace
-//     entry, so nothing the guard reported is silently dropped by the
-//     prose above.
-//  3. Escape hatch — the two ways, both real in this codebase, to stop being
+//  1. Reason — what the gating decision was, in plain English.
+//  2. Policy — the matched rule label plus every remaining raw trace entry, so
+//     nothing the guard reported is silently dropped by the prose above it.
+//  3. Escape hatch — the two ways, both real in this client, to stop being
 //     asked: the session-scoped remember toggle and a persisted config rule.
 //
-// An empty trace yields the reason paragraph's honest fallback plus the
-// escape hatch, and no Policy paragraph — there is no policy detail to print,
-// and "Policy:" with nothing after it would be worse than its absence.
-func approvalRationale(p pendingApproval) []string {
-	rule, rest := splitTrace(p.trace)
+// A rationale carrying neither a policy label nor a trace yields the reason
+// plus the escape hatch and no Policy paragraph — "Policy:" with nothing after
+// it would be worse than its absence.
+func rationaleParagraphs(p pendingApproval) []string {
+	rationale := p.rationale
+	if rationale == nil {
+		derived := permrationale.Derive(p.tool, p.trace)
+		rationale = &derived
+	}
 
-	paras := []string{approvalReason(rule, rest)}
-	if policy := approvalPolicy(rule, rest); policy != "" {
+	paras := []string{rationale.Reason}
+	if policy := policyParagraph(*rationale); policy != "" {
 		paras = append(paras, policy)
 	}
 	return append(paras, approvalEscapeHatch(p))
 }
 
-// approvalReason turns the trace's rule label (and the containability entry
-// riding with it) into the "what happened" paragraph. The two labels the SDK
-// actually produces for a gated call are "unmatched" and a matched rule's own
-// label (its permission.Rule.Source when it has one — gofer's config sets
-// "config"/"default" — else "<verdict> <tool>(<specifier>)"), so only the
-// latter shape can reveal the verdict; anything else stays deliberately
-// generic rather than asserting a verdict the label never carried.
-func approvalReason(rule string, rest []string) string {
-	var reason string
-	switch {
-	case rule == "":
-		return "gofer could not determine why this call was gated."
-	case rule == "unmatched":
-		reason = "No permission rule matched this call, so gofer is asking before it runs."
-	case strings.HasPrefix(rule, string(event.VerdictAsk)+" "):
-		reason = "A permission rule matched this call with the `ask` verdict."
-	default:
-		reason = "The `" + rule + "` permission rule matched this call, and it was still gated for a decision."
+// policyParagraph renders the Policy paragraph from a rationale's machine-
+// readable provenance: the matched label, then every trace entry that is not
+// the label's own "rule: " line (which would otherwise print twice), then the
+// source when it says something the label does not — all " · "-joined. Empty
+// when the rationale carries no provenance at all.
+//
+// The label falls back to the trace's own rule entry, so a rationale from an
+// agent that fills Trace but not Policy still names what matched.
+func policyParagraph(r acp.PermissionRationale) string {
+	rule, rest := permrationale.SplitTrace(r.Trace)
+	label := r.Policy
+	if label == "" {
+		label = rule
 	}
-	// A containable:false entry is the other half of the story on an
-	// allow-matched call: the guard's contain-or-ask policy escalates to a
-	// human precisely because the sandbox can't hold it (see the SDK's
-	// loop.RuleGuard). Saying so is what makes "just add an allow rule"
-	// visibly not the answer here. A "containable: error:" entry is left to
-	// the Policy paragraph verbatim — an uncertain containment check is not
-	// the same claim as a negative one.
-	for _, entry := range rest {
-		if strings.HasPrefix(entry, "containable: false") {
-			return reason + " It also cannot be sandboxed on this host, so an allow rule alone will not let it run unattended."
-		}
-	}
-	return reason
-}
 
-// approvalPolicy renders the Policy paragraph: the rule label verbatim plus
-// every other trace entry, " · "-joined. Empty when the trace carried
-// nothing at all.
-func approvalPolicy(rule string, rest []string) string {
-	parts := make([]string, 0, len(rest)+1)
-	if rule != "" {
-		parts = append(parts, rule)
+	parts := make([]string, 0, len(rest)+2)
+	if label != "" {
+		parts = append(parts, label)
 	}
 	parts = append(parts, rest...)
+	// gofer's own labels ARE their source (see permrationale.Derive), so this
+	// only speaks up for a rationale whose source adds something the label
+	// doesn't already say — an agent-side policy whose origin differs from it.
+	if r.Source != "" && r.Source != label {
+		parts = append(parts, "source: "+r.Source)
+	}
 	if len(parts) == 0 {
 		return ""
 	}
@@ -288,23 +337,6 @@ func approvalEscapeHatch(p pendingApproval) string {
 			string(event.VerdictAllow), p.tool, fields[0]+" *")
 	}
 	return hatch + " to stop being asked."
-}
-
-// splitTrace separates the guard's trace into the rule label (the "rule: "
-// entry's value, "" when the trace carries none) and every other entry in
-// order. Parsing by prefix rather than position: the SDK appends the
-// containability entries after the rule entry today, but a trace is a
-// human-readable diagnostic list, not a positional tuple.
-func splitTrace(trace []string) (rule string, rest []string) {
-	const rulePrefix = "rule: "
-	for _, entry := range trace {
-		if rule == "" && strings.HasPrefix(entry, rulePrefix) {
-			rule = strings.TrimPrefix(entry, rulePrefix)
-			continue
-		}
-		rest = append(rest, entry)
-	}
-	return rule, rest
 }
 
 // indentWrap word-wraps s to the prompt's two-space-indented body column and

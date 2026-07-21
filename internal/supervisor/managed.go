@@ -24,11 +24,20 @@ import (
 // *Supervisor) always take it before mu here, so the two locks have one fixed
 // order and cannot deadlock.
 type managed struct {
-	sess      Session
-	id        string
-	project   string
-	model     string
-	cwd       string
+	sess    Session
+	id      string
+	project string
+	model   string
+	cwd     string
+	// parentID/agent/depth are this session's subagent link (see [sessionMeta]):
+	// the spawning session's id, the agent identity its tool events are stamped
+	// with, and its depth in the tree. Set once in newManaged — from Create's
+	// resolved options or, on resume, from the on-disk sidecar — and never
+	// mutated afterward, so (like id/project/cwd above) they are read without
+	// holding mu.
+	parentID  string
+	agent     string
+	depth     int
 	createdAt time.Time
 	clock     func() time.Time
 	// notify pushes a fresh roster snapshot to WatchRoster subscribers. The
@@ -103,6 +112,15 @@ type managed struct {
 	// session's event.PermissionRequested, −1 on event.PermissionResolved,
 	// maintained by watchPermissions and surfaced as SessionInfo.Pending.
 	pending int
+	// pendingPerms holds the SAME outstanding requests pending counts, keyed by
+	// call id and carrying each one's full payload (tool, spec, decision
+	// trace). The count alone answers "how many?"; this answers "why was THAT
+	// one gated?" — the question [Supervisor.ExplainPermission] exists for, and
+	// which a daemonless TUI has no other source for (the daemon path answers
+	// it from its own retained requests; see internal/daemon's pendingPerms).
+	// Added and removed at the exact two points pending is adjusted, under the
+	// same mutex, so the two can never disagree about what is outstanding.
+	pendingPerms map[string]event.PermissionRequested
 	// lastErr is the most recent turn's Prompt error, kept for diagnostics
 	// only (see [Supervisor.LastError]). It is a snapshot, not a delivery
 	// mechanism: the pump emits a session.error onto the session's own stream
@@ -122,7 +140,7 @@ type managed struct {
 // join later. Calling it here, rather than after publish, closes the race
 // where a concurrent Kill/Archive could otherwise observe a live session
 // with no teardown stashed yet (see Config.OnRegister's doc).
-func newManaged(sess Session, model, effort string, now time.Time, clock func() time.Time, notify func(), cwd string, gate *loop.Gate, onRegister func(sess Session) (stop func())) *managed {
+func newManaged(sess Session, model, effort string, now time.Time, clock func() time.Time, notify func(), cwd string, gate *loop.Gate, meta sessionMeta, onRegister func(sess Session) (stop func())) *managed {
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &managed{
 		sess:       sess,
@@ -131,6 +149,9 @@ func newManaged(sess Session, model, effort string, now time.Time, clock func() 
 		model:      model,
 		effort:     effort,
 		cwd:        cwd,
+		parentID:   meta.ParentID,
+		agent:      meta.Agent,
+		depth:      meta.Depth,
 		createdAt:  now,
 		updated:    now,
 		clock:      clock,
@@ -142,6 +163,8 @@ func newManaged(sess Session, model, effort string, now time.Time, clock func() 
 		permDone:   make(chan struct{}),
 		submitCh:   make(chan struct{}, 1),
 		state:      stateIdle,
+
+		pendingPerms: make(map[string]event.PermissionRequested),
 	}
 	if onRegister != nil {
 		m.teardown = onRegister(sess)
@@ -182,6 +205,9 @@ func (m *managed) info() SessionInfo {
 		Queued:      len(m.queue),
 		Live:        true,
 		Cwd:         m.cwd,
+		ParentID:    m.parentID,
+		Agent:       m.agent,
+		Depth:       m.depth,
 	}
 }
 
@@ -316,10 +342,12 @@ func (m *managed) watchPermissions(sub *event.Subscription) {
 			if !ok {
 				return
 			}
-			switch e.(type) {
+			switch pe := e.(type) {
 			case event.PermissionRequested:
+				m.retainPerm(pe)
 				m.adjustPending(1)
 			case event.PermissionResolved:
+				m.releasePerm(pe.ID)
 				m.adjustPending(-1)
 			}
 		case <-m.baseCtx.Done():
@@ -341,6 +369,34 @@ func (m *managed) adjustPending(delta int) {
 	}
 	m.mu.Unlock()
 	m.notify()
+}
+
+// retainPerm records an outstanding permission request's full payload, so
+// [Supervisor.ExplainPermission] can answer why that call was gated for as
+// long as it IS outstanding. Called from watchPermissions beside the pending
+// bump; no notify, because nothing on the roster snapshot changes.
+func (m *managed) retainPerm(pe event.PermissionRequested) {
+	m.mu.Lock()
+	m.pendingPerms[pe.ID] = pe
+	m.mu.Unlock()
+}
+
+// releasePerm drops a resolved request's retained payload. Idempotent — a
+// stray resolved with no matching request (the same case adjustPending clamps
+// at zero) simply deletes nothing.
+func (m *managed) releasePerm(id string) {
+	m.mu.Lock()
+	delete(m.pendingPerms, id)
+	m.mu.Unlock()
+}
+
+// pendingPerm returns the still-outstanding request with this call id, or
+// ok=false once it has resolved (or if it never existed on this session).
+func (m *managed) pendingPerm(id string) (event.PermissionRequested, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	pe, ok := m.pendingPerms[id]
+	return pe, ok
 }
 
 // stop marks m closing, cancels its base context (interrupting any in-flight

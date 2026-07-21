@@ -29,6 +29,8 @@ func TestToTUICopiesRenderedFields(t *testing.T) {
 		Artifacts: 3,
 		Created:   created,
 		Updated:   updated,
+		// the subagent link a tree render indents by:
+		ParentID: "0192a1b2-0000-7000-8000-000000000001", Agent: "go-developer", Depth: 1,
 		// operational extras the TUI ignores:
 		Project: "gofer", JournalPath: "/x.jsonl", Queued: 2, Live: true,
 	}
@@ -47,6 +49,9 @@ func TestToTUICopiesRenderedFields(t *testing.T) {
 		Artifacts: in.Artifacts,
 		Created:   in.Created,
 		Updated:   in.Updated,
+		ParentID:  in.ParentID,
+		Agent:     in.Agent,
+		Depth:     in.Depth,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("toTUI mismatch:\n got %+v\nwant %+v", got, want)

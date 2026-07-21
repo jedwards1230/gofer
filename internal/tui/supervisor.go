@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/jedwards1230/agent-sdk-go/acp"
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/provider"
 )
@@ -81,6 +82,19 @@ type SessionInfo struct {
 	// signal, and stamping an identical version on every row would be noise.
 	// Empty for an offline row (no process) and from any pre-M6 daemon.
 	BinaryVersion string
+
+	// ParentID is the id of the session that spawned this one — "" for a root
+	// session. A subagent is a real session with its own journal, cost and
+	// transcript, so a child row is an ordinary roster row plus this link; the
+	// link is what lets the overview render children indented beneath their
+	// parent instead of as unrelated siblings.
+	ParentID string
+	// Agent is the session's agent identity (e.g. "go-developer"), the same id
+	// its tool-call events are stamped with. "" is un-attributed.
+	Agent string
+	// Depth is the row's depth in the subagent tree: 0 for a root session,
+	// parent+1 for a child — the indent level a tree render uses.
+	Depth int
 }
 
 // SessionRef is one entry in the /resume picker's list: a session that exists
@@ -101,12 +115,19 @@ type SessionRef struct {
 
 // CreateOptions configures [Supervisor.Create]. The zero value is the
 // daemon's default: a credential-driven model in the daemon's working
-// directory. The daemon supervisor's CreateOptions carries more fields
-// (System, Params, MaxIters); the TUI only sets these two, so this local copy
-// mirrors just them until the reconciliation PR imports the daemon type.
+// directory, as a ROOT session. The daemon supervisor's CreateOptions carries
+// more fields (System, Params, MaxIters); the TUI only sets these, so this local
+// copy mirrors just them until the reconciliation PR imports the daemon type.
 type CreateOptions struct {
 	Model string
 	Cwd   string
+	// ParentID, when set, creates the session as a SUBAGENT of that session
+	// rather than as a root one (see [SessionInfo.ParentID]). An unknown parent,
+	// or one already at the daemon's depth cap, fails the create.
+	ParentID string
+	// Agent is the new session's agent identity, stamped onto its tool-call
+	// events (see [SessionInfo.Agent]).
+	Agent string
 }
 
 // Supervisor is the client-side view of the daemon the TUI drives. Every
@@ -200,4 +221,18 @@ type Supervisor interface {
 	// contract: the daemon resolves a permission request by id alone), but
 	// an in-process one routes through it directly.
 	Reply(ctx context.Context, sessionID, id string, allow, remember bool) error
+
+	// ExplainPermission asks why the identified still-pending tool call was
+	// gated. It is READ-ONLY: it never resolves the request, so the prompt
+	// stays open across an explain and the human still answers it.
+	//
+	// The returned [acp.PermissionRationale] is the AGENT's own answer — the
+	// gating decision as the side that made it describes it, as opposed to
+	// the approximation this client derives from the trace riding on the
+	// permission request (see internal/permrationale, which both sides share
+	// so the two are comparable). An unknown or already-resolved call id, or
+	// one belonging to another session, is an error rather than an empty
+	// rationale: "no longer pending" and "gated for no stated reason" are
+	// different answers and a client must be able to tell them apart.
+	ExplainPermission(ctx context.Context, sessionID, callID string) (acp.PermissionRationale, error)
 }

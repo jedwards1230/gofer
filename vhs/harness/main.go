@@ -28,6 +28,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/jedwards1230/agent-sdk-go/acp"
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
@@ -348,3 +349,14 @@ func (s *vhsSupervisor) SetModel(context.Context, string, string) error { return
 func (s *vhsSupervisor) SetEffort(context.Context, string, string) error { return nil }
 
 func (s *vhsSupervisor) Reply(context.Context, string, string, bool, bool) error { return nil }
+
+// ExplainPermission answers with a canned rationale: no tape drives ctrl+e
+// (these scenes are about the command panel), and a scene that later does
+// should render an explained prompt rather than an error banner.
+func (s *vhsSupervisor) ExplainPermission(context.Context, string, string) (acp.PermissionRationale, error) {
+	return acp.PermissionRationale{
+		Reason: "No permission rule matched this call, so gofer is asking before it runs.",
+		Policy: "unmatched",
+		Trace:  []string{"rule: unmatched"},
+	}, nil
+}

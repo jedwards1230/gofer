@@ -347,6 +347,15 @@ type SessionInfo struct {
 	// to "", which is also what an unset level looks like, so a consumer needs
 	// no version check to read it.
 	Effort string `json:"effort,omitempty"`
+	// ParentID, Agent and Depth mirror internal/daemon/wire.go's fields of the
+	// same names: the session's subagent link (which session spawned it, which
+	// agent identity it runs as, its depth in the tree). Additive — a daemon
+	// predating subagents never sends them, and an ordinary root session on a
+	// current daemon omits all three, so they decode to the zero values that
+	// mean "a root session".
+	ParentID string `json:"parentId,omitempty"`
+	Agent    string `json:"agent,omitempty"`
+	Depth    int    `json:"depth,omitempty"`
 }
 
 // Roster calls gofer/roster and decodes the raw wire rows. Consumers map the

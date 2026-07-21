@@ -13,6 +13,7 @@ package tuibridge_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/jedwards1230/agent-sdk-go/provider/faux"
@@ -86,5 +87,28 @@ func TestAdapterReplyUnknownSessionErrors(t *testing.T) {
 
 	if err := a.Reply(context.Background(), "no-such-session", "perm-1", true, false); err == nil {
 		t.Error("Reply for an unknown session: want an error, got nil")
+	}
+}
+
+// TestAdapterExplainPermissionPassesThrough asserts the daemonless explain
+// seam reaches the supervisor's own read-only lookup and surfaces its error
+// unswallowed — the Adapter's whole responsibility here, since the rationale
+// itself is internal/permrationale's (and internal/supervisor's own
+// TestExplainPermissionWhilePending exercises it against a real pending
+// request, which a faux turn never produces).
+func TestAdapterExplainPermissionPassesThrough(t *testing.T) {
+	sup := newTestSupervisor(t)
+	a := tuibridge.New(sup, fixedModel("faux"))
+
+	info, err := a.Create(context.Background(), "", tui.CreateOptions{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if _, err := a.ExplainPermission(context.Background(), info.ID, "perm-1"); !errors.Is(err, supervisor.ErrNoPendingPermission) {
+		t.Errorf("ExplainPermission with nothing pending: err = %v, want ErrNoPendingPermission", err)
+	}
+	if _, err := a.ExplainPermission(context.Background(), "no-such-session", "perm-1"); !errors.Is(err, supervisor.ErrNotLive) {
+		t.Errorf("ExplainPermission for an unknown session: err = %v, want ErrNotLive", err)
 	}
 }

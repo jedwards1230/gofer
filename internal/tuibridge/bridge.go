@@ -15,6 +15,7 @@ package tuibridge
 import (
 	"context"
 
+	"github.com/jedwards1230/agent-sdk-go/acp"
 	"github.com/jedwards1230/agent-sdk-go/event"
 
 	"github.com/jedwards1230/gofer/internal/supervisor"
@@ -87,7 +88,12 @@ func (a Adapter) Create(ctx context.Context, prompt string, opts tui.CreateOptio
 	if model == "" && a.defaultModel != nil {
 		model = a.defaultModel(ctx)
 	}
-	info, err := a.sup.Create(ctx, prompt, supervisor.CreateOptions{Model: model, Cwd: opts.Cwd})
+	info, err := a.sup.Create(ctx, prompt, supervisor.CreateOptions{
+		Model:    model,
+		Cwd:      opts.Cwd,
+		ParentID: opts.ParentID,
+		Agent:    opts.Agent,
+	})
 	if err != nil {
 		return tui.SessionInfo{}, err
 	}
@@ -177,6 +183,22 @@ func (a Adapter) Reply(_ context.Context, sessionID, id string, allow, remember 
 	return a.sup.Reply(sessionID, event.PermissionReply{ID: id, Verdict: verdict, Remember: remember})
 }
 
+// ExplainPermission passes through to the supervisor's own read-only
+// rationale lookup — the in-process counterpart of the ACP
+// session/explain_permission round trip [daemonbridge.Supervisor] makes, and
+// the same [permrationale] grammar behind both, so a daemonless TUI explains a
+// gated call exactly as an attached one does.
+//
+// It is called DIRECTLY on the concrete supervisor rather than through any
+// capability interface: the daemon answers explains from its own retained
+// requests (see internal/daemon's handleExplainPermission), so nothing about
+// this method belongs on [daemon.Supervisor]. ctx is accepted to satisfy
+// [tui.Supervisor] and unused for the same reason [Adapter.Reply]'s is — the
+// lookup is an in-memory map read with nothing to cancel.
+func (a Adapter) ExplainPermission(_ context.Context, sessionID, callID string) (acp.PermissionRationale, error) {
+	return a.sup.ExplainPermission(sessionID, callID)
+}
+
 // toTUI copies the fields the TUI renders from a supervisor snapshot. The
 // status cast relies on the two SessionStatus enums sharing ordinals — a
 // property the mapping test pins so a future drift fails loudly.
@@ -199,5 +221,11 @@ func toTUI(s supervisor.SessionInfo) tui.SessionInfo {
 		// no separate worker process to have its own build), a router stamps it
 		// from the owning worker's gofer/hello.
 		BinaryVersion: s.BinaryVersion,
+		// The subagent link. Zero for a root session — which is every session
+		// created without an explicit parent, so this mapping is inert for the
+		// existing roster.
+		ParentID: s.ParentID,
+		Agent:    s.Agent,
+		Depth:    s.Depth,
 	}
 }

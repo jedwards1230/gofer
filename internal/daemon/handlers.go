@@ -14,6 +14,7 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/acp"
 	"github.com/jedwards1230/agent-sdk-go/event"
 
+	"github.com/jedwards1230/gofer/internal/permrationale"
 	"github.com/jedwards1230/gofer/internal/supervisor"
 )
 
@@ -123,7 +124,8 @@ var methodTable = map[string]methodHandler{
 	acp.MethodSessionCancel: handleSessionCancel,
 	acp.MethodSessionList:   handleSessionList,
 
-	acp.MethodSessionSetConfigOption: handleSessionSetConfigOption,
+	acp.MethodSessionSetConfigOption:   handleSessionSetConfigOption,
+	acp.MethodSessionExplainPermission: handleExplainPermission,
 
 	methodGoferRoster:   handleGoferRoster,
 	methodGoferPS:       handleGoferPS,
@@ -280,7 +282,7 @@ func handleSessionNew(d *Daemon, ctx context.Context, _ *peer, params json.RawMe
 	if rerr != nil {
 		return nil, rerr
 	}
-	var req acp.NewSessionRequest
+	var req NewSessionRequest
 	if err := json.Unmarshal(params, &req); err != nil {
 		return nil, invalidParams(fmt.Errorf("acp: decode %s params: %w", acp.MethodSessionNew, err))
 	}
@@ -310,45 +312,43 @@ func handleSessionNew(d *Daemon, ctx context.Context, _ *peer, params json.RawMe
 			return nil, appError(fmt.Errorf("session limit reached (max %d)", d.cfg.MaxSessions))
 		}
 	}
-	info, err := d.sup.Create(ctx, "", supervisor.CreateOptions{Cwd: cwd, Model: model})
+	parentID, agentID, _ := req.Meta.SubagentLink()
+	info, err := d.sup.Create(ctx, "", supervisor.CreateOptions{
+		Cwd:      cwd,
+		Model:    model,
+		ParentID: parentID,
+		Agent:    agentID,
+	})
 	if err != nil {
+		// A gofer/parent naming no session is a bad client PARAMETER, so it
+		// answers -32602 rather than a generic application error — the same
+		// treatment an unresolvable cwd already gets above. ErrDepthExceeded
+		// deliberately stays an application error: the parameter is well-formed and
+		// names a real session; it is the daemon's own policy that refuses.
+		if errors.Is(err, supervisor.ErrNoParent) {
+			return nil, invalidParams(err)
+		}
 		return nil, appError(err)
 	}
-	d.log.Info("session created", "session", info.ID)
-	return newSessionResult{
+	// Only log the subagent keys when there IS a link: every ordinary root create
+	// would otherwise carry two empty attributes on every line.
+	logArgs := []any{"session", info.ID}
+	if info.ParentID != "" {
+		logArgs = append(logArgs, "parent", info.ParentID)
+	}
+	if info.Agent != "" {
+		logArgs = append(logArgs, "agent", info.Agent)
+	}
+	d.log.Info("session created", logArgs...)
+	return NewSessionResponse{
 		NewSessionResponse: acp.NewSessionResponse{SessionID: info.ID},
-		Meta:               &newSessionMeta{Model: info.Model},
+		Meta: &NewSessionMeta{
+			Model:    info.Model,
+			ParentID: info.ParentID,
+			Agent:    info.Agent,
+			Depth:    info.Depth,
+		},
 	}, nil
-}
-
-// newSessionResult is the session/new response: ACP's own
-// [acp.NewSessionResponse] plus gofer's `_meta` extension. ACP reserves `_meta`
-// for exactly this — implementation-specific data an unaware client ignores —
-// so carrying the assigned model there keeps the response conformant, needs no
-// change to the SDK's shared wire types, and honors the repo's contract-only
-// consumption invariant.
-//
-// It exists because the ACP response carries only the session id. A client that
-// let the daemon choose the model — the NORMAL path, session/new with no model
-// — therefore had no way to learn what it actually got, so
-// internal/daemonbridge's Create could only echo back the model it had
-// REQUESTED (the empty string), and the roster row it returned could never
-// carry the real one (issue #162, defect 2).
-type newSessionResult struct {
-	acp.NewSessionResponse
-	Meta *newSessionMeta `json:"_meta,omitempty"`
-}
-
-// newSessionMeta is [newSessionResult]'s `_meta` payload. The key is namespaced
-// the same way gofer's own methods are (gofer/*), so it cannot collide with
-// another ACP implementation's extension data.
-type newSessionMeta struct {
-	// Model is the model the daemon ASSIGNED to the new session: the client's
-	// requested model when it sent one, else the daemon's own resolved default
-	// (see the resolution above). Empty only when the daemon could not resolve
-	// one at all. A client that sees no `_meta` at all is talking to a daemon
-	// predating this field and falls back to whatever it requested.
-	Model string `json:"gofer/model,omitempty"`
 }
 
 // handleSessionLoad reopens a persisted session and replays its folded
@@ -651,6 +651,60 @@ func handleSessionSetConfigOption(d *Daemon, ctx context.Context, _ *peer, param
 	return acp.SetConfigOptionResponse{
 		ConfigOptions: []acp.ConfigOption{modelConfigOption(current, d.authedProviders())},
 	}, nil
+}
+
+// handleExplainPermission answers the ACP session/explain_permission request:
+// why is THIS tool call being gated? It is decoded directly rather than via
+// [decodeOp] because acp.DecodeOp deliberately projects no op for it (it is a
+// question about daemon-held state, not an instruction to the session) — the
+// same shape handleSessionSetConfigOption has.
+//
+// The answer comes from the daemon's OWN retained requests
+// ([Daemon.pendingPerm]), which both topologies populate: the in-process
+// prompt handler records one as it broadcasts a permission.requested, and the
+// M6 router relay records one for an adopted session's worker-side request
+// (see permission_relay.go). So this needs nothing from the hosted supervisor
+// — no new [Supervisor] method, no router forwarding — and works identically
+// on a daemon, a worker, and a router.
+//
+// It is READ-ONLY, and that is the whole contract of the method (see
+// [acp.ExplainPermissionResponse]: "the pending permission request is left
+// unresolved"). It clears no route, drops no retained request, and touches no
+// gate: after any number of explains the request is still pending and the
+// human's reply still resolves it. A test pins exactly that
+// (TestExplainPermissionIsReadOnly).
+//
+// Failure modes are errors, never a zero rationale: a client must be able to
+// tell "that request is no longer pending" from "it was gated for no stated
+// reason". An unknown/already-resolved id — and a known id whose session does
+// not match the one asked about, which must not leak another session's
+// rationale — are both [appError]s rather than invalid-params: the request is
+// perfectly well-formed, it is the daemon's live state that cannot satisfy it,
+// exactly like sessionModel's "not found in roster" (the -32602 codes below
+// stay for genuinely malformed params).
+func handleExplainPermission(d *Daemon, _ context.Context, _ *peer, params json.RawMessage) (any, *rpcError) {
+	req, err := acp.DecodeExplainPermission(params)
+	if err != nil {
+		return nil, invalidParams(err)
+	}
+	if req.SessionID == "" {
+		return nil, invalidParamsMsg(acp.MethodSessionExplainPermission + ": sessionId is required")
+	}
+	if req.ToolCallID == "" {
+		return nil, invalidParamsMsg(acp.MethodSessionExplainPermission + ": toolCallId is required")
+	}
+
+	p, ok := d.pendingPerm(req.ToolCallID)
+	if !ok {
+		return nil, appError(fmt.Errorf("%s: tool call %s has no pending permission request (it may already have been answered)", acp.MethodSessionExplainPermission, req.ToolCallID))
+	}
+	if p.SessionID != req.SessionID {
+		// Deliberately does NOT name the session the call actually belongs to:
+		// the caller asked about a session it named, and the honest answer is
+		// that this call is not that session's.
+		return nil, appError(fmt.Errorf("%s: tool call %s does not belong to session %s", acp.MethodSessionExplainPermission, req.ToolCallID, req.SessionID))
+	}
+	return acp.ExplainPermissionResponse{Rationale: permrationale.Derive(p.Tool, p.Trace)}, nil
 }
 
 // sessionModel returns sessionID's current model, read from the live roster —
