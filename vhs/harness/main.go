@@ -156,7 +156,13 @@ func approvalScene() []step {
 		{event.NewMessageStarted(sid, event.MessageText), 0},
 		{event.NewMessageFinished(sid, event.MessageText, "One package failed. I need to remove a stale fixture before re-running."), beat},
 		{event.NewTurnFinished(sid, "end_turn", provider.Usage{InputTokens: 88, OutputTokens: 41}), beat},
-		{event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"command": "rm -rf /tmp/session-fixtures"}, []string{"no rule"}), beat},
+		// The trace is the exact two-entry shape loop.RuleGuard emits for an
+		// unmatched, un-sandboxable call — the prompt DERIVES its rationale
+		// paragraphs from it (see internal/tui's rationaleLines), so a made-up
+		// trace string would record a demo of the "could not determine why"
+		// fallback rather than of the feature.
+		{event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"command": "rm -rf /tmp/session-fixtures"},
+			[]string{"rule: unmatched", "containable: false (no container configured)"}), beat},
 	}
 }
 

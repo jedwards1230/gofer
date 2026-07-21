@@ -10,6 +10,7 @@ import (
 
 	"github.com/jedwards1230/agent-sdk-go/event"
 
+	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/tui/layout"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
@@ -423,6 +424,24 @@ func (a App) mouseEnabled() bool {
 		return true
 	}
 	return cfg.TUI.MouseEnabled()
+}
+
+// approvalBodyLines reports the effective tui.approval_body_lines setting
+// (config.TUI.ApprovalBodyLineLimit — default
+// config.DefaultApprovalBodyLines), read off a.commandEnv.Config() on every
+// call, the same "always current, never a stale snapshot" contract
+// autoscrollEnabled/mouseEnabled/pasteLimitBytes follow. It caps the inline
+// approval prompt's command-body rows (see renderApprovalPrompt). A nil
+// Config closure or a read error both fall through to the default.
+func (a App) approvalBodyLines() int {
+	if a.commandEnv.Config == nil {
+		return config.DefaultApprovalBodyLines
+	}
+	cfg, err := a.commandEnv.Config()
+	if err != nil {
+		return config.DefaultApprovalBodyLines
+	}
+	return cfg.TUI.ApprovalBodyLineLimit()
 }
 
 // currentSessionInfo returns the roster snapshot for whichever session is
@@ -991,7 +1010,15 @@ func (a App) render() string {
 		// Model.view joins it to the transcript as one scrollable region
 		// (a.scroll), so it tails off the top for a long enough conversation
 		// exactly like the oldest messages do.
-		body = a.sess.ViewWithMenu(a.width, fl.h, fl.menuLines, attachHeaderLines(a.theme, a.over.meta, a.width), a.scroll)
+		//
+		// WithApprovalBodyLines plumbs the tui.approval_body_lines cap into
+		// the render on a LOCAL copy of the model (render has a value
+		// receiver, so nothing here reaches App's own state): the setting is
+		// read fresh on every frame, so a /config edit re-caps the next render
+		// rather than the next process start, and a.sess never carries a stale
+		// snapshot of it.
+		body = a.sess.WithApprovalBodyLines(a.approvalBodyLines()).
+			ViewWithMenu(a.width, fl.h, fl.menuLines, attachHeaderLines(a.theme, a.over.meta, a.width), a.scroll)
 	default:
 		body = a.over.ViewWithMenu(a.width, fl.h, fl.menuLines, a.scroll, a.panel != nil)
 	}

@@ -402,7 +402,7 @@ func requestApproval(t *testing.T, a App, id string) App {
 	t.Helper()
 	mdl, _ := a.Update(sessEventMsg{
 		id: a.sessID,
-		ev: event.NewPermissionRequested(a.sessID, id, "bash", map[string]any{"cmd": "rm -rf /tmp/x"}, []string{"no rule"}),
+		ev: event.NewPermissionRequested(a.sessID, id, "bash", map[string]any{"cmd": "rm -rf /tmp/x"}, GoldenTrace()),
 	})
 	return mdl.(App)
 }
@@ -500,6 +500,46 @@ func TestAppApprovalDialogAllowSendsReply(t *testing.T) {
 	}
 }
 
+// TestAppApprovalDialogNumberKeysSendReply verifies the numbered choices the
+// prompt renders ("1. [a] Yes   2. [d] No") are real keys, not decoration:
+// '1' allows and '2' denies, each routed through Supervisor.Reply exactly
+// like its lettered alias.
+func TestAppApprovalDialogNumberKeysSendReply(t *testing.T) {
+	tests := []struct {
+		key       string
+		wantAllow bool
+	}{
+		{"1", true},
+		{"2", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.key, func(t *testing.T) {
+			sup := newInternalFakeSup(GoldenRoster())
+			a := attachForDialogTest(t, sup)
+			a = requestApproval(t, a, "perm-1")
+
+			mdl, cmd := a.Update(tea.KeyPressMsg{Text: tc.key})
+			a = mdl.(App)
+			if a.sess.HasPendingApproval() {
+				t.Fatalf("expected the pending approval cleared immediately on %q", tc.key)
+			}
+			if cmd == nil {
+				t.Fatalf("expected a Reply cmd after %q", tc.key)
+			}
+			cmd()
+
+			if len(sup.replies) != 1 {
+				t.Fatalf("sup.replies = %+v, want one entry", sup.replies)
+			}
+			want := replyCall{sessionID: a.sessID, id: "perm-1", allow: tc.wantAllow, remember: false}
+			if sup.replies[0] != want {
+				t.Errorf("sup.replies[0] = %+v, want %+v", sup.replies[0], want)
+			}
+		})
+	}
+}
+
 // TestAppApprovalDialogDenyWithRememberSendsReply verifies 'r' (toggle
 // remember) then 'd' (deny) sends a deny reply with remember=true.
 func TestAppApprovalDialogDenyWithRememberSendsReply(t *testing.T) {
@@ -566,7 +606,7 @@ func TestAppApprovalDialogHiddenOnOverview(t *testing.T) {
 		width:  testkit.Width,
 		height: testkit.Height,
 	}
-	if strings.Contains(a.render(), "Allow this tool call?") {
+	if strings.Contains(a.render(), "Do you want to proceed?") {
 		t.Error("overview render contains the approval prompt; want it hidden outside attach/peek")
 	}
 }
@@ -592,7 +632,16 @@ func TestAppHeaderOnEveryScreen(t *testing.T) {
 		t.Errorf("attach render missing identity header %q:\n%s", wantHeader, got)
 	}
 
-	withApproval := requestApproval(t, attach, "perm-1")
+	// The approval prompt is checked on a taller terminal: the prompt block
+	// (title, body, rationale, question, action row) is ~22 rows, so at the
+	// 24-row golden height it legitimately leaves no room for the header —
+	// header+transcript are ONE scrollable region above a pinned footer (see
+	// Model.view), and a footer that tall scrolls the header away exactly as a
+	// long transcript does (TestHeaderScrollsAwayOnLongTranscript pins that
+	// behavior). What this asserts is that the header is still part of that
+	// region during an approval, not that it survives any frame height.
+	mdl, _ := attach.Update(tea.WindowSizeMsg{Width: testkit.Width, Height: 2 * testkit.Height})
+	withApproval := requestApproval(t, mdl.(App), "perm-1")
 	if got := withApproval.render(); !strings.Contains(got, wantHeader) {
 		t.Errorf("approval-prompt render missing identity header %q:\n%s", wantHeader, got)
 	}
