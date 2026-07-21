@@ -89,6 +89,7 @@ func TestSupervisor_ListDiskOnlySessionEnrichedFromJournal(t *testing.T) {
 	got := findInfo(infos, id)
 	if got == nil {
 		t.Fatalf("List missing disk-only session %s: %+v", id, infos)
+		return
 	}
 	if got.Live {
 		t.Errorf("Live = true, want false (never resumed)")
@@ -155,6 +156,7 @@ func TestSupervisor_ListLegacyJournalNoMetaDegradesGracefully(t *testing.T) {
 	got := findInfo(infos, id)
 	if got == nil {
 		t.Fatalf("List missing legacy session %s: %+v", id, infos)
+		return
 	}
 	if got.Cwd != "" {
 		t.Errorf("Cwd = %q, want empty (no session_meta entry to read)", got.Cwd)

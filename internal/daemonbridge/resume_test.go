@@ -32,14 +32,17 @@ func TestListSessionsSeesCreatedSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListSessions: %v", err)
 	}
-	var found *tui.SessionRef
-	for i := range refs {
-		if refs[i].ID == info.ID {
-			found = &refs[i]
+	var (
+		found tui.SessionRef
+		ok    bool
+	)
+	for _, r := range refs {
+		if r.ID == info.ID {
+			found, ok = r, true
 			break
 		}
 	}
-	if found == nil {
+	if !ok {
 		t.Fatalf("session %s missing from ListSessions: %+v", info.ID, refs)
 	}
 	if found.Cwd != cwd {
