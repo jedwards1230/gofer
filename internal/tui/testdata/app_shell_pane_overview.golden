@@ -1,0 +1,24 @@
+
+gofer v0.3.0
+claude-sonnet-5 · ~/orchestration
+1 awaiting input · 1 working · 0 completed
+
+~/orchestration
+▸ wire the app root             Working · overview <-> peek <-> attach nav    2m
+  review the supervisor contr…  Needs input · turn finished — awaiting the…   5m
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+❯ describe a task for a new session
+enter peek · → attach · tab toggle view · ctrl-x kill · ? shortcuts
+────────────────────────────────────────────────────────────────────────────────
+$ git status --short
+   M internal/tui/app.go
+shell output · esc to dismiss
