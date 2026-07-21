@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -345,6 +346,29 @@ func (a App) doKill(id string) tea.Cmd {
 	}
 }
 
+// doKillTree kills every id in order via the Supervisor — one Kill per
+// session, the same Op ctrl-x issues for a single row, because "stop this
+// session's agents" is not a new capability, just a fan-out of an existing
+// one. Journals are never deleted (repo invariant #4): Kill interrupts and
+// terminates, and that is all this does.
+//
+// A failing Kill does NOT abort the sweep: a bulk stop that gives up halfway
+// leaves the operator with a partly-stopped tree and no way to tell which half.
+// Every id is attempted and the FIRST error is what surfaces on the status
+// line, which is the one an operator can act on (the later ones are usually
+// the same cause repeated).
+func (a App) doKillTree(ids []string) tea.Cmd {
+	return func() tea.Msg {
+		var firstErr error
+		for _, id := range ids {
+			if err := a.sup.Kill(context.Background(), id); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		return opDoneMsg{err: firstErr}
+	}
+}
+
 // doArchive drops id from the roster via the Supervisor.
 func (a App) doArchive(id string) tea.Cmd {
 	return func() tea.Msg {
@@ -505,6 +529,20 @@ func (a App) currentSessionInfo() *SessionInfo {
 		return &s
 	}
 	return nil
+}
+
+// parentOf resolves the roster row that spawned id, for the attach screen's
+// drill-out (← from a child returns to its parent — see handleAttachKey). It
+// reports false for a root session, for a session the polled roster snapshot
+// doesn't hold, and for one whose ParentID names a row that isn't on screen:
+// all three are "there is no parent session to return to", and the caller falls
+// back to the overview rather than navigating to a session it cannot render.
+func (a App) parentOf(id string) (SessionInfo, bool) {
+	s, ok := a.over.SessionByID(id)
+	if !ok || s.ParentID == "" || s.ParentID == s.ID {
+		return SessionInfo{}, false
+	}
+	return a.over.SessionByID(s.ParentID)
 }
 
 // enter ensures sess is subscribed to id, re-subscribing via
@@ -806,6 +844,24 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return a, a.doKill(s.ID)
 		}
 		return a, nil
+
+	case key.Mod.Contains(tea.ModCtrl) && key.Code == 't':
+		// Bulk stop: kill every subagent BELOW the selected row, leaving the
+		// selected session itself running — ctrl-x is still the way to stop one
+		// session, including this one. The two read as a pair: ctrl-x kills the
+		// row, ctrl-t stops what the row fanned out.
+		//
+		// The status note is the whole feedback channel here: the roster is a
+		// polled snapshot, so the killed rows keep rendering as Working for up to
+		// rosterInterval, and a bulk destructive key that looks like it did
+		// nothing invites a second press.
+		ids := a.over.Descendants(a.over.SelectedID())
+		if len(ids) == 0 {
+			a.setStatus(sevWarn, "No subagents under this session.")
+			return a, nil
+		}
+		a.setStatus(sevOK, fmt.Sprintf("Stopping %s.", plural(len(ids), "subagent")))
+		return a, a.doKillTree(ids)
 	}
 
 	// Every key not already claimed by the navigation contract above falls
@@ -907,12 +963,30 @@ func (a App) handleAttachKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Code == tea.KeyLeft && key.Mod == 0:
 		// Bare (unmodified) Left only — a modified Left (Alt+Left, the input
 		// keymap's word-move) falls through to applyInputKey below like any
-		// other editing key. ← in an EMPTY input backs out to the overview
-		// (the navigation contract); with text, it edits — moves the cursor
-		// left one rune, the same as everywhere else Left means "move left"
-		// — rather than the pre-cursor no-op this case used to fall through
-		// to.
+		// other editing key. ← in an EMPTY input backs out (the navigation
+		// contract); with text, it edits — moves the cursor left one rune, the
+		// same as everywhere else Left means "move left" — rather than the
+		// pre-cursor no-op this case used to fall through to.
+		//
+		// Backing out of a SUBAGENT session lands on its PARENT's session, not
+		// on the overview: drilling into a child (↑/↓ then enter) and pressing ←
+		// walks back up the tree one level at a time, so a supervisor can read a
+		// child's whole history and return to the context it came from — the
+		// tree shows who is working, entering a node shows what they did (see
+		// docs/TUI.md § "Subagent sessions"). A ROOT session — or a child whose
+		// parent is absent from the polled roster snapshot, the same orphan case
+		// [byTree] renders as a root — keeps returning to the overview exactly as
+		// before.
 		if a.sess.InputEmpty() {
+			if parent, ok := a.parentOf(a.sessID); ok {
+				// Keep the roster's selection in step with the drill-out, the way
+				// every other navigation into a session does: the header, the
+				// command panel's session views, and a subsequent ← all read
+				// a.over's selection rather than a.sessID.
+				a.over.selectedID = parent.ID
+				a.scroll = 0
+				return a, a.enter(parent.ID)
+			}
 			a.scr = screenOverview
 			a.scroll = 0
 			return a, nil
@@ -1072,7 +1146,15 @@ func (a App) render() string {
 		// process start, and a.sess never carries a stale snapshot of either.
 		// [App.transcriptRegion] measures through the SAME helper — see its
 		// doc for why they must not diverge.
+		//
+		// WithBackgroundAgents rides the same local copy for the same reason,
+		// but for a different kind of freshness: the sessions this one spawned
+		// are ROSTER facts, not events on this session's stream (a subagent is a
+		// separate session with its own journal — see docs/TUI.md), so the block
+		// is composed per frame off the latest poll instead of being ingested
+		// once and going stale as children come and go.
 		body = a.promptModel().
+			WithBackgroundAgents(a.over.Children(a.sessID)).
 			ViewWithMenu(a.width, fl.h, fl.menuLines, attachHeaderLines(a.theme, a.over.meta, a.width), a.scroll)
 	default:
 		body = a.over.ViewWithMenu(a.width, fl.h, fl.menuLines, a.scroll, a.panel != nil)

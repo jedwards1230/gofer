@@ -42,8 +42,9 @@ A row may be a whole fan-out hierarchy; it collapses to aggregate state,
 agent count, and whether approvals are pending, and expands inline to the
 subagent tree. `↑`/`↓` move the selection · `tab` switches view · `enter`
 peek · `→` attach · `ctrl-x` kill (running; subtree interrupted) or archive
-(finished), acting immediately on the selected row. `enter`, `→` and
-`ctrl-x` take these meanings only while the dispatch bar is empty; every
+(finished) · `ctrl-t` stop every subagent **below** the selected row, acting
+immediately on the selected row. `enter`, `→`, `ctrl-x` and `ctrl-t`
+take these meanings only while the dispatch bar is empty; every
 other key types into it, and `enter` on non-empty text starts a new session
 — or dispatches a `/` command. Journals are never deleted — `gofer ps --all`
 lists archived sessions.
@@ -56,8 +57,10 @@ running session or archives a finished one, as on the overview. Peek
 carries no transcript tail — it is a roster-only projection.
 
 **Attach** — full transcript + input. `esc` interrupts the in-flight turn;
-`←` on an empty input backs out to the overview (with text, it moves the
-cursor).
+`←` on an empty input backs out — to the **parent session** when the attached
+session is a subagent, otherwise to the overview (with text, it moves the
+cursor). See [Subagent sessions](#subagent-sessions-m7--ecosystem) for the
+drill-in/drill-out pair.
 
 Every screen — overview, attach's transcript, its approval prompts, and its
 command-menu/panel overlays — opens with the same two-line identity header:
@@ -288,8 +291,10 @@ session (with dispatch-bar text, it instead creates a session from that text
 and attaches into it); `→` in an **empty** dispatch bar attaches the selected
 session (with text, it edits); `esc`
 interrupts/acts on the *active* session (never "go back"); `←` in an **empty**
-input backs out to the overview (with text, it edits); `ctrl-x` kills a running
-session or archives a finished one; `ctrl-c` quits. In peek, `up`/`down` move
+input backs out to the attached session's parent, or to the overview when it has
+none (with text, it edits); `ctrl-x` kills a running
+session or archives a finished one; `ctrl-t` stops the selected row's subagents;
+`ctrl-c` quits. In peek, `up`/`down` move
 the selection, `enter` opens the session (or sends the reply when the `❯` input
 has text), `space` closes to the overview, and `ctrl+x` deletes.
 
@@ -631,23 +636,60 @@ selection/windowing the M2 roster already established — a child session is jus
 a session, so it needed no new navigation model, only the parent→child link and
 the indent.
 
-**Upcoming (the navigation).** `↑`/`↓` already selects a child, since a child
-row is an ordinary roster row; `enter` navigating *into* that child's full
-session — its complete transcript, tool blocks, and approvals, exactly as if it
-were a top-level session, with `esc`/`←` returning to the parent — is the
-remaining piece. That is the fan-out tree above made navigable: the tree shows
-*who is working*; entering a node shows *what they did*. So a supervisor
-watching one task will drill into any subagent's whole history without losing
-the parent context.
+**Built (the navigation).** The fan-out tree is navigable: the tree shows *who
+is working*, entering a node shows *what they did*, so a supervisor drills into
+any subagent's whole history without losing the parent context.
 
-**Tool-call attribution.** The SDK gate is gone: `runner.Options.Agent`
-(v0.17.0) stamps the originating-agent id onto every `tool.call.*` event a
-session's loop emits, and the supervisor forwards `CreateOptions.Agent` into it.
-Rendering it is still upcoming — a tool block should name the source,
-`ToolName(args) · from the <agent> agent`, alongside the existing human caption,
-so a transcript interleaving a parent's and its subagents' calls reads
-unambiguously. It falls back to the current un-attributed rendering when an
-event carries no agent id, so it stays purely additive.
+- **Drill in.** `↑`/`↓` selects a child (a child row is an ordinary roster row),
+  and `enter`/`→` opens *that child's* full session — its complete transcript,
+  tool blocks, and approvals, exactly as for a top-level session. This needed no
+  new code beyond the tree ordering; it is pinned by a test rather than
+  reimplemented.
+- **Drill out.** `←` on an empty attach input returns to the **parent's**
+  session, one level per press, walking a chain back to its root. A root session
+  — and a child whose parent is absent from the polled snapshot, the same orphan
+  case the roster renders as a root — keeps backing out to the overview. The
+  roster selection follows the drill-out, so the header, the panel's session
+  views, and the next `←` all agree on where you are.
+- **`esc` is NOT a return key — deliberately.** The issue text asked for
+  "`esc`/`←` returns to parent"; `esc` on the attach screen is an established,
+  tested contract (**interrupt the in-flight turn**) and it is the only
+  interrupt binding there is. Hijacking it for navigation would silently delete
+  the ability to stop a running turn — a regression dressed as a feature. The
+  return path is `←` only. Do not "fix" this.
+- **Bulk stop — `ctrl-t`.** On the roster, `ctrl-t` stops every subagent
+  *below* the selected row (the whole subtree, one `Supervisor.Kill` per
+  descendant), leaving the selected session itself running; `ctrl-x` remains the
+  way to stop one session. Kill interrupts and terminates — journals are never
+  deleted (invariant #4). A failing kill does not abort the sweep: every
+  descendant is attempted and the first error surfaces on the status line. The
+  binding avoids `ctrl-s`/`ctrl-q` (flow control), `ctrl-z` (suspend), `ctrl-b`
+  (tmux prefix), `ctrl-a`/`e`/`w`/`u`/`k`/`d` (the shared input keymap) and bare
+  letters (the dispatch bar is always typeable). The hint line gains
+  `ctrl-t stop agents` **only on a tree roster**, in place of `? shortcuts` —
+  the flat hint already spends 67 of its 80 cells, and `?` is the one entry
+  naming a key nothing handles.
+
+**Built (the transcript blocks).** Two additions, both purely additive — a
+session with no subagents renders byte-for-byte what it always did:
+
+- **Background agents.** A session that has spawned children ends its
+  transcript with `N background agents launched (↓ to manage)`, then one line
+  per child naming it and the agent it runs as. The children are a **roster**
+  fact, not an event on this session's stream (a subagent is a separate session
+  with its own journal), so the block is composed per frame from the current
+  poll (`Model.WithBackgroundAgents`) instead of ingested once and left to go
+  stale.
+- **Tool-call attribution.** `runner.Options.Agent` (SDK v0.17.0) stamps the
+  originating-agent id onto every `tool.call.*` event a session's loop emits and
+  the supervisor forwards `CreateOptions.Agent` into it, so a tool block names
+  its source: `ToolName(args) · from the <agent> agent`, alongside the existing
+  caption, and a transcript interleaving a parent's and its subagents' calls
+  reads unambiguously. An event with no agent id renders the un-attributed block
+  exactly as before — no placeholder. The attribution rides the transcript item,
+  so it outlives the per-call correlation map the approval prompt reads (that
+  map is dropped when the call finishes); the two surfaces read the same SDK
+  field independently.
 
 ## Monitor / background tasks (M8 — goal)
 
