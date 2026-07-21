@@ -3,6 +3,7 @@ package decision
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -16,11 +17,15 @@ import (
 // [Gate.Subscribe] and resolve a request with [Gate.Answer].
 //
 // Like loop.Gate, Request spawns no goroutine: it blocks the caller on a select
-// between a buffered answer channel and ctx.Done, so an interrupted turn
-// releases the waiter and leaves nothing running. Unlike loop.Gate there is no
-// "answer arrived before the waiter registered" window to stash: the request id
-// is minted inside Request, under the same lock that publishes it, so no client
-// can name a request before its waiter exists.
+// between a buffered answer channel, ctx.Done, and the gate's own shutdown, so
+// an interrupted or torn-down turn releases the waiter and leaves nothing
+// running. Unlike loop.Gate there is no "answer arrived before the waiter
+// registered" window to stash: the request id is minted inside Request, under
+// the same lock that publishes it, so no client can name a request before its
+// waiter exists.
+//
+// A Gate lives exactly as long as its session: [Gate.Close] ends it, dropping
+// the open requests and closing every subscription.
 //
 // The zero value is not usable; build one with [NewGate]. Every method is safe
 // for concurrent use.
@@ -36,11 +41,19 @@ type Gate struct {
 	// open holds every request currently awaiting an answer, keyed by id;
 	// order keeps their open order for a deterministic replay and snapshot.
 	// Both are maintained together — a request leaves the two atomically,
-	// under mu, exactly once (whichever of Answer/ctx-cancel gets there
-	// first).
+	// under mu, exactly once (whichever of Answer / a giving-up waiter (see
+	// settle) / Close gets there first).
 	open  map[string]*pending
 	order []string
 	subs  map[*Subscription]struct{}
+	// closed reports that [Gate.Close] has run: the session is gone, so no new
+	// request may open and no new subscription may register. Guarded by mu;
+	// done is its lock-free twin for the blocked waiters in Request, which
+	// cannot re-take mu while parked.
+	closed bool
+	// done is closed exactly once, by Close, to release every blocked
+	// [Gate.Request] with [ErrClosed].
+	done chan struct{}
 }
 
 // pending is one open request plus the channel its blocked [Gate.Request] is
@@ -59,6 +72,7 @@ func NewGate(sessionID string) *Gate {
 		sessionID: sessionID,
 		open:      make(map[string]*pending),
 		subs:      make(map[*Subscription]struct{}),
+		done:      make(chan struct{}),
 	}
 }
 
@@ -89,7 +103,8 @@ func (g *Gate) Bind(sessionID string) {
 // [acp.DecisionOutcomeCancelled]. On ctx cancellation the request is dropped
 // from the open set and an [UpdateResolved] is published, so a client
 // rendering the prompt clears it rather than answering a request that no
-// longer has a waiter.
+// longer has a waiter. On [Gate.Close] — the session itself going away — a
+// blocked Request returns [ErrClosed].
 func (g *Gate) Request(ctx context.Context, questions []acp.DecisionQuestion) ([]acp.DecisionAnswer, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -104,6 +119,10 @@ func (g *Gate) Request(ctx context.Context, questions []acp.DecisionQuestion) ([
 	p := &pending{answers: make(chan []acp.DecisionAnswer, 1)}
 
 	g.mu.Lock()
+	if g.closed {
+		g.mu.Unlock()
+		return nil, ErrClosed
+	}
 	if len(g.subs) == 0 {
 		g.mu.Unlock()
 		return nil, ErrNoClient
@@ -118,18 +137,60 @@ func (g *Gate) Request(ctx context.Context, questions []acp.DecisionQuestion) ([
 	select {
 	case answers := <-p.answers:
 		return answers, nil
+	case <-g.done:
+		if answers, ok := g.settle(p); ok {
+			return answers, nil
+		}
+		return nil, ErrClosed
 	case <-ctx.Done():
-		g.drop(p.req.ID)
+		if answers, ok := g.settle(p); ok {
+			return answers, nil
+		}
 		return nil, ctx.Err()
+	}
+}
+
+// settle finishes a request whose waiter is giving up — ctx cancelled, or the
+// gate closed. It returns the answers when one arrived anyway, in which case the
+// caller must return them rather than its own error.
+//
+// Deciding this under mu is what makes the hand-off airtight. [Gate.Answer]
+// removes the request and delivers its answers in one critical section, so the
+// two possibilities here are totally ordered: either the request is still open,
+// in which case no Answer can ever resolve it (this call removes it first), or
+// it is not, in which case an Answer already reported success to its client and
+// its answers are sitting in the buffer waiting to be honored. Draining outside
+// the lock instead — or letting the select pick between two ready cases, which
+// it does uniformly at random — would discard that answer on a coin flip while
+// the client was told it succeeded.
+func (g *Gate) settle(p *pending) ([]acp.DecisionAnswer, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if _, open := g.open[p.req.ID]; open {
+		g.removeLocked(p.req.ID)
+		// Tell every client the prompt is stale: nothing is waiting on it now.
+		g.publishLocked(Update{Kind: UpdateResolved, Request: Request{ID: p.req.ID, SessionID: g.sessionID}})
+		return nil, false
+	}
+	// Already out of the open set: an Answer beat us to it (its send is in the
+	// buffer) or Close dropped it (nothing to take).
+	select {
+	case answers := <-p.answers:
+		return answers, true
+	default:
+		return nil, false
 	}
 }
 
 // Answer resolves the outstanding request requestID with the client's answers.
 // It returns [ErrUnknownRequest] for an id that is not open, and a descriptive
 // error for an answer that does not fit the request: an unknown question id, a
-// second answer for a question already answered, a selected outcome naming an
-// option the question does not offer, or an answer with no outcome at all.
-// A rejected call leaves the request open, so the client can correct and retry.
+// second answer for a question already answered, an answer with no outcome at
+// all, or an outcome the question does not accept (see [validateOutcome] — a
+// missing option, an affordance the model opted out of, or a variant outside
+// acp's four). A rejected call leaves the request open, so the client can
+// correct and retry.
 //
 // Validating here rather than in [Gate.Request]'s caller is deliberate: this is
 // the seam untrusted-ish input (a peer's answer over the daemon wire, in the
@@ -149,20 +210,25 @@ func (g *Gate) Answer(requestID string, answers []acp.DecisionAnswer) error {
 	}
 	g.removeLocked(requestID)
 	g.publishLocked(Update{Kind: UpdateResolved, Request: Request{ID: requestID, SessionID: g.sessionID}})
-	g.mu.Unlock()
-
-	// Buffered, and the request was just removed under mu, so exactly one
-	// Answer can ever reach this send for a given id and it never blocks —
-	// not even when the waiter already left on ctx.
+	// Delivered under mu, deliberately: the removal above means exactly one
+	// Answer can ever reach this send for a given id, and the channel is
+	// buffered, so it cannot block — and doing it inside the same critical
+	// section is what lets a waiter giving up on ctx decide, under that same
+	// lock, whether an answer is still coming (see settle).
 	p.answers <- normalized
+	g.mu.Unlock()
 	return nil
 }
 
 // Open returns a snapshot of the currently-open requests, in the order they
 // were opened. Each Request shares its Questions slice with the live request;
-// treat it as read-only. It is the recovery path for a client that missed an
-// [UpdateRequested] (see [Subscription.Dropped]) and the replay source for a
-// client attaching mid-flight.
+// treat it as read-only.
+//
+// It is the "what is this session blocked on right now?" query — used by tests
+// and by the daemon relay's replay-on-attach in the follow-up PR. Note that no
+// client reconciles against it today: [Gate.Subscribe] already replays the open
+// set on attach, which covers every case except a subscriber that let its own
+// buffer overflow (see [Subscription.Dropped]).
 func (g *Gate) Open() []Request {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -178,14 +244,26 @@ func (g *Gate) Open() []Request {
 // Delivery is drop-on-full with a counter ([Subscription.Dropped]), NOT
 // blocking: a wedged client must never be able to hang an agent turn inside
 // [Gate.Request]. The cost is that a client which lets its buffer fill can miss
-// a prompt; [Gate.Open] is its recovery, and buffer should simply be large
-// enough (a session has one outstanding decision at a time in practice).
+// a prompt. Nothing reconciles that today — buffer being large enough is the
+// whole mitigation, and a session has one outstanding decision at a time in
+// practice. [Subscription.Dropped] and [Gate.Open] are what a reconcile would
+// be built from if that ever stops holding.
+// Subscribing to a closed gate returns an already-closed subscription rather
+// than an error, so a client pump learns the session is gone the same way it
+// learns a live subscription ended — one code path, not two.
 func (g *Gate) Subscribe(buffer int) *Subscription {
 	if buffer < 0 {
 		buffer = 0
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
+
+	if g.closed {
+		ch := make(chan Update)
+		sub := &Subscription{C: ch, ch: ch, gate: g}
+		sub.once.Do(func() { close(ch) })
+		return sub
+	}
 
 	replay := g.openLocked()
 	capacity := buffer
@@ -201,18 +279,46 @@ func (g *Gate) Subscribe(buffer int) *Subscription {
 	return sub
 }
 
-// drop removes requestID from the open set and publishes its resolution, if it
-// is still open. It is the ctx-cancellation half of the "a request leaves the
-// open set exactly once" invariant: whichever of drop and [Gate.Answer]
-// acquires mu first wins, and the loser sees no entry and does nothing.
-func (g *Gate) drop(requestID string) {
+// Close shuts the gate down for good: every open request is dropped (each
+// publishing its [UpdateResolved] first, so a client still rendering the prompt
+// clears it), every blocked [Gate.Request] is released with [ErrClosed], and
+// every subscription's channel is closed so its consumer's pump unwinds instead
+// of parking on a channel nothing will ever publish to again.
+//
+// It is the decision-side analogue of closing a session's event broker, and the
+// supervisor calls it from the same place (managed.stop) for the same reason:
+// without it, killing an attached session leaves the client's decision reader
+// blocked forever, and — because the gate's own ErrNoClient check counts
+// subscribers — the dead subscription would keep claiming a client is watching.
+//
+// Close is idempotent and safe to call concurrently with Request/Answer/
+// Subscribe: it takes mu for the state transition, and the subscription
+// channels are closed only after their subscriptions have been removed from the
+// set publishLocked walks, so no send can race a close.
+func (g *Gate) Close() {
 	g.mu.Lock()
-	defer g.mu.Unlock()
-	if _, ok := g.open[requestID]; !ok {
+	if g.closed {
+		g.mu.Unlock()
 		return
 	}
-	g.removeLocked(requestID)
-	g.publishLocked(Update{Kind: UpdateResolved, Request: Request{ID: requestID, SessionID: g.sessionID}})
+	g.closed = true
+	for _, id := range slices.Clone(g.order) {
+		g.removeLocked(id)
+		g.publishLocked(Update{Kind: UpdateResolved, Request: Request{ID: id, SessionID: g.sessionID}})
+	}
+	subs := make([]*Subscription, 0, len(g.subs))
+	for sub := range g.subs {
+		subs = append(subs, sub)
+	}
+	clear(g.subs)
+	close(g.done)
+	g.mu.Unlock()
+
+	// Outside mu: a Subscription.Close racing this one also takes mu, and the
+	// sync.Once is what makes exactly one of the two close the channel.
+	for _, sub := range subs {
+		sub.once.Do(func() { close(sub.ch) })
+	}
 }
 
 // removeLocked deletes requestID from both the open map and the order slice.
@@ -255,9 +361,10 @@ func (g *Gate) publishLocked(u Update) {
 }
 
 // Subscription is a receive stream of [Update]s from a [Gate]. Range over C to
-// consume updates; call Close to unsubscribe. C is closed by Close and only by
-// Close — a Gate outlives its session's turns, so there is no broker-side
-// shutdown that could close it out from under a consumer.
+// consume updates; call Close to unsubscribe. C is closed either by Close or by
+// the gate's own [Gate.Close] when the session ends — a consumer must treat a
+// closed channel as "this session is gone", exactly as it treats an event
+// subscription closing.
 type Subscription struct {
 	// C receives updates. It is closed when the subscription is closed.
 	C <-chan Update
@@ -269,8 +376,10 @@ type Subscription struct {
 }
 
 // Dropped returns how many updates were discarded because this subscriber's
-// buffer was full. A non-zero count means the client may be missing an open
-// request and should reconcile against [Gate.Open].
+// buffer was full — a diagnostic: a non-zero count means this client may be
+// missing an open request. No consumer acts on it today (see [Gate.Subscribe]
+// for why buffer sizing is the mitigation instead); reconciling against
+// [Gate.Open] is what acting on it would mean.
 func (s *Subscription) Dropped() uint64 { return s.dropped.Load() }
 
 // Close unsubscribes and closes C. It is idempotent and safe to call
@@ -306,8 +415,8 @@ func normalize(questions []acp.DecisionQuestion, answers []acp.DecisionAnswer) (
 		if a.Outcome == nil {
 			return nil, fmt.Errorf("answer for question %q has no outcome", a.QuestionID)
 		}
-		if sel, ok := a.Outcome.(acp.DecisionOutcomeSelected); ok && !hasOption(q, sel.OptionID) {
-			return nil, fmt.Errorf("question %q has no option %q", a.QuestionID, sel.OptionID)
+		if err := validateOutcome(q, a.Outcome); err != nil {
+			return nil, err
 		}
 		supplied[a.QuestionID] = a
 	}
@@ -321,6 +430,43 @@ func normalize(questions []acp.DecisionQuestion, answers []acp.DecisionAnswer) (
 		out[i] = acp.DecisionAnswer{QuestionID: q.QuestionID, Outcome: acp.DecisionOutcomeCancelled{}}
 	}
 	return out, nil
+}
+
+// validateOutcome checks one answer's outcome against the question it answers.
+// The type switch is CLOSED on purpose — its default rejects rather than waves
+// through — because this is the seam untrusted input enters by (a peer's answer
+// off the daemon wire, in the follow-up PR). A pointer to an outcome variant,
+// or a third-party implementation of the acp.DecisionOutcome interface, matches
+// no case here; letting one past would skip every check below and then fall out
+// of the tool's describeOutcome default, silently losing the id/label echo the
+// model reasons about. Unknown means reject.
+//
+// It also enforces the question's OWN affordances: a client must not answer
+// with free text (or with "let's chat") on a question whose model explicitly
+// set allow_free_text/allow_chat to false. Those flags default to true, so
+// switching one off is a deliberate act — honoring it is the difference between
+// an escape hatch the agent offered and one a client invented.
+func validateOutcome(q acp.DecisionQuestion, outcome acp.DecisionOutcome) error {
+	switch o := outcome.(type) {
+	case acp.DecisionOutcomeSelected:
+		if !hasOption(q, o.OptionID) {
+			return fmt.Errorf("question %q has no option %q", q.QuestionID, o.OptionID)
+		}
+	case acp.DecisionOutcomeText:
+		if !q.AllowFreeText {
+			return fmt.Errorf("question %q does not offer a free-text answer", q.QuestionID)
+		}
+	case acp.DecisionOutcomeChat:
+		if !q.AllowChat {
+			return fmt.Errorf("question %q does not offer the chat escape hatch", q.QuestionID)
+		}
+	case acp.DecisionOutcomeCancelled:
+		// Always allowed: it is what an unanswered question normalizes to, and
+		// what a client sends to withdraw from the whole request.
+	default:
+		return fmt.Errorf("answer for question %q has an unsupported outcome of type %T", q.QuestionID, outcome)
+	}
+	return nil
 }
 
 // hasOption reports whether q offers optionID.

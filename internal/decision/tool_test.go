@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jedwards1230/agent-sdk-go/acp"
 	"github.com/jedwards1230/agent-sdk-go/tool"
@@ -52,7 +53,10 @@ func runAsk(t *testing.T, input string, answer func(g *Gate, req Request)) (tool
 	select {
 	case o := <-done:
 		return o.res, o.err
-	case <-t.Context().Done():
+	case <-time.After(2 * time.Second):
+		// A real deadline, like recvUpdate/recvResult use: t.Context() is only
+		// cancelled at cleanup, so a wedged ask_user would hang here until the
+		// whole package timed out instead of failing this test fast.
 		t.Fatal("ask_user did not return")
 		return tool.Result{}, nil
 	}

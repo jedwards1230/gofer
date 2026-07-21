@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -183,7 +184,7 @@ func TestGateAnswerFillsMissingAsCancelled(t *testing.T) {
 	// Only q2 answered: the tool must still get one answer per question, in
 	// question order, so it can format its result by iterating questions.
 	if err := g.Answer(req.ID, []acp.DecisionAnswer{
-		{QuestionID: "q2", Outcome: acp.DecisionOutcomeChat{}},
+		{QuestionID: "q2", Outcome: acp.DecisionOutcomeText{Text: "30 days"}},
 	}); err != nil {
 		t.Fatalf("Answer: %v", err)
 	}
@@ -201,8 +202,8 @@ func TestGateAnswerFillsMissingAsCancelled(t *testing.T) {
 	if _, ok := res.answers[0].Outcome.(acp.DecisionOutcomeCancelled); !ok {
 		t.Errorf("unanswered q1 outcome = %#v, want cancelled", res.answers[0].Outcome)
 	}
-	if _, ok := res.answers[1].Outcome.(acp.DecisionOutcomeChat); !ok {
-		t.Errorf("q2 outcome = %#v, want chat", res.answers[1].Outcome)
+	if txt, ok := res.answers[1].Outcome.(acp.DecisionOutcomeText); !ok || txt.Text != "30 days" {
+		t.Errorf("q2 outcome = %#v, want text", res.answers[1].Outcome)
 	}
 }
 
@@ -472,6 +473,223 @@ func TestGateRequestRejectsEmptyQuestions(t *testing.T) {
 	}
 	if open := g.Open(); len(open) != 0 {
 		t.Fatalf("open = %v, want none", open)
+	}
+}
+
+// forcedChoice is a question with BOTH escape hatches switched off and one
+// option — the shape an agent has to opt into deliberately, and the one whose
+// affordances a client must not be able to answer around.
+func forcedChoice() []acp.DecisionQuestion {
+	return []acp.DecisionQuestion{{
+		Title:    "Ship it?",
+		Question: "Ship now or hold?",
+		Options:  []acp.DecisionOption{{Label: "Ship"}, {Label: "Hold"}},
+	}}
+}
+
+// alienOutcome is a third-party implementation of acp.DecisionOutcome: not one
+// of the four variants the gate and the tool know how to handle, but perfectly
+// able to satisfy the interface. It stands in for whatever a peer might put on
+// the daemon wire in the follow-up PR.
+type alienOutcome struct{}
+
+func (alienOutcome) Outcome() string              { return "teleport" }
+func (alienOutcome) MarshalJSON() ([]byte, error) { return []byte(`{"outcome":"teleport"}`), nil }
+
+// TestGateAnswerRejectsOutcomesTheQuestionDoesNotOffer pins the affordance
+// check: the escape hatches default to true, so a model that switched one off
+// did it on purpose, and a client answering around it would hand the model an
+// answer shape it explicitly declined to accept.
+//
+// The unknown-outcome case is the same check's other half, and the reason the
+// type switch is closed: a pointer to a variant, or a foreign implementation of
+// the interface, matches no case — and waving it through would skip every check
+// here and then fall out of the tool's formatting default, losing the id/label
+// echo. Unknown means reject.
+func TestGateAnswerRejectsOutcomesTheQuestionDoesNotOffer(t *testing.T) {
+	tests := []struct {
+		name    string
+		outcome acp.DecisionOutcome
+		want    string
+	}{
+		{"free text on a question that opted out", acp.DecisionOutcomeText{Text: "maybe"}, "does not offer a free-text answer"},
+		{"chat on a question that opted out", acp.DecisionOutcomeChat{}, "does not offer the chat escape hatch"},
+		{"pointer to a variant", &acp.DecisionOutcomeSelected{OptionID: "q1o1"}, "unsupported outcome"},
+		{"foreign implementation", alienOutcome{}, "unsupported outcome"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewGate("sess-1")
+			sub := g.Subscribe(4)
+			defer sub.Close()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			out, req := openRequest(t, ctx, g, sub, forcedChoice())
+
+			err := g.Answer(req.ID, []acp.DecisionAnswer{{QuestionID: "q1", Outcome: tc.outcome}})
+			if err == nil {
+				t.Fatalf("Answer accepted %#v, want a rejection", tc.outcome)
+			}
+			if got := err.Error(); !strings.Contains(got, tc.want) {
+				t.Errorf("err = %q, want it to mention %q", got, tc.want)
+			}
+			if open := g.Open(); len(open) != 1 {
+				t.Errorf("open after rejection = %v, want the request still open", open)
+			}
+
+			cancel()
+			recvResult(t, out)
+		})
+	}
+}
+
+// TestGateAnswerAcceptsWhatTheQuestionOffers is the affordance check's
+// must-not-over-reject twin: with both hatches on (the default), text and chat
+// are legitimate answers, and cancelled is legitimate either way.
+func TestGateAnswerAcceptsWhatTheQuestionOffers(t *testing.T) {
+	outcomes := []acp.DecisionOutcome{
+		acp.DecisionOutcomeSelected{OptionID: "q1o1"},
+		acp.DecisionOutcomeText{Text: "neither, shard it"},
+		acp.DecisionOutcomeChat{},
+		acp.DecisionOutcomeCancelled{},
+	}
+	for _, outcome := range outcomes {
+		t.Run(outcome.Outcome(), func(t *testing.T) {
+			g := NewGate("sess-1")
+			sub := g.Subscribe(4)
+			defer sub.Close()
+
+			out, req := openRequest(t, context.Background(), g, sub, twoQuestions())
+			if err := g.Answer(req.ID, []acp.DecisionAnswer{{QuestionID: "q1", Outcome: outcome}}); err != nil {
+				t.Fatalf("Answer(%s): %v", outcome.Outcome(), err)
+			}
+			if res := recvResult(t, out); res.err != nil {
+				t.Fatalf("Request err = %v", res.err)
+			}
+		})
+	}
+}
+
+// TestGateCloseReleasesEverything is the session-teardown contract: killing a
+// session must not leave a client's decision reader parked on a channel nothing
+// will ever publish to again, nor an agent blocked in Request.
+func TestGateCloseReleasesEverything(t *testing.T) {
+	g := NewGate("sess-1")
+	sub := g.Subscribe(4)
+	defer sub.Close()
+	watcher := g.Subscribe(4)
+	defer watcher.Close()
+
+	out, req := openRequest(t, context.Background(), g, sub, twoQuestions())
+	recvUpdate(t, watcher) // the same request, on the second subscriber
+
+	g.Close()
+	g.Close() // idempotent — Kill and Close both reach managed.stop
+
+	if res := recvResult(t, out); !errors.Is(res.err, ErrClosed) {
+		t.Errorf("blocked Request after Close = %v, want ErrClosed", res.err)
+	}
+	// Every live widget is told to clear before its stream ends, so a prompt
+	// never outlives the session that raised it.
+	for name, s := range map[string]*Subscription{"opener": sub, "watcher": watcher} {
+		up := recvUpdate(t, s)
+		if up.Kind != UpdateResolved || up.Request.ID != req.ID {
+			t.Errorf("%s: update = %v %q, want resolved %q", name, up.Kind, up.Request.ID, req.ID)
+		}
+		if _, ok := <-s.C; ok {
+			t.Errorf("%s: channel still open after Close", name)
+		}
+	}
+	if open := g.Open(); len(open) != 0 {
+		t.Errorf("open after Close = %v, want none", open)
+	}
+	if err := g.Answer(req.ID, nil); !errors.Is(err, ErrUnknownRequest) {
+		t.Errorf("Answer after Close = %v, want ErrUnknownRequest", err)
+	}
+
+	// A closed gate opens nothing new, and a late subscriber gets a stream that
+	// is already over rather than one that never fires.
+	if _, err := g.Request(context.Background(), twoQuestions()); !errors.Is(err, ErrClosed) {
+		t.Errorf("Request after Close = %v, want ErrClosed", err)
+	}
+	late := g.Subscribe(1)
+	if _, ok := <-late.C; ok {
+		t.Error("Subscribe after Close returned a live channel, want a closed one")
+	}
+	late.Close() // must not panic on a channel Close already closed
+}
+
+// TestGateCloseRacesRequestAnswerSubscribe is the -race guard on the shutdown
+// path: Close runs concurrently with everything a live session does, and none
+// of it may race, panic (a double channel close, a send on a closed channel),
+// or leave a Request parked.
+func TestGateCloseRacesRequestAnswerSubscribe(t *testing.T) {
+	for range 50 {
+		g := NewGate("sess-1")
+		sub := g.Subscribe(8)
+
+		var wg sync.WaitGroup
+		wg.Add(4)
+		go func() {
+			defer wg.Done()
+			if _, err := g.Request(context.Background(), twoQuestions()); err != nil &&
+				!errors.Is(err, ErrClosed) && !errors.Is(err, ErrNoClient) {
+				t.Errorf("Request = %v, want nil, ErrClosed or ErrNoClient", err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			// "dec-1" may or may not be open by now; either answer is fine, a
+			// race or a panic is not.
+			_ = g.Answer("dec-1", []acp.DecisionAnswer{{QuestionID: "q1", Outcome: acp.DecisionOutcomeChat{}}})
+		}()
+		go func() {
+			defer wg.Done()
+			g.Subscribe(1).Close()
+		}()
+		go func() {
+			defer wg.Done()
+			g.Close()
+		}()
+
+		done := make(chan struct{})
+		go func() { wg.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("a goroutine never returned — Close left a waiter parked")
+		}
+		sub.Close()
+	}
+}
+
+// TestGateAnswerRacingCancelIsNotDiscarded pins the answer-vs-cancel hand-off:
+// once Answer has reported success to its client the answer is committed, so a
+// ctx cancellation arriving at the same moment must not throw it away and
+// report the turn cancelled instead. Deciding that inside a plain select would
+// make it a coin flip, so this runs the race many times.
+func TestGateAnswerRacingCancelIsNotDiscarded(t *testing.T) {
+	for i := range 300 {
+		g := NewGate("sess-1")
+		sub := g.Subscribe(4)
+		ctx, cancel := context.WithCancel(context.Background())
+
+		out, req := openRequest(t, ctx, g, sub, twoQuestions())
+
+		answered := make(chan error, 1)
+		go func() {
+			answered <- g.Answer(req.ID, []acp.DecisionAnswer{
+				{QuestionID: "q1", Outcome: acp.DecisionOutcomeSelected{OptionID: "q1o2"}},
+			})
+		}()
+		cancel()
+
+		res := recvResult(t, out)
+		if err := <-answered; err == nil && res.err != nil {
+			t.Fatalf("iteration %d: Answer reported success but Request returned %v — the answer was discarded", i, res.err)
+		}
+		sub.Close()
 	}
 }
 

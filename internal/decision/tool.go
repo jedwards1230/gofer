@@ -149,10 +149,11 @@ type optionInput struct {
 
 // Run asks the questions and blocks until they are answered.
 //
-// The (Result, error) split follows [tool.Tool]'s contract exactly. Only two
-// things are Go errors: input that cannot be decoded at all, and ctx
-// cancellation (an interrupted turn — the loop aborts the turn on it rather
-// than feeding it back to the model). Everything the model could correct or
+// The (Result, error) split follows [tool.Tool]'s contract exactly. Only three
+// things are Go errors: input that cannot be decoded at all, ctx cancellation
+// (an interrupted turn — the loop aborts the turn on it rather than feeding it
+// back to the model), and the session's gate closing under it ([ErrClosed]).
+// Everything the model could correct or
 // react to — a malformed question set, no client attached to answer, a
 // cancelled or chat outcome — comes back as a [tool.Result], and only the first
 // two of those set IsError: a user who chose to discuss instead of answering is
@@ -178,8 +179,10 @@ func (t *AskUser) Run(ctx context.Context, input json.RawMessage) (tool.Result, 
 	case errors.Is(err, ErrNoClient):
 		return tool.Result{IsError: true, Content: noClientContent}, nil
 	case err != nil:
-		// Request returns only ErrNoClient or the ctx error, and a ctx error
-		// aborts the turn per the contract above.
+		// Request returns only ErrNoClient (handled above), ErrClosed, or the
+		// ctx error. The last two both mean the turn has nowhere to land — the
+		// session is being torn down, or was interrupted — so both abort it as
+		// Go errors, per the contract above.
 		return tool.Result{}, err
 	}
 

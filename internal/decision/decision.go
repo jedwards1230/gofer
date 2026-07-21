@@ -60,6 +60,13 @@ var ErrNoClient = errors.New("no client attached to answer decisions")
 // or was dropped when its turn was interrupted.
 var ErrUnknownRequest = errors.New("unknown decision request")
 
+// ErrClosed reports that the gate's session has ended (see [Gate.Close]): a
+// blocked [Gate.Request] returns it when the session is killed out from under
+// the turn, and a fresh Request on a closed gate returns it immediately. Like a
+// ctx error it aborts the turn rather than feeding the model a result — there
+// is no session left for the model to answer into.
+var ErrClosed = errors.New("decision gate closed")
+
 // Escape-hatch defaults for a question the model did not explicitly configure.
 // Both are true; see the package doc for why the agent must opt out rather
 // than in.
