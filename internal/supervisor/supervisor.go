@@ -31,6 +31,15 @@ type Config struct {
 	// Defaults to time.Now. Test seam.
 	Clock func() time.Time
 
+	// MaxSubagentDepth caps how deep a subagent session tree may nest (see
+	// [CreateOptions.ParentID]): a root session is depth 0 and a Create whose
+	// parent already sits at this depth is refused with [ErrDepthExceeded]. Zero
+	// or negative resolves to [config.DefaultMaxSubagentDepth] — zero is "unset",
+	// never "no children allowed" — so a supervisor built without one behaves
+	// like the operator default. Callers that load gofer's config pass
+	// [config.Session.SubagentDepthLimit].
+	MaxSubagentDepth int
+
 	// Permissions returns a FRESH permission engine for each new session's guard
 	// (see [config.Config.Engine]). A per-session engine keeps a remember-grant
 	// — an allow rule appended by [loop.RuleGuard.Grant] when a human answers
@@ -76,6 +85,10 @@ type Supervisor struct {
 
 	newSession    func(ctx context.Context, opts runner.Options) (Session, error)
 	resumeSession func(ctx context.Context, id string, opts runner.Options) (Session, error)
+
+	// maxSubagentDepth is the resolved [Config.MaxSubagentDepth] (never <= 0
+	// after New).
+	maxSubagentDepth int
 
 	// onRegister mirrors Config.OnRegister; nil is fine (see its doc).
 	onRegister func(sess Session) (stop func())
@@ -164,18 +177,24 @@ func New(cfg Config) (*Supervisor, error) {
 		}
 	}
 
+	maxDepth := cfg.MaxSubagentDepth
+	if maxDepth <= 0 {
+		maxDepth = config.DefaultMaxSubagentDepth
+	}
+
 	return &Supervisor{
-		root:          root,
-		store:         store,
-		ownsStore:     ownsStore,
-		clock:         clock,
-		newSession:    newSession,
-		resumeSession: resumeSession,
-		onRegister:    cfg.OnRegister,
-		newEngine:     newEngine,
-		roster:        make(map[string]*managed),
-		watchers:      make(map[*watcher]struct{}),
-		watchDone:     make(chan struct{}),
+		root:             root,
+		store:            store,
+		ownsStore:        ownsStore,
+		clock:            clock,
+		newSession:       newSession,
+		resumeSession:    resumeSession,
+		maxSubagentDepth: maxDepth,
+		onRegister:       cfg.OnRegister,
+		newEngine:        newEngine,
+		roster:           make(map[string]*managed),
+		watchers:         make(map[*watcher]struct{}),
+		watchDone:        make(chan struct{}),
 	}, nil
 }
 
@@ -223,6 +242,30 @@ type CreateOptions struct {
 	System   string
 	Params   provider.Params
 	MaxIters int
+
+	// ParentID is the id of the session SPAWNING this one — empty for a root
+	// session, which is every session gofer created before subagents existed.
+	// When set, the new session is a real child session (its own journal, cost
+	// and transcript) linked to that parent: Create resolves the parent (live
+	// roster first, then the store root on disk), derives Depth = parent+1,
+	// enforces [Config.MaxSubagentDepth], and persists the link beside the
+	// journal so it survives a restart. An unknown parent is [ErrNoParent]; too
+	// deep is [ErrDepthExceeded].
+	//
+	// The link is gofer-native on purpose: supervision and roster stay above the
+	// SDK (the SDK promotion test), and the SDK has no session-parent concept.
+	ParentID string
+
+	// Agent is the child's agent type/identity (e.g. "go-developer"). It is
+	// forwarded verbatim to [runner.Options.Agent] — the one SDK surface this
+	// feature consumes — which stamps it onto every event.ToolCallStarted/
+	// Delta/Finished the session's loop emits, so a transcript interleaving a
+	// parent's and its children's tool calls can attribute each one. Empty is
+	// un-attributed, the default and the pre-existing behavior.
+	//
+	// It is independent of ParentID: a root session may carry an agent identity,
+	// and a child need not.
+	Agent string
 }
 
 // Create starts a fresh session and registers it live. An empty prompt
@@ -244,10 +287,15 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts CreateOptio
 		return SessionInfo{}, fmt.Errorf("supervisor: create session: %w — run 'gofer login <provider>' if none is logged in, or set session.model in %s",
 			ErrNoModel, filepath.Join(s.root, config.ConfigFileName))
 	}
+	meta, err := s.resolveParent(opts)
+	if err != nil {
+		return SessionInfo{}, err
+	}
+
 	guard, gate, tools := s.sessionGuard(opts.Cwd)
 	sess, err := s.newSession(ctx, runner.Options{
 		Root: s.root, Cwd: opts.Cwd, Model: opts.Model, System: opts.System,
-		Params: opts.Params, MaxIters: opts.MaxIters,
+		Params: opts.Params, MaxIters: opts.MaxIters, Agent: opts.Agent,
 		Guard: guard, Approver: gate, Tools: tools,
 	})
 	if err != nil {
@@ -258,7 +306,20 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts CreateOptio
 	// construction, so the roster's bookkeeping starts from the same value
 	// rather than from a hardcoded "" that a later SetEffort would silently
 	// contradict (see managed.effort).
-	m, err := s.register(sess, opts.Model, opts.Params.Thinking.Effort, opts.Cwd, gate)
+	// Persist the parent/agent link beside the journal BEFORE the session becomes
+	// reachable, so a client that sees the session at all sees a linked one. A
+	// plain root session records nothing (see sessionMeta.recordable), which is
+	// why this whole path is inert for every pre-existing caller. A failed write
+	// fails the create: a child whose link was silently dropped is an orphan the
+	// roster can never place in its tree, which is worse than a loud refusal.
+	if meta.recordable() {
+		if err := writeSessionMeta(filepath.Dir(sess.JournalPath()), sess.ID(), meta); err != nil {
+			_ = sess.Close()
+			return SessionInfo{}, fmt.Errorf("supervisor: create session: %w", err)
+		}
+	}
+
+	m, err := s.register(sess, opts.Model, opts.Params.Thinking.Effort, opts.Cwd, gate, meta)
 	if err != nil {
 		// Lost a race with Close between the isClosed check above and here:
 		// tear down the just-built session so it does not leak. Its store is
@@ -276,6 +337,49 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts CreateOptio
 		s.notify()
 	}
 	return m.info(), nil
+}
+
+// resolveParent turns opts' subagent fields into the [sessionMeta] the new
+// session is registered and (when there is anything to record) journaled
+// alongside with.
+//
+// With no ParentID the result is a root session at depth 0 — carrying opts.Agent
+// if one was given, since agent attribution is independent of the parent link.
+// With one, the parent is resolved LIVE FIRST (its depth is authoritative and
+// in memory) and only then from disk, so a parent whose process was restarted —
+// or one owned by a different worker over the same shared store, which is the
+// normal case under M6 process isolation — still resolves. A parent found on
+// disk with no sidecar is a root at depth 0, which is exactly what it is.
+//
+// Write-ordering note, for whoever later makes Create cheaper: the sidecar is
+// written BEFORE the session becomes reachable (see Create), and that ordering
+// is load-bearing HERE. Reverse it — register first, persist later — and a
+// window opens in which a parent's journal exists but its sidecar does not, so
+// this lookup reads the parent back as a root at depth 0 and a child spawned in
+// that window silently dodges the cap. The window is unreachable today (a
+// client cannot know a session's id before Create returns it, and Create
+// returns only once the sidecar has landed); keep it that way.
+func (s *Supervisor) resolveParent(opts CreateOptions) (sessionMeta, error) {
+	meta := sessionMeta{ParentID: opts.ParentID, Agent: opts.Agent}
+	if opts.ParentID == "" {
+		return meta, nil
+	}
+
+	var parentDepth int
+	if m, ok := s.get(opts.ParentID); ok {
+		parentDepth = m.depth
+	} else if pm, found := lookupDiskSession(s.root, opts.ParentID); found {
+		parentDepth = pm.Depth
+	} else {
+		return sessionMeta{}, fmt.Errorf("supervisor: create session: %w: %s", ErrNoParent, opts.ParentID)
+	}
+
+	meta.Depth = parentDepth + 1
+	if meta.Depth > s.maxSubagentDepth {
+		return sessionMeta{}, fmt.Errorf("supervisor: create session: %w: depth %d exceeds the cap of %d — raise session.max_subagent_depth in %s",
+			ErrDepthExceeded, meta.Depth, s.maxSubagentDepth, filepath.Join(s.root, config.ConfigFileName))
+	}
+	return meta, nil
 }
 
 // ResumeOptions configures [Supervisor.Resume]. Model and Cwd are required —
@@ -304,17 +408,33 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 		return SessionInfo{}, ErrClosed
 	}
 
+	// A resumed child keeps its attribution: the parent link, agent id and depth
+	// are read back from the on-disk sidecar (see [sessionMeta]) BEFORE the
+	// runner is built, since Agent is a construction-time runner option. A
+	// session with no sidecar — every session predating subagents — reads back
+	// the zero value and resumes exactly as it always did.
+	//
+	// This scans rather than jumping straight to session.Slugify(opts.Cwd), and
+	// that is NOT an oversight: a session's directory is the slug of the cwd it
+	// was CREATED with, while opts.Cwd is the cwd this resume asks for, and ACP
+	// makes the latter client-supplied and authoritative — the two legitimately
+	// differ. The SDK's own store resolves a journal by id the same way
+	// ([session.FileStore] scans the project dirs); shortcutting to the resume
+	// cwd's slug would silently read no sidecar and drop the child's attribution
+	// exactly when a client reopened it from somewhere else.
+	meta, _ := lookupDiskSession(s.root, id)
+
 	guard, gate, tools := s.sessionGuard(opts.Cwd)
 	sess, err := s.resumeSession(ctx, id, runner.Options{
 		Root: s.root, Cwd: opts.Cwd, Model: opts.Model, System: opts.System,
-		Params: opts.Params, MaxIters: opts.MaxIters,
+		Params: opts.Params, MaxIters: opts.MaxIters, Agent: meta.Agent,
 		Guard: guard, Approver: gate, Tools: tools,
 	})
 	if err != nil {
 		return SessionInfo{}, fmt.Errorf("supervisor: resume %s: %w", id, err)
 	}
 
-	m, err := s.register(sess, opts.Model, opts.Params.Thinking.Effort, opts.Cwd, gate)
+	m, err := s.register(sess, opts.Model, opts.Params.Thinking.Effort, opts.Cwd, gate, meta)
 	if err != nil {
 		_ = sess.Close()
 		return SessionInfo{}, fmt.Errorf("supervisor: resume %s: %w", id, err)
@@ -334,13 +454,13 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 // is published into the roster below — so a concurrent Kill can never
 // observe a session whose teardown hasn't been stashed yet (see
 // Config.OnRegister's doc).
-func (s *Supervisor) register(sess Session, model, effort, cwd string, gate *loop.Gate) (*managed, error) {
+func (s *Supervisor) register(sess Session, model, effort, cwd string, gate *loop.Gate, meta sessionMeta) (*managed, error) {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		return nil, ErrClosed
 	}
-	m := newManaged(sess, model, effort, s.clock(), s.clock, s.notify, cwd, gate, s.onRegister)
+	m := newManaged(sess, model, effort, s.clock(), s.clock, s.notify, cwd, gate, meta, s.onRegister)
 	s.roster[m.id] = m
 	s.mu.Unlock()
 
@@ -740,16 +860,25 @@ func (s *Supervisor) List(ctx context.Context) ([]SessionInfo, error) {
 //   - Title mirrors how a live session derives it (see managed.go's
 //     enqueue/snippet): an excerpt of the first user-role message's text.
 //   - Created and Updated come from the first and last entry's Time.
+//   - ParentID, Agent and Depth come from the session's `<id>.meta.json`
+//     sidecar (see [sessionMeta]), so an offline child still shows its parent
+//     link. A session with no sidecar — every session predating subagents, and
+//     every root session, which writes none — reads back zero values and lists
+//     exactly as it did before.
 //
 // A read error, or a journal with no entries at all, degrades to the bare
 // {ID, Project, JournalPath, Live:false} snapshot rather than failing the
 // whole List — one unreadable journal must never hide every other session.
 func diskSessionInfo(id, slug, path string) SessionInfo {
+	meta := readSessionMeta(sidecarPath(filepath.Dir(path), id))
 	info := SessionInfo{
 		ID:          id,
 		Project:     slug,
 		JournalPath: path,
 		Live:        false,
+		ParentID:    meta.ParentID,
+		Agent:       meta.Agent,
+		Depth:       meta.Depth,
 	}
 
 	entries, err := session.ReadEntries(path)

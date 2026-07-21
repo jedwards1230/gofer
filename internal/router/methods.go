@@ -380,6 +380,12 @@ func (s *Supervisor) resumeOffline(ctx context.Context, id string, opts supervis
 
 	s.log.Info("worker resumed", "session", id, "addr", sw.ep.Addr, "pid", sw.pid)
 	now := time.Now()
+	// The subagent link comes off disk, not the worker: session/load carries no
+	// `_meta` to answer with (unlike session/new — see [Supervisor.Create]), and
+	// the resumed worker read the same sidecar to restore its own attribution.
+	// Without this the row a client gets back from a resume would report a child
+	// as a root until the next roster poll corrected it.
+	parentID, agentID, depth := supervisor.DiskMeta(s.root, id)
 	return supervisor.SessionInfo{
 		ID:            id,
 		Model:         model,
@@ -389,6 +395,9 @@ func (s *Supervisor) resumeOffline(ctx context.Context, id string, opts supervis
 		Updated:       now,
 		Live:          true,
 		BinaryVersion: sw.hello.BinaryVersion,
+		ParentID:      parentID,
+		Agent:         agentID,
+		Depth:         depth,
 	}, nil
 }
 
@@ -559,7 +568,7 @@ func (s *Supervisor) List(ctx context.Context) ([]supervisor.SessionInfo, error)
 				continue
 			}
 			path := filepath.Join(sessionsDir, slug, id+".jsonl")
-			out = append(out, diskSessionInfo(id, slug, path))
+			out = append(out, diskSessionInfo(s.root, id, slug, path))
 		}
 	}
 	// A live session whose journal is not on disk yet (a just-spawned worker
@@ -849,6 +858,12 @@ func toSupervisorInfo(d wirestream.SessionInfo, binaryVersion string) supervisor
 		Project:       d.Project,
 		Live:          true,
 		Cwd:           d.Cwd,
+		// The subagent link travels with the row: it is the worker's own
+		// supervisor bookkeeping (it resolved the parent and derived the depth),
+		// unlike BinaryVersion above, which only the router knows.
+		ParentID: d.ParentID,
+		Agent:    d.Agent,
+		Depth:    d.Depth,
 	}
 }
 
@@ -874,12 +889,23 @@ func statusFromWire(s string) supervisor.SessionStatus {
 // root entry, Title from the first user message, Created/Updated from the first
 // and last entry times. A read error or an empty journal degrades to the bare
 // {ID, Project, JournalPath, Live:false} snapshot rather than failing List.
-func diskSessionInfo(id, slug, path string) supervisor.SessionInfo {
+//
+// root is the store root, needed for the subagent link: it lives in a sidecar
+// beside the journal, not in the journal itself, and is read through
+// [supervisor.DiskMeta] — the SAME reader the in-process List uses. Under M6 the
+// router IS the daemon a TUI or `gofer ps` talks to, so skipping it here would
+// collapse a subagent tree into a flat list of roots the moment its workers
+// exited, on the primary deployment path.
+func diskSessionInfo(root, id, slug, path string) supervisor.SessionInfo {
+	parentID, agentID, depth := supervisor.DiskMeta(root, id)
 	info := supervisor.SessionInfo{
 		ID:          id,
 		Project:     slug,
 		JournalPath: path,
 		Live:        false,
+		ParentID:    parentID,
+		Agent:       agentID,
+		Depth:       depth,
 	}
 
 	entries, err := session.ReadEntries(path)

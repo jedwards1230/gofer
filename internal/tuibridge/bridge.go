@@ -87,7 +87,12 @@ func (a Adapter) Create(ctx context.Context, prompt string, opts tui.CreateOptio
 	if model == "" && a.defaultModel != nil {
 		model = a.defaultModel(ctx)
 	}
-	info, err := a.sup.Create(ctx, prompt, supervisor.CreateOptions{Model: model, Cwd: opts.Cwd})
+	info, err := a.sup.Create(ctx, prompt, supervisor.CreateOptions{
+		Model:    model,
+		Cwd:      opts.Cwd,
+		ParentID: opts.ParentID,
+		Agent:    opts.Agent,
+	})
 	if err != nil {
 		return tui.SessionInfo{}, err
 	}
@@ -167,5 +172,11 @@ func toTUI(s supervisor.SessionInfo) tui.SessionInfo {
 		// no separate worker process to have its own build), a router stamps it
 		// from the owning worker's gofer/hello.
 		BinaryVersion: s.BinaryVersion,
+		// The subagent link. Zero for a root session — which is every session
+		// created without an explicit parent, so this mapping is inert for the
+		// existing roster.
+		ParentID: s.ParentID,
+		Agent:    s.Agent,
+		Depth:    s.Depth,
 	}
 }

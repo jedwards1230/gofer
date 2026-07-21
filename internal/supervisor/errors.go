@@ -46,6 +46,19 @@ var ErrNoModel = errors.New("no model configured")
 // exists so a caller can branch on "you asked for a level that does not exist"
 // without string-matching; the offending value is named in the wrapping message.
 var ErrInvalidEffort = errors.New("unknown reasoning effort")
+// ErrNoParent indicates [Supervisor.Create] was given a
+// [CreateOptions.ParentID] naming a session this supervisor can find neither in
+// its live roster nor on disk under its store root. A subagent session is a real
+// child of a real session — linking one to an id that does not exist would
+// produce a row the roster can never place in a tree — so the create is refused
+// rather than silently demoted to a root session.
+var ErrNoParent = errors.New("parent session not found")
+
+// ErrDepthExceeded indicates [Supervisor.Create] would have nested a subagent
+// session deeper than the configured cap (see [config.Session.MaxSubagentDepth],
+// default [config.DefaultMaxSubagentDepth]). It is the guard against a runaway
+// spawn chain; callers wrap it with the depth and the config key that raises it.
+var ErrDepthExceeded = errors.New("subagent depth limit exceeded")
 
 // ErrCrossProvider indicates a SetModel call asked to change a session to a
 // model served by a DIFFERENT provider than its current one. A runner's

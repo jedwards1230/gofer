@@ -110,6 +110,17 @@ type Session struct {
 	// session creation lands with /yolo (see docs/TUI.md).
 	PermissionMode string `json:"permission_mode,omitempty"`
 
+	// MaxSubagentDepth caps how deep a subagent session tree may nest: a root
+	// session is depth 0, its child 1, and a Create naming a parent already at
+	// this depth is refused with [supervisor.ErrDepthExceeded]. It is the one
+	// guard against a runaway spawn chain, and it is config rather than a
+	// literal because the useful depth is a workflow opinion, not a property of
+	// gofer. Unset (0) — and any negative value, which is meaningless as a cap —
+	// resolves to [DefaultMaxSubagentDepth]; zero deliberately does NOT mean "no
+	// children allowed", so an existing config file keeps working unchanged. See
+	// [Session.SubagentDepthLimit].
+	MaxSubagentDepth int `json:"max_subagent_depth,omitempty"`
+
 	// LoadSettleTimeoutMS bounds, in milliseconds, how long session/load waits
 	// for a live session's in-flight turn to finish journaling before it folds
 	// and replays history (see the daemon's handleSessionLoad and issue #137). A
@@ -141,6 +152,21 @@ func (s Session) LoadSettleTimeout() time.Duration {
 		return DefaultLoadSettleTimeout
 	}
 	return time.Duration(*s.LoadSettleTimeoutMS) * time.Millisecond
+}
+
+// DefaultMaxSubagentDepth is [Session.MaxSubagentDepth]'s default: 5. Deep
+// enough for the delegation chains a supervising agent actually builds
+// (owner → worker → helper), shallow enough that a spawn loop is caught within
+// a handful of sessions rather than after it has filled the store.
+const DefaultMaxSubagentDepth = 5
+
+// SubagentDepthLimit resolves [Session.MaxSubagentDepth]'s effective value:
+// [DefaultMaxSubagentDepth] when unset or non-positive, else the explicit cap.
+func (s Session) SubagentDepthLimit() int {
+	if s.MaxSubagentDepth <= 0 {
+		return DefaultMaxSubagentDepth
+	}
+	return s.MaxSubagentDepth
 }
 
 // TUI holds gofer's own interface preferences, distinct from Session's

@@ -133,6 +133,9 @@ func toTUISessionInfo(d sessionInfoDTO) tui.SessionInfo {
 		Usage:         d.Usage,
 		Pending:       d.Pending,
 		BinaryVersion: d.BinaryVersion,
+		ParentID:      d.ParentID,
+		Agent:         d.Agent,
+		Depth:         d.Depth,
 		Created:       d.Created,
 		Updated:       d.Updated,
 	}
@@ -192,24 +195,31 @@ func (s *Supervisor) Send(ctx context.Context, sessionID, prompt string) error {
 // ever triggers a needless session/load for a session that, by construction,
 // has no history yet.
 func (s *Supervisor) Create(ctx context.Context, prompt string, opts tui.CreateOptions) (tui.SessionInfo, error) {
-	raw, err := s.client.Call(ctx, acp.MethodSessionNew, acp.NewSessionRequest{Cwd: opts.Cwd, Model: opts.Model})
+	raw, err := s.client.Call(ctx, acp.MethodSessionNew,
+		daemon.NewSessionRequestFor(opts.Cwd, opts.Model, opts.ParentID, opts.Agent))
 	if err != nil {
 		return tui.SessionInfo{}, fmt.Errorf("daemonbridge: create: %w", err)
 	}
-	var resp newSessionResponse
+	var resp daemon.NewSessionResponse
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return tui.SessionInfo{}, fmt.Errorf("daemonbridge: decode %s response: %w", acp.MethodSessionNew, err)
 	}
 	s.core.RegisterFresh(resp.SessionID)
 
+	// The subagent link the daemon ASSIGNED, not the one requested — Depth is
+	// computed daemon-side (parent + 1) and is not knowable here at all.
+	parentID, agentID, depth := resp.Meta.SubagentLink()
 	now := time.Now()
 	info := tui.SessionInfo{
-		ID:      resp.SessionID,
-		Model:   resp.assignedModel(opts.Model),
-		Cwd:     opts.Cwd,
-		Status:  tui.StatusNeedsInput,
-		Created: now,
-		Updated: now,
+		ID:       resp.SessionID,
+		Model:    resp.Meta.ModelOr(opts.Model),
+		Cwd:      opts.Cwd,
+		ParentID: parentID,
+		Agent:    agentID,
+		Depth:    depth,
+		Status:   tui.StatusNeedsInput,
+		Created:  now,
+		Updated:  now,
 	}
 	if prompt != "" {
 		info.Status = tui.StatusWorking
@@ -218,33 +228,6 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts tui.CreateO
 		}
 	}
 	return info, nil
-}
-
-// newSessionResponse is the session/new response as this bridge reads it:
-// ACP's [acp.NewSessionResponse] plus the daemon's gofer-namespaced `_meta`
-// extension carrying the model it ASSIGNED (see internal/daemon's
-// newSessionResult). Decoding it is what lets [Supervisor.Create] report what
-// the session actually runs instead of echoing what it asked for.
-type newSessionResponse struct {
-	acp.NewSessionResponse
-	Meta struct {
-		Model string `json:"gofer/model"`
-	} `json:"_meta"`
-}
-
-// assignedModel is the model the new session actually runs: the daemon's own
-// answer, falling back to requested — the model this client asked for — when
-// the daemon sent no `_meta` at all.
-//
-// The fallback is ONLY for a daemon predating the field. It must never be read
-// as "the request is as good as the response": on the normal path requested is
-// "" (the TUI sends no model and lets the daemon decide), which is exactly why
-// echoing it left the roster row modelless (issue #162, defect 2).
-func (r newSessionResponse) assignedModel(requested string) string {
-	if r.Meta.Model != "" {
-		return r.Meta.Model
-	}
-	return requested
 }
 
 // Kill calls gofer/kill.
