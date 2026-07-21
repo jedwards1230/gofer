@@ -273,6 +273,49 @@ type Daemon struct {
 	// the gofer/permission_resolved fanout timing. Bounded by session call ids,
 	// same as permRoutes.
 	permReqCancels map[string]context.CancelFunc
+
+	// decisionMu guards all three decision registries below. They are keyed by
+	// [decisionKey] (session + request id) rather than by id alone — see that
+	// type's doc — and are the exact analogues of permRoutes / pendingPerms /
+	// permReqCancels, with the same lifetimes:
+	//
+	//   - decisionRoutes: presence means "this request is open and answerable".
+	//     Recorded when the request is first observed, cleared EAGERLY by
+	//     handleDecisionAnswer (closing the answer→resolved window) and again on
+	//     the gate's resolution. handleDecisionAnswer rejects an answer naming a
+	//     key that is absent, which is how an unknown/late/already-answered
+	//     request id becomes a descriptive error instead of a silent drop.
+	//   - pendingDecisions: the retained request payload, re-broadcast verbatim
+	//     to a peer that attaches while the request is still open (see
+	//     handleSessionLoad). Dropped ONLY on resolution, which makes its
+	//     presence the reliable exactly-once signal for the resolution fan-out.
+	//   - decisionReqCancels: the cancel func for the spec-ACP
+	//     session/request_decision requests fanned out to ACP peers, fired when
+	//     the request resolves by any path so no daemon-side waiter dangles.
+	//
+	// All three are bounded by a session's open decisions (one at a time in
+	// practice) and are released by the gate's resolution, which the supervisor's
+	// standing watcher always delivers — including for a killed session, whose
+	// gate publishes a resolution for every request it drops.
+	decisionMu         sync.Mutex
+	decisionRoutes     map[decisionKey]struct{}
+	pendingDecisions   map[decisionKey]decisionRequestedParams
+	decisionReqCancels map[decisionKey]context.CancelFunc
+}
+
+// decisionKey identifies one outstanding structured-decision request.
+//
+// It is a PAIR where the permission registries use a bare call id, because the
+// two id spaces differ: a permission call id is a tool-call id, globally unique
+// across the daemon, while a decision request id is minted per session by that
+// session's gate ("dec-1", "dec-2", …). Two live sessions therefore both have a
+// "dec-1" the moment they each ask a question, and a registry keyed by the id
+// alone would route one session's answer into the other's gate. That is also
+// why the decision.answer op carries a sessionId the permission.reply op does
+// not need.
+type decisionKey struct {
+	session string
+	request string
 }
 
 // New builds a Daemon around sup. It does not start listening — call Serve
@@ -303,6 +346,10 @@ func New(sup Supervisor, cfg Config) *Daemon {
 		permRoutes:     make(map[string]string),
 		pendingPerms:   make(map[string]permissionRequestedParams),
 		permReqCancels: make(map[string]context.CancelFunc),
+
+		decisionRoutes:     make(map[decisionKey]struct{}),
+		pendingDecisions:   make(map[decisionKey]decisionRequestedParams),
+		decisionReqCancels: make(map[decisionKey]context.CancelFunc),
 	}
 }
 
@@ -528,6 +575,107 @@ func (d *Daemon) cancelPermRequest(id string) {
 		delete(d.permReqCancels, id)
 	}
 	d.permReqMu.Unlock()
+	if ok {
+		cancel()
+	}
+}
+
+// recordDecisionRoute remembers that key's request is open and answerable, and
+// retains its full params for replay to a peer that attaches while it is still
+// open. It returns whether this was the FIRST observer of the request — the
+// same exactly-once broadcast gate [Daemon.recordPermRoute] provides. Today the
+// supervisor's standing watcher is the sole observer, so first is always true;
+// the bool is here so a second observer (the router leg, which will relay an
+// adopted worker's decisions) cannot double-fan by construction.
+//
+// Route and pending payload are recorded together, unlike the permission pair,
+// because a decision has exactly one observer and no second recording site to
+// interleave with.
+func (d *Daemon) recordDecisionRoute(key decisionKey, params decisionRequestedParams) (first bool) {
+	d.decisionMu.Lock()
+	defer d.decisionMu.Unlock()
+	if _, existed := d.decisionRoutes[key]; existed {
+		return false
+	}
+	d.decisionRoutes[key] = struct{}{}
+	d.pendingDecisions[key] = params
+	return true
+}
+
+// clearDecisionRoute drops key's route WITHOUT touching its retained payload.
+// Idempotent: it runs eagerly in handleDecisionAnswer (closing the window
+// between an answer and the gate's resolution reaching the watcher) and again
+// on that resolution.
+func (d *Daemon) clearDecisionRoute(key decisionKey) {
+	d.decisionMu.Lock()
+	delete(d.decisionRoutes, key)
+	d.decisionMu.Unlock()
+}
+
+// decisionRouteOpen reports whether key names a request that is still open —
+// the check handleDecisionAnswer rejects an unknown id on, and the one
+// askPeerDecision uses to skip an answer that lost the race.
+func (d *Daemon) decisionRouteOpen(key decisionKey) bool {
+	d.decisionMu.Lock()
+	defer d.decisionMu.Unlock()
+	_, ok := d.decisionRoutes[key]
+	return ok
+}
+
+// clearPendingDecision drops key's route AND its retained payload once the
+// request has resolved, reporting whether the payload was still present. That
+// presence is the reliable exactly-once signal for the resolution fan-out (the
+// route is cleared eagerly on the answer path, so it is not), mirroring
+// [Daemon.clearPendingPerm].
+func (d *Daemon) clearPendingDecision(key decisionKey) (cleared bool) {
+	d.decisionMu.Lock()
+	_, existed := d.pendingDecisions[key]
+	delete(d.pendingDecisions, key)
+	delete(d.decisionRoutes, key)
+	d.decisionMu.Unlock()
+	return existed
+}
+
+// pendingDecisionsForSession snapshots every still-open decision request for
+// sessionID — the payloads [handleSessionLoad] replays to a peer attaching
+// mid-question. Order is unspecified (map iteration); a client answers by
+// request id regardless.
+func (d *Daemon) pendingDecisionsForSession(sessionID string) []decisionRequestedParams {
+	d.decisionMu.Lock()
+	defer d.decisionMu.Unlock()
+	var out []decisionRequestedParams
+	for key, params := range d.pendingDecisions {
+		if key.session == sessionID {
+			out = append(out, params)
+		}
+	}
+	return out
+}
+
+// registerDecisionCancel records the cancel func for the
+// session/request_decision requests fanned out for key. A pre-existing entry
+// (not expected — a gate never reuses a request id within a session) is
+// cancelled before being replaced so no cancel func is lost.
+func (d *Daemon) registerDecisionCancel(key decisionKey, cancel context.CancelFunc) {
+	d.decisionMu.Lock()
+	old, ok := d.decisionReqCancels[key]
+	d.decisionReqCancels[key] = cancel
+	d.decisionMu.Unlock()
+	if ok {
+		old()
+	}
+}
+
+// cancelDecisionRequest cancels and forgets the outstanding
+// session/request_decision requests for key. Idempotent: the eager cleanup in
+// handleDecisionAnswer and the gate's own resolution both call it.
+func (d *Daemon) cancelDecisionRequest(key decisionKey) {
+	d.decisionMu.Lock()
+	cancel, ok := d.decisionReqCancels[key]
+	if ok {
+		delete(d.decisionReqCancels, key)
+	}
+	d.decisionMu.Unlock()
 	if ok {
 		cancel()
 	}

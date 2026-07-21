@@ -321,6 +321,42 @@ type permissionReplyParams struct {
 	Remember bool          `json:"remember,omitempty"`
 }
 
+// decisionRequestedParams is the wire shape of a gofer/decision_requested
+// notification: the session id, the gate-minted request id, and the questions
+// verbatim as [acp.DecisionQuestion] values (they marshal themselves — see the
+// acp package — so this carries the model's full question/option/rationale set
+// with no projection step).
+//
+// It is the decision-side twin of [permissionRequestedParams], and carries the
+// session id for a sharper reason than that one does: a decision request id is
+// minted PER SESSION ("dec-1", "dec-2", …), so unlike a permission call id it
+// does not identify a request on its own.
+type decisionRequestedParams struct {
+	SessionID string                 `json:"sessionId"`
+	ID        string                 `json:"id"`
+	Questions []acp.DecisionQuestion `json:"questions"`
+}
+
+// decisionResolvedParams is the wire shape of a gofer/decision_resolved
+// notification: the request left the session's open set — answered by some
+// peer, dropped by an interrupted turn, or ended with the session. It carries
+// no answers, deliberately: the ANSWER is the agent's business (it goes into
+// the tool result), while a client needs only to stop rendering the prompt.
+type decisionResolvedParams struct {
+	SessionID string `json:"sessionId"`
+	ID        string `json:"id"`
+}
+
+// decisionAnswerParams is the inbound params shape of the "decision.answer" op:
+// {sessionId, id, answers}. Unlike [permissionReplyParams] it MUST carry the
+// session id — see [decisionRequestedParams] for why an id alone cannot name a
+// decision request.
+type decisionAnswerParams struct {
+	SessionID string               `json:"sessionId"`
+	ID        string               `json:"id"`
+	Answers   []acp.DecisionAnswer `json:"answers"`
+}
+
 // sessionIDParams is the params shape shared by gofer/kill and gofer/archive.
 type sessionIDParams struct {
 	SessionID string `json:"sessionId"`
