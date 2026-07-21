@@ -202,6 +202,7 @@ func TestSupervisor_ListCorruptJournalDegradesGracefully(t *testing.T) {
 	got := findInfo(infos, id)
 	if got == nil {
 		t.Fatalf("List missing corrupt-journal session %s: %+v", id, infos)
+		return
 	}
 	if got.Live {
 		t.Errorf("Live = true, want false")

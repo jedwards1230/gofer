@@ -39,6 +39,7 @@ func TestServeWS_MaxConnsRejects503(t *testing.T) {
 	}
 	if resp == nil {
 		t.Fatalf("dial past the cap: want a non-nil response, err = %v", err)
+		return
 	}
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Errorf("dial past the cap: status = %d, want %d", resp.StatusCode, http.StatusServiceUnavailable)

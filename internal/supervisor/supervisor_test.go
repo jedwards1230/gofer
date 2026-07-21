@@ -543,6 +543,7 @@ func TestSupervisor_PromptErrorEmitsSessionError(t *testing.T) {
 	se := awaitSessionError(t, sub)
 	if se == nil {
 		t.Fatal("no session.error emitted for a failed turn: the error reached no subscriber, and nothing reads lastErr")
+		return
 	}
 	if !strings.Contains(se.Err, "disk full") {
 		t.Errorf("session.error Err = %q, want it to carry the underlying failure", se.Err)
