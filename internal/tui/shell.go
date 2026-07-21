@@ -43,6 +43,24 @@ import (
 // the one interpreter every supported host is guaranteed to have.
 const fallbackShell = "/bin/sh"
 
+// shellWaitDelay bounds how long [exec.Cmd.Run] waits for the command's
+// output pipes to close after the process itself is gone.
+//
+// It is load-bearing, not a nicety. Killing the shell does not close the
+// pipe: any descendant that outlived it still holds the write end, and
+// without a WaitDelay os/exec's copier goroutine blocks reading that pipe
+// until every last one of them exits. Two ways that bites — a timeout that
+// kills `sh` but not the `sleep` it left behind (CI caught exactly this: the
+// 100ms timeout returned after the full 30s), and a command that backgrounds
+// something and exits immediately (`!make watch &`), where Run would block
+// for the background job's whole lifetime with no timeout involved at all.
+// On expiry os/exec closes the pipes itself and Run returns with the output
+// collected so far. Deliberately not a config knob: it is not a duration a
+// user has an opinion about — tui.shell_timeout_ms is the one they'd reach
+// for — it is the grace period between "this command is over" and "stop
+// waiting on its stragglers".
+const shellWaitDelay = 2 * time.Second
+
 // shellPaneMaxRows caps how many rows the shell-output pane occupies. Output
 // longer than that is tailed (the newest lines win — the end of a command's
 // output is what the operator just asked for), with the full text still going
@@ -239,6 +257,9 @@ func runShellCmd(cwd string, seq int, line string, timeout time.Duration, limit 
 		// otherwise steal the operator's keystrokes. An empty stdin makes such
 		// a command see EOF and exit instead.
 		cmd.Stdin = nil
+		// Bound the post-exit pipe wait — see [shellWaitDelay]. Without it
+		// the timeout above is advisory only.
+		cmd.WaitDelay = shellWaitDelay
 
 		err := cmd.Run()
 		msg := shellDoneMsg{seq: seq, output: out.String(), truncated: out.truncated}

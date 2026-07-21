@@ -142,10 +142,29 @@ func TestRunShellCmdTimesOut(t *testing.T) {
 	start := time.Now()
 	msg := runShell(t, "sleep 30", 100*time.Millisecond, 0)
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
-		t.Fatalf("the timeout did not kill the process: waited %s", elapsed)
+		t.Fatalf("the timeout did not free the run: waited %s", elapsed)
 	}
 	if !strings.Contains(msg.note, "timed out") {
 		t.Fatalf("note = %q, want a timeout note rather than a bare \"signal: killed\"", msg.note)
+	}
+}
+
+// TestRunShellCmdDoesNotBlockOnAnOrphanHoldingThePipe covers the case with no
+// timeout involved at all: the shell exits immediately but leaves a
+// background job holding the output pipe. Without [shellWaitDelay], os/exec's
+// copier goroutine reads that pipe until the orphan exits, so this would
+// block for the orphan's full lifetime — the TUI would show "running…" for 30
+// seconds after a command that already finished.
+func TestRunShellCmdDoesNotBlockOnAnOrphanHoldingThePipe(t *testing.T) {
+	start := time.Now()
+	msg := runShell(t, "sleep 30 & echo detached", 25*time.Second, 0)
+	elapsed := time.Since(start)
+
+	if elapsed > 20*time.Second {
+		t.Fatalf("a backgrounded orphan held the run open for %s", elapsed)
+	}
+	if !strings.Contains(msg.output, "detached") {
+		t.Errorf("output = %q, want the foreground command's own output kept", msg.output)
 	}
 }
 
