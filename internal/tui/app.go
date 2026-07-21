@@ -115,11 +115,29 @@ type App struct {
 	// the [Command] that runs it.
 	registry Registry
 
+	// shellRuns is every `!` / `!!` shell escape this client has run, oldest
+	// first (shell.go). It is the backing state for BOTH the output pane and
+	// the model-context fold, which is deliberate: one list, one flag per run
+	// (shellRun.inContext), so what the user sees and what the model sees can
+	// never be computed from different data. shellOpen is the pane's
+	// visibility (Esc dismisses it without discarding the runs — a dismissed
+	// `!` run still owes its output to the next prompt), and shellSeq is the
+	// monotonic id a dispatched run is matched back by.
+	shellRuns []shellRun
+	shellOpen bool
+	shellSeq  int
+
+	// files is the `@` file-mention completion's cached candidate list
+	// (filemention.go), refreshed once per mention off the Update loop.
+	files fileCandidates
+
 	// menuToken records whether the last [App.syncMenu] found an active
 	// command token in the live buffer. It exists only to detect the
 	// closed→open EDGE, which is when the registry's markdown layer is
 	// reloaded from disk ([App.reloadUserCommands]) — once per "/" typed
-	// rather than once per keystroke.
+	// rather than once per keystroke. It tracks the `/` token specifically
+	// (see syncMenu): an `@` mention has no markdown layer to reload, and
+	// latching this on one would eat the next `/`'s edge.
 	menuToken bool
 
 	// menu is the slash-command autocomplete popup (command_menu.go): closed
@@ -656,6 +674,19 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// point being that neither needs a restart to become true (issue #162).
 		return a.applyDaemonDefault(msg), nil
 
+	case shellDoneMsg:
+		// A `!` / `!!` escape finishing (shell.go). It never touches
+		// a.status: the pane already carries the exit code, the timeout note,
+		// and the truncation marker, and a status line would talk over
+		// whatever the user is reading.
+		return a.applyShellDone(msg), nil
+
+	case filesLoadedMsg:
+		// The `@` mention's background cwd enumeration landing
+		// (filemention.go). Resyncing the menu is what opens the popup — the
+		// load was dispatched precisely because an `@` token was active.
+		return a.applyFilesLoaded(msg)
+
 	case modelsLoadedMsg:
 		// The /model picker's background catalog load landing (panel.go). It
 		// never touches a.status: a silent in-place list upgrade is the whole
@@ -699,9 +730,21 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return next, cmd
 			}
 		}
+		// The shell-output pane (shell.go) claims Esc while it is showing,
+		// ahead of the per-screen handlers' own Esc meanings (interrupt on
+		// attach, clear the dispatch bar on the overview) — the same
+		// two-stage Esc the /config panel already uses. It claims nothing
+		// else: the pane is read-only output, not a focusable surface.
+		// Dismissing it does NOT discard the runs — a `!` run that has not
+		// reached a prompt yet still owes its output to the next one.
+		if a.shellOpen && msg.Key().Code == tea.KeyEscape {
+			a.shellOpen = false
+			return a, nil
+		}
 		next, cmd := a.handleKey(msg)
 		if app, ok := next.(App); ok {
-			return app.syncMenu(), cmd
+			synced, syncCmd := app.syncMenu()
+			return synced, tea.Batch(cmd, syncCmd)
 		}
 		return next, cmd
 	}
@@ -812,19 +855,30 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			a.peekReply = ""
 			return a, nil
 		}
-		// A leading "/" is a command, not a prompt — dispatch it instead of
-		// creating a session from the literal text. The intercept switches on
-		// the first rune so "@" (file mention) / "!" (shell escape) can slot
-		// in beside it later (docs/TUI.md); out of scope here.
-		if strings.HasPrefix(a.over.input.String(), "/") {
+		// A leading sigil is a command or a shell escape, not a prompt —
+		// dispatch it instead of creating a session from the literal text.
+		// [hasInputPrefix]/[App.dispatchInput] (shell.go) are the single
+		// first-rune switch both this and the attach input route through, so
+		// a prefix can never mean one thing here and another there. "@" is
+		// deliberately absent: a file mention is part of a prompt, not a
+		// replacement for one, so it is handled by the completion popup and
+		// submitted as ordinary text.
+		if hasInputPrefix(a.over.input.String()) {
 			a.over = a.over.Submit()
 			buf, _ := a.over.TakeSubmitted()
-			return a.dispatchSlash(buf)
+			return a.dispatchInput(buf)
 		}
 		a.over = a.over.Submit()
 		var cmd tea.Cmd
 		if txt, ok := a.over.TakeSubmitted(); ok {
-			cmd = a.doCreate(txt)
+			// composePrompt folds any pending `!` shell output in ahead of
+			// the user's text — see shell.go for why `!!` cannot reach here.
+			// On its own line, not inlined into the doCreate call: it mutates
+			// a (marking the folded runs consumed), and a statement makes that
+			// mutation ordered with respect to the call rather than resting on
+			// operand-evaluation order.
+			prompt := a.composePrompt(txt)
+			cmd = a.doCreate(prompt)
 		}
 		return a, cmd
 
@@ -1032,13 +1086,14 @@ func (a App) handleAttachKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case key.Code == tea.KeyEnter:
-		// A leading "/" is a command, not a prompt — same intercept as the
-		// dispatch bar (handleOverviewKey), applied here too so /status,
-		// /config, and /model work from the attach input as well.
-		if strings.HasPrefix(a.sess.input.String(), "/") {
+		// A leading sigil is a command or a shell escape, not a prompt — the
+		// same [hasInputPrefix]/[App.dispatchInput] intercept the dispatch
+		// bar uses (handleOverviewKey), applied here too so every prefix
+		// behaves identically wherever it is typed.
+		if hasInputPrefix(a.sess.input.String()) {
 			a.sess = a.sess.Submit()
 			buf, _ := a.sess.TakeSubmitted()
-			return a.dispatchSlash(buf)
+			return a.dispatchInput(buf)
 		}
 		a.sess = a.sess.Submit()
 		var cmd tea.Cmd
@@ -1046,7 +1101,11 @@ func (a App) handleAttachKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// Sending a prompt is exactly the moment a scrolled-back reader
 			// wants to see the reply as it streams in — snap back to the tail.
 			a.scroll = 0
-			cmd = a.doSend(a.sessID, txt)
+			// composePrompt folds any pending `!` shell output in ahead of
+			// the user's text — see shell.go for why `!!` cannot reach here,
+			// and handleOverviewKey for why this is its own statement.
+			prompt := a.composePrompt(txt)
+			cmd = a.doSend(a.sessID, prompt)
 		}
 		return a, cmd
 	}
@@ -1089,10 +1148,11 @@ func (a App) handleAttachKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // same numbers to find the active screen's selectable rows within the frame
 // render produces).
 type frameLayout struct {
-	h         int      // content budget handed to the active screen's own render
-	footer    string   // trailing status line, "" when a.status is unset
-	panelH    int      // command-panel row count, 0 when a.panel is nil
-	menuLines []string // pre-rendered command-menu rows, nil when closed/not applicable
+	h          int      // content budget handed to the active screen's own render
+	footer     string   // trailing status line, "" when a.status is unset
+	panelH     int      // command-panel row count, 0 when a.panel is nil
+	shellLines []string // pre-rendered shell-output pane rows, nil when dismissed/empty
+	menuLines  []string // pre-rendered command-menu rows, nil when closed/not applicable
 }
 
 func (a App) frameLayout() frameLayout {
@@ -1115,6 +1175,27 @@ func (a App) frameLayout() frameLayout {
 			panelH = h
 		}
 		h -= panelH
+	}
+
+	// The shell-output pane (shell.go) takes its slice out of the same
+	// budget the panel does, and for the same reason: it is an overlay
+	// composed BELOW the active screen's own render, so the screen must
+	// shrink to make room. It is budgeted before the menu (which the screens
+	// carve out themselves) and clamped to whatever h is left, so a terminal
+	// too short for it simply drops rows rather than pushing the input line
+	// off the bottom. Guarded on h > 0 for the same first-frame reason the
+	// menu is: a.height is 0 until WindowSizeMsg arrives.
+	var shellLines []string
+	if a.shellOpen && h > 0 {
+		rows := shellPaneMaxRows
+		if rows > h {
+			rows = h
+		}
+		shellLines = shellPaneLines(a.theme, a.shellRuns, a.width, rows)
+		h -= len(shellLines)
+		if h < 0 {
+			h = 0
+		}
 	}
 
 	// The command-autocomplete menu (command_menu.go) is part of the
@@ -1142,7 +1223,7 @@ func (a App) frameLayout() frameLayout {
 		// shrink the bottom-anchored frame short of a.height.
 	}
 
-	return frameLayout{h: h, footer: footer, panelH: panelH, menuLines: menuLines}
+	return frameLayout{h: h, footer: footer, panelH: panelH, shellLines: shellLines, menuLines: menuLines}
 }
 
 // This is the pure core [App.View] wraps into a tea.View, kept separate so
@@ -1184,6 +1265,10 @@ func (a App) render() string {
 			ViewWithMenu(a.width, fl.h, fl.menuLines, attachHeaderLines(a.theme, a.over.meta, a.width), a.scroll)
 	default:
 		body = a.over.ViewWithMenu(a.width, fl.h, fl.menuLines, a.scroll, a.panel != nil)
+	}
+
+	if len(fl.shellLines) > 0 {
+		body += "\n" + strings.Join(fl.shellLines, "\n")
 	}
 
 	if a.panel != nil {

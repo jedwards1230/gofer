@@ -192,10 +192,12 @@ func (r Registry) matching(partial string) []Command {
 }
 
 // newBuiltinRegistry returns the M4 registry: the three commands that open
-// the command panel on their respective tab. `/` is command-only; `@`
-// (file mention) and `!` (shell escape) are separate future prefixes
-// (docs/TUI.md) — out of scope here, but [dispatchSlash]'s caller switches
-// on the buffer's first rune so they slot in beside `/` later.
+// the command panel on their respective tab. `/` is command-only — the other
+// two input prefixes live outside this registry: `!` / `!!` (shell escape)
+// dispatches beside it through the same first-rune switch
+// ([App.dispatchInput], shell.go), and `@` (file mention) is a completion
+// affordance inside a prompt rather than a dispatched command
+// (filemention.go).
 func newBuiltinRegistry() Registry {
 	var r Registry
 	r.register(Command{

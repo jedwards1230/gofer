@@ -67,10 +67,12 @@ func (a App) handlePaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
 		// A caveat, not a failure: the paste DID land, just truncated.
 		a.setStatus(sevWarn, fmt.Sprintf("paste clipped to %d bytes (tui.max_paste_bytes)", a.pasteLimitBytes()))
 	}
-	// A pasted "/mod" is as much an active command token as a typed one, so
-	// the autocomplete menu re-syncs off a paste exactly as it does after
-	// every per-screen key handler (see Update).
-	return a.syncMenu(), nil
+	// A pasted "/mod" (or "@internal/") is as much an active token as a typed
+	// one, so the autocomplete menu re-syncs off a paste exactly as it does
+	// after every per-screen key handler (see Update) — carrying syncMenu's
+	// own follow-on command, which for an `@` token is the off-loop cwd
+	// enumeration (filemention.go).
+	return a.syncMenu()
 }
 
 // pasteLimitBytes reports the effective tui.max_paste_bytes cap
