@@ -9,6 +9,7 @@ package tui
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -444,6 +445,51 @@ func TestAmendEditorRememberWarningOnlyWithRemember(t *testing.T) {
 			// The override warning is unconditional either way.
 			if !strings.Contains(got, warnAmendOverride) {
 				t.Errorf("remember=%v: missing the override warning:\n%s", remember, got)
+			}
+		})
+	}
+}
+
+// TestAmendEditorSurvivesTheShortFrameCollapse is the intersection of this
+// feature with PR #206's height-aware collapse: on a short frame the prompt
+// drops the rationale to its opening paragraph plus a pointer
+// (config.TUI.ApprovalMinTranscriptRows), and that collapse must never reach
+// the editor. The two rows it could take are the two worst in the block to
+// lose — the warning saying an amended call is not re-run through the rules,
+// and the line the user is typing on.
+//
+// The collapse is proven to have actually fired (the Policy paragraph is gone)
+// before the survival assertions run, so this can never pass vacuously by
+// testing an uncollapsed frame.
+func TestAmendEditorSurvivesTheShortFrameCollapse(t *testing.T) {
+	spec := map[string]any{"cmd": "rm -rf /tmp/x", "timeout": float64(120)}
+
+	for _, height := range []int{24, 18, 12, 6} {
+		t.Run(fmt.Sprintf("height=%d", height), func(t *testing.T) {
+			m := amendingModel(t, spec).ToggleApprovalRemember()
+			m = m.ApplyApprovalAmendKey(tea.Key{Text: " --dry-run"})
+
+			got := testkit.Render(m, testkit.Width, height)
+			flat := flattenPrompt(got)
+
+			// The collapse fired: the rationale's later paragraphs are gone.
+			if strings.Contains(flat, "Policy:") {
+				t.Fatalf("height %d did not collapse the rationale — this case would prove nothing:\n%s", height, got)
+			}
+			if !strings.Contains(flat, "esc, then ctrl+e to explain") {
+				t.Errorf("collapsed-while-amending pointer missing; ctrl+e in the editor is line motion, so the plain pointer would be a lie:\n%s", got)
+			}
+
+			// ...and the editor came through it whole.
+			for _, want := range []string{
+				"rm -rf /tmp/x --dry-run" + amendCursorGlyph, // the edited line AND its cursor
+				warnAmendOverride, // the no-re-validation warning
+				warnAmendRemember, // ...and its remembered-amend half
+				"ctrl+s approve edited",
+			} {
+				if !strings.Contains(flat, want) {
+					t.Errorf("height %d collapsed away %q — the editor is not collapsible:\n%s", height, want, got)
+				}
 			}
 		})
 	}

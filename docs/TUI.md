@@ -108,9 +108,9 @@ why it was gated (read-only — both below), `esc` dismisses without answering
    being asked.
 
  Do you want to proceed?
-   1. [a] Yes   2. [d] No   ·   [r] remember: off
+   1. [a] Yes   2. [d] No   ·   [r] remember: off   ·   [tab] amend
 
- tab amend · esc cancel · ctrl+e explain · session 0192a1b2-…
+ esc cancel · ctrl+e explain · session 0192a1b2-…
 ```
 
 The header's attribution clause is omitted entirely for an un-attributed call
@@ -167,7 +167,8 @@ to decide. So the prompt adapts: when the full block would leave fewer than
 `tui.approval_min_transcript_rows` (default 8) transcript rows, the rationale
 collapses to its opening paragraph plus a muted `… ctrl+e to explain`. The
 header, the call's body, the question, the action row, and the hint line are
-**never** collapsed. Set the key to `0` to never collapse at all.
+**never** collapsed — nor is an open amend editor, including its cursor line
+and its warning (see below). Set the key to `0` to never collapse at all.
 
 **`Tab` — amend the call before allowing — what ships.** `Tab` opens an inline
 editor prefilled with the gated call's command body (the same
@@ -185,6 +186,23 @@ cursor line in view rather than truncating it away. A call whose spec carries
 no command-ish key (a structured edit payload, a search query object) has
 nothing sensible to edit, so `Tab` there is a no-op with a status note saying
 so.
+
+**`ctrl+e` inside the editor is jump-to-end-of-line, not explain.** That is a
+deliberate split of the one key both features want: in a text field `ctrl+a`/
+`ctrl+e` are the readline bindings every other input in this app gives them,
+and an explain fired mid-edit would repaint the rationale under a live cursor
+and resize the block while the user types into it. Nothing is lost — `esc`
+leaves the editor with the request still pending and the command untouched,
+and `ctrl+e` explains from there; while amending, the collapsed rationale's
+pointer says `… esc, then ctrl+e to explain` rather than advertising a key
+that would do something else. An explain already in flight when `Tab` was
+pressed still lands normally: it swaps the rationale block above and leaves
+the editor's text, cursor, and warning alone.
+
+Neither the editor nor its warning participates in the height-aware collapse
+above. The collapse only ever shortens the rationale, so on any frame size the
+line being typed on and the "not re-run through the permission rules" warning
+are both still there — the two rows in this block it would be worst to lose.
 
 Two properties of an amend are load-bearing, and the editor states both on
 screen rather than burying them here:

@@ -89,6 +89,14 @@ var commandKeys = []string{"command", "cmd", "script", "file_path", "path"}
 // gated call's text must never push the question off the frame), and caps the
 // amend editor's visible rows too when one is open.
 //
+// `[tab] amend` rides the ACTION row rather than the hint line beneath it, for
+// two reasons: amending IS a decision affordance — the middle option between
+// allowing something slightly wrong and denying it — and the hint line has no
+// room left. At width 80 "esc cancel · ctrl+e explain · session <uuid>" is 75
+// cells; a fourth key would push the session id past the edge and
+// [Model.promptLines] would clip it mid-uuid. The action row has ~30 cells
+// spare, so both keys stay fully visible at the default terminal size.
+//
 // With p.amend set (Tab — see amend.go) the numbered action row and the hint
 // line are replaced by the inline editor, its cursor line, and its warning;
 // everything above them — header, attribution, body, and whichever rationale
@@ -151,9 +159,9 @@ func renderApprovalPrompt(th theme.Theme, p pendingApproval, width, bodyLimit in
 	lines = append(lines,
 		"",
 		"Do you want to proceed?",
-		fmt.Sprintf("  1. [a] Yes   2. [d] No   ·   [r] remember: %s", rememberLabel(p.remember)),
+		fmt.Sprintf("  1. [a] Yes   2. [d] No   ·   [r] remember: %s   ·   [tab] amend", rememberLabel(p.remember)),
 		"",
-		th.MutedStyle().Render("tab amend · esc cancel · ctrl+e explain · session "+p.session),
+		th.MutedStyle().Render("esc cancel · ctrl+e explain · session "+p.session),
 	)
 	return lines
 }

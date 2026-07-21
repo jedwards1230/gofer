@@ -245,6 +245,98 @@ func TestAppApprovalAmendNoEditTargetIsANoOp(t *testing.T) {
 	}
 }
 
+// TestAppApprovalAmendCtrlEIsLineMotionNotExplain pins the deliberate
+// resolution of the one key ctrl+e and the amend editor both want (PR #206
+// bound it to explain on this prompt; the editor inherits the app's readline
+// keymap, where it is jump-to-end-of-line).
+//
+// Inside the editor it is LINE MOTION: no ExplainPermission call is made, and
+// the cursor lands at the end of the line. Firing an explain here would
+// repaint the rationale under a live cursor and resize the block mid-edit; the
+// explain loses nothing by waiting, since esc restores the prompt with the
+// request still pending — which the second half of this test proves.
+func TestAppApprovalAmendCtrlEIsLineMotionNotExplain(t *testing.T) {
+	sup := newInternalFakeSup(GoldenRoster())
+	sup.explainRationale = explainedRationale()
+	a := amendingApp(t, sup, map[string]any{"cmd": "rm -rf /tmp/x"})
+
+	// Move off the end so a jump-to-end is observable, then press ctrl+e.
+	mdl, _ := a.Update(tea.KeyPressMsg{Code: tea.KeyHome})
+	a = mdl.(App)
+	mdl, cmd := a.Update(ctrlE)
+	a = mdl.(App)
+
+	if cmd != nil {
+		t.Fatal("ctrl+e while amending issued a Cmd; want the key consumed by the editor as line motion")
+	}
+	if len(sup.explains) != 0 {
+		t.Errorf("sup.explains = %+v, want none — ctrl+e in the editor is line motion, not explain", sup.explains)
+	}
+	if a.sess.ApprovalExplaining() {
+		t.Error("ctrl+e while amending marked the prompt as explaining")
+	}
+	if !a.sess.AmendingApproval() {
+		t.Fatal("ctrl+e closed the amend editor")
+	}
+	if got := a.sess.pending.amend.cur().Cursor(); got != len("rm -rf /tmp/x") {
+		t.Errorf("cursor = %d, want the line end %d (ctrl+e is MoveEnd in a text field)", got, len("rm -rf /tmp/x"))
+	}
+
+	// And the explain is not lost: esc leaves the editor, and ctrl+e explains.
+	mdl, _ = a.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	a = mdl.(App)
+	mdl, cmd = a.Update(ctrlE)
+	a = mdl.(App)
+	if cmd == nil {
+		t.Fatal("ctrl+e after leaving the editor issued no explain Cmd")
+	}
+	if _, _ = a.Update(cmd()); len(sup.explains) != 1 {
+		t.Errorf("sup.explains = %+v, want exactly one after esc + ctrl+e", sup.explains)
+	}
+}
+
+// TestAppApprovalExplainLandingMidEditKeepsTheEditor covers the one ordering
+// that still puts an explain result underneath an open editor: ctrl+e, then
+// tab before the answer lands. The rationale block swaps to the agent's answer
+// (that is what was asked for) and the editor — its text, its cursor, its
+// warning — is untouched. An in-flight read must never cost the user the edit
+// they were typing.
+func TestAppApprovalExplainLandingMidEditKeepsTheEditor(t *testing.T) {
+	sup := newInternalFakeSup(GoldenRoster())
+	sup.explainRationale = explainedRationale()
+	a := requestApprovalSpec(t, attachForDialogTest(t, sup), "perm-1", map[string]any{"cmd": "rm -rf /tmp/x"})
+
+	mdl, cmd := a.Update(ctrlE)
+	a = mdl.(App)
+	if cmd == nil {
+		t.Fatal("expected an ExplainPermission cmd after ctrl+e")
+	}
+	mdl, _ = a.Update(tea.KeyPressMsg{Code: tea.KeyTab}) // tab before the answer lands
+	a = mdl.(App)
+	mdl, _ = a.Update(tea.KeyPressMsg{Text: " --dry-run"})
+	a = mdl.(App)
+	if !a.sess.AmendingApproval() {
+		t.Fatal("expected the amend editor open")
+	}
+
+	mdl, _ = a.Update(cmd()) // the explain answer lands under the open editor
+	a = mdl.(App)
+
+	if !a.sess.AmendingApproval() {
+		t.Fatal("the explain result closed the amend editor")
+	}
+	if got := a.sess.pending.amend.Text(); got != "rm -rf /tmp/x --dry-run" {
+		t.Errorf("editor text = %q, want the in-progress edit preserved", got)
+	}
+	frame := a.render()
+	if !strings.Contains(frame, "sandbox profile denies deletes") {
+		t.Errorf("the agent's rationale never reached the frame:\n%s", frame)
+	}
+	if !strings.Contains(flattenPrompt(frame), warnAmendOverride) {
+		t.Errorf("the explain repaint dropped the amend warning:\n%s", frame)
+	}
+}
+
 // TestAppApprovalAmendCtrlCStillQuits pins the one key the editor does NOT
 // swallow: ctrl+c quits from here exactly as it does everywhere else.
 func TestAppApprovalAmendCtrlCStillQuits(t *testing.T) {
