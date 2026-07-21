@@ -221,6 +221,13 @@ type workerHandle struct {
 	seeded   chan struct{}
 	seedOnce sync.Once
 
+	// settleCh is a coalescing wake channel (buffered 1, drop-old) the
+	// watchSession goroutine pokes after folding EACH event into the cached row,
+	// so [Supervisor.AwaitSettled] blocks on the roster-status transition instead
+	// of polling it. It carries no value — a waiter re-reads the authoritative
+	// h.info status on every wake — so a coalesced or spurious poke is harmless.
+	settleCh chan struct{}
+
 	// permMu guards openPerms.
 	permMu sync.Mutex
 	// openPerms is this session's still-OPEN permission requests by call id,
@@ -247,6 +254,7 @@ func newWorkerHandle(id string, cmd *exec.Cmd, client *daemon.Client, rec *wires
 		wireVersion:   hello.WireVersion,
 		skew:          skew,
 		seeded:        make(chan struct{}),
+		settleCh:      make(chan struct{}, 1),
 		openPerms:     make(map[string]event.PermissionRequested),
 	}
 }

@@ -365,6 +365,19 @@ func (s *Supervisor) observeSessionEvent(h *workerHandle, ev event.Event) {
 		}
 	}
 	h.applyRosterEvent(ev)
+	// Wake any AwaitSettled waiter to re-check the freshly-folded status — the
+	// idle transition that means the turn is journaled (see [Supervisor.AwaitSettled]).
+	h.pokeSettle()
+}
+
+// pokeSettle wakes an [Supervisor.AwaitSettled] waiter on h, non-blocking and
+// coalescing: a poke already pending in the buffered-1 settleCh is enough, since
+// the waiter re-reads the authoritative status on every wake.
+func (h *workerHandle) pokeSettle() {
+	select {
+	case h.settleCh <- struct{}{}:
+	default:
+	}
 }
 
 // adoptedWait returns the exit-signal channel for an ADOPTED worker: since the

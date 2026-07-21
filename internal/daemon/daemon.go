@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/jedwards1230/gofer/internal/config"
 )
 
 // DefaultListenAddr is the loopback address [Daemon] binds when
@@ -180,6 +182,16 @@ type Config struct {
 	// daemonless paths leave it false, so their session/load is byte-for-byte
 	// unchanged.
 	ReplayPendingPermissionsOnAttach bool
+
+	// LoadSettleTimeout bounds how long handleSessionLoad waits for a session's
+	// in-flight turn to finish journaling before it folds and replays history
+	// (see [Supervisor.AwaitSettled] and issue #137). The wait is best-effort:
+	// on timeout the load proceeds to fold whatever is durable, so a session
+	// genuinely mid-turn (one that never reaches needs-input) never deadlocks
+	// the load. Zero resolves to [config.DefaultLoadSettleTimeout] in [New] —
+	// cmd/gofer threads the operator's `session.load_settle_timeout_ms` config
+	// through here, and a worker/test that leaves it zero gets the same default.
+	LoadSettleTimeout time.Duration
 }
 
 // Daemon hosts a [Supervisor] behind an ACP-over-WebSocket listener. See the
@@ -270,6 +282,9 @@ type Daemon struct {
 func New(sup Supervisor, cfg Config) *Daemon {
 	if cfg.ListenAddr == "" {
 		cfg.ListenAddr = DefaultListenAddr
+	}
+	if cfg.LoadSettleTimeout <= 0 {
+		cfg.LoadSettleTimeout = config.DefaultLoadSettleTimeout
 	}
 	logger := cfg.Logger
 	if logger == nil {
