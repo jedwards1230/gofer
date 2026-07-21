@@ -13,12 +13,12 @@ claude-sonnet-5 · ~/orchestration
 
 
 
-
-
-
 ────────────────────────────────────────────────────────────────────────────────
-Status  Config  [Model]  Thinking  Usage  Stats
+Status  Config  Model  [Thinking]  Usage  Stats
 ────────────────────────────────────────────────────────────────────────────────
-Model id: (type any id, listed or not)
-No providers authenticated. Run /login (or 'gofer login <anthropic|openai>').
-Type a model id · ↑/↓ to browse · Enter to select · Esc to clear
+Reasoning effort for Sonnet 5:
+▸ ✓ off — no explicit level; the provider decides
+    low — least reasoning, fastest turns
+    medium — balanced reasoning
+    high — most reasoning, slowest and priciest turns
+↑/↓ to choose · Enter to select · Esc to close

@@ -128,6 +128,35 @@ func (s *Supervisor) SetModel(ctx context.Context, sessionID, model string) erro
 	return nil
 }
 
+// SetEffort changes sessionID's reasoning effort for its next turn by forwarding
+// gofer/set_effort to its worker — the effort-axis twin of [Supervisor.SetModel],
+// with the same ctx discipline (read once by the admission check; the write runs
+// under an owned bound, see [wireCallCtx]) and the same skew refusal: an effort
+// change configures the worker's NEXT turn, so it is new work.
+//
+// The worker validates the level (an unknown effort, or a model the registry
+// knows cannot reason, surface as the Call's application error) — the router
+// forwards rather than second-guesses, exactly as it does for the model.
+func (s *Supervisor) SetEffort(ctx context.Context, sessionID, effort string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	h, ok := s.get(sessionID)
+	if !ok {
+		return fmt.Errorf("router: set effort %s: %w", sessionID, ErrNotLive)
+	}
+	if err := h.refuseNewWork("set the reasoning effort on"); err != nil {
+		return fmt.Errorf("router: set effort %s: %w", sessionID, err)
+	}
+	cctx, cancel := wireCallCtx()
+	defer cancel()
+	params := map[string]string{"sessionId": sessionID, "effort": effort}
+	if _, err := h.client.Call(cctx, methodGoferSetEffort, params); err != nil {
+		return fmt.Errorf("router: set effort %s: %w", sessionID, err)
+	}
+	return nil
+}
+
 // Reply answers a pending permission request by forwarding permission.reply to
 // the owning worker as a bare notification. The write's lifetime is owned by
 // [daemon.Client.Notify], which takes no context and derives its own bound (see
@@ -810,6 +839,7 @@ func toSupervisorInfo(d wirestream.SessionInfo, binaryVersion string) supervisor
 		Title:         d.Title,
 		Status:        statusFromWire(d.Status),
 		Model:         d.Model,
+		Effort:        d.Effort,
 		Cost:          d.Cost,
 		Usage:         d.Usage,
 		Pending:       d.Pending,

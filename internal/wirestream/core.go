@@ -341,6 +341,12 @@ type SessionInfo struct {
 	// upgrade. Additive and live-only: an older daemon (or any offline row)
 	// simply never sends it and this decodes to "".
 	BinaryVersion string `json:"binaryVersion,omitempty"`
+	// Effort mirrors internal/daemon/wire.go's field of the same name: the
+	// session's reasoning effort ("", "low", "medium", "high"). Additive and
+	// omitempty on both sides — an older daemon never sends it and this decodes
+	// to "", which is also what an unset level looks like, so a consumer needs
+	// no version check to read it.
+	Effort string `json:"effort,omitempty"`
 }
 
 // Roster calls gofer/roster and decodes the raw wire rows. Consumers map the

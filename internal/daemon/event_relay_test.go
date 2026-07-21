@@ -321,6 +321,7 @@ func (s *inlineRelaySession) EventsLive() *event.Subscription {
 func (s *inlineRelaySession) Emit(e event.Event)       { s.broker.Publish(e) }
 func (s *inlineRelaySession) Cost() session.CostReport { return session.CostReport{} }
 func (s *inlineRelaySession) SetModel(string) error    { return nil }
+func (s *inlineRelaySession) SetEffort(string) error   { return nil }
 func (s *inlineRelaySession) Close() error             { s.broker.Close(); return nil }
 
 // emit publishes e locally and relays it, in the sink's order: the router's sink

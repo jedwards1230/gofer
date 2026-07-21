@@ -95,6 +95,15 @@ type Session struct {
 	// Model is the default model id for new sessions. Empty means
 	// credential-driven (see runner.DefaultModel) rather than a fixed model.
 	Model string `json:"model,omitempty"`
+
+	// Effort is the default reasoning effort for new sessions: "low",
+	// "medium", "high", or empty for the provider's own default (the SDK's
+	// unified vocabulary — see provider.ValidEffort). Empty is a real,
+	// supported value here rather than merely "unset": there is no separate
+	// "no opinion" state to distinguish, since clearing the level IS asking
+	// for the provider default. Written by the TUI's `/thinking` command,
+	// which spells the empty value "off".
+	Effort string `json:"effort,omitempty"`
 	// PermissionMode is the default guardrail mode for new sessions: "ask"
 	// (contain-or-ask, the default) or "yolo". Not yet consumed by
 	// [Config.Engine] — it is a settings-registry knob today; wiring it into

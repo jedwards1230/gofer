@@ -48,6 +48,17 @@ type fakeSession struct {
 	// cross-provider case, that it does NOT).
 	setModelCalls []string
 
+	// setEffortCalls records every effort argument SetEffort was called with,
+	// in order — setModelCalls' effort-axis twin, and the seam the
+	// TestSetEffort-family tests use to assert the supervisor reaches (or,
+	// for a rejected level, does NOT reach) the SDK setter.
+	setEffortCalls []string
+	// setEffortErr, when non-nil, is what SetEffort returns — standing in for
+	// the SDK runner's own rejections (an unknown level, a non-reasoning
+	// model), which the supervisor must surface rather than swallow. The call
+	// is still recorded either way.
+	setEffortErr error
+
 	// started delivers the prompt text each time Prompt is entered — one
 	// receive per dispatched turn. Buffered generously; a test only ever
 	// needs to drain it in step with its own submissions.
@@ -212,6 +223,45 @@ func (f *fakeSession) lastSetModel() string {
 		return ""
 	}
 	return f.setModelCalls[len(f.setModelCalls)-1]
+}
+
+// SetEffort records effort onto setEffortCalls and returns setEffortErr —
+// [SetModel]'s twin. The fake never validates a level itself: what the tests
+// exercise is [supervisor.Supervisor.SetEffort]'s own ValidEffort pre-check
+// (which must reject BEFORE reaching this seam) and its propagation of an SDK
+// rejection (which setEffortErr stands in for).
+func (f *fakeSession) SetEffort(effort string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.setEffortCalls = append(f.setEffortCalls, effort)
+	return f.setEffortErr
+}
+
+// setEffortCallCount returns how many times SetEffort was called.
+func (f *fakeSession) setEffortCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.setEffortCalls)
+}
+
+// lastSetEffort returns the most recent SetEffort argument, or "" if it was
+// never called. Note the ambiguity that forces every caller to pair it with
+// setEffortCallCount: "" is also a legitimate ARGUMENT (clear the level).
+func (f *fakeSession) lastSetEffort() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.setEffortCalls) == 0 {
+		return ""
+	}
+	return f.setEffortCalls[len(f.setEffortCalls)-1]
+}
+
+// failEffort makes the fake's SetEffort return err, standing in for an SDK
+// runner rejection.
+func (f *fakeSession) failEffort(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.setEffortErr = err
 }
 
 // harness wires a *supervisor.Supervisor to fakeSession construction, so

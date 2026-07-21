@@ -17,6 +17,7 @@ type sessionInfoWire struct {
 	ID     string `json:"id"`
 	Status string `json:"status"`
 	Model  string `json:"model"`
+	Effort string `json:"effort"`
 	Live   bool   `json:"live"`
 }
 
