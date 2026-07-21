@@ -69,7 +69,7 @@ func driveDaemonSession(ctx context.Context, c *daemon.Client, cmd, resumeID, cw
 	select {
 	case result = <-promptResult:
 	case <-ctx.Done():
-		_ = c.Notify(context.Background(), acp.MethodSessionCancel, acp.CancelNotification{SessionID: sessionID})
+		_ = c.Notify(acp.MethodSessionCancel, acp.CancelNotification{SessionID: sessionID})
 		result = <-promptResult
 	}
 

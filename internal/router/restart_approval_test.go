@@ -270,7 +270,7 @@ func TestRestartMidApprovalSurvives(t *testing.T) {
 	// Answer through the DAEMON's handlePermissionReply — NOT router.Reply directly
 	// — proving the standing watcher recorded the call→session route so the reply
 	// resolves for an ADOPTED session.
-	if err := clientB.Notify(ctx, "permission.reply", map[string]any{"id": callID, "verdict": string(event.VerdictAllow)}); err != nil {
+	if err := clientB.Notify("permission.reply", map[string]any{"id": callID, "verdict": string(event.VerdictAllow)}); err != nil {
 		t.Fatalf("clientB permission.reply: %v", err)
 	}
 

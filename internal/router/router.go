@@ -35,33 +35,39 @@ const (
 	// workerDialTimeout bounds the loopback WebSocket dial to a just-spawned
 	// worker.
 	workerDialTimeout = 10 * time.Second
-	// wireCallTimeout bounds a control Call/Notify to a worker (set_model,
-	// interrupt, kill, archive) so a wedged worker socket cannot block the
-	// daemon handler that issued it.
+	// wireCallTimeout bounds a control Call to a worker (set_model, kill,
+	// archive) so a wedged worker socket cannot block the daemon handler that
+	// issued it. The Notify-based ops (interrupt, permission.reply) no longer
+	// derive a bound here: [daemon.Client.Notify] takes no context and owns its
+	// own write bound (see clientWriteTimeout), which is what keeps the borrowed-
+	// context footgun structurally out of reach for them.
 	wireCallTimeout = 15 * time.Second
-	// replyCallTimeout bounds the permission.reply Notify. [Supervisor.Reply]
-	// takes no context (its interface signature has none), so it derives a
-	// bounded one from context.Background rather than blocking forever on a
-	// wedged worker socket.
-	replyCallTimeout = 10 * time.Second
 )
 
-// wireCallCtx returns the context a router→worker WRITE runs under: a fresh
+// wireCallCtx returns the context a router→worker Call runs under: a fresh
 // [wireCallTimeout] bound off context.Background, never a caller's request
-// context.
+// context. It bounds how long the router WAITS for a worker's response
+// (gofer/set_model, gofer/kill, gofer/archive, gofer/roster fallback, plus the
+// adoption hello/session-load and session/new) so a wedged worker cannot stall
+// the daemon handler that issued it.
 //
-// # Why a write must not borrow a caller's context
+// # Why the wire ops must not borrow a caller's context
 //
 // coder/websocket's setupWriteTimeout registers a context.AfterFunc(ctx, …
-// c.close()), so cancelling the context handed to a write destroys the WHOLE
+// c.close()), so cancelling the context handed to a WRITE destroys the WHOLE
 // connection, not just that write. A router's h.client is a LONG-LIVED shared
-// link to a live worker, while the ctx reaching Interrupt/SetModel/Kill/Archive
-// belongs to ONE daemon peer's in-flight request. Deriving the write context
-// from that peer's ctx therefore hands any single client the power to kill the
-// worker link for everyone: a client that sends session/cancel (or changes the
-// model) and hangs up before the write completes trips peer.run's `defer
-// cancel()`, the router↔worker connection dies, and a perfectly healthy running
-// session is marked offline for every attached client.
+// link to a live worker, while the ctx reaching SetModel/Kill/Archive belongs to
+// ONE daemon peer's in-flight request. That footgun is now closed structurally
+// at the primitive: [daemon.Client] owns every frame write's context itself
+// (Call's request write and Notify's write alike run under a bound derived from
+// the client's own ctx, never the caller's — see daemon.clientWriteTimeout), so
+// no ctx a router hands Call or Notify can reach a socket write. wireCallCtx
+// survives for the OTHER half of Call — bounding the response wait — for which a
+// caller's request context is still the wrong lifetime (a client that changes
+// the model and hangs up must not abort the router's wait such that the worker's
+// answer is lost to the whole roster). The Notify-based ops (Interrupt, Reply)
+// need no bound here at all now: they own their write in [daemon.Client.Notify]
+// and have no response to wait for.
 //
 // context.Background rather than a Supervisor-owned base is a SIMPLICITY
 // choice, not a safety one. A base context cancelled by [Supervisor.Close]
@@ -78,14 +84,9 @@ const (
 // from under any in-flight write, which fails it immediately — so a cancellable
 // base would add a field and a lifecycle for no change in behavior.
 //
-// [Supervisor.Reply] has always written this way, but only incidentally — its
-// interface signature carries no context — and [daemon.peer.request] documents
-// the same hazard explicitly. This path simply never got the treatment; the
-// helper exists so it stays that way.
-//
 // The CALLER's ctx is consulted exactly once, by a ctx.Err() admission check
 // that runs before any wire work. Nothing after that check reads it: the handle
-// lookup takes no context, and the write runs under the bound returned here.
+// lookup takes no context, and the Call runs under the bound returned here.
 func wireCallCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), wireCallTimeout)
 }
