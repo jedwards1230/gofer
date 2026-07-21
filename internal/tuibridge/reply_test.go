@@ -70,10 +70,10 @@ func TestAdapterReplyReachesSessionGate(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if err := a.Reply(context.Background(), info.ID, "perm-1", true, true); err != nil {
+	if err := a.Reply(context.Background(), info.ID, "perm-1", tui.PermissionDecision{Allow: true, Remember: true}); err != nil {
 		t.Errorf("Reply(allow=true, remember=true): %v", err)
 	}
-	if err := a.Reply(context.Background(), info.ID, "perm-2", false, false); err != nil {
+	if err := a.Reply(context.Background(), info.ID, "perm-2", tui.PermissionDecision{}); err != nil {
 		t.Errorf("Reply(allow=false, remember=false): %v", err)
 	}
 }
@@ -85,7 +85,7 @@ func TestAdapterReplyUnknownSessionErrors(t *testing.T) {
 	sup := newTestSupervisor(t)
 	a := tuibridge.New(sup, fixedModel("faux"))
 
-	if err := a.Reply(context.Background(), "no-such-session", "perm-1", true, false); err == nil {
+	if err := a.Reply(context.Background(), "no-such-session", "perm-1", tui.PermissionDecision{Allow: true}); err == nil {
 		t.Error("Reply for an unknown session: want an error, got nil")
 	}
 }

@@ -175,12 +175,17 @@ func (a Adapter) SetEffort(ctx context.Context, sessionID, effort string) error 
 // [tui.Supervisor] (every other method here takes one), though the
 // supervisor's own Reply is synchronous and never blocks on I/O (routing to
 // an in-memory Gate), so there is nothing for it to cancel.
-func (a Adapter) Reply(_ context.Context, sessionID, id string, allow, remember bool) error {
+//
+// d.Input rides along verbatim as [event.PermissionReply.Input] — the
+// amended tool input an in-process session runs with instead of the model's
+// original arguments. It is nil for a plain allow/deny, leaving that path
+// byte-identical to before amend existed.
+func (a Adapter) Reply(_ context.Context, sessionID, id string, d tui.PermissionDecision) error {
 	verdict := event.VerdictDeny
-	if allow {
+	if d.Allow {
 		verdict = event.VerdictAllow
 	}
-	return a.sup.Reply(sessionID, event.PermissionReply{ID: id, Verdict: verdict, Remember: remember})
+	return a.sup.Reply(sessionID, event.PermissionReply{ID: id, Verdict: verdict, Remember: d.Remember, Input: d.Input})
 }
 
 // ExplainPermission passes through to the supervisor's own read-only

@@ -1,9 +1,6 @@
 
-
-
-
-
-
+gofer v0.3.0
+claude-sonnet-5 · ~/orchestration
 
 
 ────────────────────────────────────────────────────────────────────────────────
@@ -16,9 +13,12 @@ Why you're being asked
   No permission rule matched this `bash` call, so gofer is asking before it
   runs. It also cannot be sandboxed on this host, so an allow rule alone will
   not let it run unattended.
-  … ctrl+e to explain
+  … esc, then ctrl+e to explain
 
-Do you want to proceed?
-  1. [a] Yes   2. [d] No   ·   [r] remember: off   ·   [tab] amend
+Amending `cmd`:
+  rm -rf /tmp/x▏
 
-esc cancel · ctrl+e explain · session 0192a1b2-c3d4-7e5f-8a90-000000000001
+Warning: an amended command does not go back through the permission rules.
+Approving it is a manual override — the call runs exactly what you leave here.
+
+ctrl+s approve edited · esc cancel · enter newline · remember: off

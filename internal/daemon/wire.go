@@ -425,12 +425,20 @@ type permissionResolvedParams struct {
 }
 
 // permissionReplyParams is the inbound params shape of the "permission.reply"
-// op (contract #1): {id, verdict, remember?}. It carries no session id — the
-// daemon resolves the session from the call id (see handlePermissionReply).
+// op (contract #1): {id, verdict, remember?, input?}. It carries no session id
+// — the daemon resolves the session from the call id (see
+// handlePermissionReply).
+//
+// input is an amend-before-approve's replacement tool input, forwarded
+// verbatim onto [event.PermissionReply.Input] so the session's loop runs the
+// call with the human's arguments instead of the model's. It is optional:
+// every client that predates amend simply omits it, which decodes to a nil
+// RawMessage — the plain allow/deny path.
 type permissionReplyParams struct {
-	ID       string        `json:"id"`
-	Verdict  event.Verdict `json:"verdict"`
-	Remember bool          `json:"remember,omitempty"`
+	ID       string          `json:"id"`
+	Verdict  event.Verdict   `json:"verdict"`
+	Remember bool            `json:"remember,omitempty"`
+	Input    json.RawMessage `json:"input,omitempty"`
 }
 
 // sessionIDParams is the params shape shared by gofer/kill and gofer/archive.

@@ -191,7 +191,7 @@ func (f *fakeSup) SetEffort(_ context.Context, id, effort string) error {
 // sessEventMsg to trigger (see app_internal_test.go, package tui, for the
 // behavioral Reply-emission tests), which this package (tui_test) has no
 // access to.
-func (f *fakeSup) Reply(_ context.Context, _, _ string, _, _ bool) error { return nil }
+func (f *fakeSup) Reply(_ context.Context, _, _ string, _ tui.PermissionDecision) error { return nil }
 
 // ExplainPermission answers with an empty rationale: this package's black-box
 // tests drive navigation, not the approval prompt's ctrl+e (which
