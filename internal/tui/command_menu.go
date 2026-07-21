@@ -253,8 +253,8 @@ func (a App) syncMenu() App {
 }
 
 // handleMenuKey applies one key press to the open command menu, ahead of the
-// per-screen handlers (dispatch precedence: panel > approval > menu > active
-// screen > global — see App.Update): ↓/↑ move the highlight, Tab completes
+// per-screen handlers (dispatch precedence: panel > approval > decision >
+// menu > active screen > global — see App.Update): ↓/↑ move the highlight, Tab completes
 // the highlighted command's Name into whichever buffer is live, Enter runs
 // it, and Esc closes the menu but keeps the typed text. Any other key isn't
 // the menu's to consume — handled reports false and [App.Update] falls
