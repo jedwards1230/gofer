@@ -18,7 +18,14 @@ import (
 	"github.com/jedwards1230/gofer/internal/tuibridge"
 )
 
-func TestAdapterDecisionsSubscribesToSessionGate(t *testing.T) {
+// TestAdapterDecisionsSubscribesToALiveSession covers the only thing this
+// pass-through can get wrong that its own error path does not already cover:
+// subscribing a session that exists must succeed. The routing property — that
+// the subscription is the session's OWN gate — is proven end to end in
+// internal/supervisor's decisions_test.go, against a real blocked ask_user
+// call; re-asserting it here off a fresh session could only be done with checks
+// that cannot fail.
+func TestAdapterDecisionsSubscribesToALiveSession(t *testing.T) {
 	sup := newTestSupervisor(t)
 	a := tuibridge.New(sup, fixedModel("faux"))
 	ctx := context.Background()
@@ -32,19 +39,7 @@ func TestAdapterDecisionsSubscribesToSessionGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decisions: %v", err)
 	}
-	defer sub.Close()
-
-	// A live subscription is exactly what the gate's ErrNoClient check counts,
-	// so proving it is attached is proving the subscribe reached the session's
-	// own gate rather than some detached one.
-	if sub.C == nil {
-		t.Fatal("Decisions returned a subscription with no channel")
-	}
-	select {
-	case up, ok := <-sub.C:
-		t.Fatalf("unexpected update %v (open=%v) on a fresh session", up, ok)
-	default:
-	}
+	sub.Close()
 }
 
 func TestAdapterAnswerDecisionSurfacesGateErrors(t *testing.T) {
