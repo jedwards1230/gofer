@@ -46,7 +46,7 @@ jobs:
       SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
       CAP_BRANCH: vhs-captures-pr-${{ github.event.pull_request.number }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Drop the baseline PNGs inherited from the checkout so the publish step
       # ships exactly what THIS render produced — a tape deleted by the PR
@@ -60,7 +60,7 @@ jobs:
       # Always upload the raw frames+gifs: the only way fork PRs can see them,
       # and a backup (incl. the motion GIFs) for same-repo runs.
       - name: Upload frames artifact
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: vhs-frames
           path: vhs/out/
