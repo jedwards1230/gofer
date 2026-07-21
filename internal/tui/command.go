@@ -100,6 +100,25 @@ func (r *Registry) setLayer(src CommandSource, cmds []Command) {
 	r.rebuild()
 }
 
+// builtinNames returns every name and alias the BUILTIN layer occupies, as a
+// set. It backs [usercmd.Options.ReservedForProject]: a markdown file from
+// `<cwd>/.gofer/commands` — which is whatever a cloned repository shipped, not
+// something this user wrote — may not claim one of these, while a file from
+// the user's own `<root>/commands` still may (see usercmds.go).
+//
+// Aliases are included: reserving /config but not /cfg would leave the exact
+// hijack the reservation exists to prevent available under the other spelling.
+func (r Registry) builtinNames() map[string]bool {
+	out := make(map[string]bool, len(r.layers[sourceBuiltin])*2)
+	for _, cmd := range r.layers[sourceBuiltin] {
+		out[cmd.Name] = true
+		for _, alias := range cmd.Aliases {
+			out[alias] = true
+		}
+	}
+	return out
+}
+
 // rebuild re-resolves the name/alias index from the layers, lowest source
 // rank first so a higher one overwrites it. Three rules beyond that:
 //

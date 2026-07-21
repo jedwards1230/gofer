@@ -16,9 +16,13 @@
 // than failing the load, because one bad file must not cost a user every
 // other command they wrote.
 //
-// Project scope wins over user scope for the same name. Everything else about
-// precedence — markdown over builtin, extension over markdown — is the
-// dispatcher registry's business, not this package's.
+// Project scope wins over user scope for the same name, with one asymmetry:
+// a project file may not claim a name the caller reserves
+// ([Options.ReservedForProject]). `<root>/commands` holds files the user
+// wrote; `<cwd>/.gofer/commands` holds whatever a cloned repository shipped,
+// and those are not the same trust level. Everything else about precedence —
+// markdown over builtin, extension over markdown — is the dispatcher
+// registry's business, not this package's.
 //
 // # Frontmatter
 //
@@ -37,15 +41,19 @@
 //
 // # Cost
 //
-// [Load] is O(files) syscalls and reads every matching file into memory. It
-// is a once-per-open operation, not a per-keystroke one: internal/tui calls it
-// at app construction and again on the closed→open transition of the
-// command-autocomplete popup (i.e. once per `/` typed, not once per rune),
-// so a command file written while the TUI is running shows up the next time
-// the popup opens without the dispatcher ever holding a permanently stale
-// view. A typical commands directory is a handful of small files; if that
-// ever stops being true the fix is a mtime check inside Load, not a cached
-// snapshot in the registry.
+// [Load] is O(files) syscalls and reads every matching file into memory, each
+// bounded by [Options.MaxFileBytes]. It is a once-per-open operation, not a
+// per-keystroke one: internal/tui calls it at app construction and again on
+// the closed→open transition of the command-autocomplete popup (i.e. once per
+// `/` typed, not once per rune), so a command file written while the TUI is
+// running shows up the next time the popup opens without the dispatcher ever
+// holding a permanently stale view. A typical commands directory is a handful
+// of small files; if that ever stops being true the fix is a mtime check
+// inside Load, not a cached snapshot in the registry.
+//
+// The walk is unbounded in TIME, though — a network-mounted cwd can make any
+// of those syscalls arbitrarily slow — so the reload after construction runs
+// off the UI event loop in a tea.Cmd (internal/tui's loadUserCommandsCmd).
 package usercmd
 
 import (
@@ -128,6 +136,36 @@ func UserDir(root string) string { return filepath.Join(root, "commands") }
 // directory.
 func ProjectDir(cwd string) string { return filepath.Join(cwd, ".gofer", "commands") }
 
+// Options tunes a [Load]. The zero value is valid: nothing reserved, no size
+// cap.
+type Options struct {
+	// ReservedForProject reports whether name is one the PROJECT scope may not
+	// claim. It exists for one trust boundary: `<root>/commands` holds files
+	// the USER wrote, so letting them replace a builtin command is a feature;
+	// `<cwd>/.gofer/commands` holds whatever a cloned repository happened to
+	// ship, and a checked-in `model.md` silently turning /model into "send
+	// this text to the agent" is not. A project file whose name is reserved is
+	// skipped with a [Warning] naming it — user scope is never checked, so a
+	// user's own override of the same builtin still applies.
+	//
+	// The predicate rather than a name list keeps the builtin set — which is
+	// internal/tui's business, aliases and all — out of this package. nil
+	// reserves nothing.
+	ReservedForProject func(name string) bool
+
+	// MaxFileBytes caps how large one command file may be. A file over the cap
+	// is skipped with a [Warning] rather than truncated: half a prompt is not
+	// a prompt, and the body is submitted to a model verbatim. Zero or
+	// negative means no cap.
+	MaxFileBytes int
+}
+
+// reservedForProject reports whether name is reserved, tolerating a nil
+// predicate.
+func (o Options) reservedForProject(name string) bool {
+	return o.ReservedForProject != nil && o.ReservedForProject(name)
+}
+
 // Load discovers every markdown command under [UserDir](root) and
 // [ProjectDir](cwd), with project scope overriding user scope on a name
 // collision. Commands come back sorted by Name; warnings carry the files that
@@ -136,7 +174,11 @@ func ProjectDir(cwd string) string { return filepath.Join(cwd, ".gofer", "comman
 // An empty root or cwd skips that scope. A missing directory is the normal
 // case (most users have neither) and is not a warning. Both arguments
 // resolving to the same directory loads it once, as project scope.
-func Load(root, cwd string) ([]Command, []Warning) {
+//
+// Load performs file IO — a stat and a recursive walk per scope, plus a read
+// per `.md` file. Callers on a UI event loop must run it off that loop (see
+// internal/tui's userCommandsMsg).
+func Load(root, cwd string, opts Options) ([]Command, []Warning) {
 	var (
 		userDir = ""
 		projDir = ""
@@ -165,7 +207,7 @@ func Load(root, cwd string) ([]Command, []Warning) {
 		if s.dir == "" {
 			continue
 		}
-		cmds, w := loadDir(s.dir, s.scope)
+		cmds, w := loadDir(s.dir, s.scope, opts)
 		warns = append(warns, w...)
 		for _, c := range cmds {
 			byName[c.Name] = c
@@ -184,7 +226,7 @@ func Load(root, cwd string) ([]Command, []Warning) {
 // all (not a warning); every other failure — an unreadable subtree, an
 // unreadable file, an illegal name, malformed frontmatter — yields a warning
 // and skips only that entry.
-func loadDir(dir string, scope Scope) ([]Command, []Warning) {
+func loadDir(dir string, scope Scope, opts Options) ([]Command, []Warning) {
 	if _, err := os.Stat(dir); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
@@ -217,7 +259,7 @@ func loadDir(dir string, scope Scope) ([]Command, []Warning) {
 		if d.IsDir() || !strings.EqualFold(filepath.Ext(base), mdExt) {
 			return nil
 		}
-		cmd, warn := loadFile(dir, path, scope)
+		cmd, warn := loadFile(dir, path, scope, opts)
 		if warn != nil {
 			warns = append(warns, *warn)
 		}
@@ -235,10 +277,24 @@ func loadDir(dir string, scope Scope) ([]Command, []Warning) {
 // loadFile turns one `.md` file into a command. It can return a command AND a
 // warning together: malformed frontmatter degrades to "no frontmatter" (the
 // body still becomes a usable command) while still reporting what was wrong.
-func loadFile(dir, path string, scope Scope) (*Command, *Warning) {
+func loadFile(dir, path string, scope Scope, opts Options) (*Command, *Warning) {
 	name, err := commandName(dir, path)
 	if err != nil {
 		return nil, &Warning{Path: path, Err: err}
+	}
+	if scope == ScopeProject && opts.reservedForProject(name) {
+		return nil, &Warning{Path: path, Err: fmt.Errorf(
+			"/%s is a builtin command; a project file may not replace one (move it to the user commands directory to override it deliberately)", name)}
+	}
+	if opts.MaxFileBytes > 0 {
+		info, statErr := os.Stat(path)
+		if statErr != nil {
+			return nil, &Warning{Path: path, Err: statErr}
+		}
+		if info.Size() > int64(opts.MaxFileBytes) {
+			return nil, &Warning{Path: path, Err: fmt.Errorf(
+				"%d bytes exceeds the %d-byte command-file cap (tui.max_command_file_bytes)", info.Size(), opts.MaxFileBytes)}
+		}
 	}
 	data, err := os.ReadFile(path) //nolint:gosec // the path comes from walking the user's own commands dir
 	if err != nil {

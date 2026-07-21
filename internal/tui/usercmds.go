@@ -17,35 +17,90 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/usercmd"
 )
 
-// reloadUserCommands rebuilds the registry's markdown layer from disk —
+// userCommandsMsg carries a completed markdown-command load
+// ([App.loadUserCommandsCmd]) back to [App.Update]. It has no error field for
+// the same reason [modelsLoadedMsg] doesn't: every per-file failure is already
+// a [usercmd.Warning] that degrades to "that one file is skipped", and a load
+// that finds nothing is indistinguishable from a user with no command files —
+// the normal case.
+type userCommandsMsg struct {
+	cmds  []usercmd.Command
+	warns []usercmd.Warning
+}
+
+// loadUserCommandsCmd reads the markdown command layer OFF the Update loop —
 // [usercmd.UserDir] under the resolved store root and [usercmd.ProjectDir]
 // under this client's cwd, both threaded in from [CommandEnv] rather than
 // recomputed, so `--root` moves the user-scope directory with it.
 //
-// Called at [NewApp] and again on the closed→open transition of the
-// command-autocomplete popup ([App.syncMenu]) — once per `/` typed, never per
-// keystroke and never inside [Registry.matching]. That is the same spirit as
-// CommandEnv's lazy reads (env.go): no cached-forever snapshot, but no
-// filesystem walk on a hot path either. A command file written while the TUI
-// runs is picked up the next time the popup opens.
+// It runs off the loop because [usercmd.Load] stats and walks two directory
+// trees and reads every `.md` file in them, and none of that is bounded in
+// time: a network-mounted cwd, an autofs mount waking up, or simply a large
+// `.gofer/commands` tree turns the `/` keypress that triggers the reload into
+// a visible freeze. Same reasoning (and same shape) as
+// [App.discoverModelsCmd]: the registry keeps serving its last-known command
+// set — which is the complete, correct one in every case except a file
+// created seconds ago in this same session — and the fresh set replaces it in
+// place when it lands.
+//
+// The one synchronous load is in [NewApp], before `tea.NewProgram` exists:
+// there is no event loop to block and no frame to drop there, and doing it
+// eagerly means a command typed in the first keystrokes resolves rather than
+// racing the load.
+func (a App) loadUserCommandsCmd() tea.Cmd {
+	root, cwd, opts := a.commandEnv.Root, a.commandEnv.Cwd, a.userCommandOptions()
+	return func() tea.Msg {
+		cmds, warns := usercmd.Load(root, cwd, opts)
+		return userCommandsMsg{cmds: cmds, warns: warns}
+	}
+}
+
+// applyUserCommands installs a completed load's commands as the registry's
+// markdown layer and reports anything that was skipped.
 //
 // Skipped files ([usercmd.Warning]) become one transient status note rather
 // than being swallowed: a command that silently never appears is the single
-// most confusing failure this feature can have.
-func (a App) reloadUserCommands() App {
-	cmds, warns := usercmd.Load(a.commandEnv.Root, a.commandEnv.Cwd)
-	a.registry.setLayer(sourceMarkdown, userCommands(cmds))
-	if len(warns) > 0 {
-		note := "skipped " + strconv.Itoa(len(warns)) + " command file"
-		if len(warns) > 1 {
+// most confusing failure this feature can have, and the two rules that reject
+// a file outright — an untypeable name, and a project file trying to replace a
+// builtin — are exactly the ones a user needs told about.
+func (a App) applyUserCommands(msg userCommandsMsg) App {
+	a.registry.setLayer(sourceMarkdown, userCommands(msg.cmds))
+	if n := len(msg.warns); n > 0 {
+		note := "skipped " + strconv.Itoa(n) + " command file"
+		if n > 1 {
 			note += "s"
 		}
-		a.setStatus(sevWarn, note+": "+warns[0].Error())
+		a.setStatus(sevWarn, note+": "+msg.warns[0].Error())
 	}
 	return a
+}
+
+// userCommandOptions builds the loader's [usercmd.Options] for this App: the
+// builtin names a project file may not claim, and the per-file size cap.
+//
+// The cap is read off a.commandEnv.Config() on every call rather than cached —
+// the same "always current, never a stale snapshot" contract
+// [App.pasteLimitBytes] follows. A nil Config closure or a read error both
+// fall through to the default.
+func (a App) userCommandOptions() usercmd.Options {
+	limit := config.DefaultMaxCommandFileBytes
+	if a.commandEnv.Config != nil {
+		if cfg, err := a.commandEnv.Config(); err == nil {
+			limit = cfg.TUI.CommandFileLimitBytes()
+		}
+	}
+	// Snapshot the reserved set rather than closing over the registry: the
+	// predicate runs on another goroutine (loadUserCommandsCmd), and the
+	// registry is a field of a value type this App copy owns.
+	reserved := a.registry.builtinNames()
+	return usercmd.Options{
+		ReservedForProject: func(name string) bool { return reserved[name] },
+		MaxFileBytes:       limit,
+	}
 }
 
 // userCommands wraps each loaded file as a registry [Command]. Precedence is
@@ -68,7 +123,9 @@ func userCommands(loaded []usercmd.Command) []Command {
 // the result as this session's next prompt.
 //
 // The two refusals both report rather than drop, matching /model's rule that
-// a command with no other feedback channel must never fail silently:
+// a command with no other feedback channel must never fail silently. They are
+// checked in this order on purpose — the more actionable message wins when
+// both apply:
 //
 //   - No attached session. The overview has nothing to send to (its own Enter
 //     CREATES a session from the typed text, which is a different action than
@@ -79,13 +136,13 @@ func userCommands(loaded []usercmd.Command) []Command {
 //     on nothing.
 func runUserCommand(uc usercmd.Command) func(App, []string) (App, tea.Cmd) {
 	return func(a App, args []string) (App, tea.Cmd) {
+		if a.sessID == "" {
+			a.setStatus(sevDanger, "/"+uc.Name+" sends a prompt — attach a session first (→ on the roster)")
+			return a, nil
+		}
 		prompt := strings.TrimSpace(usercmd.Expand(uc.Body, args))
 		if prompt == "" {
 			a.setStatus(sevWarn, "/"+uc.Name+" expanded to an empty prompt — nothing sent")
-			return a, nil
-		}
-		if a.sessID == "" {
-			a.setStatus(sevDanger, "/"+uc.Name+" sends a prompt — attach a session first (→ on the roster)")
 			return a, nil
 		}
 		// Same tail-snap a hand-typed prompt does (handleAttachKey): the reply

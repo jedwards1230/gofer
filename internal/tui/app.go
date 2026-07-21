@@ -14,6 +14,7 @@ import (
 	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/tui/layout"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
+	"github.com/jedwards1230/gofer/internal/usercmd"
 )
 
 // screen selects which of the three navigation-contract surfaces [App] is
@@ -219,9 +220,14 @@ func NewApp(th theme.Theme, sup Supervisor, meta OverviewMeta, env CommandEnv) A
 		commandEnv: env,
 	}
 	// Markdown commands are a registry LAYER above the builtins (command.go's
-	// CommandSource), loaded once here and refreshed when the autocomplete
-	// popup opens — see App.reloadUserCommands for the reload contract.
-	a = a.reloadUserCommands()
+	// CommandSource). This first load is synchronous BECAUSE it runs before
+	// tea.NewProgram: there is no event loop to block and no frame to drop
+	// yet, and loading eagerly means a command typed in the first keystrokes
+	// resolves instead of racing the read. Every later refresh runs off the
+	// loop — see App.loadUserCommandsCmd (usercmds.go) for the reload
+	// contract.
+	cmds, warns := usercmd.Load(a.commandEnv.Root, a.commandEnv.Cwd, a.userCommandOptions())
+	a = a.applyUserCommands(userCommandsMsg{cmds: cmds, warns: warns})
 	// `gofer attach <id>`: open straight into the session's attach screen and
 	// pre-select it in the roster, so backing out with ← lands on it. The
 	// subscription is kicked off in Init.
@@ -725,6 +731,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// actually reading.
 		return a.applyModelsLoaded(msg), nil
 
+	case userCommandsMsg:
+		// A markdown-command load landing off the loop (usercmds.go). The
+		// popup that triggered it opened on the registry as it stood, so
+		// re-sync it here — the new layer may add, drop, or re-summarize rows.
+		// syncMenu cannot re-trigger a load from here: a.menuToken is already
+		// true whenever a load is in flight, so the closed→open edge it gates
+		// on has passed.
+		next, _ := a.applyUserCommands(msg).syncMenu()
+		return next, nil
+
 	case tea.PasteMsg:
 		// Bracketed paste arrives as ONE message carrying the whole payload,
 		// handled entirely outside the key handlers below so no character in
@@ -774,6 +790,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		next, cmd := a.handleKey(msg)
 		if app, ok := next.(App); ok {
+			// tea.Batch collapses to the single non-nil Cmd, so this is
+			// exactly `cmd` on every key press except the two that open a
+			// token: `/` dispatches the markdown-command reload, `@` the cwd
+			// enumeration (see syncMenu).
 			synced, syncCmd := app.syncMenu()
 			return synced, tea.Batch(cmd, syncCmd)
 		}
