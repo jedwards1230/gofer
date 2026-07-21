@@ -242,13 +242,6 @@ func type_(t *testing.T, m tea.Model, s string) tea.Model {
 	return m
 }
 
-// attachedSessionID is GoldenRoster's (and modelSelectRoster's) first row: the
-// selected, most-recently-active session, and therefore the one a single →
-// press attaches to. It lives here, in this package's shared helper file,
-// because several test files name it — two of them declared their own copy and
-// collided the moment both landed on the same branch.
-const attachedSessionID = "0192a1b2-app0-7000-8000-000000000001"
-
 const ctrl = tea.ModCtrl
 
 // TestNavEnterPeeksSelected verifies enter, with an empty dispatch input,
