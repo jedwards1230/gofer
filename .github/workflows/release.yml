@@ -109,7 +109,7 @@ jobs:
     name: Tag & Generate Notes
     needs: [detect]
     if: needs.detect.outputs.release == 'true'
-    uses: jedwards1230/release-workflows/.github/workflows/ai-release.yml@v1
+    uses: jedwards1230/release-workflows/.github/workflows/ai-release.yml@0c57d2b2c7cb044adaa1f3a070192677ab1f3bfd # v1
     with:
       service_name: gofer
       service_description: "a daemon + TUI for running and supervising many coding agents on the agent-sdk-go contract"
