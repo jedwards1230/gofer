@@ -286,20 +286,66 @@ Until it lands, a multi-question request renders its **first** question only.
 Nothing is lost: the gate fills every question the client didn't answer in as
 `cancelled`, so the tool still receives exactly one answer per question.
 
-**Also deferred**: the **daemon-backed path**. `internal/daemonbridge` stubs
-both methods today (`Decisions` returns a closed subscription,
-`AnswerDecision` an explicit "not yet" error) — relaying a decision out of the
-daemon and an answer back in needs the `gofer/permission_requested` +
-`permission.reply` treatment, which is the follow-up PR for #173. Against the
-in-process supervisor the round trip is live.
+### Across the daemon wire
+
+A decision crosses a daemon connection the way a permission does, with one
+structural difference: a permission is an `event.Event`, so the daemon's
+`session/prompt` handler observes every one inline while draining the turn's
+event stream. A decision is not — the SDK's Event union is closed and carries no
+decision kind — so the supervisor runs a **standing per-session watcher** over
+the session's gate and hands each update to a `DecisionRelay` the daemon
+implements (`internal/supervisor/decision_relay.go`, `internal/daemon/decision_relay.go`).
+That watcher is the daemon's only observation point; nothing else can see one.
+
+Four methods carry it:
+
+| Method | Direction | Params |
+|---|---|---|
+| `gofer/decision_requested` | daemon → every attached peer | `{sessionId, id, questions}` |
+| `gofer/decision_resolved` | daemon → every attached peer | `{sessionId, id}` |
+| `decision.answer` | client → daemon (notification) | `{sessionId, id, answers}` |
+| `session/request_decision` | daemon → each **ACP** peer (request) | ACP `RequestDecisionRequest`, answered with `RequestDecisionResponse` |
+
+`decision.answer` carries a `sessionId` that `permission.reply` does not need:
+a decision request id is minted **per session** (`dec-1`, `dec-2`, …), so unlike
+a permission call id it does not name a request on its own. The daemon keys its
+route/retain/cancel registries on the pair for the same reason.
+
+**First answer wins, from either surface.** A gofer client answers with
+`decision.answer`; a pure ACP client answers the `session/request_decision`
+request. Whichever reaches the gate first resolves it; the loser is a harmless
+no-op (the gate rejects an id that is no longer open) and its outstanding request
+is retracted, so no daemon-side waiter dangles. Every peer then receives
+`gofer/decision_resolved` and clears its prompt.
+
+**Replay on attach is unconditional.** A peer that attaches while a question is
+outstanding is sent it on `session/load`. Unlike a permission — which is an event
+and so rides the replay backlog and leaves a transcript badge — a decision is in
+no backlog and no journal, so this is the *only* way a late client learns a turn
+is blocked on one. It is not behind a config flag.
+
+**With zero peers attached, a decision simply stays open.** The supervisor's own
+watcher counts as a subscriber, so `ErrNoClient` (the "continue in prose" fast
+path on the daemonless attach) never fires under a daemon. The question waits
+until a peer attaches and is replayed it, the turn is interrupted, or the session
+ends — exactly what a permission asked with zero peers already does. There is no
+decision-side timeout; inventing one would silently answer a question the user
+never saw.
+
+**Still deferred: the `--workers` router hop.** Under `gofer daemon --workers`
+each session runs in a worker process, and the decision relay does not yet cross
+the router↔worker leg — the router's supervisor implements no
+`daemon.DecisionAnswerer`, so a decision there is refused with a clear error
+rather than silently swallowed. Closing it needs the same treatment permissions
+got: a relay + `Notify` across the leg, plus skew-subset handling in
+`internal/router/skew.go`.
 
 **And deferred with it**: decisions from **background sessions**. The App
 subscribes decisions only for the session it is *attached* to (`app.go`,
-alongside the event subscription), so an unattached session calling `ask_user`
-gets `ErrNoClient` and is told to continue in prose — even with the TUI open on
-another session. Fixing that is the same daemon-relay work: once a decision
-travels the wire as its own message, every connected peer sees it, and the
-roster can surface "needs a decision" the way it surfaces a pending approval.
+alongside the event subscription), so an unattached session's question is not
+rendered even though it now reaches the client — the daemon fans it out to every
+peer, but the TUI subscribes per attached session. Surfacing "needs a decision"
+on the roster the way a pending approval is surfaced is the remaining UI work.
 
 ## Roster & navigation (M2)
 
