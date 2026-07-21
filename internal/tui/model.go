@@ -19,11 +19,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/jedwards1230/agent-sdk-go/acp"
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
@@ -405,15 +407,15 @@ func (m Model) IngestDecision(u decision.Update) Model {
 		if len(u.Request.Questions) == 0 {
 			return m
 		}
-		ids := make([]string, len(u.Request.Questions))
-		for i, q := range u.Request.Questions {
-			ids[i] = q.QuestionID
-		}
 		m.pendingDec = &pendingDecision{
-			id:          u.Request.ID,
-			session:     u.Request.SessionID,
-			question:    u.Request.Questions[0],
-			questionIDs: ids,
+			id:      u.Request.ID,
+			session: u.Request.SessionID,
+			// Shared with the gate's snapshot, which documents Questions as
+			// read-only once the request is open — nothing here writes to it.
+			// The parallel drafts slice is this client's own, one entry per
+			// question, all unanswered until the user picks something.
+			questions: u.Request.Questions,
+			drafts:    make([]decisionDraft, len(u.Request.Questions)),
 		}
 	case decision.UpdateResolved:
 		if m.pendingDec != nil && m.pendingDec.id == u.Request.ID {
@@ -509,6 +511,125 @@ func (m Model) withDecisionInput(buf inputBuffer) Model {
 	}
 	p := *m.pendingDec
 	p.input = buf
+	m.pendingDec = &p
+	return m
+}
+
+// moveDecisionTab moves the focused tab by delta on a multi-question request —
+// Tab/shift+tab and ←/→ (see App.handleDecisionKey). A no-op on a
+// single-question request, which has no tab strip at all.
+//
+// Unlike the row cursor, which CLAMPS (moveDecisionCursor: wrapping from the
+// last row onto option 1 is how a stray press sends the wrong answer), tab
+// movement WRAPS. Switching tabs commits nothing — no answer is sent until the
+// Submit row — so the surprise the clamp protects against does not exist here,
+// and cycling is what a tab strip and its two end arrows advertise.
+//
+// Switching leaves both editors, discarding whatever was half-typed in them:
+// an editor belongs to the question that opened it, and carrying a half-typed
+// answer onto the next question is a worse outcome than losing it. The cursor
+// lands on the answer this question already has, if any (see draftRow).
+func (m Model) moveDecisionTab(delta int) Model {
+	if m.pendingDec == nil || !m.pendingDec.multi() {
+		return m
+	}
+	p := *m.pendingDec
+	n := p.tabCount()
+	p.tab = ((p.tab+delta)%n + n) % n
+	p.typing = false
+	p.input = inputBuffer{}
+	p.noting = false
+	p.notes = inputBuffer{}
+	p.cursor = p.draftRow()
+	m.pendingDec = &p
+	return m
+}
+
+// recordDecisionAnswer stores outcome as the focused question's drafted answer.
+// It is where EVERY answer lands, single-question and multi alike: the
+// single-question path then submits immediately (App.answerDecision), so the
+// draft is a moment old rather than long-lived, but there is only one place
+// that decides what a question's answer is.
+//
+// The drafts slice is cloned rather than written through: a pendingDecision
+// struct copy shares its backing array, so mutating in place would rewrite the
+// answer inside every older Model value too — the one hole a copy-on-write
+// discipline built on struct copies leaves open.
+func (m Model) recordDecisionAnswer(outcome acp.DecisionOutcome) Model {
+	if m.pendingDec == nil {
+		return m
+	}
+	p := *m.pendingDec
+	if p.tab < 0 || p.tab >= len(p.drafts) {
+		return m
+	}
+	p.drafts = slices.Clone(p.drafts)
+	p.drafts[p.tab].outcome = outcome
+	p.typing = false
+	p.input = inputBuffer{}
+	m.pendingDec = &p
+	return m
+}
+
+// startDecisionNoting opens the notes editor on the focused question's draft —
+// the `n` key. It preloads whatever note that draft already carries, so `n`
+// re-opens a note for editing rather than silently restarting it.
+func (m Model) startDecisionNoting() Model {
+	if m.pendingDec == nil || m.pendingDec.noting {
+		return m
+	}
+	p := *m.pendingDec
+	p.noting = true
+	p.notes = inputBuffer{}.SetText(p.draft().notes)
+	m.pendingDec = &p
+	return m
+}
+
+// stopDecisionNoting closes the notes editor WITHOUT saving — esc's first press
+// while a note is being edited, mirroring stopDecisionTyping. The draft's
+// existing note is left exactly as it was.
+func (m Model) stopDecisionNoting() Model {
+	if m.pendingDec == nil {
+		return m
+	}
+	p := *m.pendingDec
+	p.noting = false
+	p.notes = inputBuffer{}
+	m.pendingDec = &p
+	return m
+}
+
+// commitDecisionNote saves the notes editor's contents onto the focused
+// question's draft and closes the editor — Enter in notes mode. An empty (or
+// whitespace-only) note CLEARS whatever note was there, which is the only way
+// to take a note back off an answer.
+func (m Model) commitDecisionNote() Model {
+	if m.pendingDec == nil {
+		return m
+	}
+	p := *m.pendingDec
+	// A tab with no draft behind it has nowhere to store the note (the Submit
+	// tab, which `n` is not bound on). Close the editor anyway rather than
+	// leaving it open with no key that can shut it — an editor Enter cannot
+	// close is a wedge.
+	if p.tab >= 0 && p.tab < len(p.drafts) {
+		p.drafts = slices.Clone(p.drafts) // see recordDecisionAnswer
+		p.drafts[p.tab].notes = strings.TrimSpace(p.notes.String())
+	}
+	p.noting = false
+	p.notes = inputBuffer{}
+	m.pendingDec = &p
+	return m
+}
+
+// withDecisionNotes replaces the notes editor's buffer with buf —
+// withDecisionInput's twin for the second editor.
+func (m Model) withDecisionNotes(buf inputBuffer) Model {
+	if m.pendingDec == nil {
+		return m
+	}
+	p := *m.pendingDec
+	p.notes = buf
 	m.pendingDec = &p
 	return m
 }

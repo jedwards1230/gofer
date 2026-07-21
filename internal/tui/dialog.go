@@ -87,18 +87,27 @@ func (a App) doReply(sessionID, id string, allow, remember bool) tea.Cmd {
 // Keymap: ↑/↓ move the focused row, 1-9 answer with that option directly,
 // Enter resolves the focused row (an option answers with it; "Type
 // something." enters typing mode and a SECOND Enter submits what was typed;
-// "Chat about this" answers with the chat escape hatch), Esc leaves typing
-// mode or — when not typing — CANCELS the request (see [App.cancelDecision];
+// "Chat about this" answers with the chat escape hatch), Esc leaves an editor
+// or — when in neither — CANCELS the whole request (see [App.cancelDecision];
 // the hint line has always promised "Esc to cancel"), and ctrl+c quits, the
 // last of those exactly as [App.handleApprovalKey] does.
 //
-// While typing, every key this switch does not itself claim falls through to
-// the shared input keymap (input_keymap.go), so the free-text answer gets the
-// same movement/insertion/deletion editing the attach input has — and the
-// digit keys type digits instead of selecting options, which is why the
-// numeric and arrow cases are gated on !typing. While NOT typing, an unclaimed
-// key is a no-op: the prompt owns the whole footer, so there is nothing else
-// on screen for it to mean.
+// A MULTI-question request binds three more: Tab/shift+tab (and ←/→, which is
+// what the tab strip's end arrows advertise — a rendered affordance that did
+// nothing when pressed would be a lie) move between questions and the Submit
+// tab, and `n` opens the notes editor on the focused question's answer. All
+// three are gated on [pendingDecision.multi] because there is nothing for them
+// to do on a single question: one tab to switch to, and a notes affordance the
+// single-question hint line does not advertise.
+//
+// While either editor is open, every key this switch does not itself claim
+// falls through to the shared input keymap (input_keymap.go), so the free-text
+// answer and the note get the same movement/insertion/deletion editing the
+// attach input has — and the digit keys type digits instead of selecting
+// options, which is why the numeric, arrow, tab and `n` cases are gated on
+// !typing && !noting. With neither open, an unclaimed key is a no-op: the
+// prompt owns the whole footer, so there is nothing else on screen for it to
+// mean.
 //
 // j/k are deliberately unbound. Every list in this TUI (roster, command menu,
 // /config, /model) is arrow-only, so vi keys here alone would make the
@@ -110,11 +119,23 @@ func (a App) handleDecisionKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 	key := msg.Key()
+	editing := p.typing || p.noting
+	tabs := p.multi() && !editing
 	switch {
 	case key.Mod.Contains(tea.ModCtrl) && key.Code == 'c':
 		return a, tea.Quit
 
+	// The notes editor claims Enter and Esc ahead of the row keymap below, so
+	// saving a note can never be read as answering the question it annotates.
+	case p.noting && key.Code == tea.KeyEnter:
+		a.sess = a.sess.commitDecisionNote()
+		return a, nil
+
 	case key.Code == tea.KeyEscape:
+		if p.noting {
+			a.sess = a.sess.stopDecisionNoting()
+			return a, nil
+		}
 		if p.typing {
 			a.sess = a.sess.stopDecisionTyping()
 			return a, nil
@@ -124,19 +145,48 @@ func (a App) handleDecisionKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Code == tea.KeyEnter:
 		return a.resolveDecision()
 
-	case !p.typing && key.Code == tea.KeyUp:
+	case tabs && key.Code == tea.KeyTab:
+		// shift+tab steps backwards through the same strip; the strip draws an
+		// arrow at each end, so both directions have to exist.
+		delta := 1
+		if key.Mod.Contains(tea.ModShift) {
+			delta = -1
+		}
+		a.sess = a.sess.moveDecisionTab(delta)
+		return a, nil
+
+	case tabs && key.Code == tea.KeyLeft:
+		a.sess = a.sess.moveDecisionTab(-1)
+		return a, nil
+
+	case tabs && key.Code == tea.KeyRight:
+		a.sess = a.sess.moveDecisionTab(1)
+		return a, nil
+
+	// Not on the Submit tab: a note belongs to a question's answer, and the
+	// Submit tab has no question to annotate.
+	case tabs && !p.onSubmitTab() && key.Text == "n":
+		a.sess = a.sess.startDecisionNoting()
+		return a, nil
+
+	case !editing && key.Code == tea.KeyUp:
 		a.sess = a.sess.moveDecisionCursor(-1)
 		return a, nil
 
-	case !p.typing && key.Code == tea.KeyDown:
+	case !editing && key.Code == tea.KeyDown:
 		a.sess = a.sess.moveDecisionCursor(1)
 		return a, nil
 
-	case !p.typing && len(key.Text) == 1 && key.Text[0] >= '1' && key.Text[0] <= '9':
+	case !editing && len(key.Text) == 1 && key.Text[0] >= '1' && key.Text[0] <= '9':
 		return a.selectDecisionOption(int(key.Text[0] - '1'))
 	}
 
-	if p.typing {
+	switch {
+	case p.noting:
+		if buf, ok := applyInputKey(p.notes, key); ok {
+			a.sess = a.sess.withDecisionNotes(buf)
+		}
+	case p.typing:
 		if buf, ok := applyInputKey(p.input, key); ok {
 			a.sess = a.sess.withDecisionInput(buf)
 		}
@@ -145,11 +195,12 @@ func (a App) handleDecisionKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 // resolveDecision acts on the focused row: an option answers with it, the
-// free-text row opens its editor (or, already open, submits what was typed),
-// and the chat row hands the turn back to the conversation. A submit with
-// nothing but whitespace typed is a no-op rather than an empty text answer —
-// the agent asked a question, and "" is not an answer to it; the user can keep
-// typing or press Esc.
+// free-text row opens its editor (or, already open, records what was typed),
+// the chat row hands the turn back to the conversation, and the Submit row —
+// which only a multi-question request has — commits every drafted answer at
+// once. A submit with nothing but whitespace typed is a no-op rather than an
+// empty text answer — the agent asked a question, and "" is not an answer to
+// it; the user can keep typing or press Esc.
 func (a App) resolveDecision() (tea.Model, tea.Cmd) {
 	p := a.sess.pendingDec
 	if p == nil {
@@ -161,7 +212,7 @@ func (a App) resolveDecision() (tea.Model, tea.Cmd) {
 	}
 	switch row.kind {
 	case decisionRowOption:
-		return a.answerDecision(acp.DecisionOutcomeSelected{OptionID: p.question.Options[row.opt].OptionID})
+		return a.answerDecision(acp.DecisionOutcomeSelected{OptionID: p.question().Options[row.opt].OptionID})
 
 	case decisionRowFreeText:
 		if !p.typing {
@@ -176,40 +227,70 @@ func (a App) resolveDecision() (tea.Model, tea.Cmd) {
 
 	case decisionRowChat:
 		return a.answerDecision(acp.DecisionOutcomeChat{})
+
+	case decisionRowSubmit:
+		return a.submitDecision()
 	}
 	return a, nil
 }
 
-// selectDecisionOption answers the pending decision with the question's i-th
-// option (0-based; the 1-9 digit keys map onto it). A digit past the end of
-// the option list is a no-op — a number key must never answer something other
-// than the row it names.
+// selectDecisionOption answers the focused question with its i-th option
+// (0-based; the 1-9 digit keys map onto it). A digit past the end of the option
+// list is a no-op — a number key must never answer something other than the row
+// it names — as is any digit on the Submit tab, whose zero question offers no
+// options at all.
 func (a App) selectDecisionOption(i int) (tea.Model, tea.Cmd) {
 	p := a.sess.pendingDec
-	if p == nil || i < 0 || i >= len(p.question.Options) {
+	if p == nil || i < 0 || i >= len(p.question().Options) {
 		return a, nil
 	}
-	return a.answerDecision(acp.DecisionOutcomeSelected{OptionID: p.question.Options[i].OptionID})
+	return a.answerDecision(acp.DecisionOutcomeSelected{OptionID: p.question().Options[i].OptionID})
 }
 
-// answerDecision resolves the pending decision by answering its rendered
-// question with outcome.
+// answerDecision records outcome as the FOCUSED question's answer, and — on a
+// single-question request — submits it in the same breath.
 //
-// PR 1 answers the request's FIRST question only. That is not a lost answer:
-// decision.Gate.Answer fills every question this call omits in as cancelled,
-// so the tool downstream still receives exactly one answer per question.
+// That split is the whole multi-question contract in one function. With one
+// question there is nothing to batch, so the answer goes out immediately and
+// the prompt clears, exactly as it shipped. With several, the answer becomes a
+// draft the tab strip marks ✔, and nothing is sent until the Submit row
+// (see [App.submitDecision]) commits them together — an agent that needed four
+// sign-offs gets one round trip, not four.
 func (a App) answerDecision(outcome acp.DecisionOutcome) (tea.Model, tea.Cmd) {
+	p := a.sess.pendingDec
+	if p == nil || p.onSubmitTab() {
+		return a, nil
+	}
+	a.sess = a.sess.recordDecisionAnswer(outcome)
+	if p.multi() {
+		return a, nil
+	}
+	return a.submitDecision()
+}
+
+// submitDecision resolves the pending decision with every drafted answer at
+// once — the Submit row, and the tail of the single-question path.
+//
+// Questions still unanswered are simply OMITTED (see
+// [pendingDecision.submitAnswers]): decision.Gate.Answer fills each of them in
+// as cancelled, which is tested behavior in internal/decision and must not be
+// re-implemented here. So submitting two of four commits those two and cancels
+// the other two — while esc (below) cancels all four.
+func (a App) submitDecision() (tea.Model, tea.Cmd) {
 	p := a.sess.pendingDec
 	if p == nil {
 		return a, nil
 	}
-	return a.sendDecision([]acp.DecisionAnswer{{QuestionID: p.question.QuestionID, Outcome: outcome}})
+	return a.sendDecision(p.submitAnswers())
 }
 
 // cancelDecision resolves the pending decision by answering EVERY question in
-// the request — including the ones this PR does not render — with
+// the request — drafted or not, rendered or not — with
 // [acp.DecisionOutcomeCancelled]. That is what esc means here, and what the
-// prompt's hint line has always said it means.
+// prompt's hint line has always said it means. It deliberately discards the
+// drafts and their notes: esc is "I am not answering this", and quietly
+// committing half of it because the user had already ticked a box would be a
+// different, more surprising thing than the key advertises.
 //
 // Cancelling rather than dismissing locally is the whole point: a decision has
 // no transcript badge and no event-stream replay to find it by again, so a
@@ -223,8 +304,9 @@ func (a App) cancelDecision() (tea.Model, tea.Cmd) {
 	if p == nil {
 		return a, nil
 	}
-	answers := make([]acp.DecisionAnswer, 0, len(p.questionIDs))
-	for _, id := range p.questionIDs {
+	ids := p.questionIDs()
+	answers := make([]acp.DecisionAnswer, 0, len(ids))
+	for _, id := range ids {
 		answers = append(answers, acp.DecisionAnswer{QuestionID: id, Outcome: acp.DecisionOutcomeCancelled{}})
 	}
 	return a.sendDecision(answers)

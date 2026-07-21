@@ -1,0 +1,24 @@
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+decision   2 questions
+←   ▸ □ M4 slicing     ✔ Views v1 scope     □ Submit   →
+
+How should the M4 milestone be sliced?
+
+▸ 1  Renderer first, wiring after                   │ context
+       goldens land early, so the frame is          │ M4 is the TUI polish
+       reviewable before any plumbing moves         │ milestone; whichever half
+  2  Wiring first, renderer after  (Recommended)    │ lands first is what M5 has
+       unblocks the daemon path sooner, at the cost │ to build on.
+       of an unreviewable frame                     │
+                                                    │ reference
+  › Type something.                                 │ docs/TUI.md#rendering
+  ↳ Chat about this                                 │
+                                                    │ notes
+                                                    │ leaning renderer-first,
+                                                    │ ask again after the spike
+
+Enter to select · ↑/↓ to navigate · n to add notes · Tab to switch questions ·
+Esc to cancel
