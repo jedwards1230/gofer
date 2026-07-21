@@ -20,14 +20,21 @@ import (
 // gofer-native control methods, namespaced so they never collide with an ACP
 // method name. They serve the CLI client (a later PR): roster/ps mirror
 // [supervisor.Supervisor.Roster]/[supervisor.Supervisor.List], kill/archive
-// mirror the lifecycle operations, and set_model mirrors
-// [supervisor.Supervisor.SetModel].
+// mirror the lifecycle operations, and set_model / set_effort mirror
+// [supervisor.Supervisor.SetModel] / [supervisor.Supervisor.SetEffort].
 const (
 	methodGoferRoster   = "gofer/roster"
 	methodGoferPS       = "gofer/ps"
 	methodGoferKill     = "gofer/kill"
 	methodGoferArchive  = "gofer/archive"
 	methodGoferSetModel = "gofer/set_model"
+
+	// methodGoferSetEffort is the effort-axis twin of gofer/set_model: it
+	// changes a session's reasoning effort for its next turn. Deliberately
+	// gofer-native (not the SDK's session.set_effort op) so it mirrors
+	// set_model's shape hop for hop — model- and effort-setting are the same
+	// kind of control-plane mutation and travel the same road.
+	methodGoferSetEffort = "gofer/set_effort"
 
 	// methodGoferFleet is gofer-native fleet-wide usage: the summed Cost/Usage
 	// across every LIVE session, aggregated by the hosted supervisor (see
@@ -126,6 +133,8 @@ var methodTable = map[string]methodHandler{
 	methodGoferSetModel: handleGoferSetModel,
 	methodGoferModels:   handleGoferModels,
 	methodGoferHello:    handleGoferHello,
+
+	methodGoferSetEffort: handleGoferSetEffort,
 
 	methodPermissionReply: handlePermissionReply,
 }
@@ -1340,5 +1349,29 @@ func handleGoferSetModel(d *Daemon, ctx context.Context, _ *peer, params json.Ra
 	// unreadable model just suppresses the advertisement (see advertiseModelChange).
 	current, _ := d.sessionModel(ctx, req.SessionID)
 	d.advertiseModelChange(req.SessionID, prevModel, current)
+	return struct{}{}, nil
+}
+
+// handleGoferSetEffort answers gofer/set_effort {sessionId, effort}, changing
+// the session's reasoning effort for its next turn (see
+// [supervisor.Supervisor.SetEffort]). [supervisor.ErrNotLive] (unknown session),
+// [supervisor.ErrInvalidEffort] (a level outside the unified vocabulary), and
+// the SDK's own non-reasoning-model rejection all surface as clear application
+// errors naming the offending value — the concrete sentinel types do not cross
+// the wire (see internal/daemonbridge's SetEffort doc), the messages do.
+//
+// Unlike [handleGoferSetModel] it advertises nothing afterwards: effort is not
+// one of the ACP config options this daemon publishes (see
+// [handleSessionSetConfigOption], which offers "model" only), so there is no
+// config_option_update for a client to reconcile against.
+func handleGoferSetEffort(d *Daemon, ctx context.Context, _ *peer, params json.RawMessage) (any, *rpcError) {
+	req, rerr := decodeSetEffortParams(params)
+	if rerr != nil {
+		return nil, rerr
+	}
+	if err := d.sup.SetEffort(ctx, req.SessionID, req.Effort); err != nil {
+		return nil, appError(err)
+	}
+	d.log.Info("session effort set", "session", req.SessionID, "effort", req.Effort)
 	return struct{}{}, nil
 }

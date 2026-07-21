@@ -48,6 +48,10 @@ type fakeSup struct {
 	listErr   error
 	resumeErr error
 	listN     int
+
+	// setEffortErr is setModelErr's effort-axis twin: what SetEffort returns,
+	// for the failed-op path. The call is still recorded in ops either way.
+	setEffortErr error
 }
 
 // createdPrompts, sentPrompts, recordedOps, and listCalls read the recorded
@@ -171,6 +175,17 @@ func (f *fakeSup) SetModel(_ context.Context, id, model string) error {
 	return f.setModelErr
 }
 
+// SetEffort records the call the same way SetModel does. The effort is
+// recorded verbatim, so the CLEAR call ("") is distinguishable from no call at
+// all — it shows up as a trailing-colon "set-effort:<id>:" entry rather than
+// being invisible.
+func (f *fakeSup) SetEffort(_ context.Context, id, effort string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ops = append(f.ops, "set-effort:"+id+":"+effort)
+	return f.setEffortErr
+}
+
 // Reply is a no-op here: the approval prompt it answers needs the unexported
 // sessEventMsg to trigger (see app_internal_test.go, package tui, for the
 // behavioral Reply-emission tests), which this package (tui_test) has no
@@ -226,6 +241,13 @@ func type_(t *testing.T, m tea.Model, s string) tea.Model {
 	}
 	return m
 }
+
+// attachedSessionID is GoldenRoster's (and modelSelectRoster's) first row: the
+// selected, most-recently-active session, and therefore the one a single →
+// press attaches to. It lives here, in this package's shared helper file,
+// because several test files name it — two of them declared their own copy and
+// collided the moment both landed on the same branch.
+const attachedSessionID = "0192a1b2-app0-7000-8000-000000000001"
 
 const ctrl = tea.ModCtrl
 

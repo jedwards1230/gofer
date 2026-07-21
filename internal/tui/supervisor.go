@@ -61,6 +61,7 @@ type SessionInfo struct {
 	Summary string        // one-line latest-activity summary
 	Status  SessionStatus // coarse grouping / status count bucket
 	Model   string        // model id driving the session
+	Effort  string        // reasoning effort: "" (provider default), "low", "medium", "high"
 	Cwd     string        // session working directory — the roster's cwd group key
 
 	Cost  provider.Cost  // accumulated cost, from the SDK's usage accounting
@@ -175,6 +176,19 @@ type Supervisor interface {
 	// should compare provider families itself before calling — the concrete
 	// error type does not cross the daemon wire (see internal/daemonbridge).
 	SetModel(ctx context.Context, sessionID, model string) error
+
+	// SetEffort changes the reasoning effort a session uses for its next
+	// turn — the effort-axis twin of SetModel, valid to call while the
+	// session is running for the same reason (the swap lands on the NEXT
+	// turn). An empty effort clears the level back to the provider's default
+	// and is always legal; any other value outside "low"/"medium"/"high" is
+	// rejected, as is a non-empty level on a model the SDK registry KNOWS
+	// cannot reason. There is NO cross-provider constraint here — effort is
+	// provider-agnostic vocabulary. A caller wanting to refuse the
+	// non-reasoning case BEFORE calling should read [provider.Lookup]'s
+	// Reasoning bit itself: like SetModel's, the concrete error type does not
+	// cross the daemon wire.
+	SetEffort(ctx context.Context, sessionID, effort string) error
 
 	// Reply answers a pending permission request identified by id: allow or
 	// deny it, and — when remember is true — persist the verdict as a

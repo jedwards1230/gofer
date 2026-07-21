@@ -83,6 +83,10 @@ func (r *routerSupervisor) SetModel(ctx context.Context, sessionID, model string
 	return r.b.SetModel(ctx, sessionID, model)
 }
 
+func (r *routerSupervisor) SetEffort(ctx context.Context, sessionID, effort string) error {
+	return r.b.SetEffort(ctx, sessionID, effort)
+}
+
 func (r *routerSupervisor) Kill(ctx context.Context, sessionID string) error {
 	return r.b.Kill(ctx, sessionID)
 }

@@ -21,9 +21,10 @@ import (
 // rather than import them, since they ARE the daemon's public wire contract,
 // not an internal implementation detail).
 const (
-	methodGoferKill     = "gofer/kill"
-	methodGoferArchive  = "gofer/archive"
-	methodGoferSetModel = "gofer/set_model"
+	methodGoferKill      = "gofer/kill"
+	methodGoferArchive   = "gofer/archive"
+	methodGoferSetModel  = "gofer/set_model"
+	methodGoferSetEffort = "gofer/set_effort"
 )
 
 // methodPermissionReply is the JSON-RPC method literal the daemon exposes to
@@ -126,6 +127,7 @@ func toTUISessionInfo(d sessionInfoDTO) tui.SessionInfo {
 		Title:         d.Title,
 		Status:        statusFromWire(d.Status),
 		Model:         d.Model,
+		Effort:        d.Effort,
 		Cwd:           d.Cwd,
 		Cost:          d.Cost,
 		Usage:         d.Usage,
@@ -356,6 +358,23 @@ func (s *Supervisor) Archive(ctx context.Context, sessionID string) error {
 func (s *Supervisor) SetModel(ctx context.Context, sessionID, model string) error {
 	if _, err := s.client.Call(ctx, methodGoferSetModel, map[string]string{"sessionId": sessionID, "model": model}); err != nil {
 		return fmt.Errorf("daemonbridge: set model %s: %w", sessionID, err)
+	}
+	return nil
+}
+
+// SetEffort calls gofer/set_effort. Like [Supervisor.SetModel], every
+// supervisor-side sentinel ([supervisor.ErrInvalidEffort], and the SDK runner's
+// own non-reasoning-model rejection) arrives here as a plain, messaged JSON-RPC
+// application error — the concrete types do not survive the wire. A caller that
+// needs to branch on "this model cannot reason" (the TUI's picker does, so it
+// never offers levels the runner will reject) reads the same capability bit off
+// [provider.Lookup] itself before calling.
+//
+// An empty effort is a legitimate request — the SDK's "clear back to the
+// provider's default" — and is sent as such, not treated as a missing param.
+func (s *Supervisor) SetEffort(ctx context.Context, sessionID, effort string) error {
+	if _, err := s.client.Call(ctx, methodGoferSetEffort, map[string]string{"sessionId": sessionID, "effort": effort}); err != nil {
+		return fmt.Errorf("daemonbridge: set effort %s: %w", sessionID, err)
 	}
 	return nil
 }

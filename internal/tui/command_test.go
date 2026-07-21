@@ -220,11 +220,15 @@ func TestPanelConfigEditPersistsViaSaveConfig(t *testing.T) {
 	m, _ = m.Update(m.Init()())
 
 	m = dispatchSlash(t, m, "/config")
-	// session.model, session.permission_mode, tui.roster_view,
-	// tui.autoscroll, tui.mouse, telemetry.enabled — six ↓ presses (the first
-	// selects row 0) land on telemetry.enabled, a bool row that saves on
-	// Enter with no further input needed.
-	for i := 0; i < 6; i++ {
+	// session.model, session.effort, session.permission_mode, tui.roster_view,
+	// tui.autoscroll, tui.mouse, telemetry.enabled — seven ↓ presses (the
+	// first selects row 0) land on telemetry.enabled, a bool row that saves on
+	// Enter with no further input needed. This package can't read the
+	// unexported registry to derive the count (config_view_test.go's
+	// downPressesTo does), so the row list above is the thing to update when a
+	// setting is added ahead of telemetry.enabled — the assertions below fail
+	// loudly if it isn't.
+	for i := 0; i < 7; i++ {
 		m = press(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})

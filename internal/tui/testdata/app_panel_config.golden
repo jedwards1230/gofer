@@ -9,12 +9,12 @@ claude-sonnet-5 · ~/orchestration
 
 
 
-
 ────────────────────────────────────────────────────────────────────────────────
-Status  [Config]  Model  Usage  Stats  Resume
+Status  [Config]  Model  Thinking  Usage  Stats  Resume
 ────────────────────────────────────────────────────────────────────────────────
 Search settings…
   Default model … 
+  Reasoning effort … off
   Permission mode … ask
   Roster view … flat
   Auto-scroll transcript … true

@@ -352,10 +352,22 @@ func TestResumeTabInFetchesOnce(t *testing.T) {
 	m, cmd := dispatchSlashCmd(t, m, "/status")
 	m = runCmd(t, m, cmd)
 
-	// Status → Config → Model → Usage → Stats → Resume.
-	for range 5 {
+	// → until the Resume tab is active, rather than a fixed press count: the
+	// tab bar grows as commands land, and how many presses it takes is not what
+	// this test is about. The bound is generous but finite so a Resume tab that
+	// somehow became unreachable fails here instead of spinning (←/→ wrap, so
+	// any bound past the tab count would loop forever otherwise).
+	var reached bool
+	for range 16 {
+		if strings.Contains(content(m), "[Resume]") {
+			reached = true
+			break
+		}
 		m, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyRight})
 		m = runCmd(t, m, cmd)
+	}
+	if !reached {
+		t.Fatalf("→ never reached the Resume tab:\n%s", content(m))
 	}
 	if got := content(m); !strings.Contains(got, "an offline session") {
 		t.Fatalf("expected tabbing into Resume to fetch the listing, got:\n%s", got)

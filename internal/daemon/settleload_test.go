@@ -81,7 +81,8 @@ func (s *settleSupervisor) List(context.Context) ([]supervisor.SessionInfo, erro
 func (s *settleSupervisor) Roster(context.Context) ([]supervisor.SessionInfo, error) {
 	return nil, nil
 }
-func (s *settleSupervisor) SetModel(context.Context, string, string) error { return nil }
+func (s *settleSupervisor) SetModel(context.Context, string, string) error  { return nil }
+func (s *settleSupervisor) SetEffort(context.Context, string, string) error { return nil }
 func (s *settleSupervisor) SubscribeLive(context.Context, string) (*event.Subscription, error) {
 	return nil, nil
 }

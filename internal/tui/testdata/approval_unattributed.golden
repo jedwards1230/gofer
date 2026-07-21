@@ -1,0 +1,24 @@
+────────────────────────────────────────────────────────────────────────────────
+bash command
+  Run the test suite with race detection
+
+  go test -race ./...
+  timeout=120
+
+Why you're being asked
+
+  No permission rule matched this call, so gofer is asking before it runs. It
+  also cannot be sandboxed on this host, so an allow rule alone will not let it
+  run unattended.
+
+  Policy: unmatched · containable: false (no container configured)
+
+  Press `r` before allowing to remember this exact call for the rest of the
+  session. Add a rule to the `permissions` array in `config.json` — e.g.
+  `{"verdict": "allow", "tool": "bash", "specifier": "go *"}` — to stop being
+  asked.
+
+Do you want to proceed?
+  1. [a] Yes   2. [d] No   ·   [r] remember: off
+
+esc cancel · session 0192a1b2-c3d4-7e5f-8a90-000000000001
