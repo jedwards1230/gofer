@@ -295,6 +295,33 @@ func TestMentionTokenDoesNotReloadTheMarkdownLayer(t *testing.T) {
 	}
 }
 
+// TestPasteFromMentionIntoCommandStillReloads covers the subtler half of the
+// same rule, and the one only a PASTE can reach: typing can never carry a
+// stale `@` latch into a `/` token (every transition between token kinds
+// passes through a no-token sync that clears it), but pasting " /st" onto a
+// buffer already ending in a mention lands ONE sync that sees a `/` token. If
+// `@` had latched menuToken, that sync reads as a continuation and the reload
+// is skipped — the command file written after startup would stay invisible.
+func TestPasteFromMentionIntoCommandStillReloads(t *testing.T) {
+	const warning = "skipped 1 command file"
+
+	env, userDir, _ := newUserCmdEnv(t)
+	seedUserCmd(t, userDir, "my review.md", "body") // unloadable: space in the name
+	if err := os.WriteFile(filepath.Join(env.Cwd, "main.go"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newUserCmdModel(t, newFakeSup(tui.GoldenRoster()), env)
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach; clears the startup note
+	m = press(t, m, tea.KeyPressMsg{Text: "@"})
+	m = press(t, m, tea.KeyPressMsg{Text: "m"})
+
+	m = paste(t, m, " /st")
+	if got := content(m); !strings.Contains(got, warning) {
+		t.Fatalf("pasting a `/` token straight out of an `@` mention skipped the markdown reload:\n%s", got)
+	}
+}
+
 // TestUserCommandFoldsPendingShellOutput holds usercmds.go to its own
 // promise ("there is no second send path, so a markdown command can never
 // diverge from a typed one") now that a typed prompt carries pending `!`
