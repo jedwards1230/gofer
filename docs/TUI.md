@@ -991,9 +991,9 @@ the M4 trio (`/status`, `/config`, `/model`), the M5 read-only pair
 on a one-line placeholder body until its own step landed the real view
 (`/status` in step 2, `/config` in step 3, `/model` in step 4, `/usage` +
 `/stats` in the M5 usage-panels step, `/thinking` with `Runner.SetEffort`,
-`/resume` with the session-lifecycle commands — all below). `@`
-and `!` are not implemented — the intercept only switches on a leading `/` so
-they can slot in later.
+`/resume` with the session-lifecycle commands — all below). The first-rune
+switch the intercept is built on now carries `!` / `!!` and `@` beside `/` —
+see **Built (input prefixes)** below.
 
 **Built (M4 step 2)**: `env.go` adds `CommandEnv` — the panel's read-only
 data seam: `Version`/`Cwd`/`Root` plus `Auth`/`Config` closures wrapping the
@@ -1290,6 +1290,41 @@ end to end (it is how `gofer resume` reaches a daemon), so the only thing
 missing was the TUI trigger — `tui.Supervisor` gains `Resume`/`ListSessions`,
 mirrored in `internal/tuibridge` and `internal/daemonbridge`.
 
+**Built (input prefixes)**: `/` is no longer the only sigil the submit
+intercept switches on. `hasInputPrefix`/`App.dispatchInput` (shell.go) are the
+single first-rune switch **both** text-entry surfaces route through, so a
+prefix cannot mean one thing in the dispatch bar and another in the attach
+input — and it is **leading-only**, so `that worked!` and
+`mail me@example.com` submit as ordinary prompts.
+
+- **`!` / `!!` shell escape** (shell.go). `!cmd` runs cmd under `$SHELL -c`
+  (falling back to `/bin/sh`) in the session's cwd, off the Update loop, and
+  shows the result in a bottom overlay pane composed like the command panel
+  (Esc dismisses it). **`!` output is folded into the next prompt this client
+  submits; `!!` output never is.** That exclusion is structural, not
+  cosmetic: `App.composePrompt` — the one place local content becomes model
+  input — walks the run list and skips any run flagged not-in-context, so no
+  rendering, copy, or re-submit path can leak it. A `!!` run is marked
+  consumed without contributing, so a later prompt can't pick it up either.
+  Output is bounded (`tui.shell_max_output_bytes`, default 64 KiB, with a
+  visible truncation marker) and so is runtime (`tui.shell_timeout_ms`,
+  default 30s); a non-zero exit is reported as an exit code with the
+  command's own stderr retained, stdout and stderr interleave in arrival
+  order, and a bare `!` runs nothing. It is **not** a tool call and
+  deliberately touches no part of the permission/approval path — the user
+  typed it themselves, and nothing the model emits can reach it.
+- **`@` file mention** (filemention.go). Typing `@` at a token boundary opens
+  the same popup the slash commands use, sourced from the paths under the
+  session's cwd — `git ls-files` inside a repository (which is what makes it
+  honor `.gitignore` and skip `.git/`), a bounded `filepath.WalkDir`
+  otherwise, enumerated off the Update loop once per mention and bounded by
+  `tui.file_mention_max_entries` / `tui.file_mention_max_depth`. Tab or Enter
+  splices the path into the buffer. **A submitted `@path` passes the PATH
+  through as text — it does NOT inline the file's contents.** So a mention
+  costs the length of a path, not a file's worth of tokens; the agent reads
+  it with its own file tools if it wants more. The trigger is a token
+  boundary, so an email address never opens the popup.
+
 - **P0**: `/compact [instructions]` (block-if-busy) — **blocked on the SDK**: `v0.17.0`
   ships the `session.compact` op and `session.compacted` event as data types and
   a `session.NewCompactionEntry` journal entry, but no way for an embedder to
@@ -1301,8 +1336,7 @@ mirrored in `internal/tuibridge` and `internal/daemonbridge`.
   string) error` that folds the history, appends the compaction entry, and emits
   `session.compacted`. · `/yolo` permission-mode toggle (dual-bound command +
   key; ships before autonomous tool use) · `/help` rendered from the live
-  keymap · `!` / `!!` shell escape (`!!` runs but excludes output from model
-  context) · `@`-file mention.
+  keymap.
 - **P1**: `/init` (first-run project context) · `/fork` · `/tree` ·
   `/export html|jsonl` · `/login` · runtime `registerCommand` from plugins ·
   `/skill:name` · `/name` · `/session` (id, path, per-model tokens/cost).

@@ -91,6 +91,16 @@ func runUserCommand(uc usercmd.Command) func(App, []string) (App, tea.Cmd) {
 		// Same tail-snap a hand-typed prompt does (handleAttachKey): the reply
 		// is exactly what a scrolled-back reader wants to see next.
 		a.scroll = 0
+		// And the same prompt assembly, for the reason stated at the top of
+		// this file: a markdown command must do exactly what typing its
+		// expanded body would. A pending `!` shell run owes its output to the
+		// next prompt whichever way that prompt is composed — skipping the
+		// fold here would make /mycmd and the identical hand-typed text
+		// produce different model input, which is precisely the divergence
+		// "there is no second send path" exists to rule out. `!!` runs stay
+		// excluded here for free: composePrompt is the one place that decides
+		// (shell.go).
+		prompt = a.composePrompt(prompt)
 		return a, a.doSend(a.sessID, prompt)
 	}
 }
