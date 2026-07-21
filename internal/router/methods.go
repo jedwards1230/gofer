@@ -454,6 +454,40 @@ func (s *Supervisor) Roster(ctx context.Context) ([]supervisor.SessionInfo, erro
 	return out, nil
 }
 
+// FleetUsage sums every live session's accumulated Cost and Usage into a
+// fleet-wide total, computed off the pushed roster cache with the SAME lock-free
+// [atomic.Pointer] loads [Supervisor.Roster] uses and ZERO worker RPCs. It is
+// the aggregate that was missing once sessions moved into separate worker
+// processes: the roster cache already carries each live session's running
+// Cost/Usage (folded from turn.finished deltas — see [workerHandle.applyRosterEvent]),
+// so the total is just their sum.
+//
+// A handle with NO cached row (a failed or not-yet-landed seed, the degraded
+// path) contributes nothing rather than forcing a fallback RPC: this is a
+// display aggregate, not an authoritative per-session figure, so a struggling
+// worker leaving its row unseeded should not turn a cheap sum into a fan-out of
+// bounded Calls. provider.Usage has its own Add; provider.Cost does not, so the
+// per-bucket sum reuses [addCost] (the same helper the cache folds deltas with)
+// rather than a second copy of it.
+//
+// There is no double-count seam to reintroduce here: each row is already the
+// correct running total for its session (the seed-vs-first-delta seam documented
+// in rostercache.go is bounded to one turn of ONE row and is not this method's
+// concern), and this method only adds correct rows together.
+func (s *Supervisor) FleetUsage() (provider.Cost, provider.Usage) {
+	var (
+		cost  provider.Cost
+		usage provider.Usage
+	)
+	for _, h := range s.snapshotHandles() {
+		if info := h.info.Load(); info != nil {
+			cost = addCost(cost, info.Cost)
+			usage = usage.Add(info.Usage)
+		}
+	}
+	return cost, usage
+}
+
 // List returns the union of live workers ∪ on-disk journals: live sessions from
 // the aggregated roster, every other on-disk session as an offline (Live=false)
 // entry read from its journal. This union is what makes a crashed session — whose
@@ -566,11 +600,30 @@ func (s *Supervisor) AwaitSettled(ctx context.Context, id string) error {
 		// Offline / no live worker: the journal is durable, nothing to settle.
 		return nil
 	}
+	return awaitHandleSettled(ctx, h)
+}
+
+// awaitHandleSettled blocks until h's cached row reports idle
+// ([supervisor.StatusNeedsInput]) or ctx fires, returning ctx.Err() on the
+// latter. It is the shared settle-wait [Supervisor.AwaitSettled] (issue #137)
+// and [Supervisor.Drain] both use: it observes the cached row's Status —
+// maintained by h's watchSession goroutine — and blocks on h.settleCh, which
+// that goroutine pokes after folding each event, rather than polling.
+//
+// A nil cached row (the seed never landed — the degraded path) returns nil
+// rather than blocking: settledness is unobservable there, so a caller must not
+// wait forever on it. This is what keeps a worker blocked mid-turn (design §7)
+// from deadlocking a load or a drain — ctx still bounds the wait regardless.
+//
+// It assumes a SINGLE waiter per handle: h.settleCh is a coalescing buffered-1
+// channel, so two concurrent waiters could each miss the other's wake. AwaitSettled
+// (session/load) and Drain (shutdown) do not overlap on a handle in practice —
+// the drain path runs after the listener has stopped accepting session/load — so
+// the single-waiter assumption holds where both are wired.
+func awaitHandleSettled(ctx context.Context, h *workerHandle) error {
 	for {
 		info := h.info.Load()
 		if info == nil || info.Status == supervisor.StatusNeedsInput {
-			// nil: the roster cache never seeded (degraded path) — we cannot observe
-			// settledness, so don't block the load; ctx still bounds it regardless.
 			return nil
 		}
 		select {
@@ -580,6 +633,45 @@ func (s *Supervisor) AwaitSettled(ctx context.Context, id string) error {
 			return ctx.Err()
 		}
 	}
+}
+
+// Drain puts the router into graceful drain and blocks until every live session
+// is idle or ctx fires. It is the controlled first step of the M6 hot-upgrade
+// story (design §11): stop admitting NEW sessions, let in-flight turns finish on
+// their existing workers, THEN detach (via [Supervisor.Close], a separate later
+// step that deliberately leaves the workers running to be re-adopted).
+//
+// It does two things:
+//
+//  1. Flips the draining flag (idempotent), so [Supervisor.admit] refuses a new
+//     [Supervisor.Create] with [ErrDraining] from here on. Resuming an existing
+//     session stays allowed (Resume does not run through admit) — finishing an
+//     already-live session's work is the point of draining.
+//  2. Waits for every live handle to reach idle, reusing the SAME settle signal
+//     issue #137/#139 use ([awaitHandleSettled] on each handle's settleCh). The
+//     handle set is snapshotted once: draining refuses new Creates, so no new
+//     handle can appear, and a handle that ends mid-drain (its worker finished
+//     and was killed/crashed, or was never seeded) simply settles or drops out.
+//
+// It is BOUNDED by ctx: on a ctx deadline it returns ctx.Err() with some handles
+// possibly still working, leaving the caller to decide whether to proceed to
+// Close anyway (the shutdown wiring does — a detached worker finishes its turn
+// and is re-adopted on the next start regardless). Drain does NOT kill workers.
+//
+// Draining is one-way for the router's lifetime — there is no resume-from-drain,
+// because the only caller is shutdown. A second Drain call is a harmless no-op on
+// the flag and re-waits on whatever is still live.
+func (s *Supervisor) Drain(ctx context.Context) error {
+	s.mu.Lock()
+	s.draining = true
+	s.mu.Unlock()
+
+	for _, h := range s.snapshotHandles() {
+		if err := awaitHandleSettled(ctx, h); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Kill terminates sessionID's worker (keeping its journal). It first asks the

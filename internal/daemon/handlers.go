@@ -29,6 +29,17 @@ const (
 	methodGoferArchive  = "gofer/archive"
 	methodGoferSetModel = "gofer/set_model"
 
+	// methodGoferFleet is gofer-native fleet-wide usage: the summed Cost/Usage
+	// across every LIVE session, aggregated by the hosted supervisor (see
+	// [FleetUsager]). With sessions in separate worker processes under M6, no
+	// single row carries the fleet total, so a client that wants "total cost
+	// across all sessions" — `gofer ps`' fleet footer — reads it here rather than
+	// re-summing the roster. Read-only; takes no params. A daemon whose supervisor
+	// does not aggregate (the in-process one) answers {supported:false}, and an
+	// older daemon returns method-not-found; a client treats both as "no fleet
+	// total to show".
+	methodGoferFleet = "gofer/fleet"
+
 	// methodGoferHello is the gofer-native version handshake (design §6): the
 	// authoritative, connection-scoped version exchange a router calls first on
 	// every worker connection to route around binary/wire skew. Returns
@@ -109,6 +120,7 @@ var methodTable = map[string]methodHandler{
 
 	methodGoferRoster:   handleGoferRoster,
 	methodGoferPS:       handleGoferPS,
+	methodGoferFleet:    handleGoferFleet,
 	methodGoferKill:     handleGoferKill,
 	methodGoferArchive:  handleGoferArchive,
 	methodGoferSetModel: handleGoferSetModel,
@@ -1221,6 +1233,21 @@ func handleGoferRoster(d *Daemon, ctx context.Context, _ *peer, _ json.RawMessag
 		return nil, appError(err)
 	}
 	return toSessionInfoDTOs(infos), nil
+}
+
+// handleGoferFleet answers gofer/fleet: the fleet-wide Cost/Usage total across
+// every live session. It type-asserts the hosted supervisor for the optional
+// [FleetUsager] capability — the M6 router aggregates off its roster cache; the
+// in-process supervisor does not implement it — and reports {supported:false}
+// when the supervisor does not aggregate, so a client omits its fleet footer
+// rather than showing a misleading $0. Read-only; never fails.
+func handleGoferFleet(d *Daemon, _ context.Context, _ *peer, _ json.RawMessage) (any, *rpcError) {
+	fu, ok := d.sup.(FleetUsager)
+	if !ok {
+		return fleetUsageDTO{Supported: false}, nil
+	}
+	cost, usage := fu.FleetUsage()
+	return fleetUsageDTO{Supported: true, Cost: cost, Usage: usage}, nil
 }
 
 // handleGoferModels answers gofer/models: the full SDK provider registry

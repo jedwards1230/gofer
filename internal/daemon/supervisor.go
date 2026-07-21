@@ -72,3 +72,20 @@ type Supervisor interface {
 // — a signature drift in either package fails the build here rather than at a
 // call site.
 var _ Supervisor = (*supervisor.Supervisor)(nil)
+
+// FleetUsager is an OPTIONAL [Supervisor] capability: a fleet-wide Cost/Usage
+// total across every live session, aggregated by the supervisor itself. The M6
+// router implements it off its pushed roster cache (zero worker RPCs); the
+// in-process supervisor deliberately does NOT — a single-process daemon has no
+// per-worker fan-out to aggregate, and a client can sum the roster it already
+// receives.
+//
+// It is a separate interface rather than a method on [Supervisor] precisely so
+// the in-process supervisor stays untouched: [handleGoferFleet] type-asserts for
+// it and reports the total as unsupported when the hosted supervisor does not
+// provide one, so an in-process — or an older — daemon simply omits the
+// fleet-total line instead of failing the call.
+type FleetUsager interface {
+	// FleetUsage returns the summed Cost and Usage of every live session.
+	FleetUsage() (provider.Cost, provider.Usage)
+}

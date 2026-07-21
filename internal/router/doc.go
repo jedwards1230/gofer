@@ -156,6 +156,22 @@
 // own time. A handle with no cached row (a failed or not-yet-landed seed) falls
 // back to a live RPC for that handle alone. Full rationale: rostercache.go.
 //
+// # Fleet cost/usage aggregation
+//
+// With each session's usage living in its own worker, the fleet-wide total is no
+// longer any single row. [Supervisor.FleetUsage] recovers it by summing the
+// pushed roster cache — every live handle's already-correct running Cost/Usage —
+// with the SAME lock-free [atomic.Pointer] loads Roster uses and zero worker
+// RPCs. It is a plain sum of correct rows, so it does not reintroduce the
+// seed-vs-first-delta double-count seam rostercache.go documents (that seam is
+// bounded to one turn of one row and is the cache's concern, not the sum's).
+//
+// It is surfaced, not hidden: the daemon exposes it over gofer/fleet (via the
+// optional [daemon.FleetUsager] capability the router implements and the
+// in-process supervisor does not), and `gofer ps` prints a fleet-total footer
+// from it. An in-process or older daemon reports no total and the footer is
+// omitted.
+//
 // # Event bridge (§5)
 //
 // A turn running on a worker has no daemon prompt handler in this process fanning
@@ -255,6 +271,27 @@
 // lost-event-free ordering argument, and [Supervisor.SetEventRelay] for how the
 // two Loads (adoption's and resume's) each honor the no-double-broadcast
 // invariant.
+//
+// # Graceful drain (§11 hot-upgrade)
+//
+// [Supervisor.Drain] is the controlled first step of the daemon hot-upgrade
+// story: it flips the router into a draining state (idempotent) so [Supervisor.admit]
+// refuses a new [Supervisor.Create] with [ErrDraining], then blocks — bounded by
+// its ctx — until every live handle reports idle, reusing the SAME settle signal
+// [Supervisor.AwaitSettled] uses (each handle's settleCh, poked by its watcher on
+// the needs-input transition). Draining refuses only BRAND-NEW sessions;
+// resuming an already-live session to finish its work stays allowed (Resume does
+// not run through admit).
+//
+// Drain does NOT kill workers — it is the step BEFORE [Supervisor.Close], which
+// itself deliberately leaves detached workers running to be re-adopted (§3). The
+// sequence a graceful daemon shutdown runs is: stop serving, Drain (let in-flight
+// turns settle while still attached and relaying their events), then Close
+// (detach). On a ctx timeout Drain returns ctx.Err() and the caller proceeds to
+// Close anyway: a still-working worker finishes its turn detached and is
+// re-adopted on the next start regardless. The drain window is bounded by an
+// operator-tunable timeout (config.Daemon.DrainTimeoutMS), wired in cmd/gofer's
+// serveDaemonForeground.
 //
 // # Deliberate cuts for this slice (documented, not oversights)
 //
