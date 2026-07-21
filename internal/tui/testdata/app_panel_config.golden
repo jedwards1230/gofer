@@ -11,7 +11,7 @@ claude-sonnet-5 · ~/orchestration
 
 
 ────────────────────────────────────────────────────────────────────────────────
-Status  [Config]  Model
+Status  [Config]  Model  Usage  Stats
 ────────────────────────────────────────────────────────────────────────────────
 Search settings…
   Default model … 

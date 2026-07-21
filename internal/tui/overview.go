@@ -128,6 +128,18 @@ func (o Overview) SelectedID() string { return o.selectedID }
 // active session carries no model override.
 func (o Overview) DefaultModel() string { return o.meta.Model }
 
+// Now returns the reference time the overview ages rows against (meta.Now) —
+// fixed in golden tests, time.Now() in the live adapter. The command panel
+// captures it at open time so the Stats tab's elapsed output (age, last-active)
+// stays deterministic across renders (see stats.go).
+func (o Overview) Now() time.Time { return o.meta.Now }
+
+// Roster returns a copy of the overview's current session snapshot, for the
+// command panel's Stats rollup (session count + summed tokens/cost across all
+// rows). A copy so the panel's captured slice can't drift under a later
+// WithSessions poll.
+func (o Overview) Roster() []SessionInfo { return append([]SessionInfo(nil), o.sessions...) }
+
 // WithDefaultModel returns a copy of the overview whose header reports model
 // as the default (meta.Model). It is how `/model` makes its effect visible
 // without a restart (issue #156): meta was seeded once at NewApp time from a

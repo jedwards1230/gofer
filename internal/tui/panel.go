@@ -33,6 +33,8 @@ const (
 	panelStatus commandPanelTab = iota
 	panelConfig
 	panelModel
+	panelUsage
+	panelStats
 )
 
 // panelTab pairs a commandPanelTab with its display label.
@@ -48,6 +50,8 @@ var panelTabs = []panelTab{
 	{panelStatus, "Status"},
 	{panelConfig, "Config"},
 	{panelModel, "Model"},
+	{panelUsage, "Usage"},
+	{panelStats, "Stats"},
 }
 
 // panelHeight is the fixed number of rows the command panel occupies in the
@@ -85,6 +89,14 @@ type commandPanel struct {
 	sess         *SessionInfo
 	defaultModel string
 
+	// now and roster are the Stats tab's extra inputs (see stats.go), captured
+	// once at open time the same way sess is: now is the overview's reference
+	// time ([Overview.Now]) so the Stats tab's age/last-active elapsed output
+	// stays deterministic in goldens, and roster is the full session snapshot
+	// ([Overview.Roster]) the Stats rollup sums tokens + cost across.
+	now    time.Time
+	roster []SessionInfo
+
 	// cfg is the Config tab's state (config_view.go), built from env at open
 	// time the same way sess/defaultModel are — regardless of which tab the
 	// panel opens on, so switching to Config mid-session shows a
@@ -99,15 +111,17 @@ type commandPanel struct {
 
 // newCommandPanel returns a panel open on tab, rendering through th, with env
 // and the current session snapshot (nil on the overview) captured at open
-// time for the Status tab to read, and the Config/Model tabs' working state
-// loaded from env at the same time.
-func newCommandPanel(th theme.Theme, tab commandPanelTab, env CommandEnv, sess *SessionInfo, defaultModel string) commandPanel {
+// time for the Status/Usage tabs to read, now and roster for the Stats tab,
+// and the Config/Model tabs' working state loaded from env at the same time.
+func newCommandPanel(th theme.Theme, tab commandPanelTab, env CommandEnv, sess *SessionInfo, defaultModel string, now time.Time, roster []SessionInfo) commandPanel {
 	return commandPanel{
 		theme:        th,
 		active:       tab,
 		env:          env,
 		sess:         sess,
 		defaultModel: defaultModel,
+		now:          now,
+		roster:       roster,
 		cfg:          newConfigView(th, env),
 		model:        newModelPickerView(th, env, sess, defaultModel),
 	}
@@ -284,6 +298,12 @@ func (p commandPanel) body(width, bodyRows int) string {
 	switch p.active {
 	case panelStatus:
 		v := statusView{theme: p.theme, env: p.env, sess: p.sess, defaultModel: p.defaultModel}
+		return v.View(width, bodyRows)
+	case panelUsage:
+		v := usageView{theme: p.theme, sess: p.sess}
+		return v.View(width, bodyRows)
+	case panelStats:
+		v := statsView{theme: p.theme, sess: p.sess, now: p.now, roster: p.roster}
 		return v.View(width, bodyRows)
 	case panelConfig:
 		return p.cfg.View(width, bodyRows)

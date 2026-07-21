@@ -16,9 +16,9 @@ claude-sonnet-5 · ~/orchestration
 
 
 
+
 ────────────────────────────────────────────────────────────────────────────────
-Status  Config  [Model]  Usage  Stats
+Status  Config  Model  [Usage]  Stats
 ────────────────────────────────────────────────────────────────────────────────
-Model id: (type any id, listed or not)
-No providers authenticated. Run /login (or 'gofer login <anthropic|openai>').
-Type a model id · ↑/↓ to browse · Enter to select · Esc to clear
+No active session — attach to see its usage.
+←/→ to switch tabs · esc to close

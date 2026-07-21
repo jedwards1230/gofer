@@ -1,0 +1,9 @@
+Input tokens: 18234
+Output tokens: 4096
+Cache read tokens: 12000
+Cache write tokens: 512
+Cost: $0.1120
+  Input: $0.0547
+  Output: $0.0410
+  Cache read: $0.0036
+  Cache write: $0.0127
