@@ -544,15 +544,32 @@ open — whether the change substrate is gofer-native atop the JSONL journal or
 leans on a task/checkpoint seam from the SDK; see the agent-sdk-go design
 backlog.
 
-## Subagent sessions (M7, not yet built)
+## Subagent sessions (M7 · ecosystem)
 
-Design intent only — lands with M6's subagents-first-class work. A subagent
-is **not a black box within a turn** — it is a real child session
-with its own journal, cost, and transcript, linked to its parent
-(`session.spawned` event + `parent_id`; depth ≤ 5). The overview renders the
-parent with its children indented beneath it, each child row carrying its own
-description, run duration, and cumulative token/cost tally — the same
-one-line-per-session shape as a top-level row:
+A subagent is **not a black box within a turn** — it is a real child session
+with its own journal, cost, and transcript, linked to its parent.
+
+**Built (the primitive).** `supervisor.CreateOptions{ParentID, Agent}` creates
+one: Create resolves the parent (live roster first, then the store root on
+disk), derives `Depth = parent + 1`, and refuses an unknown parent
+(`ErrNoParent`) or an over-deep chain (`ErrDepthExceeded`). The cap is config,
+not a literal — `session.max_subagent_depth`, default 5. The link is durable and
+gofer-native: it is written beside the journal as
+`<root>/sessions/<slug>/<id>.meta.json` (`{parentId, agent, depth}`), so
+`List` reports it for offline sessions and `Resume` restores a child's
+attribution. Only a session that has a parent or an agent writes a sidecar, so
+nothing changes for a root session. `ParentID`/`Agent`/`Depth` ride the roster
+wire (`parentId`/`agent`/`depth`, all omitempty) through to `tui.SessionInfo`;
+`session/new` carries the request half in ACP's `_meta` (`gofer/parent`,
+`gofer/agent`) and reports what it assigned back (plus `gofer/depth`).
+`gofer run --parent <id> --agent <name>` is the CLI spawner. WHO spawns children
+from inside a turn is still open — there is deliberately no agent-facing spawn
+tool.
+
+**Upcoming (the render).** The overview renders the parent with its children
+indented beneath it, each child row carrying its own description, run duration,
+and cumulative token/cost tally — the same one-line-per-session shape as a
+top-level row:
 
 ```
 ● main
@@ -573,13 +590,14 @@ row renderer and the id-tracked selection/windowing the M2 roster already
 established — a child session is just a session, so no new navigation model is
 needed, only the parent→child link and the indent.
 
-**Tool-call attribution (SDK-gated).** When a tool event carries an
-originating-agent id, its transcript block should name the source —
-`ToolName(args) · from the <agent> agent` — alongside the existing human
-caption, so a transcript that interleaves a parent's and its subagents' calls
-reads unambiguously. It falls back to the current un-attributed rendering when
-the event carries no agent id, so it is purely additive; surfacing that id on
-the tool event is an SDK change — see the agent-sdk-go design backlog.
+**Tool-call attribution.** The SDK gate is gone: `runner.Options.Agent`
+(v0.17.0) stamps the originating-agent id onto every `tool.call.*` event a
+session's loop emits, and the supervisor forwards `CreateOptions.Agent` into it.
+Rendering it is still upcoming — a tool block should name the source,
+`ToolName(args) · from the <agent> agent`, alongside the existing human caption,
+so a transcript interleaving a parent's and its subagents' calls reads
+unambiguously. It falls back to the current un-attributed rendering when an
+event carries no agent id, so it stays purely additive.
 
 ## Monitor / background tasks (M8 — goal)
 

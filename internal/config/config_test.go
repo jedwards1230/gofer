@@ -387,6 +387,48 @@ func TestDaemonDrainTimeout(t *testing.T) {
 	}
 }
 
+// TestSessionSubagentDepthLimit covers the subagent depth cap's resolver.
+// Unset (0) MUST mean "use the default", never "no children allowed" — an
+// existing config file has no such key, and reading it as a zero cap would
+// refuse every subagent create on upgrade.
+func TestSessionSubagentDepthLimit(t *testing.T) {
+	tests := []struct {
+		name string
+		in   int
+		want int
+	}{
+		{"unset resolves to default", 0, config.DefaultMaxSubagentDepth},
+		{"negative resolves to default", -3, config.DefaultMaxSubagentDepth},
+		{"explicit cap wins", 2, 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := config.Session{MaxSubagentDepth: tt.in}
+			if got := s.SubagentDepthLimit(); got != tt.want {
+				t.Fatalf("SubagentDepthLimit() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestLoadParsesSubagentDepth pins the config KEY itself: an operator raising
+// the cap edits session.max_subagent_depth, so a rename would silently return
+// every daemon to the default.
+func TestLoadParsesSubagentDepth(t *testing.T) {
+	dir := t.TempDir()
+	path := config.DefaultPath(dir)
+	if err := os.WriteFile(path, []byte(`{"session":{"max_subagent_depth":9}}`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	c, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := c.Session.SubagentDepthLimit(); got != 9 {
+		t.Fatalf("SubagentDepthLimit() = %d, want 9", got)
+	}
+}
+
 func TestLoadRejectsMalformedJSON(t *testing.T) {
 	dir := t.TempDir()
 	path := config.DefaultPath(dir)

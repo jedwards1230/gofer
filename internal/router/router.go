@@ -488,14 +488,15 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts supervisor.
 	// to contain. The bound is OWNED, not derived from the creating peer's ctx
 	// (see [wireCallCtx]).
 	newCtx, newCancel := wireCallCtx()
-	raw, err := sw.client.Call(newCtx, acp.MethodSessionNew, acp.NewSessionRequest{Cwd: opts.Cwd, Model: model})
+	raw, err := sw.client.Call(newCtx, acp.MethodSessionNew,
+		daemon.NewSessionRequestFor(opts.Cwd, model, opts.ParentID, opts.Agent))
 	newCancel()
 	if err != nil {
 		_ = rec.Close()
 		cleanupSpawnedWorker(sessionID, sw.cmd, sw.wait)
 		return supervisor.SessionInfo{}, fmt.Errorf("router: create: session/new on worker: %w", err)
 	}
-	var resp acp.NewSessionResponse
+	var resp daemon.NewSessionResponse
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		_ = rec.Close()
 		cleanupSpawnedWorker(sessionID, sw.cmd, sw.wait)
@@ -539,6 +540,7 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts supervisor.
 	if prompt != "" {
 		status = supervisor.StatusWorking
 	}
+	parentID, agentID, depth := resp.Meta.SubagentLink()
 	return supervisor.SessionInfo{
 		ID:            sessionID,
 		Model:         model,
@@ -548,6 +550,13 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts supervisor.
 		Updated:       now,
 		Live:          true,
 		BinaryVersion: sw.hello.BinaryVersion,
+		// The subagent link as the WORKER's supervisor resolved it. Depth in
+		// particular is not knowable here: the worker owns the parent lookup
+		// (against the shared store root) and the depth cap, so the router reports
+		// what came back rather than recomputing it.
+		ParentID: parentID,
+		Agent:    agentID,
+		Depth:    depth,
 	}, nil
 }
 

@@ -81,16 +81,36 @@ type SessionInfo struct {
 	// signal, and stamping an identical version on every row would be noise.
 	// Empty for an offline row (no process) and from any pre-M6 daemon.
 	BinaryVersion string
+
+	// ParentID is the id of the session that spawned this one — "" for a root
+	// session. A subagent is a real session with its own journal, cost and
+	// transcript, so a child row is an ordinary roster row plus this link; the
+	// link is what lets the overview render children indented beneath their
+	// parent instead of as unrelated siblings.
+	ParentID string
+	// Agent is the session's agent identity (e.g. "go-developer"), the same id
+	// its tool-call events are stamped with. "" is un-attributed.
+	Agent string
+	// Depth is the row's depth in the subagent tree: 0 for a root session,
+	// parent+1 for a child — the indent level a tree render uses.
+	Depth int
 }
 
 // CreateOptions configures [Supervisor.Create]. The zero value is the
 // daemon's default: a credential-driven model in the daemon's working
-// directory. The daemon supervisor's CreateOptions carries more fields
-// (System, Params, MaxIters); the TUI only sets these two, so this local copy
-// mirrors just them until the reconciliation PR imports the daemon type.
+// directory, as a ROOT session. The daemon supervisor's CreateOptions carries
+// more fields (System, Params, MaxIters); the TUI only sets these, so this local
+// copy mirrors just them until the reconciliation PR imports the daemon type.
 type CreateOptions struct {
 	Model string
 	Cwd   string
+	// ParentID, when set, creates the session as a SUBAGENT of that session
+	// rather than as a root one (see [SessionInfo.ParentID]). An unknown parent,
+	// or one already at the daemon's depth cap, fails the create.
+	ParentID string
+	// Agent is the new session's agent identity, stamped onto its tool-call
+	// events (see [SessionInfo.Agent]).
+	Agent string
 }
 
 // Supervisor is the client-side view of the daemon the TUI drives. Every

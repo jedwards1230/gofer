@@ -259,6 +259,10 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 		isup, serr := supervisor.New(supervisor.Config{
 			Root:        rootDir,
 			Permissions: cfg.Engine,
+			// The subagent depth cap is an operator opinion, so it comes from
+			// config (session.max_subagent_depth) rather than a literal; an unset
+			// value resolves to the package default.
+			MaxSubagentDepth: cfg.Session.SubagentDepthLimit(),
 			// Attach a per-session telemetry observer at registration, before the
 			// session's first turn — subscribing here (rather than after a turn
 			// has already started) means Events' replay backlog is still empty,

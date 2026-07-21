@@ -24,11 +24,20 @@ import (
 // *Supervisor) always take it before mu here, so the two locks have one fixed
 // order and cannot deadlock.
 type managed struct {
-	sess      Session
-	id        string
-	project   string
-	model     string
-	cwd       string
+	sess    Session
+	id      string
+	project string
+	model   string
+	cwd     string
+	// parentID/agent/depth are this session's subagent link (see [sessionMeta]):
+	// the spawning session's id, the agent identity its tool events are stamped
+	// with, and its depth in the tree. Set once in newManaged — from Create's
+	// resolved options or, on resume, from the on-disk sidecar — and never
+	// mutated afterward, so (like id/project/cwd above) they are read without
+	// holding mu.
+	parentID  string
+	agent     string
+	depth     int
 	createdAt time.Time
 	clock     func() time.Time
 	// notify pushes a fresh roster snapshot to WatchRoster subscribers. The
@@ -122,7 +131,7 @@ type managed struct {
 // join later. Calling it here, rather than after publish, closes the race
 // where a concurrent Kill/Archive could otherwise observe a live session
 // with no teardown stashed yet (see Config.OnRegister's doc).
-func newManaged(sess Session, model, effort string, now time.Time, clock func() time.Time, notify func(), cwd string, gate *loop.Gate, onRegister func(sess Session) (stop func())) *managed {
+func newManaged(sess Session, model, effort string, now time.Time, clock func() time.Time, notify func(), cwd string, gate *loop.Gate, meta sessionMeta, onRegister func(sess Session) (stop func())) *managed {
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &managed{
 		sess:       sess,
@@ -131,6 +140,9 @@ func newManaged(sess Session, model, effort string, now time.Time, clock func() 
 		model:      model,
 		effort:     effort,
 		cwd:        cwd,
+		parentID:   meta.ParentID,
+		agent:      meta.Agent,
+		depth:      meta.Depth,
 		createdAt:  now,
 		updated:    now,
 		clock:      clock,
@@ -182,6 +194,9 @@ func (m *managed) info() SessionInfo {
 		Queued:      len(m.queue),
 		Live:        true,
 		Cwd:         m.cwd,
+		ParentID:    m.parentID,
+		Agent:       m.agent,
+		Depth:       m.depth,
 	}
 }
 

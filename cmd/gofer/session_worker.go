@@ -112,6 +112,10 @@ func runSessionWorker(ctx context.Context, args []string, stdout, stderr io.Writ
 	sup, err := supervisor.New(supervisor.Config{
 		Root:        rootDir,
 		Permissions: cfg.Engine,
+		// Same config-driven subagent depth cap as `gofer daemon`: the worker
+		// hosts the session that a session/new with a gofer/parent `_meta`
+		// actually creates, so it is the process that enforces the cap.
+		MaxSubagentDepth: cfg.Session.SubagentDepthLimit(),
 		// Pin the sole session's id to --session (design Option A) through the
 		// SDK's pre-assigned-session-id seam: runner.New creates the session with
 		// this exact id, leaving entry-id generation on the store default.
