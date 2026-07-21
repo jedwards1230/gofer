@@ -129,6 +129,12 @@ func (r *routerSupervisor) History(context.Context, string) ([]provider.Message,
 	return nil, errRouterPrototype
 }
 
+// AwaitSettled is a no-op for this prototype: the double-hop paths drive
+// session/prompt, not session/load's settle wait, so there is nothing to gate.
+func (r *routerSupervisor) AwaitSettled(context.Context, string) error {
+	return nil
+}
+
 func (r *routerSupervisor) EmitConfigOptions(string, []event.ConfigOption) error {
 	return errRouterPrototype
 }

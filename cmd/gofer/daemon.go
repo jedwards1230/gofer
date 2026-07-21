@@ -308,6 +308,12 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 		// re-surface still see and answer it (design §7). The in-process daemon
 		// leaves this false — its session/load is byte-for-byte unchanged.
 		ReplayPendingPermissionsOnAttach: *workers,
+		// How long session/load waits for a live session's in-flight turn to
+		// finish journaling before folding history, so a load in that window does
+		// not replay a short transcript (issue #137). Operator-tunable via
+		// `session.load_settle_timeout_ms`; unset resolves to the default (see
+		// config.Session.LoadSettleTimeout).
+		LoadSettleTimeout: cfg.Session.LoadSettleTimeout(),
 		// Let gofer/models report per-model availability to remote clients: a
 		// phone ACP client can't see the daemon host's auth state, so the daemon
 		// resolves the logged-in providers here (the same store `gofer auth`

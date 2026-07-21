@@ -67,14 +67,16 @@ func (s *Supervisor) SubscribeLive(ctx context.Context, sessionID string) (*even
 }
 
 // Interrupt cancels sessionID's in-flight turn by forwarding session/cancel to
-// its worker — a notification, per ACP. The bounded context keeps a wedged
-// worker socket from blocking the handler.
+// its worker — a notification, per ACP.
 //
-// ctx is read exactly once, by the admission check below; the write runs under
-// an owned bound (see [wireCallCtx]). Interrupt is the likeliest trigger for
-// that hazard in practice — Ctrl-C then quit cancels the peer request that
-// carried the session/cancel — and borrowing here would have let the quit
-// destroy the router's link to a still-healthy worker.
+// ctx is read exactly once, by the admission check below; the write's lifetime
+// is owned by [daemon.Client.Notify], which takes no context and derives its own
+// bound (see clientWriteTimeout) so a wedged worker socket cannot block the
+// handler AND a caller cancellation cannot tear the shared worker link down.
+// Interrupt is the likeliest trigger for that hazard in practice — Ctrl-C then
+// quit cancels the peer request that carried the session/cancel — and borrowing
+// its ctx for the write would have let the quit destroy the router's link to a
+// still-healthy worker.
 func (s *Supervisor) Interrupt(ctx context.Context, sessionID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -83,9 +85,7 @@ func (s *Supervisor) Interrupt(ctx context.Context, sessionID string) error {
 	if !ok {
 		return fmt.Errorf("router: interrupt %s: %w", sessionID, ErrNotLive)
 	}
-	cctx, cancel := wireCallCtx()
-	defer cancel()
-	if err := h.client.Notify(cctx, acp.MethodSessionCancel, acp.CancelNotification{SessionID: sessionID}); err != nil {
+	if err := h.client.Notify(acp.MethodSessionCancel, acp.CancelNotification{SessionID: sessionID}); err != nil {
 		return fmt.Errorf("router: interrupt %s: %w", sessionID, err)
 	}
 	return nil
@@ -127,24 +127,23 @@ func (s *Supervisor) SetModel(ctx context.Context, sessionID, model string) erro
 }
 
 // Reply answers a pending permission request by forwarding permission.reply to
-// the owning worker as a bare notification. It takes no context in the interface
-// signature, so it derives a BOUNDED one from context.Background — a wedged
-// worker socket must not block the reply forever. The op carries no session id
-// (the worker resolves the request by call id at its own gate), but the router
-// still looks the handle up by sessionID to reach the right worker's connection.
+// the owning worker as a bare notification. The write's lifetime is owned by
+// [daemon.Client.Notify], which takes no context and derives its own bound (see
+// clientWriteTimeout), so a wedged worker socket cannot block the reply forever.
+// The op carries no session id (the worker resolves the request by call id at
+// its own gate), but the router still looks the handle up by sessionID to reach
+// the right worker's connection.
 func (s *Supervisor) Reply(sessionID string, op event.PermissionReply) error {
 	h, ok := s.get(sessionID)
 	if !ok {
 		return fmt.Errorf("router: reply %s: %w", sessionID, ErrNotLive)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), replyCallTimeout)
-	defer cancel()
 	params := struct {
 		ID       string        `json:"id"`
 		Verdict  event.Verdict `json:"verdict"`
 		Remember bool          `json:"remember,omitempty"`
 	}{ID: op.ID, Verdict: op.Verdict, Remember: op.Remember}
-	if err := h.client.Notify(ctx, methodPermissionReply, params); err != nil {
+	if err := h.client.Notify(methodPermissionReply, params); err != nil {
 		return fmt.Errorf("router: reply %s: %w", sessionID, err)
 	}
 	return nil
@@ -318,6 +317,47 @@ func (s *Supervisor) History(ctx context.Context, id string) ([]provider.Message
 		return nil, fmt.Errorf("router: history %s: %w", id, err)
 	}
 	return j.Fold(), nil
+}
+
+// AwaitSettled blocks until id's owning worker reports its session idle
+// ([supervisor.StatusNeedsInput] in the pushed roster cache), or returns nil at
+// once when there is no live handle — an OFFLINE session's on-disk journal has
+// no live writer and is already durable. It is the router half of the issue #137
+// fix: a worker journals a turn's assistant/tool entries ASYNCHRONOUSLY after the
+// turn.finished event a client observes, so a session/load adopting that worker
+// mid-flush would read a SHORT history without this wait.
+//
+// It observes the cached row's Status — maintained by this handle's watchSession
+// goroutine from the worker's reconstructed event stream (see [workerHandle.applyRosterEvent])
+// — and blocks on the handle's settleCh, which that same goroutine pokes after
+// folding each event, rather than polling. It is BEST-EFFORT: the caller
+// (handleSessionLoad) bounds it via ctx, a ctx deadline returns ctx.Err() for the
+// caller to treat as "fold whatever is durable", and an unseeded row (nil cache,
+// the degraded path) returns nil rather than blindly waiting — so a worker
+// blocked mid-turn (design §7) never deadlocks the load.
+func (s *Supervisor) AwaitSettled(ctx context.Context, id string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	h, ok := s.get(id)
+	if !ok {
+		// Offline / no live worker: the journal is durable, nothing to settle.
+		return nil
+	}
+	for {
+		info := h.info.Load()
+		if info == nil || info.Status == supervisor.StatusNeedsInput {
+			// nil: the roster cache never seeded (degraded path) — we cannot observe
+			// settledness, so don't block the load; ctx still bounds it regardless.
+			return nil
+		}
+		select {
+		case <-h.settleCh:
+			// Re-read the authoritative status at the top of the loop.
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
 
 // Kill terminates sessionID's worker (keeping its journal). It first asks the

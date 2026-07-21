@@ -281,8 +281,19 @@ func (s *Supervisor) SetModel(ctx context.Context, sessionID, model string) erro
 // the in-flight session/prompt Call (see [Supervisor.Send]) resolves on its
 // own once the daemon observes the cancellation, publishing the resulting
 // TurnFinished(stop=cancelled) through the normal reconstruction path.
+//
+// ctx is honored ONLY as an admission check on the LOGICAL operation (a caller
+// that has already given up need not send at all); the socket write's lifetime
+// belongs to the write path, which owns its own bound (see [daemon.Client.Notify]
+// — it takes no context by construction). Interrupt is the likeliest trigger for
+// the borrowed-context hazard in practice — Ctrl-C then quit cancels the peer
+// request that carried the session/cancel — so handing ctx to the write would
+// have let the quit tear down the shared daemon link mid-write.
 func (s *Supervisor) Interrupt(ctx context.Context, sessionID string) error {
-	if err := s.client.Notify(ctx, acp.MethodSessionCancel, acp.CancelNotification{SessionID: sessionID}); err != nil {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := s.client.Notify(acp.MethodSessionCancel, acp.CancelNotification{SessionID: sessionID}); err != nil {
 		return fmt.Errorf("daemonbridge: interrupt %s: %w", sessionID, err)
 	}
 	return nil
@@ -295,7 +306,15 @@ func (s *Supervisor) Interrupt(ctx context.Context, sessionID string) error {
 // a request by id alone (see the reconstruction core's reconstruction — the
 // same id [event.PermissionRequested]/[event.PermissionResolved] already
 // carry), matching [tui.Supervisor.Reply]'s doc.
+//
+// As with [Supervisor.Interrupt], ctx is honored only as an admission check on
+// the logical operation; the write's lifetime is owned by [daemon.Client.Notify]
+// (which takes no context), so a caller cancellation cannot close the shared
+// daemon link mid-write.
 func (s *Supervisor) Reply(ctx context.Context, sessionID, id string, allow, remember bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	verdict := event.VerdictDeny
 	if allow {
 		verdict = event.VerdictAllow
@@ -305,7 +324,7 @@ func (s *Supervisor) Reply(ctx context.Context, sessionID, id string, allow, rem
 		Verdict  event.Verdict `json:"verdict"`
 		Remember bool          `json:"remember,omitempty"`
 	}{ID: id, Verdict: verdict, Remember: remember}
-	if err := s.client.Notify(ctx, methodPermissionReply, params); err != nil {
+	if err := s.client.Notify(methodPermissionReply, params); err != nil {
 		return fmt.Errorf("daemonbridge: reply %s (session %s): %w", id, sessionID, err)
 	}
 	return nil

@@ -31,6 +31,20 @@ type Supervisor interface {
 	Resume(ctx context.Context, id string, opts supervisor.ResumeOptions) (supervisor.SessionInfo, error)
 	// History returns a session's folded conversation for replay on attach.
 	History(ctx context.Context, id string) ([]provider.Message, error)
+	// AwaitSettled blocks until id's journal is safe to fold completely, then
+	// returns nil: a live session reaching supervisor.StatusNeedsInput (the
+	// observable signal that its runner's async journaling barrier has passed),
+	// or a session with no live writer (offline / not hosted here — its on-disk
+	// journal is already durable). It returns the ctx error (never a fold error)
+	// when ctx is cancelled or its deadline fires first. The session/load caller
+	// treats it as a best-effort wait: handleSessionLoad bounds it and folds
+	// whatever is durable regardless of the outcome, which is what keeps a load
+	// of a session genuinely mid-turn — one that never reaches needs-input, e.g.
+	// an adopted worker blocked on a permission (design §7) — from deadlocking.
+	// It closes the journaling-flush window in which a load would otherwise read
+	// a SHORT history (issue #137). Distinct from History, which stays a
+	// non-blocking accessor for List/diagnostics.
+	AwaitSettled(ctx context.Context, id string) error
 	// Interrupt cancels a session's in-flight turn.
 	Interrupt(ctx context.Context, sessionID string) error
 	// List enumerates every session, live and disk-only.
