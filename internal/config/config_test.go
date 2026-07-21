@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/loop"
@@ -292,6 +293,31 @@ func TestMouseExplicitFalseRoundTrips(t *testing.T) {
 	}
 	if !got.TUI.MouseEnabled() {
 		t.Fatal("MouseEnabled() after Save/Load of an explicit true = false, want true")
+	}
+}
+
+// TestSessionLoadSettleTimeout covers the resolver for session/load's
+// journaling-settle bound (issue #137): unset and non-positive values fall back
+// to the default, an explicit positive value is taken as a millisecond bound.
+func TestSessionLoadSettleTimeout(t *testing.T) {
+	ms := func(v int) *int { return &v }
+	tests := []struct {
+		name string
+		in   *int
+		want time.Duration
+	}{
+		{"unset resolves to default", nil, config.DefaultLoadSettleTimeout},
+		{"zero resolves to default", ms(0), config.DefaultLoadSettleTimeout},
+		{"negative resolves to default", ms(-5), config.DefaultLoadSettleTimeout},
+		{"explicit value is a millisecond bound", ms(500), 500 * time.Millisecond},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := config.Session{LoadSettleTimeoutMS: tt.in}
+			if got := s.LoadSettleTimeout(); got != tt.want {
+				t.Fatalf("LoadSettleTimeout() = %s, want %s", got, tt.want)
+			}
+		})
 	}
 }
 

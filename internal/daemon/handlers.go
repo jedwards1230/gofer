@@ -341,6 +341,15 @@ type newSessionMeta struct {
 // ignores session/update entirely; both go out to this peer before the
 // response, per the SAME ordering contract.
 //
+// History completeness: before folding, it waits — bounded and best-effort — for
+// the session to finish journaling its in-flight turn (see [Supervisor.AwaitSettled]
+// and [Config.LoadSettleTimeout]). A turn's assistant/tool entries are journaled
+// ASYNCHRONOUSLY after the turn.finished a client observes, so a load landing in
+// that window would otherwise read and silently replay a SHORT history (issue
+// #137). The wait cannot deadlock a load of a session genuinely mid-turn: on
+// timeout it folds whatever is durable, and the still-open permission that mid-turn
+// state carries is replayed separately below (§7).
+//
 // Ordering contract (spec-critical): every replay notification is written
 // strictly before this handler's response reaches the wire. This holds
 // without extra synchronization here because [peer.handleFrame] sends the
@@ -398,6 +407,20 @@ func handleSessionLoad(d *Daemon, ctx context.Context, p *peer, params json.RawM
 	// failed above never reaches here — means the registry only ever holds
 	// peers attached to a session the daemon actually resumed.
 	d.attachPeer(op.SessionID, p)
+
+	// Wait — bounded, best-effort — for the session's in-flight turn to finish
+	// journaling before folding, so a load landing in the async-journaling window
+	// does not read and silently replay a SHORT history (issue #137). The bound
+	// is [Config.LoadSettleTimeout]; on timeout (or any early return) the load
+	// proceeds to fold whatever is durable, so a session genuinely mid-turn — one
+	// that never reaches needs-input, e.g. an adopted worker blocked on a
+	// permission (design §7), whose still-open gate this handler replays AFTER
+	// History below — is never deadlocked here. See [Supervisor.AwaitSettled].
+	settleCtx, cancelSettle := context.WithTimeout(ctx, d.cfg.LoadSettleTimeout)
+	if serr := d.sup.AwaitSettled(settleCtx, op.SessionID); serr != nil {
+		d.log.Debug("session load settle wait ended early", "session", op.SessionID, "err", serr)
+	}
+	cancelSettle()
 
 	msgs, err := d.sup.History(ctx, op.SessionID)
 	if err != nil {

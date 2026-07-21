@@ -771,6 +771,74 @@ func (s *Supervisor) History(ctx context.Context, id string) ([]provider.Message
 	return m.sess.Fold(), nil
 }
 
+// AwaitSettled blocks until id is safe for a complete history fold, then
+// returns nil: it is idle (reporting [StatusNeedsInput]), it has left the
+// roster, or it was never live here. It returns the ctx error when ctx is
+// cancelled or its deadline fires first. It is the fix for issue #137: a turn's
+// assistant/tool entries are journaled ASYNCHRONOUSLY by the runner's consume
+// goroutine AFTER the turn.finished event a client observes, so a session/load
+// landing in that window reads — and silently replays — a SHORT history. The
+// pump publishes [StatusNeedsInput] only after Session.Prompt returns, and
+// Prompt returns only after the runner's awaitJournaled barrier, so needs-input
+// is the locally-observable proof that the fold is whole (the same inference
+// awaitFoldComplete relies on in tests).
+//
+// It is deliberately BEST-EFFORT and unbounded of its own: the caller
+// (handleSessionLoad) applies the timeout bound via ctx, and a ctx deadline
+// returned here is the caller's cue to "fold whatever is durable" rather than a
+// failure — so a session genuinely mid-turn, which never reaches needs-input,
+// cannot deadlock the load. A not-live/offline id returns nil at once: its
+// on-disk journal has no live writer, so it is already complete.
+//
+// It observes the settle signal on the same [Supervisor.WatchRoster] stream the
+// roster fan-out already maintains — not a poll — so it wakes on the exact
+// idle⇄running transition that means the turn is journaled.
+func (s *Supervisor) AwaitSettled(ctx context.Context, id string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Not live here → offline; the on-disk journal has no live writer and is
+	// already durable, so there is nothing to wait for.
+	if _, err := s.lookup(id); err != nil {
+		return nil //nolint:nilerr // not-live/closed is "nothing to settle", not a failure
+	}
+
+	roster, err := s.WatchRoster(ctx)
+	if err != nil {
+		// Closed between the lookup and the watch — nothing left to settle.
+		return nil //nolint:nilerr // see above
+	}
+	for {
+		select {
+		case snap, ok := <-roster:
+			if !ok {
+				// The watch closed (the supervisor is shutting down): stop waiting
+				// rather than block, and let the caller fold what is durable.
+				return nil
+			}
+			settled, present := settledInRoster(snap, id)
+			if settled || !present {
+				// present=false means id left the roster (killed/archived) — no live
+				// writer remains, so its journal is complete.
+				return nil
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// settledInRoster reports whether snap holds id and, if so, whether it is idle
+// (reporting [StatusNeedsInput]). present=false means id is not in the snapshot.
+func settledInRoster(snap []SessionInfo, id string) (settled, present bool) {
+	for _, si := range snap {
+		if si.ID == id {
+			return si.Status == StatusNeedsInput, true
+		}
+	}
+	return false, false
+}
+
 // LastError returns id's most recent turn's Prompt error, if any — a
 // best-effort diagnostic; the pump never treats a Prompt error as a
 // supervisor-level failure (see managed.lastErr). It returns nil for an

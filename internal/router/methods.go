@@ -320,6 +320,47 @@ func (s *Supervisor) History(ctx context.Context, id string) ([]provider.Message
 	return j.Fold(), nil
 }
 
+// AwaitSettled blocks until id's owning worker reports its session idle
+// ([supervisor.StatusNeedsInput] in the pushed roster cache), or returns nil at
+// once when there is no live handle — an OFFLINE session's on-disk journal has
+// no live writer and is already durable. It is the router half of the issue #137
+// fix: a worker journals a turn's assistant/tool entries ASYNCHRONOUSLY after the
+// turn.finished event a client observes, so a session/load adopting that worker
+// mid-flush would read a SHORT history without this wait.
+//
+// It observes the cached row's Status — maintained by this handle's watchSession
+// goroutine from the worker's reconstructed event stream (see [workerHandle.applyRosterEvent])
+// — and blocks on the handle's settleCh, which that same goroutine pokes after
+// folding each event, rather than polling. It is BEST-EFFORT: the caller
+// (handleSessionLoad) bounds it via ctx, a ctx deadline returns ctx.Err() for the
+// caller to treat as "fold whatever is durable", and an unseeded row (nil cache,
+// the degraded path) returns nil rather than blindly waiting — so a worker
+// blocked mid-turn (design §7) never deadlocks the load.
+func (s *Supervisor) AwaitSettled(ctx context.Context, id string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	h, ok := s.get(id)
+	if !ok {
+		// Offline / no live worker: the journal is durable, nothing to settle.
+		return nil
+	}
+	for {
+		info := h.info.Load()
+		if info == nil || info.Status == supervisor.StatusNeedsInput {
+			// nil: the roster cache never seeded (degraded path) — we cannot observe
+			// settledness, so don't block the load; ctx still bounds it regardless.
+			return nil
+		}
+		select {
+		case <-h.settleCh:
+			// Re-read the authoritative status at the top of the loop.
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
 // Kill terminates sessionID's worker (keeping its journal). It first asks the
 // worker to emit session.killed (gofer/kill, best-effort so attached peers see a
 // clean terminal event), then SIGKILLs the now-empty single-session worker

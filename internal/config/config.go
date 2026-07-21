@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/permission"
@@ -59,6 +60,38 @@ type Session struct {
 	// [Config.Engine] — it is a settings-registry knob today; wiring it into
 	// session creation lands with /yolo (see docs/TUI.md).
 	PermissionMode string `json:"permission_mode,omitempty"`
+
+	// LoadSettleTimeoutMS bounds, in milliseconds, how long session/load waits
+	// for a live session's in-flight turn to finish journaling before it folds
+	// and replays history (see the daemon's handleSessionLoad and issue #137). A
+	// turn's assistant/tool entries are journaled ASYNCHRONOUSLY after the
+	// turn.finished event a client observes, so a load landing in that window
+	// would otherwise read — and silently replay — a SHORT history. The load
+	// waits (best-effort) for the session to report needs-input, the observable
+	// signal that the journal barrier has passed. nil (unset) resolves to
+	// [DefaultLoadSettleTimeout]; a value <= 0 also resolves to the default (the
+	// wait is always on — the timeout only bounds a session genuinely mid-turn,
+	// e.g. one blocked on a permission, which never settles). See
+	// [Session.LoadSettleTimeout].
+	LoadSettleTimeoutMS *int `json:"load_settle_timeout_ms,omitempty"`
+}
+
+// DefaultLoadSettleTimeout is [Session.LoadSettleTimeoutMS]'s default: 2s. The
+// journaling-flush window session/load waits out closes in milliseconds, so a
+// short bound closes the incomplete-history race (issue #137) while still
+// letting a load of a session genuinely mid-turn — one that will never reach
+// needs-input, e.g. an adopted worker blocked on a permission (design §7) —
+// fall through to fold whatever is durable on disk rather than deadlocking.
+const DefaultLoadSettleTimeout = 2 * time.Second
+
+// LoadSettleTimeout resolves [Session.LoadSettleTimeoutMS]'s effective value:
+// [DefaultLoadSettleTimeout] when unset or non-positive, else the explicit
+// millisecond bound.
+func (s Session) LoadSettleTimeout() time.Duration {
+	if s.LoadSettleTimeoutMS == nil || *s.LoadSettleTimeoutMS <= 0 {
+		return DefaultLoadSettleTimeout
+	}
+	return time.Duration(*s.LoadSettleTimeoutMS) * time.Millisecond
 }
 
 // TUI holds gofer's own interface preferences, distinct from Session's
