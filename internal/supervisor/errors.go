@@ -56,6 +56,7 @@ var ErrNoModel = errors.New("no model configured")
 // exists so a caller can branch on "you asked for a level that does not exist"
 // without string-matching; the offending value is named in the wrapping message.
 var ErrInvalidEffort = errors.New("unknown reasoning effort")
+
 // ErrNoParent indicates [Supervisor.Create] was given a
 // [CreateOptions.ParentID] naming a session this supervisor can find neither in
 // its live roster nor on disk under its store root. A subagent session is a real

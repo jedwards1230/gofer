@@ -749,7 +749,7 @@ func (a App) handleEffortSelect() (tea.Model, tea.Cmd) {
 // differ in what an unusable value does, so the decision stays with them.
 func (a App) applyEffortSelection(effort string, sess *SessionInfo) (App, tea.Cmd) {
 	if effort != "" {
-		if model := activeModelFor(a.commandEnv, sess, a.over.DefaultModel()); !effortCapable(model) {
+		if model := activeModelFor(a.commandEnv, sess, a.over.DefaultModel()); !effortCapable(a.commandEnv, model) {
 			// Refuse WITHOUT writing anything: persisting a level for a model
 			// that cannot use it would leave a default the next session silently
 			// ignores, and the runner would reject the live call anyway.

@@ -1143,7 +1143,9 @@ v0.17.0, so effort now travels the same road as the model, hop for hop:
 `Supervisor.SetEffort` → `gofer/set_effort` (gofer-native JSON-RPC, like
 `gofer/set_model`, forwarded router→worker) → `Runner.SetEffort`, with the
 level surfaced on the roster row (`SessionInfo.Effort`) and persisted as the
-`session.effort` config default.
+`session.effort` config default. That road stops at the runner, though —
+see "Reasoning effort does not reach the provider yet" below before reading
+this as an end-to-end feature.
 
 It is its own **Thinking** tab (effortpicker.go) rather than a ←/→ modifier on
 the Model tab: ←/→ are claimed by the panel host for tab switching, and effort
@@ -1159,22 +1161,52 @@ change.
 What the tab *does* reason about is **model capability**, which is the
 "toggle vs effort-picker by model capability" the roadmap asked for. The rule
 is the SDK's own, applied client-side so the UI never disagrees with the
-runner: reject only on **positive registry evidence** that the active model
-cannot reason (`provider.Lookup` found it AND `Reasoning` is false). An
-unregistered model — anything newer than this binary — is UNKNOWN, not
-incapable, so its levels are offered and the runner gets the final word. On a
-model the registry says cannot reason, the tab renders one warning line naming
-the remedy instead of four rows the runner would refuse, and `/thinking <level>`
-refuses by name without writing anything (clearing stays legal — it asks for no
-reasoning at all). The tab issues **no vendor request** on open: unlike the
-Model tab's catalog, the level list is a closed four-value enum.
+runner: reject a **non-empty** level only on **positive registry evidence**
+that the active model cannot reason (`provider.Lookup` found it AND
+`Reasoning` is false). An unregistered model — anything newer than this binary
+— is UNKNOWN, not incapable, so its levels are offered and the runner gets the
+final word. The tab issues **no vendor request** on open: unlike the Model
+tab's catalog, the level list is a closed four-value enum.
 
-The persisted `session.effort` default is a settings knob today (`/config`'s
-`session.effort` row, `off`/`low`/`medium`/`high`) — like `session.permission_mode`
-it is **not yet read at session creation**, so `/thinking` from the overview
-saves the default and says exactly that, claiming nothing about sessions that
-do not exist yet. Seeding a new session's `Params.Thinking.Effort` from it is
-follow-up work.
+**Clearing is never gated.** `Runner.SetEffort("")` is admitted for any model
+whatsoever — the SDK's capability branch sits inside `if effort != ""` —
+because asking for no reasoning is coherent everywhere. So on a non-reasoning
+model the tab keeps the `off` row selectable and renders the other three muted
+rather than collapsing to a bare warning: a session that carried `high` into
+that model still has it, and a screen that hides both the level and the way to
+drop it is a dead end. `/thinking off` stays legal there too; only
+`/thinking low|medium|high` refuses, by name, without writing anything.
+
+### Reasoning effort does not reach the provider yet (SDK gap)
+
+Everything above is real gofer-side state — the roster row, the runner's
+`SetEffort`, the wire method — but **no provider request currently changes**,
+so `/thinking` cannot yet make a model think harder. Three facts compose:
+
+1. gofer never populates `provider.Params` on any create path, so every runner
+   is built with `Thinking{Enabled: false}`.
+2. `Runner.Prompt`'s per-turn overlay sets `params.Thinking.Effort` and
+   **never** `params.Thinking.Enabled` (agent-sdk-go v0.17.0
+   `runner/runner.go`), so `SetEffort` cannot flip it.
+3. Both adapters emit reasoning config **only** when `Enabled` is true —
+   `provider/openai/request.go` (`if req.Params.Thinking.Enabled`) and
+   `provider/anthropic/convert.go` (same).
+
+gofer cannot close this from its side without forcing `Thinking.Enabled: true`
+at session creation, which would switch Anthropic extended thinking on (minimum
+budget, temperature forbidden) for every affected session — a behavior change
+no user asked for — and would *still* leave mid-session `/thinking` inert on
+any session created before a default existed. Per invariant #1 it is the
+SDK's contract to fix: `SetEffort`'s own doc promises a mid-session effect it
+cannot currently deliver.
+
+Consequently the persisted `session.effort` default is **not read at session
+creation** (like `session.permission_mode`), and the Thinking tab's ✓
+deliberately does **not** fall back to it — the ✓ claims what is *in force*,
+and a config default reaches no runner. `/thinking` from the overview says only
+"Default reasoning effort saved", claiming nothing about sessions that do not
+exist yet. When the SDK gap closes, wire the default into
+`Params.Thinking` and restore the config rung in `activeEffort`.
 
 **Built (M5 usage panels)**: `/usage` (usage.go) and `/stats` (stats.go) are two
 more read-only tabs cut from the same cloth as `/status` — pure, stateless
