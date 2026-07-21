@@ -215,6 +215,52 @@ func TestInterruptReleasesBlockedAskUser(t *testing.T) {
 	}
 }
 
+// TestKillClosesTheDecisionGate is the teardown contract: killing an attached
+// session must end its decision stream, the same way closing the session's
+// broker ends its event stream. Without it a client's decision reader parks on
+// a channel nothing will ever publish to again — invisible in a test that only
+// checks Kill returns, which is why this asserts on the subscription itself.
+func TestKillClosesTheDecisionGate(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	info, err := h.sup.Create(ctx, "", supervisor.CreateOptions{Cwd: h.root, Model: "m"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sub, err := h.sup.SubscribeDecisions(info.ID, 4)
+	if err != nil {
+		t.Fatalf("SubscribeDecisions: %v", err)
+	}
+	defer sub.Close()
+
+	fs := h.session(info.ID)
+	fs.setAskInput(askTwoOptions)
+	if err := h.sup.Send(ctx, info.ID, "ask"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	fs.waitStarted(t)
+	waitForDecision(t, sub) // the request the turn is blocked on
+
+	if err := h.sup.Kill(ctx, info.ID); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+
+	// The open request resolves first — a client rendering the prompt clears it
+	// rather than leaving a dead question on screen — and then the stream ends.
+	if up := waitForDecision(t, sub); up.Kind != decision.UpdateResolved {
+		t.Errorf("update after Kill = %v, want resolved", up.Kind)
+	}
+	select {
+	case _, ok := <-sub.C:
+		if ok {
+			t.Error("the decision subscription delivered another update; want it closed by the kill")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the decision subscription was never closed — a client's reader is parked forever")
+	}
+}
+
 // TestAskUserWithNoSubscriberDoesNotHangTheTurn pins the ErrNoClient path end
 // to end: with nothing attached, the tool returns an IsError result naming the
 // alternative and the turn completes on its own rather than blocking until the

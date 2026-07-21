@@ -344,9 +344,18 @@ func (m *managed) adjustPending(delta int) {
 
 // stop marks m closing, cancels its base context (interrupting any in-flight
 // turn, waking an idle pump, and waking watchPermissions), waits for both its
-// pump and permission-watcher goroutines to exit, and finally joins the
-// OnRegister teardown (if any) — mirroring the permDone discipline above, so
-// no observer goroutine outlives the session.
+// pump and permission-watcher goroutines to exit, closes the decision gate, and
+// finally joins the OnRegister teardown (if any) — mirroring the permDone
+// discipline above, so no observer goroutine outlives the session.
+//
+// The gate is closed here rather than left to the caller for the same reason
+// the session's broker is closed on the way out: a client watching this
+// session's decisions has a goroutine parked on its subscription's channel, and
+// only the gate can end that stream. Closing it also clears any prompt still on
+// a client's screen (each open request publishes its resolution first) and
+// releases an ask_user call that somehow outlived the ctx cancel above. It is
+// done AFTER the pump has exited so the ordering is unambiguous: the turn is
+// already gone by the time the gate reports it closed.
 func (m *managed) stop() {
 	m.mu.Lock()
 	m.closing = true
@@ -354,6 +363,7 @@ func (m *managed) stop() {
 	m.baseCancel()
 	<-m.done
 	<-m.permDone
+	m.decisions.Close()
 	if m.teardown != nil {
 		m.teardown()
 	}

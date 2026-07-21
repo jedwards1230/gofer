@@ -346,14 +346,16 @@ func (s *Supervisor) register(sess Session, model, cwd string, gate *loop.Gate, 
 		return nil, ErrClosed
 	}
 	m := newManaged(sess, model, s.clock(), s.clock, s.notify, cwd, gate, decisions, s.onRegister)
+	// Stamp the session id onto the decision gate the moment it is knowable —
+	// before m is published anywhere and before anything can run a turn against
+	// it, so no request can ever open with an empty session id (see
+	// [decision.Gate.Bind]). Deliberately not "somewhere before go m.pump()":
+	// binding right here means no later statement can be moved above it and
+	// silently start minting requests the TUI would have to guess the session
+	// of.
+	decisions.Bind(m.id)
 	s.roster[m.id] = m
 	s.mu.Unlock()
-
-	// Stamp the session id onto the decision gate now that the runner has
-	// minted it. Done before the pump starts — so before any turn, and
-	// therefore before any ask_user call — meaning no request can ever open
-	// with an empty session id (see [decision.Gate.Bind]).
-	decisions.Bind(m.id)
 
 	go m.pump()
 	// Subscribe to the session's own stream to keep the live pending-approval
@@ -570,10 +572,11 @@ func (s *Supervisor) AnswerDecision(sessionID, requestID string, answers []acp.D
 // blocked on (see [decision.Gate.Subscribe]). It returns [ErrNotLive] for an
 // unknown session.
 //
-// The caller owns the returned subscription and must Close it — nothing here
-// closes it when the session ends, by design: the gate has no lifecycle event
-// of its own, and a client that has already stopped reading is indistinguishable
-// from one that is merely slow.
+// The caller owns the returned subscription and must Close it when it stops
+// reading. It does NOT have to poll for the session ending: killing/archiving/
+// closing a session closes its gate (managed.stop), which closes every live
+// subscription — so a consumer learns the session is gone the same way it
+// learns its event subscription ended, by the channel closing.
 func (s *Supervisor) SubscribeDecisions(sessionID string, buffer int) (*decision.Subscription, error) {
 	m, err := s.lookup(sessionID)
 	if err != nil {
