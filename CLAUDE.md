@@ -69,7 +69,8 @@ go run ./cmd/gofer demo                            # offline faux-provider strea
   (`gofer daemon`); see its package doc.
 - `internal/tui/` (bubbletea) — the attach/peek/overview frontend, plus the
   slash-command dispatcher and command panel (`/status`, `/config`, `/model`,
-  `/usage`, `/stats`).
+  `/usage`, `/stats`, `/resume`), plus the session-lifecycle commands `/new`
+  and `/quit`.
 - `internal/tuibridge/` — adapts the daemon supervisor to the TUI's narrow
   `Supervisor` interface (the single seam importing both).
 - `internal/render/` — turns a session's typed event stream into terminal

@@ -35,6 +35,7 @@ const (
 	panelModel
 	panelUsage
 	panelStats
+	panelResume
 )
 
 // panelTab pairs a commandPanelTab with its display label.
@@ -45,13 +46,14 @@ type panelTab struct {
 
 // panelTabs is the fixed left-to-right tab order every command panel opens
 // with, regardless of which tab the slash command that opened it targeted —
-// once open, all three are reachable with ←/→.
+// once open, every one of them is reachable with ←/→.
 var panelTabs = []panelTab{
 	{panelStatus, "Status"},
 	{panelConfig, "Config"},
 	{panelModel, "Model"},
 	{panelUsage, "Usage"},
 	{panelStats, "Stats"},
+	{panelResume, "Resume"},
 }
 
 // panelHeight is the fixed number of rows the command panel occupies in the
@@ -107,6 +109,11 @@ type commandPanel struct {
 	// model is the Model tab's state (modelpicker.go), built the same way as
 	// cfg — env/sess/defaultModel captured once at open time.
 	model modelPickerView
+
+	// resume is the Resume tab's state (resumepicker.go). Unlike cfg/model it
+	// opens EMPTY: its list is the store's, which no local read can answer, so
+	// [App.listSessionsCmd] fills it in off the Update loop.
+	resume resumePickerView
 }
 
 // newCommandPanel returns a panel open on tab, rendering through th, with env
@@ -124,6 +131,7 @@ func newCommandPanel(th theme.Theme, tab commandPanelTab, env CommandEnv, sess *
 		roster:       roster,
 		cfg:          newConfigView(th, env),
 		model:        newModelPickerView(th, env, sess, defaultModel),
+		resume:       newResumePickerView(th, now, roster),
 	}
 }
 
@@ -149,6 +157,8 @@ func (p commandPanel) handleKey(msg tea.KeyPressMsg) commandPanel {
 		p.cfg = p.cfg.handleKey(msg)
 	case panelModel:
 		p.model = p.model.handleKey(msg)
+	case panelResume:
+		p.resume = p.resume.handleKey(msg)
 	}
 	return p
 }
@@ -172,6 +182,12 @@ func (p commandPanel) handleEscape() (commandPanel, bool) {
 		model, consumed := p.model.handleEscape()
 		if consumed {
 			p.model = model
+			return p, false
+		}
+	case panelResume:
+		resume, consumed := p.resume.handleEscape()
+		if consumed {
+			p.resume = resume
 			return p, false
 		}
 	}
@@ -275,6 +291,8 @@ func (p commandPanel) footerText() string {
 		return "Type to filter · Enter/↓ to select · ↑ to tabs · Esc to clear"
 	case panelModel:
 		return "Type a model id · ↑/↓ to browse · Enter to select · Esc to clear"
+	case panelResume:
+		return "Type to filter · ↑/↓ to browse · Enter to resume · Esc to clear"
 	}
 	return "←/→ to switch tabs · esc to close"
 }
@@ -309,8 +327,94 @@ func (p commandPanel) body(width, bodyRows int) string {
 		return p.cfg.View(width, bodyRows)
 	case panelModel:
 		return p.model.View(width, bodyRows)
+	case panelResume:
+		return p.resume.View(width, bodyRows)
 	}
 	return ""
+}
+
+// sessionsListedMsg carries the result of the Resume tab's background session
+// listing ([App.listSessionsCmd]). Unlike [modelsLoadedMsg] it DOES carry an
+// error: the model picker degrades to a compiled-in floor, but there is no
+// floor beneath a session store, so a failed listing has to be said out loud
+// rather than rendered as "no sessions".
+type sessionsListedMsg struct {
+	sessions []SessionRef
+	err      error
+}
+
+// listSessionsCmd fetches the store-wide session listing OFF the Update loop,
+// for the same reason [App.discoverModelsCmd] fetches the model catalog off it:
+// on the daemon path this is one or more round trips to another process, and
+// resolving it inline would freeze the TUI for as long as the daemon takes.
+func (a App) listSessionsCmd() tea.Cmd {
+	sup := a.sup
+	return func() tea.Msg {
+		refs, err := sup.ListSessions(context.Background())
+		return sessionsListedMsg{sessions: refs, err: err}
+	}
+}
+
+// applySessionsListed folds a completed session listing into the open panel. A
+// panel CLOSED while the listing was in flight drops the result — the same
+// rule [App.applyModelsLoaded] follows, and for the same reason: the next open
+// re-fetches, and a stale slice must never resurrect a dismissed panel.
+func (a App) applySessionsListed(msg sessionsListedMsg) App {
+	if a.panel == nil {
+		return a
+	}
+	p := *a.panel
+	if msg.err != nil {
+		p.resume = p.resume.withLoadError(msg.err)
+	} else {
+		p.resume = p.resume.withSessions(msg.sessions)
+	}
+	a.panel = &p
+	return a
+}
+
+// handleResumeSelect applies Enter on the Resume tab: it resumes the
+// highlighted session and attaches into it. Selecting nothing (no row
+// highlighted, an empty list, or a filter matching none) is a pure no-op — the
+// panel stays open, untouched — matching [App.handleModelSelect]'s contract for
+// the same state.
+func (a App) handleResumeSelect() (tea.Model, tea.Cmd) {
+	ref, ok := a.panel.resume.selected()
+	if !ok {
+		return a, nil
+	}
+	// The session's OWN directory wins over this client's when the listing
+	// carried one: per ACP the client picks what directory a load reloads into,
+	// and for a session from another project that is where it lives, not where
+	// this TUI happens to be sitting.
+	cwd := ref.Cwd
+	if cwd == "" {
+		cwd = a.cwd
+	}
+	app, cmd := a.resumeSession(ref.ID, cwd)
+	return app, cmd
+}
+
+// resumeSession is the commit half shared by the Resume tab's Enter and
+// `/resume <id>` (command.go), so a picked row and a typed id take the same
+// path — the panel closes, and the session is brought back and attached
+// through the same [App.doResume]/[resumedMsg] round trip.
+//
+// A session the roster ALREADY holds is live, so it skips the Resume op
+// entirely and just attaches. That is not merely an optimization: on the daemon
+// path a redundant session/load replays the session's whole history back onto
+// the reconstruction broker a second time, which the attach transcript would
+// then render twice.
+func (a App) resumeSession(id, cwd string) (App, tea.Cmd) {
+	a.panel = nil
+	for _, s := range a.over.Roster() {
+		if s.ID != id {
+			continue
+		}
+		a.scr = screenAttach
+		return a, a.enter(id)
+	}
+	return a, a.doResume(id, cwd)
 }
 
 // modelsLoadedMsg carries the result of the Model tab's background catalog
@@ -416,6 +520,10 @@ func (a App) handlePanelKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// so it intercepts Enter here instead of routing it into
 		// commandPanel.handleKey below.
 		return a.handleModelSelect()
+	case key.Code == tea.KeyEnter && a.panel.active == panelResume:
+		// Same reason as the Model tab's interception: resuming needs IO the
+		// pure [resumePickerView] has no seam for.
+		return a.handleResumeSelect()
 	}
 	was := a.panel.active
 	p := a.panel.handleKey(msg)
@@ -426,6 +534,11 @@ func (a App) handlePanelKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// by a completed load is not re-fetched on every tab bounce.
 	if p.active == panelModel && was != panelModel && !p.model.live {
 		return a, a.discoverModelsCmd()
+	}
+	// The Resume tab's listing follows exactly the same tab-in rule, guarded on
+	// its own "already answered" flag so a tab bounce costs no second listing.
+	if p.active == panelResume && was != panelResume && !p.resume.loaded {
+		return a, a.listSessionsCmd()
 	}
 	return a, nil
 }

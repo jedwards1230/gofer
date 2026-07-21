@@ -94,6 +94,38 @@ func (a Adapter) Create(ctx context.Context, prompt string, opts tui.CreateOptio
 	return toTUI(info), nil
 }
 
+// ListSessions maps the supervisor's store-wide enumeration — every session on
+// disk, live and offline alike ([supervisor.Supervisor.List]) — to the TUI's
+// resume-picker row. Only the four fields a disk-only session can honestly
+// answer cross over; the operational extras a live row also carries (Status,
+// Cost, Usage) are deliberately dropped rather than shown as zeroes for the
+// offline majority (see [tui.SessionRef]).
+func (a Adapter) ListSessions(ctx context.Context) ([]tui.SessionRef, error) {
+	infos, err := a.sup.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]tui.SessionRef, len(infos))
+	for i, info := range infos {
+		out[i] = tui.SessionRef{ID: info.ID, Title: info.Title, Cwd: info.Cwd, Updated: info.Updated}
+	}
+	return out, nil
+}
+
+// Resume reopens sessionID as a live session in cwd. The model is resolved the
+// same per-call way [Adapter.Create] resolves it — the supervisor requires one
+// on every Resume (the journal does not persist it, see
+// [supervisor.ResumeOptions]) and reading it now rather than at construction
+// keeps a `/model` write made since made effective here too.
+func (a Adapter) Resume(ctx context.Context, sessionID, cwd string) error {
+	var model string
+	if a.defaultModel != nil {
+		model = a.defaultModel(ctx)
+	}
+	_, err := a.sup.Resume(ctx, sessionID, supervisor.ResumeOptions{Cwd: cwd, Model: model})
+	return err
+}
+
 // Send submits prompt as sessionID's next turn.
 func (a Adapter) Send(ctx context.Context, sessionID, prompt string) error {
 	return a.sup.Send(ctx, sessionID, prompt)

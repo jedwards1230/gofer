@@ -255,6 +255,14 @@ type createdMsg struct {
 	err  error
 }
 
+// resumedMsg carries the result of [Supervisor.Resume]: the session id that was
+// asked for (so the attach below targets it — Resume returns no row) and the
+// error, if any.
+type resumedMsg struct {
+	id  string
+	err error
+}
+
 // opDoneMsg carries the error, if any, from a fire-and-forget Supervisor Op
 // (Send/Interrupt/Kill/Archive).
 type opDoneMsg struct{ err error }
@@ -306,6 +314,17 @@ func (a App) doCreate(prompt string) tea.Cmd {
 	return func() tea.Msg {
 		info, err := a.sup.Create(context.Background(), prompt, CreateOptions{Cwd: a.cwd})
 		return createdMsg{info: info, err: err}
+	}
+}
+
+// doResume brings an on-disk session back under live supervision via the
+// Supervisor, in cwd, and reports the outcome as a [resumedMsg] so Update can
+// attach into it — the same create-then-attach shape [App.doCreate]/[createdMsg]
+// have, since "resume" and "new" differ only in where the journal comes from.
+func (a App) doResume(id, cwd string) tea.Cmd {
+	return func() tea.Msg {
+		err := a.sup.Resume(context.Background(), id, cwd)
+		return resumedMsg{id: id, err: err}
 	}
 }
 
@@ -532,6 +551,18 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.scr = screenAttach
 		return a, a.switchSession(msg.info.ID)
+
+	case resumedMsg:
+		if msg.err != nil {
+			a.setStatus(sevDanger, msg.err.Error())
+			return a, nil
+		}
+		// Same landing as createdMsg: the session is live now, so show it.
+		a.scr = screenAttach
+		return a, a.switchSession(msg.id)
+
+	case sessionsListedMsg:
+		return a.applySessionsListed(msg), nil
 
 	case opDoneMsg:
 		if msg.err != nil {

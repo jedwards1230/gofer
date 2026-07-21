@@ -82,6 +82,22 @@ type SessionInfo struct {
 	BinaryVersion string
 }
 
+// SessionRef is one entry in the /resume picker's list: a session that exists
+// on disk and can therefore be brought back under live supervision. It is
+// deliberately NOT a [SessionInfo] — a session that is merely on disk has no
+// status, no cost, and no usage to report, and reusing the roster row would
+// present those zero values as fact (the same "omit what you can't answer
+// honestly" rule status.go states). These four fields are exactly what BOTH
+// backends can answer for an offline session: the in-process supervisor reads
+// them back off the journal ([supervisor.Supervisor.List]), and the daemon
+// path gets them off the ACP session/list response.
+type SessionRef struct {
+	ID      string    // stable session id (a UUID) — what Resume addresses
+	Title   string    // task title, seeded from the first prompt; may be empty
+	Cwd     string    // the directory the session was created in; may be empty
+	Updated time.Time // last activity — the newest-first sort key; may be zero
+}
+
 // CreateOptions configures [Supervisor.Create]. The zero value is the
 // daemon's default: a credential-driven model in the daemon's working
 // directory. The daemon supervisor's CreateOptions carries more fields
@@ -113,6 +129,27 @@ type Supervisor interface {
 	// sets Model/Cwd at create time. An empty prompt creates an idle session
 	// with no first turn (the ACP path).
 	Create(ctx context.Context, prompt string, opts CreateOptions) (SessionInfo, error)
+
+	// ListSessions enumerates every session on disk — live and offline alike —
+	// as the /resume picker's source list. It is a strictly WIDER read than
+	// Roster: Roster answers "what is under live supervision right now", while
+	// this answers "what could be brought back", which is the only question a
+	// resume picker can be built from. Ordering is the backend's; the caller
+	// sorts. A backend with no store to walk returns an empty list, not an
+	// error.
+	ListSessions(ctx context.Context) ([]SessionRef, error)
+
+	// Resume reopens a persisted session as a live one and leaves it addressable
+	// by every other method here — the client-side half of ACP's session/load.
+	// It is idempotent: resuming a session that is already live is a no-op that
+	// succeeds, so the caller may always follow it with a Subscribe.
+	//
+	// cwd is the working directory to reload the session INTO, and per ACP v1 it
+	// is the client's call, not the daemon's (LoadSessionRequest.cwd is
+	// required). Callers pass the session's own persisted directory when they
+	// know it (the picker reads it off [SessionRef.Cwd]) and their own working
+	// directory otherwise — the same value `gofer resume` sends from os.Getwd.
+	Resume(ctx context.Context, sessionID, cwd string) error
 
 	// Send submits prompt as the next turn on an existing session — the
 	// multi-turn attach loop's send-when-idle path.

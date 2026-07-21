@@ -218,6 +218,85 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts tui.CreateO
 	return info, nil
 }
 
+// listSessionsPageCap bounds how many session/list pages [Supervisor.ListSessions]
+// will walk before it stops asking. The daemon pages at 50 rows
+// (internal/daemon's sessionListPageSize), so this is 20 pages ≈ 1000 sessions —
+// far past any plausible store, while still guaranteeing the loop terminates
+// against a daemon whose cursor never advances rather than spinning forever on
+// the Update loop's behalf.
+const listSessionsPageCap = 20
+
+// ListSessions walks session/list — the ACP-standard, fleet-global enumeration
+// of every session the daemon has on disk, live and offline alike (see
+// internal/daemon's handleSessionList) — and maps each page to the TUI's
+// resume-picker row.
+//
+// It follows NextCursor rather than reading only the first page: the picker's
+// whole job is "show me what I can bring back", and silently truncating that at
+// the daemon's page size would hide older sessions with no indication they
+// exist. A page whose cursor does not advance, or one past [listSessionsPageCap],
+// ends the walk with whatever has been collected — a partial list beats hanging.
+//
+// Cwd is deliberately NOT sent: the daemon accepts it for wire compatibility but
+// ignores it as a filter (handleSessionList's doc), and the picker wants the
+// fleet, not this client's directory.
+func (s *Supervisor) ListSessions(ctx context.Context) ([]tui.SessionRef, error) {
+	var (
+		out    []tui.SessionRef
+		cursor string
+	)
+	for range listSessionsPageCap {
+		raw, err := s.client.Call(ctx, acp.MethodSessionList, acp.ListSessionsRequest{Cursor: cursor})
+		if err != nil {
+			return nil, fmt.Errorf("daemonbridge: list sessions: %w", err)
+		}
+		var resp acp.ListSessionsResponse
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			return nil, fmt.Errorf("daemonbridge: decode %s response: %w", acp.MethodSessionList, err)
+		}
+		for _, sess := range resp.Sessions {
+			// UpdatedAt is optional and free-form on the wire (ACP says ISO 8601);
+			// an unparseable or absent value leaves Updated zero, which the picker
+			// renders as "unknown" rather than as the epoch.
+			updated, _ := time.Parse(time.RFC3339, sess.UpdatedAt)
+			out = append(out, tui.SessionRef{
+				ID:      sess.SessionID,
+				Title:   sess.Title,
+				Cwd:     sess.Cwd,
+				Updated: updated,
+			})
+		}
+		if resp.NextCursor == "" || resp.NextCursor == cursor {
+			break
+		}
+		cursor = resp.NextCursor
+	}
+	return out, nil
+}
+
+// Resume reopens sessionID as a live session via ACP's session/load — the same
+// method `gofer resume` sends against a reachable daemon (cmd/gofer's
+// openDaemonSession), which the daemon answers by calling its supervisor's own
+// Resume. cwd is the client's, per ACP v1: LoadSessionRequest.cwd is required
+// and authoritative for what directory the session reloads into.
+//
+// The reconstruction state is pre-registered BEFORE the call, not after. A
+// session/load replays the session's whole history back to this peer as
+// gofer/event frames while the call is still outstanding, and an unregistered id
+// reaching the demuxer would be first-referenced there — which is the core's one
+// trigger for it to issue a session/load of its OWN (see
+// [wirestream.Reconstructor.session]). Registering first means this call is the
+// only load, and its replay lands on the broker the TUI's follow-up Subscribe
+// then reads back (the same retained-backlog handoff the core's own load path
+// relies on).
+func (s *Supervisor) Resume(ctx context.Context, sessionID, cwd string) error {
+	s.core.RegisterFresh(sessionID)
+	if _, err := s.client.Call(ctx, acp.MethodSessionLoad, acp.LoadSessionRequest{SessionID: sessionID, Cwd: cwd}); err != nil {
+		return fmt.Errorf("daemonbridge: resume %s: %w", sessionID, err)
+	}
+	return nil
+}
+
 // newSessionResponse is the session/new response as this bridge reads it:
 // ACP's [acp.NewSessionResponse] plus the daemon's gofer-namespaced `_meta`
 // extension carrying the model it ASSIGNED (see internal/daemon's
