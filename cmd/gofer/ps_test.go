@@ -47,6 +47,74 @@ func TestPSTableEmptyBinaryVersion(t *testing.T) {
 	}
 }
 
+// TestFleetFooterRendersTotal pins that the fleet-total footer renders the
+// daemon-aggregated cost/usage and the live-session count beneath the table when
+// the daemon supports it (worker mode). This is the client half of the fleet
+// cost/usage aggregation feature — the total the router computes off its roster
+// cache reaching an operator's screen.
+func TestFleetFooterRendersTotal(t *testing.T) {
+	rows := []psRow{
+		{ID: "s1", Status: "working", Live: true, Cost: psCost{USD: 0.10}},
+		{ID: "s2", Status: "working", Live: true, Cost: psCost{USD: 0.25}},
+	}
+	fleet := psFleet{
+		Supported: true,
+		Cost:      psCost{USD: 0.35},
+		Usage:     psUsage{InputTokens: 200, OutputTokens: 100},
+	}
+
+	var out strings.Builder
+	writeFleetFooter(&out, fleet, rows)
+	got := out.String()
+
+	for _, want := range []string{"Fleet:", "$0.3500", "300 tokens", "2 live"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("fleet footer missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestFleetFooterOmittedWhenUnsupported pins that an in-process or older daemon —
+// which reports no fleet total (supported=false) — produces NO footer, so
+// `gofer ps` looks exactly as it did before this feature.
+func TestFleetFooterOmittedWhenUnsupported(t *testing.T) {
+	var out strings.Builder
+	writeFleetFooter(&out, psFleet{Supported: false}, []psRow{{ID: "s1", Live: true}})
+	if got := out.String(); got != "" {
+		t.Errorf("fleet footer rendered for an unsupported daemon: %q, want empty", got)
+	}
+}
+
+// TestFleetFooterCountsOnlyLive pins that the footer's session count is the LIVE
+// rows (the aggregation is live-only), so a `gofer ps --all` view mixing offline
+// rows still reports the total across the live fleet.
+func TestFleetFooterCountsOnlyLive(t *testing.T) {
+	rows := []psRow{
+		{ID: "s1", Live: true, Cost: psCost{USD: 0.10}},
+		{ID: "s2", Live: false},
+		{ID: "s3", Live: true, Cost: psCost{USD: 0.20}},
+	}
+	var out strings.Builder
+	writeFleetFooter(&out, psFleet{Supported: true, Cost: psCost{USD: 0.30}}, rows)
+	if got := out.String(); !strings.Contains(got, "2 live") {
+		t.Errorf("fleet footer live count wrong (want 2 live):\n%s", got)
+	}
+}
+
+// TestFleetDecodesWire pins the gofer/fleet decode against internal/daemon's
+// fleetUsageDTO — a tag drift would silently blank the footer rather than fail
+// to build.
+func TestFleetDecodesWire(t *testing.T) {
+	var fleet psFleet
+	body := `{"supported":true,"cost":{"usd":0.5},"usage":{"input_tokens":10,"output_tokens":20}}`
+	if err := json.Unmarshal([]byte(body), &fleet); err != nil {
+		t.Fatalf("decoding a fleet reply: %v", err)
+	}
+	if !fleet.Supported || fleet.Cost.USD != 0.5 || fleet.Usage.InputTokens != 10 || fleet.Usage.OutputTokens != 20 {
+		t.Errorf("psFleet decoded = %+v, want supported/0.5/10/20 — check the json tags match the daemon's", fleet)
+	}
+}
+
 // TestPSRowDecodesBinaryVersion pins the wire tag against internal/daemon's
 // sessionInfoDTO. `gofer ps` decodes the daemon's roster JSON independently
 // (this IS the public wire contract — any ACP client decodes it the same way),

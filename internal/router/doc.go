@@ -156,6 +156,22 @@
 // own time. A handle with no cached row (a failed or not-yet-landed seed) falls
 // back to a live RPC for that handle alone. Full rationale: rostercache.go.
 //
+// # Fleet cost/usage aggregation
+//
+// With each session's usage living in its own worker, the fleet-wide total is no
+// longer any single row. [Supervisor.FleetUsage] recovers it by summing the
+// pushed roster cache — every live handle's already-correct running Cost/Usage —
+// with the SAME lock-free [atomic.Pointer] loads Roster uses and zero worker
+// RPCs. It is a plain sum of correct rows, so it does not reintroduce the
+// seed-vs-first-delta double-count seam rostercache.go documents (that seam is
+// bounded to one turn of one row and is the cache's concern, not the sum's).
+//
+// It is surfaced, not hidden: the daemon exposes it over gofer/fleet (via the
+// optional [daemon.FleetUsager] capability the router implements and the
+// in-process supervisor does not), and `gofer ps` prints a fleet-total footer
+// from it. An in-process or older daemon reports no total and the footer is
+// omitted.
+//
 // # Event bridge (§5)
 //
 // A turn running on a worker has no daemon prompt handler in this process fanning
