@@ -27,6 +27,7 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
+	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/decision"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
@@ -82,6 +83,25 @@ type Model struct {
 	// toolIndex maps an in-flight tool call's ID to its item index.
 	toolIndex map[string]int
 
+	// toolAgents maps an in-flight tool call's ID to the originating agent id
+	// its event carried (event.ToolCallStarted.Agent), for the approval prompt
+	// to attribute a gated call to the subagent that issued it. The correlation
+	// is by tool call id because event.PermissionRequested.ID *is* the tool call
+	// id (the SDK's loop.awaitApproval publishes NewPermissionRequested with
+	// call.ID), and tool.call.started is emitted while the model streams —
+	// before the gate — so the entry is always already recorded when the request
+	// arrives. Un-attributed calls are simply absent, and a lookup miss yields
+	// "" (the un-attributed rendering), never a placeholder.
+	toolAgents map[string]string
+
+	// approvalBodyLines is the resolved tui.approval_body_lines row cap the
+	// approval prompt's body honors, or 0 for "use the config default" — the
+	// zero value a Model built by [New] carries, so every caller that doesn't
+	// plumb config (every golden test, FullTranscript) renders the default. The
+	// App sets it per render off its always-current config read (see
+	// App.render).
+	approvalBodyLines int
+
 	// pending is the session's current unresolved permission request, if any
 	// (nil = none) — the backing state for the interactive inline approval
 	// prompt. It is transient client-side state (like input), NOT a transcript
@@ -123,6 +143,7 @@ func New(th theme.Theme) Model {
 		openText:      -1,
 		openReasoning: -1,
 		toolIndex:     map[string]int{},
+		toolAgents:    map[string]string{},
 	}
 }
 
@@ -137,6 +158,11 @@ func (m Model) Ingest(e event.Event) Model {
 		toolIndex[k] = v
 	}
 	m.toolIndex = toolIndex
+	toolAgents := make(map[string]string, len(m.toolAgents))
+	for k, v := range m.toolAgents {
+		toolAgents[k] = v
+	}
+	m.toolAgents = toolAgents
 
 	switch ev := e.(type) {
 	case event.TurnFinished:
@@ -187,6 +213,9 @@ func (m Model) Ingest(e event.Event) Model {
 			toolInput: compactJSON(ev.Input),
 		})
 		m.toolIndex[ev.ID] = idx
+		if ev.Agent != "" {
+			m.toolAgents[ev.ID] = ev.Agent
+		}
 
 	case event.ToolCallDelta:
 		// ToolCallDelta carries a fragment of the streaming INPUT (partial
@@ -205,7 +234,15 @@ func (m Model) Ingest(e event.Event) Model {
 			m.items[idx].toolErr = ev.IsError
 			m.items[idx].done = true
 		}
+		// The call is over: both per-call maps drop it in the same place, so an
+		// attribution lives exactly as long as the item index it is keyed
+		// alongside. The PermissionRequested window has necessarily closed by
+		// now — the guard gates a call BEFORE it runs, so a finished call can
+		// no longer be awaiting approval — which is also why ToolCallFinished
+		// deliberately does NOT record ev.Agent: an entry written here would be
+		// deleted on the next line and could never be read.
 		delete(m.toolIndex, ev.ID)
+		delete(m.toolAgents, ev.ID)
 
 	case event.SessionError:
 		m.items = append(m.items, item{kind: itemError, text: ev.Err, done: true})
@@ -219,9 +256,22 @@ func (m Model) Ingest(e event.Event) Model {
 		// badgeIdx records the badge's transcript index so transcriptLines can
 		// suppress it while the prompt block is showing (the prompt already
 		// repeats the tool + args line).
+		// agent/trace are the request's provenance: the agent that issued the
+		// gated call (correlated through toolAgents — ev.ID is the tool call
+		// id) and the guard's own decision trace, which the prompt renders as
+		// the rationale. A miss in toolAgents yields "", the un-attributed
+		// rendering.
 		idx := len(m.items)
 		m.items = append(m.items, item{kind: itemApproval, text: ev.Tool, done: true})
-		m.pending = &pendingApproval{id: ev.ID, tool: ev.Tool, spec: ev.Spec, session: ev.SessionID(), badgeIdx: idx}
+		m.pending = &pendingApproval{
+			id:       ev.ID,
+			tool:     ev.Tool,
+			spec:     ev.Spec,
+			session:  ev.SessionID(),
+			agent:    m.toolAgents[ev.ID],
+			trace:    ev.Trace,
+			badgeIdx: idx,
+		}
 
 	case event.PermissionResolved:
 		// A routine allow is the expected outcome, and its transcript line is
@@ -298,6 +348,28 @@ func (m Model) ToggleApprovalRemember() Model {
 	p.remember = !p.remember
 	m.pending = &p
 	return m
+}
+
+// WithApprovalBodyLines sets the row cap the inline approval prompt's body
+// honors, reallocating rather than mutating in place (Model's copy-on-write
+// discipline). n <= 0 means "the config default" — see [Model.approvalBodyLimit].
+// [App.render] calls this with its always-current tui.approval_body_lines
+// read; a Model nobody plumbs config into keeps the default.
+func (m Model) WithApprovalBodyLines(n int) Model {
+	m.approvalBodyLines = n
+	return m
+}
+
+// approvalBodyLimit resolves the effective approval-prompt body row cap:
+// config.DefaultApprovalBodyLines unless a caller plumbed one in through
+// [Model.WithApprovalBodyLines]. The resolution lives here, not at the call
+// site, so every render path — App.render, a golden test calling View
+// directly — agrees on the default.
+func (m Model) approvalBodyLimit() int {
+	if m.approvalBodyLines <= 0 {
+		return config.DefaultApprovalBodyLines
+	}
+	return m.approvalBodyLines
 }
 
 // DismissApproval clears the pending request without resolving it — the esc
@@ -723,7 +795,7 @@ func (m Model) promptLines(width int) []string {
 	var raw []string
 	switch {
 	case m.pending != nil:
-		raw = renderApprovalPrompt(m.theme, *m.pending, width)
+		raw = renderApprovalPrompt(m.theme, *m.pending, width, m.approvalBodyLimit())
 	case m.pendingDec != nil:
 		raw = renderDecisionPrompt(m.theme, *m.pendingDec, width)
 	default:

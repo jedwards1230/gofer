@@ -36,6 +36,17 @@ var ErrEmptyModel = errors.New("model must not be empty")
 // with the remedy that applies to them.
 var ErrNoModel = errors.New("no model configured")
 
+// ErrInvalidEffort indicates [Supervisor.SetEffort] was called with a level
+// outside the SDK's unified reasoning-effort vocabulary ([provider.ValidEffort]:
+// "low", "medium", "high", or "" to clear back to the provider's default).
+//
+// Note the asymmetry with [ErrEmptyModel], and that it is deliberate: an empty
+// MODEL is meaningless, whereas an empty EFFORT is the documented way to clear
+// a previously-set level, so it is accepted rather than rejected. The sentinel
+// exists so a caller can branch on "you asked for a level that does not exist"
+// without string-matching; the offending value is named in the wrapping message.
+var ErrInvalidEffort = errors.New("unknown reasoning effort")
+
 // ErrCrossProvider indicates a SetModel call asked to change a session to a
 // model served by a DIFFERENT provider than its current one. A runner's
 // provider client is bound to one backend at session creation, so a live

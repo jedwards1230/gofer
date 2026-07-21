@@ -83,6 +83,15 @@ type Session interface {
 	// call while a turn is in flight — the change takes effect on the next
 	// turn.
 	SetModel(model string) error
+	// SetEffort changes the reasoning effort this session uses for its next
+	// turn — the effort-axis parallel to SetModel. It rejects a level outside
+	// the unified vocabulary ([provider.ValidEffort]) and a non-empty level on
+	// a model the registry KNOWS cannot reason; "" clears back to the
+	// provider's default and is always accepted. Unlike SetModel it carries NO
+	// same-provider constraint (effort is provider-agnostic — each backend
+	// projects a level onto its own wire format). Safe to call while a turn is
+	// in flight — the change takes effect on the next turn.
+	SetEffort(effort string) error
 	// Close shuts the session down, releasing its broker and journal.
 	Close() error
 }
@@ -102,6 +111,7 @@ type SessionInfo struct {
 	Summary   string // M2: "" (reserved)
 	Status    SessionStatus
 	Model     string
+	Effort    string // reasoning effort: "", "low", "medium", or "high"
 	Cost      provider.Cost
 	Usage     provider.Usage
 	Pending   int // approvals; 0 in M2

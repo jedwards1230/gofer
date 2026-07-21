@@ -73,22 +73,48 @@ badge the moment the request arrives, but while it's unresolved the live
 prompt **commandeers the whole footer** (status line, input box, and its
 framing rules) and the badge is suppressed from the transcript so it isn't
 shown twice; once answered, the footer returns and the badge becomes visible
-again. It reads as a confirm prompt — a rule, a titled `<tool> command`
-header, the indented args, the question, and the action row, keyed `a`/`d`/`r`
-(`r` toggles remember), `esc` dismisses without answering (the request stays
+again. It reads as a confirm prompt — a rule, an attributed `<tool> command`
+header, the call's own description and body, a plain-English rationale, the
+question, and the action row, keyed `a`/`d`/`r` (`r` toggles remember, `1`/`2`
+alias allow/deny), `esc` dismisses without answering (the request stays
 pending; a re-attach re-surfaces it):
 
 ```
  ────────────────────────────────────────────────
- bash command
+ bash command · from the `researcher` agent
+   Run the test suite with race detection
 
-   cmd=rm -rf /tmp/session-fixtures
+   go test -race ./... \
+     -run TestApproval
+   timeout=120
 
- Allow this tool call?
-   [a] allow   [d] deny   [r] remember: off
+ Why you're being asked
+
+   No permission rule matched this call, so gofer is asking before it runs.
+   It also cannot be sandboxed on this host, so an allow rule alone will not
+   let it run unattended.
+
+   Policy: unmatched · containable: false (no container configured)
+
+   Press `r` before allowing to remember this exact call for the rest of the
+   session. Add a rule to the `permissions` array in `config.json` — e.g.
+   `{"verdict": "allow", "tool": "bash", "specifier": "go *"}` — to stop
+   being asked.
+
+ Do you want to proceed?
+   1. [a] Yes   2. [d] No   ·   [r] remember: off
 
  esc cancel · session 0192a1b2-…
 ```
+
+The header's attribution clause is omitted entirely for an un-attributed call
+(no subagent, or a stream that never carried one) — never a placeholder. The
+body is the call's own `command`/`cmd`/`script`/`file_path`/`path` value,
+rendered over as many rows as it needs with every other spec key demoted to a
+sorted `k=v` list beneath it; the whole body is capped at
+`tui.approval_body_lines` rows (default 12) with the remainder collapsed into
+`… +N more lines`, so a pasted script can never push the question off the
+frame.
 
 Resolution is deliberately quiet. A routine **allow** adds *no* transcript
 line — the `●` badge already recorded that the call was gated, and a
@@ -97,22 +123,28 @@ reading as if config auto-allowed it) was pure noise. A **deny** keeps a red
 `permission deny` line, because a blocked call changed what happened. The old
 rule-source parenthetical is dropped either way.
 
-The fuller pipeline trace (which rail matched, what the sandbox said, what the
-reviewer decided) and the richer action set (`edit cmd`, `why?`) land later; M3
-ships the inline allow/deny/remember prompt above.
+**Richer provenance — what ships.** The prompt now carries the call's
+**attribution** ("from the `<agent>` agent", correlated from the tool call's
+`event.Agent` — `event.PermissionRequested.ID` *is* the tool call id), its
+**multi-line body** (the real command text, not a one-line `cmd=…` summary),
+and a **rationale derived from the guard's decision trace**
+(`event.PermissionRequested.Trace`): why it was gated in plain English, the
+matched policy with every raw trace entry preserved, and the two escape
+hatches that actually exist — `r` to remember the call for the session, or a
+rule in `config.json`'s `permissions` array (the example specifier is built
+from the call's own first token, and is omitted rather than guessed at when
+there is no command body).
 
-**Richer provenance (backlog).** Once the ACP permission request carries it,
-the prompt should render the request's full provenance rather than just the
-tool and its args: the **gating hook** that raised it (e.g. `PreToolUse:Bash`),
-the human **reason** and the **policy** that matched, a copy-paste **override
-hint** carrying its `[plugin:x]` provenance so a grant can be reproduced outside
-the TUI, and the call's **attribution** ("from the `<agent>` agent" when a
-subagent issued it). Two affordances ride the action row — `Tab` to amend the
+**Richer provenance — what remains backlog.** The **gating hook** that raised
+the request (e.g. `PreToolUse:Bash`) and a copy-paste **override hint**
+carrying its `[plugin:x]` provenance both need fields the permission request
+doesn't carry yet. Two affordances ride the action row — `Tab` to amend the
 call before allowing, `ctrl+e` to explain why it was gated — but both need new
-SDK permission-outcome variants (an amended-input reply and an explain request)
-before the TUI can offer them; see the agent-sdk-go design backlog. Until the
-request carries these fields the prompt renders exactly the tool/args form
-above.
+SDK permission-outcome variants (an amended-input reply and an explain
+request) before the TUI can offer them; see the agent-sdk-go design backlog.
+Neither key is advertised on the prompt until its implementation lands. Once
+`session/explain_permission` exists it supersedes the locally-derived
+rationale above as the source for the "why".
 
 **Remember-as-rule** — a grant never widens silently: the prompt offers
 exact / prefix / broad patterns, but dangerous commands are force-downgraded
@@ -925,11 +957,12 @@ color by construction and would assert nothing here.
 routed with the same precedence as the approval overlay — `panel > approval >
 active screen > global` — and closed by Esc, sized to whatever the active
 tab's body actually renders (`commandPanel.Height`) rather than always a
-worst-case max. Five builtins register now and open the panel on their tab —
-the M4 trio (`/status`, `/config`, `/model`) plus the M5 read-only pair
-(`/usage`, `/stats`); each opened on a one-line placeholder body until its own
-step landed the real view (`/status` in step 2, `/config` in step 3, `/model`
-in step 4, `/usage` + `/stats` in the M5 usage-panels step — see below). `@`
+worst-case max. Six builtins register now and open the panel on their tab —
+the M4 trio (`/status`, `/config`, `/model`), the M5 read-only pair
+(`/usage`, `/stats`), and the SDK-catch-up `/thinking`; each opened on a
+one-line placeholder body until its own step landed the real view (`/status`
+in step 2, `/config` in step 3, `/model` in step 4, `/usage` + `/stats` in the
+M5 usage-panels step, `/thinking` with `Runner.SetEffort` — all below). `@`
 and `!` are not implemented — the intercept only switches on a leading `/` so
 they can slot in later.
 
@@ -1074,14 +1107,45 @@ model the daemon ASSIGNED in ACP's reserved `_meta`, under the
 gofer-namespaced key `gofer/model`, so `daemonbridge.Create` reports what the
 session actually runs instead of echoing the (normally empty) requested model.
 
-Effort-adjust (←/→) stays deferred (no SDK backing) —
-and has no room on the Model tab regardless, since ←/→ are already claimed by
-the panel host for tab switching. The concrete dependency is a runtime
-`Runner.SetEffort` paralleling the `Runner.SetModel` that `Supervisor.SetModel`
-already rides on; once the SDK grows it (see the agent-sdk-go design backlog)
-the control becomes actionable — a persisted `session.effort` default plus a
-same-session hot-swap on the same terms as the model — needing only a spot on
-the tab that ←/→ don't already own.
+**Built (SDK catch-up): `/thinking`, the reasoning-effort adjuster.** The
+dependency this was waiting on — a runtime `Runner.SetEffort` paralleling the
+`Runner.SetModel` that `Supervisor.SetModel` rides on — arrived in agent-sdk-go
+v0.17.0, so effort now travels the same road as the model, hop for hop:
+`Supervisor.SetEffort` → `gofer/set_effort` (gofer-native JSON-RPC, like
+`gofer/set_model`, forwarded router→worker) → `Runner.SetEffort`, with the
+level surfaced on the roster row (`SessionInfo.Effort`) and persisted as the
+`session.effort` config default.
+
+It is its own **Thinking** tab (effortpicker.go) rather than a ←/→ modifier on
+the Model tab: ←/→ are claimed by the panel host for tab switching, and effort
+is an orthogonal axis. `/thinking` (alias `/effort`) opens it; `/thinking
+low|medium|high|off` applies a level directly through the same commit path a
+picked row takes — `off` (or `none`/`default`) is the empty level, i.e. "clear
+it and let the provider decide". Unlike `/model` there is **no cross-provider
+branch**: a provider client is fixed at session creation, which is what
+constrains a model swap, but effort is provider-agnostic vocabulary each
+backend projects onto its own wire format, so a live session always takes the
+change.
+
+What the tab *does* reason about is **model capability**, which is the
+"toggle vs effort-picker by model capability" the roadmap asked for. The rule
+is the SDK's own, applied client-side so the UI never disagrees with the
+runner: reject only on **positive registry evidence** that the active model
+cannot reason (`provider.Lookup` found it AND `Reasoning` is false). An
+unregistered model — anything newer than this binary — is UNKNOWN, not
+incapable, so its levels are offered and the runner gets the final word. On a
+model the registry says cannot reason, the tab renders one warning line naming
+the remedy instead of four rows the runner would refuse, and `/thinking <level>`
+refuses by name without writing anything (clearing stays legal — it asks for no
+reasoning at all). The tab issues **no vendor request** on open: unlike the
+Model tab's catalog, the level list is a closed four-value enum.
+
+The persisted `session.effort` default is a settings knob today (`/config`'s
+`session.effort` row, `off`/`low`/`medium`/`high`) — like `session.permission_mode`
+it is **not yet read at session creation**, so `/thinking` from the overview
+saves the default and says exactly that, claiming nothing about sessions that
+do not exist yet. Seeding a new session's `Params.Thinking.Effort` from it is
+follow-up work.
 
 **Built (M5 usage panels)**: `/usage` (usage.go) and `/stats` (stats.go) are two
 more read-only tabs cut from the same cloth as `/status` — pure, stateless
@@ -1102,6 +1166,49 @@ time like every other tab — `sess` off `App.currentSessionInfo`, and `/stats`
 additionally the overview's reference `Now()` (so elapsed output stays
 deterministic in goldens) and `Roster()` (the snapshot it sums).
 
+**Built (M5 markdown commands)**: `internal/usercmd` turns a saved prompt file
+into a slash command. It walks `<store-root>/commands/` (user scope — the
+resolved `--root`, not a hardcoded `~/.gofer`) and `<cwd>/.gofer/commands/`
+(project scope), both threaded in from `CommandEnv`, taking every `.md` file
+recursively; a nested file is namespaced with `:`, so
+`commands/git/review.md` is `/git:review`. An optional `---`-delimited header
+carries two keys — `description` (the popup's summary) and `argument-hint`
+(the `[arg]` beside the name); unknown keys are ignored and a malformed header
+degrades to "no frontmatter" plus a warning rather than losing the command.
+Running one submits its expanded body through `App.doSend` — the same
+`Supervisor.Send` a hand-typed prompt takes, never a second send path — and
+refuses with a status note (rather than silently dropping the prompt) when
+there is no attached session or the body expands to nothing.
+
+Arguments substitute into the body at dispatch time, in a **single pass**: a
+substituted value is never rescanned, so an argument containing `$ARGUMENTS`
+is inserted literally instead of injecting tokens into the prompt.
+
+| Token | Expands to |
+|---|---|
+| `$ARGUMENTS` | every argument, space-joined, in order |
+| `$N` / `${N}` | the Nth argument (1-based); missing → empty |
+| `${N:-default}` | the Nth argument, or `default` when missing or empty |
+| `${@:N}` | arguments N through the end, space-joined |
+| `$$` | a literal `$` |
+
+Tokens are recognized inside a word (`internal/$1/doc.go`), `$N` consumes a
+maximal digit run (`$12` is the twelfth argument — brace it as `${1}2` for the
+other reading), and any `$` that doesn't start a recognized token stays
+literal. `internal/usercmd`'s package doc is the full contract, including the
+`${@:0}` and out-of-range answers.
+
+`Registry` became **layered** to hold this: `CommandSource` ranks
+`extension > markdown > builtin` (docs' long-standing intended order), each
+layer is replaceable wholesale, and a name resolves by rank — so a
+`status.md` genuinely overrides the builtin `/status`, taking its aliases with
+it, and a project file overrides a same-named user file. The extension tier is
+reserved and asserted but not populated (plugin `registerCommand` is P1). The
+markdown layer is reloaded at `NewApp` and on the closed→open edge of the
+autocomplete popup — once per `/` typed, never per keystroke and never inside
+`Registry.matching` — so a file written while the TUI runs appears the next
+time the popup opens.
+
 Deferred (issue #175): true per-message / per-tool-call token attribution
 (needs SDK per-item usage granularity absent from v0.14.2, which reports usage
 only at the turn and session level — rendering a synthesized per-message
@@ -1110,17 +1217,13 @@ line ("read N files, ran M commands") the issue flags as M8 polish (needs
 per-tool-call tallying off the event stream this roster-snapshot projection
 doesn't consume).
 
-- **P0**: user markdown commands (`~/.gofer/commands` + project
-  `.gofer/commands`, with `$1`, `$ARGUMENTS`, `${1:-def}`, `${@:N}`
-  substitution + frontmatter description/argument-hint) ·
-  `/new` · `/quit` · `/resume` (picker) · `/compact [instructions]`
+- **P0**: `/new` · `/quit` · `/resume` (picker) · `/compact [instructions]`
   (block-if-busy) · `/yolo` permission-mode toggle (dual-bound command +
   key; ships before autonomous tool use) · `/help` rendered from the live
   keymap · `!` / `!!` shell escape (`!!` runs but excludes output from model
   context) · `@`-file mention.
 - **P1**: `/init` (first-run project context) · `/fork` · `/tree` ·
-  `/export html|jsonl` · `/login` · `/thinking` (toggle vs effort-picker by
-  model capability) · runtime `registerCommand` from plugins ·
+  `/export html|jsonl` · `/login` · runtime `registerCommand` from plugins ·
   `/skill:name` · `/name` · `/session` (id, path, per-model tokens/cost).
 - **P2**: model-cycling key · `/mcp` management · `/debug` (hidden commands
   share the dispatcher, skip autocomplete).

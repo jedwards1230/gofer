@@ -263,7 +263,11 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts CreateOptio
 		return SessionInfo{}, fmt.Errorf("supervisor: create session: %w", err)
 	}
 
-	m, err := s.register(sess, opts.Model, opts.Cwd, gate, decisions)
+	// The runner seeds its own effort from Params.Thinking.Effort at
+	// construction, so the roster's bookkeeping starts from the same value
+	// rather than from a hardcoded "" that a later SetEffort would silently
+	// contradict (see managed.effort).
+	m, err := s.register(sess, opts.Model, opts.Params.Thinking.Effort, opts.Cwd, gate, decisions)
 	if err != nil {
 		// Lost a race with Close between the isClosed check above and here:
 		// tear down the just-built session so it does not leak. Its store is
@@ -319,7 +323,7 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 		return SessionInfo{}, fmt.Errorf("supervisor: resume %s: %w", id, err)
 	}
 
-	m, err := s.register(sess, opts.Model, opts.Cwd, gate, decisions)
+	m, err := s.register(sess, opts.Model, opts.Params.Thinking.Effort, opts.Cwd, gate, decisions)
 	if err != nil {
 		_ = sess.Close()
 		return SessionInfo{}, fmt.Errorf("supervisor: resume %s: %w", id, err)
@@ -339,13 +343,13 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 // is published into the roster below — so a concurrent Kill can never
 // observe a session whose teardown hasn't been stashed yet (see
 // Config.OnRegister's doc).
-func (s *Supervisor) register(sess Session, model, cwd string, gate *loop.Gate, decisions *decision.Gate) (*managed, error) {
+func (s *Supervisor) register(sess Session, model, effort, cwd string, gate *loop.Gate, decisions *decision.Gate) (*managed, error) {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		return nil, ErrClosed
 	}
-	m := newManaged(sess, model, s.clock(), s.clock, s.notify, cwd, gate, decisions, s.onRegister)
+	m := newManaged(sess, model, effort, s.clock(), s.clock, s.notify, cwd, gate, decisions, s.onRegister)
 	// Stamp the session id onto the decision gate the moment it is knowable —
 	// before m is published anywhere and before anything can run a turn against
 	// it, so no request can ever open with an empty session id (see
@@ -497,6 +501,59 @@ func (s *Supervisor) SetModel(ctx context.Context, sessionID, model string) erro
 
 	m.mu.Lock()
 	m.model = model
+	m.mu.Unlock()
+	s.notify()
+	return nil
+}
+
+// SetEffort changes sessionID's reasoning effort for its next turn, consuming
+// the SDK runner's own setter ([runner.Runner.SetEffort]) — the effort-axis
+// parallel to [Supervisor.SetModel], hop for hop. Like SetModel it has no
+// idle-only restriction: the SDK setter is concurrency-safe with a turn already
+// in flight (the runner reads the effort once, at the top of the NEXT turn).
+//
+// Two ways it deliberately DIFFERS from SetModel:
+//
+//   - An empty effort is LEGAL. "" is the SDK's documented "clear back to the
+//     provider's default" ([provider.ValidEffort]), so there is no
+//     ErrEmptyModel analogue; the pre-check is ValidEffort, which admits "".
+//   - There is no cross-provider guard. A runner's provider client is fixed at
+//     creation, which is what constrains a model swap — but effort is
+//     provider-agnostic vocabulary each backend projects onto its own wire
+//     format (OpenAI's effort string, Anthropic's thinking budget), so the same
+//     level is meaningful everywhere and nothing about the session's provider
+//     can make it illegal.
+//
+// The reasoning-CAPABILITY check is left entirely to the SDK: [runner.Runner.SetEffort]
+// rejects a non-empty level only on positive registry evidence that the current
+// model cannot reason, and duplicating that rule here would be a second copy to
+// drift. Clients that want to refuse BEFORE calling (the TUI's picker does, so
+// it never offers four levels the runner will reject) read the same
+// [provider.Lookup] capability bit themselves.
+func (s *Supervisor) SetEffort(ctx context.Context, sessionID, effort string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Pre-checked here, rather than left to the SDK, for the same reason
+	// SetModel pre-checks cross-provider: the SDK's rejection is a plain,
+	// unwrapped error a caller cannot errors.Is against, and the daemon wire
+	// flattens it further. ValidEffort is the SDK's own predicate, so this is a
+	// typed restatement of its verdict, not a second opinion.
+	if !provider.ValidEffort(effort) {
+		return fmt.Errorf("supervisor: set effort %s: %w: %q (want %q, %q, %q, or \"\" to clear)",
+			sessionID, ErrInvalidEffort, effort, provider.EffortLow, provider.EffortMedium, provider.EffortHigh)
+	}
+	m, err := s.lookup(sessionID)
+	if err != nil {
+		return fmt.Errorf("supervisor: set effort %s: %w", sessionID, err)
+	}
+
+	if err := m.sess.SetEffort(effort); err != nil {
+		return fmt.Errorf("supervisor: set effort %s: %w", sessionID, err)
+	}
+
+	m.mu.Lock()
+	m.effort = effort
 	m.mu.Unlock()
 	s.notify()
 	return nil

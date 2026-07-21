@@ -46,6 +46,23 @@ func pressKey(v configView, code rune) configView {
 	return v.handleKey(tea.KeyPressMsg{Code: code})
 }
 
+// downPressesTo returns how many ↓ presses land the highlight on key's row:
+// the first press selects row 0, so it is that row's index plus one. Derived
+// from the registry rather than hardcoded, so adding a setting ABOVE the row a
+// test targets retargets the presses with it instead of silently pointing them
+// at the wrong row (which is exactly what a plain "6 presses" did when
+// session.effort landed second).
+func downPressesTo(t *testing.T, key string) int {
+	t.Helper()
+	for i, s := range settingsRegistry() {
+		if s.Key == key {
+			return i + 1
+		}
+	}
+	t.Fatalf("settingsRegistry has no %q row to navigate to", key)
+	return 0
+}
+
 // TestGoldenConfigInitialList covers the view's opening state: an empty
 // filter box and every registry setting listed at its default value, no row
 // highlighted.
@@ -99,10 +116,7 @@ func TestGoldenConfigBoolToggle(t *testing.T) {
 		return nil
 	}
 	v := newConfigView(theme.Test(), env)
-	// session.model, session.permission_mode, tui.roster_view,
-	// tui.autoscroll, tui.mouse, telemetry.enabled — six ↓ presses (the first
-	// selects row 0) land on telemetry.enabled.
-	for i := 0; i < 6; i++ {
+	for range downPressesTo(t, "telemetry.enabled") {
 		v = pressKey(v, tea.KeyDown)
 	}
 	v = pressKey(v, tea.KeyEnter)
@@ -126,8 +140,9 @@ func TestGoldenConfigEnumCycle(t *testing.T) {
 		return nil
 	}
 	v := newConfigView(theme.Test(), env)
-	v = pressKey(v, tea.KeyDown) // session.model
-	v = pressKey(v, tea.KeyDown) // session.permission_mode
+	for range downPressesTo(t, "session.permission_mode") {
+		v = pressKey(v, tea.KeyDown)
+	}
 	v = pressKey(v, tea.KeyEnter)
 	renderConfig(t, "config_enum_cycled", v)
 
@@ -225,7 +240,7 @@ func TestConfigZeroCommandEnvDoesNotPanic(t *testing.T) {
 		t.Fatalf("expected the empty-filter placeholder, got:\n%s", got)
 	}
 
-	for i := 0; i < 6; i++ {
+	for range downPressesTo(t, "telemetry.enabled") {
 		v = pressKey(v, tea.KeyDown)
 	}
 	v = pressKey(v, tea.KeyEnter) // toggles telemetry.enabled in memory; SaveConfig is nil
@@ -255,7 +270,7 @@ func TestConfigSaveErrorSurfacesAsRow(t *testing.T) {
 	env := GoldenCommandEnv()
 	env.SaveConfig = func(config.Config) error { return errors.New("disk full") }
 	v := newConfigView(theme.Test(), env)
-	for i := 0; i < 6; i++ {
+	for range downPressesTo(t, "telemetry.enabled") {
 		v = pressKey(v, tea.KeyDown)
 	}
 	v = pressKey(v, tea.KeyEnter)

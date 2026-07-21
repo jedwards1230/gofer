@@ -75,6 +75,13 @@ type managed struct {
 	submitCh chan struct{}
 
 	mu sync.Mutex
+	// effort is the session's current reasoning effort ("", "low", "medium",
+	// "high"), seeded from the runner's construction-time
+	// Params.Thinking.Effort and updated by [Supervisor.SetEffort]. It is
+	// bookkeeping only — the runner owns the value it actually sends — kept
+	// here for the same reason model is: the [Session] interface exposes no
+	// accessor, and info must be able to report it.
+	effort string
 	// state is the session's current pump run-state, read by info (which
 	// derives SessionStatus) and by Archive to reject archiving a running
 	// session.
@@ -122,13 +129,14 @@ type managed struct {
 // join later. Calling it here, rather than after publish, closes the race
 // where a concurrent Kill/Archive could otherwise observe a live session
 // with no teardown stashed yet (see Config.OnRegister's doc).
-func newManaged(sess Session, model string, now time.Time, clock func() time.Time, notify func(), cwd string, gate *loop.Gate, decisions *decision.Gate, onRegister func(sess Session) (stop func())) *managed {
+func newManaged(sess Session, model, effort string, now time.Time, clock func() time.Time, notify func(), cwd string, gate *loop.Gate, decisions *decision.Gate, onRegister func(sess Session) (stop func())) *managed {
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &managed{
 		sess:       sess,
 		id:         sess.ID(),
 		project:    filepath.Base(filepath.Dir(sess.JournalPath())),
 		model:      model,
+		effort:     effort,
 		cwd:        cwd,
 		createdAt:  now,
 		updated:    now,
@@ -171,6 +179,7 @@ func (m *managed) info() SessionInfo {
 		Title:       title,
 		Status:      status,
 		Model:       m.model,
+		Effort:      m.effort,
 		Cost:        report.Cost,
 		Usage:       report.Usage,
 		Pending:     m.pending,

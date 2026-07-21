@@ -49,7 +49,7 @@ func newColorAppWithApproval(t *testing.T, th theme.Theme) App {
 	mdl, _ = a.Update(sessEventMsg{
 		id: a.sessID,
 		ev: event.NewPermissionRequested(a.sessID, "perm-1", "bash",
-			map[string]any{"cmd": "rm -rf /tmp/x"}, []string{"no rule"}),
+			map[string]any{"cmd": "rm -rf /tmp/x"}, GoldenTrace()),
 	})
 	a = mdl.(App)
 	if !a.sess.HasPendingApproval() {
@@ -78,15 +78,18 @@ func TestColorApprovalDialogComposite(t *testing.T) {
 		}
 	}
 
-	// The prompt must survive compositing intact — the tool+args line, the
-	// question, the action row, and the footer — not fragments scattered by a
+	// The prompt must survive compositing intact — the title, the command
+	// body, the rationale's section header and its policy line, the question,
+	// the action row, and the footer — not fragments scattered by a
 	// display-width bug.
 	stripped := ansi.Strip(colored)
 	for _, want := range []string{
 		"bash command",
-		"cmd=rm -rf /tmp/x",
-		"Allow this tool call?",
-		"[a] allow   [d] deny   [r] remember: off",
+		"rm -rf /tmp/x",
+		"Why you're being asked",
+		"Policy: unmatched",
+		"Do you want to proceed?",
+		"1. [a] Yes   2. [d] No   ·   [r] remember: off",
 		"esc cancel · session ",
 	} {
 		if !strings.Contains(stripped, want) {

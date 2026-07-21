@@ -1,0 +1,33 @@
+────────────────────────────────────────────────────────────────────────────────
+bash command
+
+  echo step-00
+  echo step-01
+  echo step-02
+  echo step-03
+  echo step-04
+  echo step-05
+  echo step-06
+  echo step-07
+  echo step-08
+  echo step-09
+  echo step-10
+  … +9 more lines
+
+Why you're being asked
+
+  No permission rule matched this call, so gofer is asking before it runs. It
+  also cannot be sandboxed on this host, so an allow rule alone will not let it
+  run unattended.
+
+  Policy: unmatched · containable: false (no container configured)
+
+  Press `r` before allowing to remember this exact call for the rest of the
+  session. Add a rule to the `permissions` array in `config.json` — e.g.
+  `{"verdict": "allow", "tool": "bash", "specifier": "echo *"}` — to stop being
+  asked.
+
+Do you want to proceed?
+  1. [a] Yes   2. [d] No   ·   [r] remember: off
+
+esc cancel · session 0192a1b2-c3d4-7e5f-8a90-000000000001

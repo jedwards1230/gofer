@@ -53,6 +53,9 @@ type Supervisor interface {
 	Roster(ctx context.Context) ([]supervisor.SessionInfo, error)
 	// SetModel changes a session's model for its next turn.
 	SetModel(ctx context.Context, sessionID, model string) error
+	// SetEffort changes a session's reasoning effort for its next turn. An
+	// empty effort clears the level back to the provider's default.
+	SetEffort(ctx context.Context, sessionID, effort string) error
 	// SubscribeLive returns a session's event stream without the retained
 	// must-deliver backlog, for a caller about to drive a fresh turn.
 	SubscribeLive(ctx context.Context, sessionID string) (*event.Subscription, error)

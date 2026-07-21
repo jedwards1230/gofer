@@ -91,10 +91,16 @@ func modelConfigOptionEvent(currentModel string, authed map[string]bool) event.C
 // JournalPath is an on-disk implementation detail, so none of the three cross
 // the wire.
 type sessionInfoDTO struct {
-	ID     string         `json:"id"`
-	Title  string         `json:"title,omitempty"`
-	Status string         `json:"status"`
-	Model  string         `json:"model,omitempty"`
+	ID     string `json:"id"`
+	Title  string `json:"title,omitempty"`
+	Status string `json:"status"`
+	Model  string `json:"model,omitempty"`
+	// Effort is the session's reasoning effort (see
+	// [supervisor.SessionInfo.Effort]). Omitted when empty, which is both the
+	// common case (no explicit level — the provider's default) and what an
+	// older daemon sends; a client decoding this simply reads "" and shows the
+	// level as unset.
+	Effort string         `json:"effort,omitempty"`
 	Cost   provider.Cost  `json:"cost"`
 	Usage  provider.Usage `json:"usage"`
 	Queued int            `json:"queued"`
@@ -139,6 +145,7 @@ func toSessionInfoDTO(info supervisor.SessionInfo) sessionInfoDTO {
 		Title:         info.Title,
 		Status:        info.Status.String(),
 		Model:         info.Model,
+		Effort:        info.Effort,
 		Cost:          info.Cost,
 		Usage:         info.Usage,
 		Queued:        info.Queued,
@@ -351,6 +358,34 @@ func decodeSetModelParams(params json.RawMessage) (setModelParams, *rpcError) {
 	}
 	if req.Model == "" {
 		return setModelParams{}, invalidParamsMsg(methodGoferSetModel + ": model is required")
+	}
+	return req, nil
+}
+
+// setEffortParams is the params shape of gofer/set_effort: {sessionId, effort}.
+type setEffortParams struct {
+	SessionID string `json:"sessionId"`
+	Effort    string `json:"effort"`
+}
+
+// decodeSetEffortParams decodes gofer/set_effort's params, rejecting only a
+// missing sessionId.
+//
+// Note what it deliberately does NOT reject, unlike [decodeSetModelParams]: an
+// empty effort. "" is the SDK's documented "clear the level back to the
+// provider's default" ([provider.ValidEffort]), i.e. a legitimate request
+// rather than a malformed one, so rejecting it as invalid params would make the
+// clear operation unreachable over the wire. Which non-empty strings are levels
+// at all is [supervisor.Supervisor.SetEffort]'s call (it restates ValidEffort's
+// verdict as [supervisor.ErrInvalidEffort]) — an application error, not a
+// params error.
+func decodeSetEffortParams(params json.RawMessage) (setEffortParams, *rpcError) {
+	var req setEffortParams
+	if err := json.Unmarshal(params, &req); err != nil {
+		return setEffortParams{}, invalidParams(err)
+	}
+	if req.SessionID == "" {
+		return setEffortParams{}, invalidParamsMsg(methodGoferSetEffort + ": sessionId is required")
 	}
 	return req, nil
 }

@@ -95,6 +95,15 @@ type Session struct {
 	// Model is the default model id for new sessions. Empty means
 	// credential-driven (see runner.DefaultModel) rather than a fixed model.
 	Model string `json:"model,omitempty"`
+
+	// Effort is the default reasoning effort for new sessions: "low",
+	// "medium", "high", or empty for the provider's own default (the SDK's
+	// unified vocabulary — see provider.ValidEffort). Empty is a real,
+	// supported value here rather than merely "unset": there is no separate
+	// "no opinion" state to distinguish, since clearing the level IS asking
+	// for the provider default. Written by the TUI's `/thinking` command,
+	// which spells the empty value "off".
+	Effort string `json:"effort,omitempty"`
 	// PermissionMode is the default guardrail mode for new sessions: "ask"
 	// (contain-or-ask, the default) or "yolo". Not yet consumed by
 	// [Config.Engine] — it is a settings-registry knob today; wiring it into
@@ -184,6 +193,21 @@ type TUI struct {
 	// absent" (use the default) from an explicit 0 ("no limit"). See
 	// [TUI.PasteLimitBytes] for the resolved value every caller should read.
 	MaxPasteBytes *int `json:"max_paste_bytes,omitempty"`
+
+	// ApprovalBodyLines caps how many rows the inline approval prompt spends
+	// on the gated call's own body — the command text plus the residual
+	// spec `k=v` lines (see internal/tui's renderApprovalPrompt): nil (unset)
+	// is the default [DefaultApprovalBodyLines], and any positive value is a
+	// row cap, with the overflow collapsed into a single "… +N more lines"
+	// row. The cap exists because the prompt commandeers the whole footer:
+	// a pasted 200-line heredoc would otherwise push the question and the
+	// action row off the top of the frame, leaving an operator staring at a
+	// wall of script with no visible way to answer it. A *int, not a plain
+	// int, for the same reason [TUI.Autoscroll] is a *bool — a plain int
+	// can't distinguish "field absent" from an explicit 0. See
+	// [TUI.ApprovalBodyLineLimit] for the resolved value every caller should
+	// read.
+	ApprovalBodyLines *int `json:"approval_body_lines,omitempty"`
 }
 
 // DefaultMaxPasteBytes is [TUI.MaxPasteBytes]'s default: 128 KiB, comfortably
@@ -201,6 +225,24 @@ func (t TUI) PasteLimitBytes() int {
 		return DefaultMaxPasteBytes
 	}
 	return *t.MaxPasteBytes
+}
+
+// DefaultApprovalBodyLines is [TUI.ApprovalBodyLines]'s default: 12 rows.
+// Enough to read a realistic multi-line shell command or a short heredoc
+// whole, while leaving the rationale, the question, and the action row on
+// screen at the 24-row terminal height gofer's own golden renders assume.
+const DefaultApprovalBodyLines = 12
+
+// ApprovalBodyLineLimit resolves [TUI.ApprovalBodyLines]'s effective value:
+// [DefaultApprovalBodyLines] when unset, and also for a stored value <= 0 —
+// unlike [TUI.PasteLimitBytes]'s 0-means-unlimited, a zero-row body would
+// render the prompt with the gated call itself invisible, which is never what
+// an operator means.
+func (t TUI) ApprovalBodyLineLimit() int {
+	if t.ApprovalBodyLines == nil || *t.ApprovalBodyLines <= 0 {
+		return DefaultApprovalBodyLines
+	}
+	return *t.ApprovalBodyLines
 }
 
 // AutoscrollEnabled resolves [TUI.Autoscroll]'s effective value: true (the
