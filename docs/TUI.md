@@ -73,22 +73,48 @@ badge the moment the request arrives, but while it's unresolved the live
 prompt **commandeers the whole footer** (status line, input box, and its
 framing rules) and the badge is suppressed from the transcript so it isn't
 shown twice; once answered, the footer returns and the badge becomes visible
-again. It reads as a confirm prompt — a rule, a titled `<tool> command`
-header, the indented args, the question, and the action row, keyed `a`/`d`/`r`
-(`r` toggles remember), `esc` dismisses without answering (the request stays
+again. It reads as a confirm prompt — a rule, an attributed `<tool> command`
+header, the call's own description and body, a plain-English rationale, the
+question, and the action row, keyed `a`/`d`/`r` (`r` toggles remember, `1`/`2`
+alias allow/deny), `esc` dismisses without answering (the request stays
 pending; a re-attach re-surfaces it):
 
 ```
  ────────────────────────────────────────────────
- bash command
+ bash command · from the `researcher` agent
+   Run the test suite with race detection
 
-   cmd=rm -rf /tmp/session-fixtures
+   go test -race ./... \
+     -run TestApproval
+   timeout=120
 
- Allow this tool call?
-   [a] allow   [d] deny   [r] remember: off
+ Why you're being asked
+
+   No permission rule matched this call, so gofer is asking before it runs.
+   It also cannot be sandboxed on this host, so an allow rule alone will not
+   let it run unattended.
+
+   Policy: unmatched · containable: false (no container configured)
+
+   Press `r` before allowing to remember this exact call for the rest of the
+   session. Add a rule to the `permissions` array in `config.json` — e.g.
+   `{"verdict": "allow", "tool": "bash", "specifier": "go *"}` — to stop
+   being asked.
+
+ Do you want to proceed?
+   1. [a] Yes   2. [d] No   ·   [r] remember: off
 
  esc cancel · session 0192a1b2-…
 ```
+
+The header's attribution clause is omitted entirely for an un-attributed call
+(no subagent, or a stream that never carried one) — never a placeholder. The
+body is the call's own `command`/`cmd`/`script`/`file_path`/`path` value,
+rendered over as many rows as it needs with every other spec key demoted to a
+sorted `k=v` list beneath it; the whole body is capped at
+`tui.approval_body_lines` rows (default 12) with the remainder collapsed into
+`… +N more lines`, so a pasted script can never push the question off the
+frame.
 
 Resolution is deliberately quiet. A routine **allow** adds *no* transcript
 line — the `●` badge already recorded that the call was gated, and a
@@ -97,22 +123,28 @@ reading as if config auto-allowed it) was pure noise. A **deny** keeps a red
 `permission deny` line, because a blocked call changed what happened. The old
 rule-source parenthetical is dropped either way.
 
-The fuller pipeline trace (which rail matched, what the sandbox said, what the
-reviewer decided) and the richer action set (`edit cmd`, `why?`) land later; M3
-ships the inline allow/deny/remember prompt above.
+**Richer provenance — what ships.** The prompt now carries the call's
+**attribution** ("from the `<agent>` agent", correlated from the tool call's
+`event.Agent` — `event.PermissionRequested.ID` *is* the tool call id), its
+**multi-line body** (the real command text, not a one-line `cmd=…` summary),
+and a **rationale derived from the guard's decision trace**
+(`event.PermissionRequested.Trace`): why it was gated in plain English, the
+matched policy with every raw trace entry preserved, and the two escape
+hatches that actually exist — `r` to remember the call for the session, or a
+rule in `config.json`'s `permissions` array (the example specifier is built
+from the call's own first token, and is omitted rather than guessed at when
+there is no command body).
 
-**Richer provenance (backlog).** Once the ACP permission request carries it,
-the prompt should render the request's full provenance rather than just the
-tool and its args: the **gating hook** that raised it (e.g. `PreToolUse:Bash`),
-the human **reason** and the **policy** that matched, a copy-paste **override
-hint** carrying its `[plugin:x]` provenance so a grant can be reproduced outside
-the TUI, and the call's **attribution** ("from the `<agent>` agent" when a
-subagent issued it). Two affordances ride the action row — `Tab` to amend the
+**Richer provenance — what remains backlog.** The **gating hook** that raised
+the request (e.g. `PreToolUse:Bash`) and a copy-paste **override hint**
+carrying its `[plugin:x]` provenance both need fields the permission request
+doesn't carry yet. Two affordances ride the action row — `Tab` to amend the
 call before allowing, `ctrl+e` to explain why it was gated — but both need new
-SDK permission-outcome variants (an amended-input reply and an explain request)
-before the TUI can offer them; see the agent-sdk-go design backlog. Until the
-request carries these fields the prompt renders exactly the tool/args form
-above.
+SDK permission-outcome variants (an amended-input reply and an explain
+request) before the TUI can offer them; see the agent-sdk-go design backlog.
+Neither key is advertised on the prompt until its implementation lands. Once
+`session/explain_permission` exists it supersedes the locally-derived
+rationale above as the source for the "why".
 
 **Remember-as-rule** — a grant never widens silently: the prompt offers
 exact / prefix / broad patterns, but dangerous commands are force-downgraded

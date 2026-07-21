@@ -2,6 +2,7 @@ package tui_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -263,13 +264,184 @@ func TestGoldenSessionError(t *testing.T) {
 	render(t, "session_error", event.NewSessionError(sid, "boom", true))
 }
 
+// attributionSuffix is the exact substring the approval prompt's header
+// carries when — and only when — the gated call is attributed to an agent.
+// Its ABSENCE is the un-attributed contract (see
+// TestGoldenApprovalUnattributed), so both tests below assert on this one
+// string rather than two independently-drifting literals.
+const attributionSuffix = " · from the "
+
+// attributedCall builds the two events that attribute a gated call to an
+// agent: a tool.call.started carrying ev.Agent, then the permission request
+// for the SAME id (event.PermissionRequested.ID *is* the tool call id — see
+// Model.toolAgents). agent == "" produces the un-attributed stream: the
+// started event with no Agent at all, exactly what a single-agent session
+// emits.
+func attributedCall(agent string) []event.Event {
+	started := event.NewToolCallStarted(sid, "call-1", "bash", json.RawMessage(`{"cmd":"go test -race ./..."}`))
+	started.Agent = agent
+	return []event.Event{
+		started,
+		event.NewPermissionRequested(sid, "call-1", "bash",
+			map[string]any{"cmd": "go test -race ./...", "description": "Run the test suite with race detection", "timeout": 120},
+			tui.GoldenTrace()),
+	}
+}
+
+// TestGoldenApprovalAttributed covers the prompt's provenance header: a
+// subagent's tool.call.started carried Agent="researcher", so the permission
+// request correlated to that call renders "· from the `researcher` agent"
+// after the title.
+func TestGoldenApprovalAttributed(t *testing.T) {
+	events := attributedCall("researcher")
+	render(t, "approval_attributed", events...)
+
+	got := testkit.Render(ingest(events...), testkit.Width, testkit.Height)
+	if want := "bash command" + attributionSuffix + "`researcher` agent"; !strings.Contains(got, want) {
+		t.Errorf("attributed approval header missing %q:\n%s", want, got)
+	}
+}
+
+// TestGoldenApprovalUnattributed is the fallback contract: the same stream
+// with NO agent on the tool call renders the bare title and no attribution
+// clause at all — not a placeholder, not an empty pair of backticks. Asserted
+// as the ABSENCE of the substring, because a golden alone can only prove "the
+// bytes are these", never "this thing can't appear".
+func TestGoldenApprovalUnattributed(t *testing.T) {
+	events := attributedCall("")
+	render(t, "approval_unattributed", events...)
+
+	got := testkit.Render(ingest(events...), testkit.Width, testkit.Height)
+	if !strings.Contains(got, "bash command") {
+		t.Fatalf("un-attributed approval is missing the plain title:\n%s", got)
+	}
+	if strings.Contains(got, attributionSuffix) {
+		t.Errorf("un-attributed approval rendered an attribution clause %q:\n%s", attributionSuffix, got)
+	}
+}
+
+// multilineCommand is a shell command spanning several physical lines, one of
+// them far wider than the 80-cell golden width — the shape a heredoc or a
+// backslash-continued pipeline takes, and the case the pre-redesign one-line
+// "cmd=…" summary silently truncated.
+const multilineCommand = "go test -race ./... \\\n  -run 'TestApproval|TestGolden' \\\n  -count=1 -timeout 120s -v -args -update -someveryverylongflagvalue=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+// TestGoldenApprovalMultilineCommand covers a command body with embedded
+// newlines and an over-width physical line: every physical line becomes one
+// or more rendered rows, and no row overruns the frame.
+func TestGoldenApprovalMultilineCommand(t *testing.T) {
+	events := []event.Event{
+		event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"cmd": multilineCommand}, tui.GoldenTrace()),
+	}
+	render(t, "approval_multiline_command", events...)
+
+	got := testkit.Render(ingest(events...), testkit.Width, testkit.Height)
+	for i, line := range strings.Split(got, "\n") {
+		if w := ansi.StringWidth(line); w > testkit.Width {
+			t.Errorf("line %d exceeds width %d cells (got %d): %q", i, testkit.Width, w, line)
+		}
+	}
+	// The body must actually be spread over rows, not collapsed onto one:
+	// every physical line's leading token appears on a row of its own.
+	for _, token := range []string{"go test -race ./... \\", "-run 'TestApproval|TestGolden' \\", "-count=1"} {
+		if !strings.Contains(got, token) {
+			t.Errorf("multi-line body missing %q:\n%s", token, got)
+		}
+	}
+}
+
+// TestGoldenApprovalTruncatedBody covers the row budget
+// (config.TUI.ApprovalBodyLineLimit, default 12): a command with more lines
+// than the cap renders the first cap-1 of them plus a muted "… +N more
+// lines", so the question and the action row can never be pushed off the
+// frame by a pasted script.
+func TestGoldenApprovalTruncatedBody(t *testing.T) {
+	lines := make([]string, 0, 20)
+	for i := range 20 {
+		lines = append(lines, fmt.Sprintf("echo step-%02d", i))
+	}
+	events := []event.Event{
+		event.NewPermissionRequested(sid, "perm-1", "bash",
+			map[string]any{"cmd": strings.Join(lines, "\n")}, tui.GoldenTrace()),
+	}
+	render(t, "approval_truncated_body", events...)
+
+	got := testkit.Render(ingest(events...), testkit.Width, testkit.Height)
+	// 20 body rows capped at 12: 11 shown, 9 collapsed.
+	if want := "… +9 more lines"; !strings.Contains(got, want) {
+		t.Errorf("over-cap body missing the collapse row %q:\n%s", want, got)
+	}
+	if !strings.Contains(got, "echo step-10") {
+		t.Errorf("over-cap body dropped the last shown row (step-10):\n%s", got)
+	}
+	if strings.Contains(got, "echo step-11") {
+		t.Errorf("over-cap body rendered past the cap (step-11 present):\n%s", got)
+	}
+	// The decision row must survive the truncation — that is the whole point
+	// of capping the body.
+	if !strings.Contains(got, "Do you want to proceed?") {
+		t.Errorf("over-cap body pushed the question off the frame:\n%s", got)
+	}
+}
+
+// TestGoldenApprovalNoTrace covers a permission request whose guard reported
+// no trace at all: the rationale falls back to saying so plainly instead of
+// rendering an empty "Policy:" line or panicking on the missing entries.
+func TestGoldenApprovalNoTrace(t *testing.T) {
+	events := []event.Event{
+		event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"cmd": "rm -rf /tmp/x"}, nil),
+	}
+	render(t, "approval_no_trace", events...)
+
+	got := testkit.Render(ingest(events...), testkit.Width, testkit.Height)
+	if want := "gofer could not determine why this call was gated."; !strings.Contains(got, want) {
+		t.Errorf("empty-trace approval missing the fallback reason %q:\n%s", want, got)
+	}
+	if strings.Contains(got, "Policy:") {
+		t.Errorf("empty-trace approval rendered a Policy paragraph with nothing to report:\n%s", got)
+	}
+}
+
+// TestApprovalPromptDegenerateWidths pins the width guards: the prompt's own
+// wrap budget (width-2) goes non-positive below width 3, and every paragraph
+// it wraps is longer than one cell, so an unguarded budget would either panic
+// or spin. Rendering at 0 and 1 must simply produce clipped rows. Zero-height
+// is exercised too — the first frame arrives before WindowSizeMsg does.
+func TestApprovalPromptDegenerateWidths(t *testing.T) {
+	m := ingest(event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"cmd": "rm -rf /tmp/x"}, tui.GoldenTrace()))
+	for _, size := range []struct{ w, h int }{{0, 0}, {1, 1}, {2, 3}, {3, 24}} {
+		t.Run(fmt.Sprintf("%dx%d", size.w, size.h), func(t *testing.T) {
+			got := testkit.Render(m, size.w, size.h)
+			for i, line := range strings.Split(got, "\n") {
+				if w := ansi.StringWidth(line); w > max(size.w, 1) {
+					t.Errorf("line %d exceeds width %d cells (got %d): %q", i, size.w, w, line)
+				}
+			}
+		})
+	}
+}
+
+// TestApprovalPromptEmptySpecKeepsNoArgs pins the degenerate spec cases: a
+// permission request with no spec at all (or one carrying only the
+// description, which renders as the subtitle) still shows the "(no args)"
+// placeholder where the body would be, rather than an empty gap.
+func TestApprovalPromptEmptySpecKeepsNoArgs(t *testing.T) {
+	for _, spec := range []map[string]any{nil, {}, {"description": "sweep the workspace"}} {
+		m := ingest(event.NewPermissionRequested(sid, "perm-1", "bash", spec, tui.GoldenTrace()))
+		got := testkit.Render(m, testkit.Width, testkit.Height)
+		if !strings.Contains(got, "(no args)") {
+			t.Errorf("approval with spec %v is missing the (no args) placeholder:\n%s", spec, got)
+		}
+	}
+}
+
 // TestGoldenApproval covers a pending permission request: the interactive
 // inline prompt that commandeers the whole footer while it's unresolved (see
 // Model.pending, approval.go) — the transcript's own itemApproval badge is
 // suppressed while the prompt shows it (see transcriptLines).
 func TestGoldenApproval(t *testing.T) {
 	render(t, "approval",
-		event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"cmd": "rm -rf /tmp/x"}, []string{"no rule"}),
+		event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"cmd": "rm -rf /tmp/x"}, tui.GoldenTrace()),
 	)
 }
 
@@ -279,7 +451,7 @@ func TestGoldenApproval(t *testing.T) {
 // error.
 func TestGoldenStyledApproval(t *testing.T) {
 	renderStyled(t, "approval",
-		event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"cmd": "rm -rf /tmp/x"}, []string{"no rule"}),
+		event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"cmd": "rm -rf /tmp/x"}, tui.GoldenTrace()),
 	)
 }
 
@@ -289,7 +461,7 @@ func TestGoldenStyledApproval(t *testing.T) {
 // and a dim esc/session footer), replacing the old centered-overlay modal.
 func TestGoldenApprovalPromptInline(t *testing.T) {
 	render(t, "approval_prompt_inline",
-		event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"cmd": "rm -rf /tmp/x"}, []string{"no rule"}),
+		event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"cmd": "rm -rf /tmp/x"}, tui.GoldenTrace()),
 	)
 }
 
@@ -299,7 +471,7 @@ func TestGoldenApprovalPromptInline(t *testing.T) {
 // catch an ANSI-width regression.
 func TestColorApprovalPromptInlineNarrow(t *testing.T) {
 	events := []event.Event{
-		event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"cmd": "rm -rf /tmp/x"}, []string{"no rule"}),
+		event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"cmd": "rm -rf /tmp/x"}, tui.GoldenTrace()),
 	}
 	build := func(th theme.Theme) tui.Model {
 		m := tui.New(th)
