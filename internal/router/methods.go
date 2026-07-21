@@ -273,6 +273,12 @@ func (s *Supervisor) resumeOffline(ctx context.Context, id string, opts supervis
 		// the top-of-Resume check and the admission lock — return its snapshot.
 		return snap, nil
 	}
+	// finishResume is DEFERRED: it runs at return — after registerWorker below and
+	// after any failure-path cleanupSpawnedWorker — so the resuming[id] guard spans
+	// the ENTIRE spawn→register critical section. A concurrent same-id resume stays
+	// refused with ErrResumeInProgress until this one has either registered its
+	// handle or fully torn its spawned worker down; the guard is never cleared with a
+	// half-spawned worker still live. (It clears LIFO, after the releaseSlot defer.)
 	defer s.finishResume(id)
 	reserved := true
 	defer func() {
@@ -304,8 +310,14 @@ func (s *Supervisor) resumeOffline(ctx context.Context, id string, opts supervis
 	// Build the reconstruction core with a REPLAY GUARD wired into its sink, so
 	// the journal replay the load triggers is suppressed for attached clients (see
 	// this method's doc for why, and why clearing it after the load has no race).
-	var replaySuppressed atomic.Bool
-	rec := wirestream.New(sw.client, wirestream.WithEventSink(s.eventSink(id, &replaySuppressed)))
+	// replaySuppressed is taken by pointer here and captured by the sink closure
+	// stored in rec, so it must outlive this stack frame. Allocating it explicitly
+	// via &atomic.Bool{} says so at the call site — though `var x atomic.Bool; &x`
+	// would be equally safe, since Go's escape analysis heap-promotes any local
+	// whose address escapes into a heap-reachable closure (there are no dangling
+	// stack pointers in Go). The pointer form just documents the intent.
+	replaySuppressed := &atomic.Bool{}
+	rec := wirestream.New(sw.client, wirestream.WithEventSink(s.eventSink(id, replaySuppressed)))
 
 	// Suppress the sink, then drive the worker's session/load. Load blocks until
 	// the whole replay has settled onto the reconstructed broker; only then is the
