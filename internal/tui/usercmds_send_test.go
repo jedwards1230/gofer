@@ -51,10 +51,6 @@ func newUserCmdModel(t *testing.T, sup tui.Supervisor, env tui.CommandEnv) tea.M
 	return m
 }
 
-// attachedSessionID is GoldenRoster's first (selected) session — the one a
-// single → press attaches to.
-const attachedSessionID = "0192a1b2-app0-7000-8000-000000000001"
-
 // TestUserCommandSendsExpandedBody is the end-to-end case: `/review 42
 // urgently` from the attach input reaches Supervisor.Send carrying the body
 // with its arguments substituted, exactly as if the user had typed that text.
