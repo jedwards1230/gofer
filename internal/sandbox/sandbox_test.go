@@ -32,7 +32,6 @@ func TestNew_ReturnsUsableContainer(t *testing.T) {
 	c := New()
 	if c == nil {
 		t.Fatal("New() returned nil")
-		return
 	}
 	_ = c.Available()
 	if _, ok := c.WrapCommand("true", t.TempDir()); !c.Available() && ok {

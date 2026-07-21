@@ -365,7 +365,6 @@ func crashWorker(t *testing.T, s *Supervisor, sessionID string) {
 	s.mu.Unlock()
 	if h == nil {
 		t.Fatalf("no live worker for session %s to crash", sessionID)
-		return
 	}
 	// Tolerate a worker that already exited between the lookup and the kill —
 	// os.ErrProcessDone is not a failure to simulate a crash, it IS one.

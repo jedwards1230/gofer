@@ -129,7 +129,6 @@ func TestGoferModelsFieldsAvailabilityAndSort(t *testing.T) {
 	}
 	if sonnet == nil {
 		t.Fatal("gofer/models missing claude-sonnet-5")
-		return
 	}
 	if sonnet.Provider != info.Provider {
 		t.Errorf("claude-sonnet-5 Provider = %q, want %q", sonnet.Provider, info.Provider)

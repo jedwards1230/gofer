@@ -168,7 +168,6 @@ func (w *countingWorker) pushEvent(t *testing.T, params map[string]any) {
 	w.mu.Unlock()
 	if c == nil {
 		t.Fatal("counting worker has no connection to push on")
-		return
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
