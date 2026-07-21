@@ -2,6 +2,7 @@ package daemonbridge_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/jedwards1230/gofer/internal/supervisor"
@@ -78,6 +79,41 @@ func TestListSessionsWalksEveryPage(t *testing.T) {
 	}
 	if len(ids) != want {
 		t.Errorf("ListSessions returned %d distinct sessions, want %d — the second page was not walked", len(ids), want)
+	}
+}
+
+// TestListSessionsHonorsCancellation pins that the pagination walk cannot
+// outlive its context. [daemon.Client.Call] selects on ctx.Done() and returns
+// ctx.Err(), so a cancelled context aborts at the very next page request and
+// the loop returns the error instead of walking on — no separate ctx.Err()
+// check between iterations is needed for termination, and this is the test that
+// says so rather than a comment.
+func TestListSessionsHonorsCancellation(t *testing.T) {
+	sup := newTestSupervisor(t, fauxProvider)
+	url := newTestDaemon(t, sup)
+	b := newBridge(t, url)
+
+	cwd := t.TempDir()
+	// More than one page (internal/daemon's sessionListPageSize = 50), so a walk
+	// that ignored cancellation would have a second request to make.
+	for range 51 {
+		if _, err := sup.Create(context.Background(), "", supervisor.CreateOptions{Cwd: cwd, Model: "faux"}); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	refs, err := b.ListSessions(ctx)
+	if err == nil {
+		t.Fatalf("ListSessions with a cancelled context returned %d rows and no error", len(refs))
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want it to wrap context.Canceled", err)
+	}
+	if refs != nil {
+		t.Errorf("refs = %+v, want nil on a cancelled walk", refs)
 	}
 }
 

@@ -118,10 +118,13 @@ func (v resumePickerView) withLoadError(err error) resumePickerView {
 // width-truncated — the same Renderable contract every other panel component
 // follows ([testkit.Renderable]).
 //
-// A height of 0 (or less) renders nothing at all rather than indexing into an
-// empty slice: [App.render] can hand a panel a zero body budget on a terminal
-// too short to hold one, and the first frame before any WindowSizeMsg has that
-// shape too.
+// A height of 0 renders nothing at all rather than indexing into an empty
+// slice: [App.render] can hand a panel a zero body budget on a terminal too
+// short to hold one, and the first frame before any WindowSizeMsg has that
+// shape too. The `height > 0` guard on the truncation below is NOT redundant
+// with that early return — a NEGATIVE height is [testkit.Renderable]'s
+// "unbounded" convention, and without the sign check `lines[:height]` would
+// panic on it (pinned by TestResumeNegativeHeightIsUnbounded).
 func (v resumePickerView) View(width, height int) string {
 	if height == 0 {
 		return ""

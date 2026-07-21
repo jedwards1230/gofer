@@ -236,6 +236,10 @@ const listSessionsPageCap = 20
 // the daemon's page size would hide older sessions with no indication they
 // exist. A page whose cursor does not advance, or one past [listSessionsPageCap],
 // ends the walk with whatever has been collected — a partial list beats hanging.
+// A cancelled ctx needs no separate check between iterations: every iteration's
+// [daemon.Client.Call] selects on ctx.Done() and returns ctx.Err(), so the walk
+// aborts at the very next page request (pinned by
+// TestListSessionsHonorsCancellation).
 //
 // Cwd is deliberately NOT sent: the daemon accepts it for wire compatibility but
 // ignores it as a filter (handleSessionList's doc), and the picker wants the

@@ -220,7 +220,7 @@ func TestResumeRendersSmallAndZeroHeights(t *testing.T) {
 		}(),
 	}
 	for name, v := range views {
-		for _, h := range []int{0, 1, 2, 3} {
+		for _, h := range []int{-2, -1, 0, 1, 2, 3} {
 			for _, w := range []int{0, 1, 10, testkit.Width} {
 				got := testkit.Render(v, w, h)
 				if h == 0 && got != "" {
@@ -230,6 +230,27 @@ func TestResumeRendersSmallAndZeroHeights(t *testing.T) {
 					t.Errorf("%s at %dx%d: rendered %d lines, want at most %d", name, w, h, strings.Count(got, "\n")+1, h)
 				}
 			}
+		}
+	}
+}
+
+// TestResumeNegativeHeightIsUnbounded pins why View's `height > 0` truncation
+// guard is NOT redundant with its `height == 0` early return. A negative height
+// is the [testkit.Renderable] convention for "unbounded", and it is a value
+// [App.render] genuinely produces on a terminal too short for the panel's fixed
+// chrome. Dropping the sign check would leave `len(lines) > height` true for
+// every negative height and slice `lines[:height]` — an immediate panic, which
+// is precisely the zero/first-frame class of crash this TUI has hit before.
+func TestResumeNegativeHeightIsUnbounded(t *testing.T) {
+	v := loadedPicker()
+	full := len(v.lines(-1))
+	if full <= 1 {
+		t.Fatalf("the fixture rendered %d lines; this test needs a populated list to be meaningful", full)
+	}
+	for _, h := range []int{-1, -5, -100} {
+		got := testkit.Render(v, testkit.Width, h)
+		if lines := strings.Count(got, "\n") + 1; lines != full {
+			t.Errorf("height %d rendered %d lines, want the full %d — a negative height means unbounded, not truncate-to-negative", h, lines, full)
 		}
 	}
 }
