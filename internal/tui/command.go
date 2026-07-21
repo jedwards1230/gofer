@@ -117,6 +117,16 @@ func newBuiltinRegistry() Registry {
 		Run:     openPanel(panelStatus),
 	})
 	r.register(Command{
+		Name:    "usage",
+		Summary: "Show this session's token and cost consumption",
+		Run:     openPanel(panelUsage),
+	})
+	r.register(Command{
+		Name:    "stats",
+		Summary: "Show session lifecycle and roster-wide totals",
+		Run:     openPanel(panelStats),
+	})
+	r.register(Command{
 		Name:    "config",
 		Aliases: []string{"cfg"},
 		Summary: "View and edit settings",
@@ -137,7 +147,7 @@ func newBuiltinRegistry() Registry {
 // [Overview.DefaultModel].
 func openPanel(tab commandPanelTab) func(App, []string) (App, tea.Cmd) {
 	return func(a App, _ []string) (App, tea.Cmd) {
-		p := newCommandPanel(a.theme, tab, a.commandEnv, a.currentSessionInfo(), a.over.DefaultModel())
+		p := newCommandPanel(a.theme, tab, a.commandEnv, a.currentSessionInfo(), a.over.DefaultModel(), a.over.Now(), a.over.Roster())
 		a.panel = &p
 		if tab == panelModel {
 			// Only /model pays for a listing. Opening /status or /config must
