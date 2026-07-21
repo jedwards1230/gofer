@@ -98,6 +98,12 @@ type Supervisor struct {
 	mu     sync.Mutex
 	roster map[string]*managed
 	closed bool
+	// decisionRelay is the host's structured-decision fan-out, nil until (and
+	// unless) a host installs one with [Supervisor.SetDecisionRelay] — see its
+	// doc for why nil is a meaningful configuration and not merely "not wired up
+	// yet". Guarded by mu so [Supervisor.register] reads it atomically with the
+	// roster insert that publishes the session it is about to watch.
+	decisionRelay DecisionRelay
 
 	// watchMu guards the WatchRoster subscriber registry and its shutdown
 	// flag, independent of mu so notify's fan-out never contends with roster
@@ -359,6 +365,7 @@ func (s *Supervisor) register(sess Session, model, effort, cwd string, gate *loo
 	// of.
 	decisions.Bind(m.id)
 	s.roster[m.id] = m
+	relay := s.decisionRelay
 	s.mu.Unlock()
 
 	go m.pump()
@@ -367,6 +374,16 @@ func (s *Supervisor) register(sess Session, model, effort, cwd string, gate *loo
 	// before any turn can run — so the count never misses this session's first
 	// permission request.
 	go m.watchPermissions(sess.Events())
+	// Start the standing decision watcher on the same principle, and for a
+	// stronger reason: a decision is observable ONLY on this gate (no event
+	// carries one), so a host relaying decisions off-process has no other place
+	// to see them. Started here, at registration, before any turn can run — so
+	// the session's first ask_user is never missed, and the subscription exists
+	// before [decision.Gate.Request]'s ErrNoClient check can run. A nil relay
+	// (the daemonless path) starts nothing at all: see [Supervisor.SetDecisionRelay].
+	if relay != nil {
+		m.startDecisionWatch(relay)
+	}
 	return m, nil
 }
 
