@@ -348,10 +348,19 @@ func (a App) syncMenu() (App, tea.Cmd) {
 	//
 	// This deliberately gates on [commandToken] — the `/`-only narrowing of
 	// [activeToken] — and NOT on activeToken itself. There are no markdown
-	// commands behind `@`, so an `@` mention must neither trigger the directory
-	// walk nor latch menuToken: latching it would make the "/" the user types
-	// next look like a continuation rather than an edge, and silently skip the
-	// reload that "/" is supposed to get.
+	// commands behind `@`, so an `@` mention must neither trigger the walk nor
+	// latch menuToken. Two distinct costs if it did:
+	//
+	//   - Every mention pays a commands-directory walk it can never use, and
+	//     an unloadable command file's skipped-file warning would surface as a
+	//     status note in the middle of typing a path. This is the certain one,
+	//     and what TestMentionTokenDoesNotReloadTheMarkdownLayer probes.
+	//   - A latch set by `@` can eat the next `/`'s edge. Typing can't reach
+	//     that (every transition between token kinds passes through a
+	//     no-token sync, which clears the latch), but a PASTE can: pasting
+	//     " /st" onto a buffer already ending in an `@` token lands one sync
+	//     that sees a `/` token with the latch already set, and the reload is
+	//     skipped.
 	_, _, active := commandToken(buf.String(), buf.Cursor())
 	if active && !a.menuToken {
 		a = a.reloadUserCommands()
