@@ -333,10 +333,15 @@ func (m Model) IngestDecision(u decision.Update) Model {
 		if len(u.Request.Questions) == 0 {
 			return m
 		}
+		ids := make([]string, len(u.Request.Questions))
+		for i, q := range u.Request.Questions {
+			ids[i] = q.QuestionID
+		}
 		m.pendingDec = &pendingDecision{
-			id:       u.Request.ID,
-			session:  u.Request.SessionID,
-			question: u.Request.Questions[0],
+			id:          u.Request.ID,
+			session:     u.Request.SessionID,
+			question:    u.Request.Questions[0],
+			questionIDs: ids,
 		}
 	case decision.UpdateResolved:
 		if m.pendingDec != nil && m.pendingDec.id == u.Request.ID {
@@ -362,12 +367,13 @@ func (m Model) PendingDecision() (id string, ok bool) {
 	return m.pendingDec.id, true
 }
 
-// DismissDecision clears the pending decision WITHOUT answering it — the esc
-// dismiss, and the optimistic local clear after an answer is sent. The
-// underlying request stays open server-side (the agent's turn is still blocked
-// on it); re-attaching replays it off the gate (decision.Gate.Subscribe) and
-// re-surfaces this prompt, exactly as [Model.DismissApproval] leaves a
-// permission request re-surfaceable.
+// DismissDecision clears the pending decision locally. It is ONLY the
+// optimistic local clear every resolution makes before its
+// [Supervisor.AnswerDecision] call lands — an answer, or esc's cancel (see
+// App.cancelDecision). There is deliberately no "dismiss without resolving"
+// path: unlike a permission request, which a re-attach re-surfaces off the
+// event stream's replay, a decision left open here would leave the agent's turn
+// blocked with no prompt on screen and no transcript badge to find it by.
 func (m Model) DismissDecision() Model {
 	m.pendingDec = nil
 	return m

@@ -83,8 +83,9 @@ func (a App) doReply(sessionID, id string, allow, remember bool) tea.Cmd {
 // Enter resolves the focused row (an option answers with it; "Type
 // something." enters typing mode and a SECOND Enter submits what was typed;
 // "Chat about this" answers with the chat escape hatch), Esc leaves typing
-// mode or — when not typing — dismisses the prompt WITHOUT answering, and
-// ctrl+c quits, all exactly as [App.handleApprovalKey] does.
+// mode or — when not typing — CANCELS the request (see [App.cancelDecision];
+// the hint line has always promised "Esc to cancel"), and ctrl+c quits, the
+// last of those exactly as [App.handleApprovalKey] does.
 //
 // While typing, every key this switch does not itself claim falls through to
 // the shared input keymap (input_keymap.go), so the free-text answer gets the
@@ -113,8 +114,7 @@ func (a App) handleDecisionKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			a.sess = a.sess.stopDecisionTyping()
 			return a, nil
 		}
-		a.sess = a.sess.DismissDecision()
-		return a, nil
+		return a.cancelDecision()
 
 	case key.Code == tea.KeyEnter:
 		return a.resolveDecision()
@@ -187,17 +187,50 @@ func (a App) selectDecisionOption(i int) (tea.Model, tea.Cmd) {
 	return a.answerDecision(acp.DecisionOutcomeSelected{OptionID: p.question.Options[i].OptionID})
 }
 
-// answerDecision sends outcome as the answer to the pending decision's
-// question via [Supervisor.AnswerDecision] and dismisses the prompt
-// immediately — the same optimistic local dismiss [App.resolveApproval] makes.
-// The gate's own UpdateResolved, when it lands on the decision subscription a
-// moment later, is then a no-op in [Model.IngestDecision]: the id it carries
-// no longer matches anything pending.
+// answerDecision resolves the pending decision by answering its rendered
+// question with outcome.
 //
 // PR 1 answers the request's FIRST question only. That is not a lost answer:
 // decision.Gate.Answer fills every question this call omits in as cancelled,
 // so the tool downstream still receives exactly one answer per question.
 func (a App) answerDecision(outcome acp.DecisionOutcome) (tea.Model, tea.Cmd) {
+	p := a.sess.pendingDec
+	if p == nil {
+		return a, nil
+	}
+	return a.sendDecision([]acp.DecisionAnswer{{QuestionID: p.question.QuestionID, Outcome: outcome}})
+}
+
+// cancelDecision resolves the pending decision by answering EVERY question in
+// the request — including the ones this PR does not render — with
+// [acp.DecisionOutcomeCancelled]. That is what esc means here, and what the
+// prompt's hint line has always said it means.
+//
+// Cancelling rather than dismissing locally is the whole point: a decision has
+// no transcript badge and no event-stream replay to find it by again, so a
+// prompt cleared without resolving would leave the agent's turn blocked forever
+// with nothing on screen. Cancelled is a first-class outcome all the way down —
+// the gate normalizes unanswered questions to it and the tool reports it to the
+// model without IsError — so the model gets told "the user declined to choose"
+// and can carry on in prose.
+func (a App) cancelDecision() (tea.Model, tea.Cmd) {
+	p := a.sess.pendingDec
+	if p == nil {
+		return a, nil
+	}
+	answers := make([]acp.DecisionAnswer, 0, len(p.questionIDs))
+	for _, id := range p.questionIDs {
+		answers = append(answers, acp.DecisionAnswer{QuestionID: id, Outcome: acp.DecisionOutcomeCancelled{}})
+	}
+	return a.sendDecision(answers)
+}
+
+// sendDecision sends answers via [Supervisor.AnswerDecision] and clears the
+// prompt immediately — the same optimistic local dismiss [App.resolveApproval]
+// makes. The gate's own UpdateResolved, when it lands on the decision
+// subscription a moment later, is then a no-op in [Model.IngestDecision]: the
+// id it carries no longer matches anything pending.
+func (a App) sendDecision(answers []acp.DecisionAnswer) (tea.Model, tea.Cmd) {
 	p := a.sess.pendingDec
 	if p == nil {
 		return a, nil
@@ -211,7 +244,6 @@ func (a App) answerDecision(outcome acp.DecisionOutcome) (tea.Model, tea.Cmd) {
 	if sessionID == "" {
 		sessionID = a.sessID
 	}
-	answers := []acp.DecisionAnswer{{QuestionID: p.question.QuestionID, Outcome: outcome}}
 	id := p.id
 	a.sess = a.sess.DismissDecision()
 	return a, a.doAnswerDecision(sessionID, id, answers)

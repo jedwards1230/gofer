@@ -340,15 +340,14 @@ func TestDecisionFreeTextSubmits(t *testing.T) {
 	}
 }
 
-// TestDecisionEscLeavesTypingThenDismisses covers Esc's two-step contract: the
-// first press leaves typing mode (discarding the half-typed answer) and the
-// second dismisses the prompt — so escape never throws away more than one
-// thing at a time, and a digit works again once typing is off.
-func TestDecisionEscLeavesTypingThenDismisses(t *testing.T) {
+// TestDecisionEscLeavesTypingThenCancels covers Esc's two-step contract: the
+// first press leaves typing mode (discarding the half-typed answer) and only
+// the second cancels the request — so escape never throws away more than one
+// thing at a time.
+func TestDecisionEscLeavesTypingThenCancels(t *testing.T) {
 	sup := newInternalFakeSup(GoldenRoster())
 	a := attachForDecisionTest(t, sup)
 	a, req := openDecision(t, sup, a)
-	defer req.stillBlocked(t)
 
 	for range 2 {
 		mdl, _ := a.Update(tea.KeyPressMsg{Code: tea.KeyDown})
@@ -364,24 +363,22 @@ func TestDecisionEscLeavesTypingThenDismisses(t *testing.T) {
 	mdl, cmd := a.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	a = mdl.(App)
 	if cmd != nil {
-		t.Error("expected the first Esc to issue no Cmd — nothing is answered")
+		t.Error("expected the first Esc to issue no Cmd — nothing is resolved yet")
 	}
 	if !a.sess.HasPendingDecision() {
-		t.Fatal("expected the first Esc to leave typing mode, not dismiss the prompt")
+		t.Fatal("expected the first Esc to leave typing mode, not resolve the prompt")
 	}
 	if a.sess.pendingDec.typing || a.sess.pendingDec.input.String() != "" {
 		t.Errorf("expected typing mode off and the buffer cleared, got typing=%v buf=%q",
 			a.sess.pendingDec.typing, a.sess.pendingDec.input.String())
 	}
+	req.stillBlocked(t)
 
-	mdl, cmd = a.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
-	a = mdl.(App)
-	if cmd != nil {
-		t.Error("expected the second Esc to issue no Cmd either")
-	}
+	a = pressDecision(t, a, tea.KeyPressMsg{Code: tea.KeyEscape})
 	if a.sess.HasPendingDecision() {
-		t.Fatal("expected the second Esc to dismiss the prompt")
+		t.Fatal("expected the second Esc to clear the prompt")
 	}
+	cancelledAnswers(t, req.await(t), "q1")
 }
 
 // TestDecisionChatAnswersWithChat covers the "↳ Chat about this" escape hatch:
@@ -410,32 +407,100 @@ func TestDecisionChatAnswersWithChat(t *testing.T) {
 	}
 }
 
-// TestDecisionEscDismissesWithoutAnswering is the esc contract's load-bearing
-// half, asserted against the GATE rather than just the widget: the prompt
-// disappears locally, no AnswerDecision call is made, and the agent's ask_user
-// call is still parked waiting — a dismissed prompt must never silently
-// resolve a question the user declined to answer.
-func TestDecisionEscDismissesWithoutAnswering(t *testing.T) {
+// TestDecisionEscCancelsTheRequest is the esc contract's load-bearing half,
+// asserted against the GATE rather than just the widget: esc ANSWERS the
+// request cancelled — every question in it, not just the rendered one — the
+// blocked ask_user call is released with those answers, and nothing is left
+// open on the gate.
+//
+// The alternative (clear the prompt, leave the request open) is what this
+// replaced: a decision has no transcript badge and no event-stream replay, so
+// an orphaned request blocks the agent's turn forever with nothing on screen
+// pointing at it.
+func TestDecisionEscCancelsTheRequest(t *testing.T) {
 	sup := newInternalFakeSup(GoldenRoster())
 	a := attachForDecisionTest(t, sup)
 	a, req := openDecision(t, sup, a)
 
-	mdl, cmd := a.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
-	a = mdl.(App)
+	a = pressDecision(t, a, tea.KeyPressMsg{Code: tea.KeyEscape})
 	if a.sess.HasPendingDecision() {
 		t.Fatal("expected the prompt cleared after esc")
 	}
-	if cmd != nil {
-		t.Error("expected esc to issue no Cmd — no answer is sent")
-	}
-	if len(sup.answers) != 0 {
-		t.Errorf("sup.answers = %+v; want none after esc", sup.answers)
-	}
-	req.stillBlocked(t)
 
-	// The request is still open on the gate, so a re-attach replays it.
-	if open := sup.gate(a.sessID).Open(); len(open) != 1 || open[0].ID != "dec-1" {
-		t.Errorf("gate.Open() = %+v; want dec-1 still open after a local dismiss", open)
+	if len(sup.answers) != 1 {
+		t.Fatalf("sup.answers = %+v; want exactly one AnswerDecision call — esc must resolve, not orphan", sup.answers)
+	}
+	if sup.answers[0].sessionID != a.sessID || sup.answers[0].requestID != "dec-1" {
+		t.Errorf("AnswerDecision routed to %q/%q; want %q/dec-1",
+			sup.answers[0].sessionID, sup.answers[0].requestID, a.sessID)
+	}
+	cancelledAnswers(t, req.await(t), "q1")
+
+	// Nothing is left open: the agent's turn is unblocked, not parked on a
+	// request no client is rendering any more.
+	if open := sup.gate(a.sessID).Open(); len(open) != 0 {
+		t.Errorf("gate.Open() = %+v; want nothing open after esc cancelled the request", open)
+	}
+}
+
+// TestDecisionEscCancelsEveryQuestion pins the multi-question half of esc: PR 1
+// renders only the first question, but the agent is blocked on all of them, so
+// the cancel names every question id in the request rather than relying on the
+// gate's fill-in.
+func TestDecisionEscCancelsEveryQuestion(t *testing.T) {
+	sup := newInternalFakeSup(GoldenRoster())
+	a := attachForDecisionTest(t, sup)
+
+	gate := sup.gate(a.sessID)
+	questions := append(decisionQuestions(), acp.DecisionQuestion{
+		Title: "Retention", Question: "How long do we keep the shadow table?",
+		AllowFreeText: true, AllowChat: true,
+	})
+	answers := make(chan []acp.DecisionAnswer, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() {
+		got, err := gate.Request(ctx, questions)
+		if err != nil {
+			t.Errorf("gate.Request: %v", err)
+			return
+		}
+		answers <- got
+	}()
+	mdl, _ := a.Update(waitForDecision(a.sessID, a.decSub)())
+	a = mdl.(App)
+
+	a = pressDecision(t, a, tea.KeyPressMsg{Code: tea.KeyEscape})
+
+	if len(sup.answers) != 1 {
+		t.Fatalf("sup.answers = %+v; want exactly one AnswerDecision call from esc", sup.answers)
+	}
+	sent := sup.answers[0].answers
+	if len(sent) != 2 {
+		t.Fatalf("esc sent %d answers for a two-question request: %+v", len(sent), sent)
+	}
+	select {
+	case got := <-answers:
+		cancelledAnswers(t, got, "q1", "q2")
+	case <-time.After(2 * time.Second):
+		t.Fatal("the blocked ask_user call was never released by esc")
+	}
+}
+
+// cancelledAnswers asserts answers is exactly one DecisionOutcomeCancelled per
+// wantQuestion, in order.
+func cancelledAnswers(t *testing.T, answers []acp.DecisionAnswer, wantQuestions ...string) {
+	t.Helper()
+	if len(answers) != len(wantQuestions) {
+		t.Fatalf("answers = %+v; want %d (one per question)", answers, len(wantQuestions))
+	}
+	for i, want := range wantQuestions {
+		if answers[i].QuestionID != want {
+			t.Errorf("answers[%d].QuestionID = %q; want %q", i, answers[i].QuestionID, want)
+		}
+		if _, ok := answers[i].Outcome.(acp.DecisionOutcomeCancelled); !ok {
+			t.Errorf("answers[%d].Outcome = %#v; want a DecisionOutcomeCancelled", i, answers[i].Outcome)
+		}
 	}
 }
 
@@ -517,6 +582,42 @@ func TestDecisionSubReadyStaleClosesSubscription(t *testing.T) {
 	}
 	if _, err := gate.Request(context.Background(), decisionQuestions()); !errors.Is(err, decision.ErrNoClient) {
 		t.Errorf("gate.Request after the stale subscribe = %v; want ErrNoClient — the subscription leaked", err)
+	}
+}
+
+// TestDecisionSubReadySupersedesLiveSubscription is the adopt path's twin
+// guard: a second subscription for the SAME session (Init subscribes, then an
+// enter before subReadyMsg lands subscribes again) must close the one already
+// held. An overwritten subscription stays in the gate's subscriber set forever,
+// and since Gate.Request decides ErrNoClient from "are there subscribers", one
+// orphan makes that fail-fast permanently unreachable — an agent would block on
+// a question no client is rendering.
+func TestDecisionSubReadySupersedesLiveSubscription(t *testing.T) {
+	th := theme.Test()
+	a := App{theme: th, sess: New(th), sessID: "session-a"}
+	gate := decision.NewGate("session-a")
+
+	first := gate.Subscribe(1)
+	mdl, _ := a.Update(decisionSubReadyMsg{id: "session-a", sub: first})
+	a = mdl.(App)
+	second := gate.Subscribe(1)
+	mdl, _ = a.Update(decisionSubReadyMsg{id: "session-a", sub: second})
+	a = mdl.(App)
+
+	if a.decSub != second {
+		t.Error("the second subscription was not adopted")
+	}
+	if _, ok := <-first.C; ok {
+		t.Error("expected the superseded subscription's channel closed")
+	}
+
+	// The real property: with the only live subscription closed, the gate must
+	// have no subscribers left at all.
+	second.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := gate.Request(ctx, decisionQuestions()); !errors.Is(err, decision.ErrNoClient) {
+		t.Errorf("gate.Request after both subscriptions closed = %v; want ErrNoClient — one leaked", err)
 	}
 }
 

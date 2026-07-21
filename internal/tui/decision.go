@@ -48,6 +48,14 @@ type pendingDecision struct {
 	// client did not answer in as cancelled (see decision.Gate.Answer) — it
 	// just isn't yet renderable as the tabbed stepper the design calls for.
 	question acp.DecisionQuestion
+	// questionIDs is EVERY question id in the request, including question's
+	// own. Esc cancels the whole request, not just the rendered question — the
+	// agent is blocked on all of them — so the cancel needs the ids this PR
+	// does not yet render. (Gate.Answer would fill the omitted ones in as
+	// cancelled anyway; sending them explicitly means the cancel does not
+	// depend on that fill-in, and it stays correct once the multi-question
+	// stepper answers several at once.)
+	questionIDs []string
 
 	// cursor is the index into rows() of the focused row.
 	cursor int

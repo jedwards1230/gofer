@@ -593,6 +593,18 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.setStatus(sevDanger, msg.err.Error())
 			return a, nil
 		}
+		// Close whatever we already hold before adopting: two subscribes for
+		// the same session can be in flight at once (Init subscribes, then an
+		// enter before subReadyMsg lands subscribes again), and an overwritten
+		// subscription would stay in the gate's subscriber set forever with its
+		// waitForDecision goroutine parked on a channel nothing publishes to.
+		// Worse than a plain leak: Gate.Request decides ErrNoClient from
+		// "are there subscribers", so one orphan makes that fail-fast
+		// permanently unreachable for this session — the same reason the stale
+		// branch above closes rather than drops.
+		if a.decSub != nil {
+			a.decSub.Close()
+		}
 		a.decSub = msg.sub
 		return a, waitForDecision(msg.id, msg.sub)
 
