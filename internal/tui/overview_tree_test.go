@@ -160,6 +160,56 @@ func TestColorOverviewTreeLayout(t *testing.T) {
 	}
 }
 
+// TestOverviewRootAgentKeepsItsTitle pins the label rule's narrow scope: only
+// a CHILD row trades its title for its agent id. `gofer run --agent <name>`
+// stamps an agent onto a ROOT session purely so its tool-call events carry
+// attribution, and that session has a real operator-chosen title — swapping in
+// the agent id there would discard the more informative text to answer a
+// "which child is this?" question nobody asked of a root row.
+//
+// The right-column width rule deliberately does NOT narrow the same way (see
+// [Overview.layout]): a root carrying an agent id is still part of a tree
+// roster and gets the same columns as its children. The final assertion pins
+// that divergence, so a later "tidy-up" can't collapse the two rules back
+// together on the assumption they should match.
+func TestOverviewRootAgentKeepsItsTitle(t *testing.T) {
+	root := tui.SessionInfo{
+		ID: treeRootID,
+		// An agent id but NO parent: a root session, run with --agent.
+		Agent:   "owner",
+		Title:   "ship the subagent roster",
+		Summary: "one worker fanned out",
+		Status:  tui.StatusWorking,
+		Created: tui.GoldenNow.Add(-42 * time.Minute),
+		Updated: tui.GoldenNow.Add(-20 * time.Second),
+	}
+	child := treeSession(treeChildID, treeRootID, "go-developer", "editing overview_render.go", 5*time.Minute, 2048)
+
+	got := labelOrder(t, newOverview().WithSessions([]tui.SessionInfo{root, child}))
+	want := []string{root.Title, child.Agent}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("row labels = %v; want the root's TITLE and the child's AGENT %v", got, want)
+	}
+
+	// A root's agent id must not surface as a label anywhere — the assertion
+	// above would still pass if "owner" leaked onto some other row.
+	for _, label := range got {
+		if label == root.Agent {
+			t.Errorf("root session's agent id %q rendered as a row label, displacing its title %q", root.Agent, root.Title)
+		}
+	}
+
+	// The width rule is broader on purpose: a root-with-agent roster, with no
+	// child in it at all, still renders the tree's tally column.
+	rootOnly := testkit.Render(newOverview().WithSessions([]tui.SessionInfo{root}), testkit.Width, testkit.Height)
+	if !strings.Contains(rootOnly, "tokens") {
+		t.Errorf("a root session carrying an agent id lost the tree tally column; the width rule keys on ParentID OR Agent, unlike the label rule:\n%s", rootOnly)
+	}
+	if !strings.Contains(rootOnly, root.Title) {
+		t.Errorf("root-only render dropped the session title %q:\n%s", root.Title, rootOnly)
+	}
+}
+
 // TestGoldenOverviewTreeOverflow locks the "↓ N more" indicator: a tree taller
 // than its row budget reports how much it is hiding on its last visible line,
 // instead of silently ending.

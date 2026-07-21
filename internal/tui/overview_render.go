@@ -420,15 +420,20 @@ func (o Overview) row(s SessionInfo, width int, showStatus bool, lay rosterLayou
 	return line
 }
 
-// rowLabel is the identity text a row's title column carries: the session's
-// AGENT id when it has one, else its title. A spawned session's identity is its
-// role — "go-developer", "owner" — which is what makes a child row readable as
+// rowLabel is the identity text a row's title column carries: a CHILD session's
+// agent id, else the session's title. A spawned session's identity is its role —
+// "go-developer", "owner" — which is what makes a child row readable as
 // something other than an anonymous session; its title is derived from the
 // prompt its parent handed it and usually just restates the parent's task.
-// docs/TUI.md's roster sketch names the agent for exactly this reason. Every
-// ordinary session has no agent and is unaffected.
+// docs/TUI.md's roster sketch names the agent for exactly this reason.
+//
+// It keys off ParentID, not Agent alone: a ROOT session can carry an agent id
+// too (`gofer run --agent <name>` sets one so its tool-call events are
+// attributed), and that session has a real title of its own that the operator
+// chose. Substituting the agent id there would discard the more informative
+// text to answer a "which child is this?" question nobody asked of a root row.
 func (o Overview) rowLabel(s SessionInfo) string {
-	if s.Agent != "" {
+	if s.ParentID != "" && s.Agent != "" {
 		return s.Agent
 	}
 	return s.Title
