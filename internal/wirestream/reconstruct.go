@@ -9,6 +9,7 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
 	"github.com/jedwards1230/gofer/internal/daemon"
+	"github.com/jedwards1230/gofer/internal/decision"
 )
 
 // This file REPLAYS each session's typed [event.Event] stream from the
@@ -146,14 +147,19 @@ func (r *Reconstructor) drainNotifications() {
 	}
 }
 
-// closeAllBrokers closes every session's reconstructed broker once the
-// client connection (and so the demuxer) has shut down, so any still-live
-// Subscribe channel observes a clean close instead of hanging forever.
+// closeAllBrokers closes every session's reconstructed broker AND its decision
+// stream once the client connection (and so the demuxer) has shut down, so any
+// still-live Subscribe/Decisions channel observes a clean close instead of
+// hanging forever. Closing the stream also publishes a resolution for every
+// decision still open on it, so a consumer clears a prompt it is rendering
+// rather than leaving a question on screen that nothing can answer any more (see
+// [decision.Stream.Close]).
 func (r *Reconstructor) closeAllBrokers() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, rec := range r.sessions {
 		rec.broker.Close()
+		rec.decisions.Close()
 	}
 }
 
@@ -373,6 +379,10 @@ func (r *Reconstructor) handleNotification(n daemon.Notification) {
 		r.handlePermissionRequested(n.Params)
 	case methodGoferPermissionResolved:
 		r.handlePermissionResolved(n.Params)
+	case methodGoferDecisionRequested:
+		r.handleDecisionRequested(n.Params)
+	case methodGoferDecisionResolved:
+		r.handleDecisionResolved(n.Params)
 	case methodGoferEvent:
 		r.handleGoferEvent(n.Params)
 	}
@@ -604,4 +614,71 @@ type permissionResolvedWire struct {
 	ID        string `json:"id"`
 	Verdict   string `json:"verdict"`
 	Rule      string `json:"rule"`
+}
+
+// handleDecisionRequested reconstructs a gofer/decision_requested notification
+// into a [decision.Update] applied to its session's client-side decision stream
+// — the structured-decision analogue of handlePermissionRequested, differing in
+// its destination for a structural reason: a decision is not an
+// [event.Event] (the SDK's union is closed and has no decision kind, see
+// internal/decision's package doc), so there is no broker to publish it onto and
+// it lands on the session's [decision.Stream] instead.
+//
+// The daemon's params carry the questions verbatim as acp types, so this is a
+// pure decode-and-apply with no projection. A decode failure, or params with no
+// session id, is a protocol drift — dropped like any other malformed
+// notification (see handleNotification's doc), never a crash.
+func (r *Reconstructor) handleDecisionRequested(raw json.RawMessage) {
+	var w decisionRequestedWire
+	if err := json.Unmarshal(raw, &w); err != nil || w.SessionID == "" || w.ID == "" {
+		return
+	}
+	rec := r.session(w.SessionID)
+	if rec == nil {
+		return // reconstructor closing: drop the update
+	}
+	rec.decisions.Apply(decision.Update{
+		Kind: decision.UpdateRequested,
+		Request: decision.Request{
+			ID:        w.ID,
+			SessionID: w.SessionID,
+			Questions: w.Questions,
+		},
+	})
+}
+
+// handleDecisionResolved reconstructs a gofer/decision_resolved notification —
+// see handleDecisionRequested for the shared design. Only the ids are
+// meaningful on a resolution (see [decision.Update]): it tells a client to stop
+// rendering the prompt, whoever answered it and however.
+func (r *Reconstructor) handleDecisionResolved(raw json.RawMessage) {
+	var w decisionResolvedWire
+	if err := json.Unmarshal(raw, &w); err != nil || w.SessionID == "" || w.ID == "" {
+		return
+	}
+	rec := r.session(w.SessionID)
+	if rec == nil {
+		return // reconstructor closing: drop the update
+	}
+	rec.decisions.Apply(decision.Update{
+		Kind:    decision.UpdateResolved,
+		Request: decision.Request{ID: w.ID, SessionID: w.SessionID},
+	})
+}
+
+// decisionRequestedWire decodes a gofer/decision_requested notification's
+// params — internal/daemon/wire.go's decisionRequestedParams:
+// {"sessionId","id","questions"}. The questions decode straight into the acp
+// types the daemon marshalled them from; this core adds nothing to them.
+type decisionRequestedWire struct {
+	SessionID string                 `json:"sessionId"`
+	ID        string                 `json:"id"`
+	Questions []acp.DecisionQuestion `json:"questions"`
+}
+
+// decisionResolvedWire decodes a gofer/decision_resolved notification's params
+// — internal/daemon/wire.go's decisionResolvedParams: {"sessionId","id"}.
+type decisionResolvedWire struct {
+	SessionID string `json:"sessionId"`
+	ID        string `json:"id"`
 }

@@ -3,7 +3,6 @@ package daemonbridge
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"time"
 
@@ -35,6 +34,14 @@ const (
 // into an [event.PermissionReply] and routed to the session's
 // loop.Gate.Reply. See [Supervisor.Reply].
 const methodPermissionReply = "permission.reply"
+
+// methodDecisionAnswer is the JSON-RPC method literal the daemon exposes to
+// answer a pending structured-decision request — the decision-side twin of
+// permission.reply: a bare notification (no id, no response), decoded
+// daemon-side and routed to the session's decision.Gate.Answer. Its params
+// carry a sessionId permission.reply does not need; see
+// [Supervisor.AnswerDecision].
+const methodDecisionAnswer = "decision.answer"
 
 // sessionInfoDTO is the wire shape of a gofer/roster row. It now lives on the
 // reconstruction core as [wirestream.SessionInfo] (the one wire decoder shared
@@ -351,37 +358,57 @@ func (s *Supervisor) Reply(ctx context.Context, sessionID, id string, allow, rem
 	return nil
 }
 
-// ErrDecisionsUnsupported reports that the daemon-backed path cannot carry a
-// structured decision yet. The relay — a gofer/decision_requested notification
-// out of the daemon and a decision.answer op back in, mirroring the permission
-// pair above — is the follow-up PR for #173; this build ships the in-process
-// (internal/tuibridge) path only.
-var ErrDecisionsUnsupported = errors.New("daemonbridge: structured decisions require the daemon relay (follow-up PR for #173)")
-
-// Decisions returns an already-closed subscription: a daemon-backed session's
-// decision requests do not reach a client until the relay lands (see
-// [ErrDecisionsUnsupported]). Closed rather than merely idle, and nil rather
-// than an error, on purpose — the TUI's pump treats a closed channel as "this
-// stream is over" and stops re-arming, so a daemon-backed attach costs one
-// subscribe and nothing else, while returning an error here would surface a
-// failure banner for a feature the user never invoked.
+// Decisions subscribes to sessionID's open structured-decision requests,
+// reconstructed from the daemon's gofer/decision_requested /
+// gofer/decision_resolved notifications by the reconstruction core (see
+// [wirestream.Reconstructor.Decisions]). Every request already open is replayed
+// first — by the core's own stream for one this connection already saw, and by
+// the daemon's session/load replay for one asked before this client attached at
+// all — so attaching mid-question shows the prompt rather than an idle-looking
+// session whose agent is waiting.
 //
-// It is a real [decision.Subscription] over a throwaway gate rather than a
-// hand-rolled zero value: Close is what closes C, and going through the gate
-// keeps this stub honest against the package's actual lifecycle.
-func (s *Supervisor) Decisions(ctx context.Context, _ string) (*decision.Subscription, error) {
+// It is the daemon-backed twin of internal/tuibridge's in-process Decisions:
+// same [decision.Subscription], same replay contract, same "the channel closing
+// means this stream is over" teardown. ctx is honored only as an admission
+// check on the logical operation; the subscribe itself is local registration
+// with nothing to cancel.
+func (s *Supervisor) Decisions(ctx context.Context, sessionID string) (*decision.Subscription, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	sub := decision.NewGate("").Subscribe(0)
-	sub.Close()
-	return sub, nil
+	return s.core.Decisions(ctx, sessionID)
 }
 
-// AnswerDecision always fails with [ErrDecisionsUnsupported]: with no relay
-// there is no gate on the far side to route an answer to. It reports that
-// plainly rather than returning nil — a silent success would let a client
-// believe an agent turn had been unblocked when it is still waiting.
-func (s *Supervisor) AnswerDecision(context.Context, string, string, []acp.DecisionAnswer) error {
-	return ErrDecisionsUnsupported
+// AnswerDecision resolves an outstanding decision request by sending
+// [methodDecisionAnswer] — a bare notification, mirroring [Supervisor.Reply]'s
+// fire-and-forget shape: the daemon routes the answers into the session's gate,
+// and the outcome a client cares about (the prompt clearing) arrives as the
+// gofer/decision_resolved that follows, not as an RPC result.
+//
+// Unlike Reply it puts sessionID ON the wire. A decision request id is minted
+// per session ("dec-1", "dec-2", …), so — unlike a permission call id — it does
+// not name a request on its own and the daemon cannot recover the session from
+// it.
+//
+// As with [Supervisor.Interrupt], ctx is honored only as an admission check;
+// the write's lifetime belongs to [daemon.Client.Notify] (which takes no
+// context), so a caller cancellation cannot close the shared daemon link
+// mid-write.
+//
+// A nil/empty answers slice is a legitimate call — it withdraws from every
+// question, which the gate normalizes to a cancelled outcome apiece — and is
+// sent as such rather than rejected locally.
+func (s *Supervisor) AnswerDecision(ctx context.Context, sessionID, requestID string, answers []acp.DecisionAnswer) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	params := struct {
+		SessionID string               `json:"sessionId"`
+		ID        string               `json:"id"`
+		Answers   []acp.DecisionAnswer `json:"answers"`
+	}{SessionID: sessionID, ID: requestID, Answers: answers}
+	if err := s.client.Notify(methodDecisionAnswer, params); err != nil {
+		return fmt.Errorf("daemonbridge: answer decision %s (session %s): %w", requestID, sessionID, err)
+	}
+	return nil
 }
