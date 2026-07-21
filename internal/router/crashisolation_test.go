@@ -154,6 +154,17 @@ func runFauxWorker() {
 			opts.Provider = faux.New(multiTurnScript())
 			return runner.New(ctx, opts)
 		},
+		// ResumeSession reopens the persisted journal with the SAME faux provider,
+		// so the router's offline-resume path (session/load → in-process
+		// supervisor.Resume → runner.Resume) rebuilds the session from disk without
+		// touching a real credential. The real `gofer session-worker` leaves this
+		// nil and lets the default runner.Resume resolve a live provider; the faux
+		// worker must inject one, exactly as NewSession does.
+		ResumeSession: func(ctx context.Context, id string, opts runner.Options) (supervisor.Session, error) {
+			opts.Model = "faux"
+			opts.Provider = faux.New(multiTurnScript())
+			return runner.Resume(ctx, id, opts)
+		},
 	})
 	if err != nil {
 		os.Exit(1)

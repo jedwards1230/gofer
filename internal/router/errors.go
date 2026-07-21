@@ -22,11 +22,15 @@ var ErrNotLive = errors.New("router: session not live")
 // session ends — not a transport failure or a dropped connection.
 var ErrAtCapacity = errors.New("router: worker capacity reached")
 
-// ErrResumeUnsupported is the typed error [Supervisor.Resume] returns: spawning a
-// fresh worker for an offline (or old-binary) session is Phase 4 of M6, not this
-// slice. The daemon's session/load handler surfaces it as a clean application
-// error rather than panicking (see the package doc's Phase-1 cuts).
-var ErrResumeUnsupported = errors.New("router: resume not yet supported in worker mode")
+// ErrResumeInProgress is the typed error [Supervisor.Resume] returns when a
+// concurrent resume of the SAME offline id is already spawning its worker: the
+// second caller is refused rather than forking a duplicate worker that would
+// collide on the session's <uuid> lock/socket (see [Supervisor.resuming]). The
+// daemon surfaces it as a clean application error the client can retry once the
+// in-flight resume finishes and the session is live. A genuinely unknown id is a
+// different outcome — Resume returns a [session.ErrSessionNotFound]-wrapped error
+// for that (see [Supervisor.confirmJournal]).
+var ErrResumeInProgress = errors.New("router: resume already in progress for this session")
 
 // ErrEmitConfigUnsupported is the typed error [Supervisor.EmitConfigOptions]
 // returns: there is no wire method for a client to make a worker emit an
@@ -48,6 +52,6 @@ var ErrEmitConfigUnsupported = errors.New("router: emit config options not suppo
 // wire: prompting an older worker merely runs another turn on that binary, which
 // is session pinning rather than a hazard (see the package doc).
 //
-// Like [ErrResumeUnsupported], the daemon surfaces it as a plain JSON-RPC
-// application error — no distinct error code, and no first-class TUI state.
+// Like [ErrAtCapacity], the daemon surfaces it as a plain JSON-RPC application
+// error — no distinct error code, and no first-class TUI state.
 var ErrWorkerSkewed = errors.New("router: worker wire version skewed")

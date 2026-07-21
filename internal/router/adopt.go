@@ -168,9 +168,12 @@ func (s *Supervisor) adoptWorker(entry daemon.WorkerEndpointEntry) bool {
 	// whole history to attached clients as if it were live. Adoption runs inside
 	// [New], which returns before the daemon that injects the relay is even
 	// constructed, so the ordering holds by construction rather than by
-	// convention — but it is load-bearing, and any Load added later (Phase 4's
-	// resume-spawns-a-worker path) has to preserve it.
-	rec := wirestream.New(client, wirestream.WithEventSink(s.eventSink(id)))
+	// convention. The other Load — [Supervisor.Resume] spawning a worker for an
+	// offline session — cannot rely on that ordering (it runs while serving), so
+	// it suppresses the sink for its replay instead (see [Supervisor.eventSink]'s
+	// replaySuppressed guard). Adoption needs no such guard: a nil guard here
+	// leaves the sink ungated, and the relay it would reach does not yet exist.
+	rec := wirestream.New(client, wirestream.WithEventSink(s.eventSink(id, nil)))
 	loadCtx, cancel := wireCallCtx()
 	if lerr := rec.Load(loadCtx, id); lerr != nil {
 		// A load that did not settle is non-fatal — the live stream still works;

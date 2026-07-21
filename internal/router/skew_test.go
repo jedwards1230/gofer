@@ -112,8 +112,9 @@ func TestClassifySkew(t *testing.T) {
 
 // TestSkewClassRefusesNewWork is the policy assertion that matters most: ONLY a
 // wire mismatch refuses new work. Binary and unknown skew must stay routable, or
-// a daemon upgrade would strand every live session (Resume cannot yet spawn a
-// replacement worker — that is Phase 4).
+// a daemon upgrade would strand every live session — refuse-and-migrate of a
+// still-live old-binary worker onto a fresh one is not wired yet (only offline
+// resume-spawns-a-worker is).
 func TestSkewClassRefusesNewWork(t *testing.T) {
 	tests := []struct {
 		class skewClass
