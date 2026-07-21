@@ -25,40 +25,43 @@ import (
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
 
-// nonReasoningModel is the id [withNonReasoningRegistry] teaches the registry
+// nonReasoningModel is the id [nonReasoningRegistry] teaches the registry
 // to report as reasoning-incapable. It is deliberately a REGISTERED-looking
 // anthropic id: the whole point of the rule under test is that only positive
 // registry evidence refuses, so a fixture the registry has never heard of
 // would prove the opposite thing.
 const nonReasoningModel = "claude-no-think-1"
 
-// withNonReasoningRegistry swaps the package's [modelRegistry] seam for one
-// that reports nonReasoningModel as registered-and-not-reasoning, restoring it
-// on cleanup.
+// nonReasoningRegistry is a [CommandEnv.ModelInfo] stand-in that reports
+// nonReasoningModel as registered-and-not-reasoning and defers everything else
+// to the real [provider.Lookup], so the capable cases in this file are still
+// judged by the genuine registry.
 //
 // The seam exists because every model in the SDK's compiled-in registry today
-// carries Reasoning:true, so the refusal branch is otherwise unreachable from a
-// test — see modelRegistry's doc. Everything else falls through to the real
-// [provider.Lookup], so the capable cases in this file are still judged by the
-// genuine registry.
-func withNonReasoningRegistry(t *testing.T) {
-	t.Helper()
-	prev := modelRegistry
-	t.Cleanup(func() { modelRegistry = prev })
-	modelRegistry = func(id string) (provider.ModelInfo, bool) {
-		if id == nonReasoningModel {
-			return provider.ModelInfo{ID: id, Provider: "anthropic", Reasoning: false}, true
-		}
-		return prev(id)
+// carries Reasoning:true, leaving the refusal branch unreachable from a test
+// that can only name real ids. It is threaded through the env each view already
+// carries rather than swapped into a package-level var: a mutable global would
+// be a data race the moment anything in this package calls t.Parallel().
+func nonReasoningRegistry(id string) (provider.ModelInfo, bool) {
+	if id == nonReasoningModel {
+		return provider.ModelInfo{ID: id, Provider: "anthropic", Reasoning: false}, true
 	}
+	return provider.Lookup(id)
 }
 
 // effortTestEnv returns a CommandEnv fixed to GoldenCommandEnv's identity with
-// Config answering cfg, so the ✓ mark's config rung is controllable without
-// touching a real file.
+// Config answering cfg, without touching a real file.
 func effortTestEnv(cfg config.Config) CommandEnv {
 	env := GoldenCommandEnv()
 	env.Config = func() (config.Config, error) { return cfg, nil }
+	return env
+}
+
+// effortTestEnvNonReasoning is [effortTestEnv] with the registry stand-in
+// wired, for the cases that exercise a model the registry says cannot reason.
+func effortTestEnvNonReasoning(cfg config.Config) CommandEnv {
+	env := effortTestEnv(cfg)
+	env.ModelInfo = nonReasoningRegistry
 	return env
 }
 
@@ -84,21 +87,32 @@ func TestGoldenEffortSessionLevel(t *testing.T) {
 	renderEffort(t, "effort_session_level", newEffortPickerView(theme.Test(), effortTestEnv(cfg), sess, "claude-sonnet-5"))
 }
 
-// TestGoldenEffortNonReasoningModel covers the capability refusal: the list is
-// replaced by one warning line naming the remedy, so the picker is never a menu
-// of levels the runner will reject.
+// TestGoldenEffortNonReasoningModel covers the capability refusal: a warning
+// line replaces the header, the unusable levels render muted, and the clear row
+// stays selectable — the picker is never a menu of levels the runner will
+// reject, and never a dead end either.
 func TestGoldenEffortNonReasoningModel(t *testing.T) {
-	withNonReasoningRegistry(t)
-	v := newEffortPickerView(theme.Test(), effortTestEnv(config.Config{}), nil, nonReasoningModel)
+	env := effortTestEnvNonReasoning(config.Config{})
+	v := newEffortPickerView(theme.Test(), env, nil, nonReasoningModel)
 	renderEffort(t, "effort_non_reasoning", v)
+}
+
+// TestGoldenEffortNonReasoningModelStaleLevel is the case the whole clear-row
+// carve-out exists for: a session carrying "high" into a model that cannot
+// reason. The ✓ must stay visible on the stale level (it is what the session
+// actually has) while the clear row below is the way out.
+func TestGoldenEffortNonReasoningModelStaleLevel(t *testing.T) {
+	env := effortTestEnvNonReasoning(config.Config{})
+	sess := &SessionInfo{ID: "0192a1b2-eff0-7000-8000-000000000002", Model: nonReasoningModel, Effort: provider.EffortHigh}
+	renderEffort(t, "effort_non_reasoning_stale", newEffortPickerView(theme.Test(), env, sess, nonReasoningModel))
 }
 
 // TestGoldenEffortNonReasoningModelStyled is its color-state counterpart: the
 // refusal must render in WarnStyle rather than as an ordinary row, a
 // distinction the Ascii golden above is blind to.
 func TestGoldenEffortNonReasoningModelStyled(t *testing.T) {
-	withNonReasoningRegistry(t)
-	v := newEffortPickerView(testkit.ColorTheme(), effortTestEnv(config.Config{}), nil, nonReasoningModel)
+	env := effortTestEnvNonReasoning(config.Config{})
+	v := newEffortPickerView(testkit.ColorTheme(), env, nil, nonReasoningModel)
 	testkit.AssertGoldenStyled(t, "effort_non_reasoning", testkit.Render(v, testkit.Width, testkit.Height))
 }
 
@@ -112,8 +126,7 @@ func TestEffortSmallAndZeroHeightRenders(t *testing.T) {
 	views := map[string]effortPickerView{
 		"reasoning": newEffortPickerView(theme.Test(), effortTestEnv(config.Config{}), nil, "claude-sonnet-5"),
 	}
-	withNonReasoningRegistry(t)
-	views["non-reasoning"] = newEffortPickerView(theme.Test(), effortTestEnv(config.Config{}), nil, nonReasoningModel)
+	views["non-reasoning"] = newEffortPickerView(theme.Test(), effortTestEnvNonReasoning(config.Config{}), nil, nonReasoningModel)
 
 	for name, v := range views {
 		t.Run(name, func(t *testing.T) {
@@ -130,10 +143,18 @@ func TestEffortSmallAndZeroHeightRenders(t *testing.T) {
 	}
 }
 
-// TestEffortActiveLevelPrecedence covers all three rungs of the ✓ mark's
-// precedence in one table, including the case that makes the order matter: a
-// session level and a config default that disagree.
-func TestEffortActiveLevelPrecedence(t *testing.T) {
+// TestEffortActiveLevelLeavesConfigOut pins what the ✓ mark may claim: the
+// attached session's OWN level, and nothing else.
+//
+// The two config-default cases here previously expected the opposite — the ✓
+// falling back to session.effort — and that was the bug. Nothing feeds
+// session.effort into a session's construction params (unlike session.model,
+// which cmd/gofer's resolveRunModel genuinely applies), so a config rung made
+// the picker render `✓ high` for a session whose runner sat at "". The ✓ is a
+// claim about what is IN FORCE; omitting what we cannot answer honestly beats
+// blank-filling it. When the default is wired into session creation, restore
+// the rung and flip these two cases back.
+func TestEffortActiveLevelLeavesConfigOut(t *testing.T) {
 	sessAt := func(effort string) *SessionInfo {
 		return &SessionInfo{ID: "s", Model: "claude-sonnet-5", Effort: effort}
 	}
@@ -144,9 +165,9 @@ func TestEffortActiveLevelPrecedence(t *testing.T) {
 		want string
 	}{
 		{"nothing set", nil, config.Config{}, ""},
-		{"config default", nil, config.Config{Session: config.Session{Effort: provider.EffortLow}}, provider.EffortLow},
-		{"session beats config", sessAt(provider.EffortHigh), config.Config{Session: config.Session{Effort: provider.EffortLow}}, provider.EffortHigh},
-		{"unset session falls back to config", sessAt(""), config.Config{Session: config.Session{Effort: provider.EffortMedium}}, provider.EffortMedium},
+		{"session level", sessAt(provider.EffortHigh), config.Config{}, provider.EffortHigh},
+		{"config default is NOT claimed as active", nil, config.Config{Session: config.Session{Effort: provider.EffortLow}}, ""},
+		{"session at off outranks a config default", sessAt(""), config.Config{Session: config.Session{Effort: provider.EffortMedium}}, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -214,24 +235,84 @@ func TestEffortSelectedClearIsALegitimateSelection(t *testing.T) {
 	}
 }
 
-// TestEffortNonReasoningModelOffersNothing is the picker half of the capability
-// gate: with a model the registry says cannot reason, no level is selectable at
-// all, so Enter cannot commit one.
-func TestEffortNonReasoningModelOffersNothing(t *testing.T) {
-	withNonReasoningRegistry(t)
-	v := newEffortPickerView(theme.Test(), effortTestEnv(config.Config{}), nil, nonReasoningModel)
+// TestEffortNonReasoningModelOffersOnlyTheClear replaces an earlier
+// TestEffortNonReasoningModelOffersNothing, which pinned the WRONG behavior: it
+// asserted `selectedEffort()` reports nothing selectable on a non-reasoning
+// model, i.e. that the clear is refused too. That made gofer stricter than the
+// SDK — `runner.SetEffort("")` is admitted for ANY model, its capability branch
+// sitting inside `if effort != ""` — and it stranded a session that carried a
+// level into a non-reasoning model, with no way to drop it from this tab.
+//
+// What is actually right: the levels are refused, the clear is offered.
+func TestEffortNonReasoningModelOffersOnlyTheClear(t *testing.T) {
+	env := effortTestEnvNonReasoning(config.Config{})
+	v := newEffortPickerView(theme.Test(), env, nil, nonReasoningModel)
 
-	if _, ok := v.selectedEffort(); ok {
-		t.Fatal("selectedEffort() reported something selectable for a non-reasoning model")
+	if got := len(v.selectableLevels()); got != 1 {
+		t.Fatalf("selectableLevels() = %d rows for a non-reasoning model, want just the clear", got)
 	}
-	got := v.View(testkit.Width, testkit.Height)
-	if !strings.Contains(got, "doesn't support reasoning effort") {
-		t.Fatalf("expected the refusal on screen, got:\n%s", got)
+	got, ok := v.selectedEffort()
+	if !ok {
+		t.Fatal("selectedEffort() refused everything on a non-reasoning model; the clear must stay committable")
 	}
+	if got != "" {
+		t.Fatalf("selectedEffort() = %q on a non-reasoning model, want the clear \"\"", got)
+	}
+
+	// ↓ must not walk onto a level the model cannot use.
+	for range len(effortLevels) + 3 {
+		v = v.handleKey(tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+	if v.cursor != 0 {
+		t.Fatalf("cursor = %d after running off the bottom, want the clamp at the clear row", v.cursor)
+	}
+	if got, _ := v.selectedEffort(); got != "" {
+		t.Fatalf("selectedEffort() after ↓×n = %q, want the clear", got)
+	}
+
+	rendered := v.View(testkit.Width, testkit.Height)
+	if !strings.Contains(rendered, "doesn't support reasoning effort") {
+		t.Fatalf("expected the refusal on screen, got:\n%s", rendered)
+	}
+	// The unusable levels stay VISIBLE (muted) so an active one's ✓ can be
+	// seen — dropping them is what hid a stale level in the first place.
 	for _, level := range []string{"low", "medium", "high"} {
-		if strings.Contains(got, "— ") && strings.Contains(got, "  "+level+" —") {
-			t.Fatalf("expected no selectable level rows for a non-reasoning model, got:\n%s", got)
+		if !strings.Contains(rendered, level+" — ") {
+			t.Fatalf("expected %q still rendered (muted) so a stale ✓ stays visible, got:\n%s", level, rendered)
 		}
+	}
+}
+
+// TestEffortNonReasoningModelKeepsStaleLevelVisibleAndClearable is the
+// behavioral statement of the same fix, from the user's side: a session running
+// "high" on a model that cannot reason must SHOW the level it has and let the
+// user clear it.
+func TestEffortNonReasoningModelKeepsStaleLevelVisibleAndClearable(t *testing.T) {
+	env := effortTestEnvNonReasoning(config.Config{})
+	sess := &SessionInfo{ID: "s", Model: nonReasoningModel, Effort: provider.EffortHigh}
+	v := newEffortPickerView(theme.Test(), env, sess, nonReasoningModel)
+
+	if got := v.activeEffort(); got != provider.EffortHigh {
+		t.Fatalf("activeEffort() = %q, want the session's stale %q", got, provider.EffortHigh)
+	}
+	if got := v.cursor; got != 0 {
+		t.Fatalf("seeded cursor = %d, want 0 — the seed must clamp into the selectable range", got)
+	}
+	if got := v.View(testkit.Width, testkit.Height); !strings.Contains(got, "✓ high") {
+		t.Fatalf("expected the stale level's ✓ on screen, got:\n%s", got)
+	}
+	got, ok := v.selectedEffort()
+	if !ok || got != "" {
+		t.Fatalf("selectedEffort() = (%q, %v), want the clear to be committable", got, ok)
+	}
+}
+
+// TestEffortLevelsLeadWithTheClear pins the ordering
+// [effortPickerView.selectableLevels] slices against: it takes effortLevels[:1]
+// as "the clear", which is silently wrong if the clear ever stops being first.
+func TestEffortLevelsLeadWithTheClear(t *testing.T) {
+	if effortLevels[0].value != "" {
+		t.Fatalf("effortLevels[0] = %q, want the clear level \"\" — selectableLevels slices on this", effortLevels[0].value)
 	}
 }
 
@@ -258,7 +339,7 @@ func TestEffortUnregisteredModelIsOffered(t *testing.T) {
 // TestEffortCapableMirrorsTheSDKRule pins [effortCapable]'s three-way verdict
 // directly, including the branch the SDK registry cannot currently produce.
 func TestEffortCapableMirrorsTheSDKRule(t *testing.T) {
-	withNonReasoningRegistry(t)
+	env := effortTestEnvNonReasoning(config.Config{})
 	cases := map[string]bool{
 		"claude-sonnet-5":        true,  // registered, reasoning
 		nonReasoningModel:        false, // registered, explicitly not reasoning
@@ -266,7 +347,7 @@ func TestEffortCapableMirrorsTheSDKRule(t *testing.T) {
 		"":                       true,  // no model resolved at all
 	}
 	for model, want := range cases {
-		if got := effortCapable(model); got != want {
+		if got := effortCapable(env, model); got != want {
 			t.Errorf("effortCapable(%q) = %v, want %v", model, got, want)
 		}
 	}
@@ -328,15 +409,14 @@ func TestParseEffortArg(t *testing.T) {
 // the config write nor Supervisor.SetEffort.
 //
 // It lives in this white-box file rather than beside its siblings in
-// effort_select_test.go because it needs the [modelRegistry] seam. "SetEffort
-// was not called" is asserted through the returned tea.Cmd being nil: that
+// effort_select_test.go because it needs the [CommandEnv.ModelInfo] seam.
+// "SetEffort was not called" is asserted through the returned tea.Cmd being nil: that
 // command is the ONLY route from here to the supervisor (see
 // applyEffortSelection), so a nil one is proof no call was dispatched.
 func TestThinkingArgNonReasoningModelRefuses(t *testing.T) {
-	withNonReasoningRegistry(t)
-
 	var saved []config.Config
 	env := GoldenCommandEnv()
+	env.ModelInfo = nonReasoningRegistry
 	env.Config = func() (config.Config, error) { return config.Config{}, nil }
 	env.SaveConfig = func(c config.Config) error { saved = append(saved, c); return nil }
 
@@ -367,10 +447,9 @@ func TestThinkingArgNonReasoningModelRefuses(t *testing.T) {
 // SDK allows it unconditionally. A gate that refused every /thinking on a
 // non-reasoning model would strand a session that already had a level set.
 func TestThinkingArgClearIsAllowedOnANonReasoningModel(t *testing.T) {
-	withNonReasoningRegistry(t)
-
 	var saved []config.Config
 	env := GoldenCommandEnv()
+	env.ModelInfo = nonReasoningRegistry
 	env.Config = func() (config.Config, error) {
 		return config.Config{Session: config.Session{Effort: provider.EffortHigh}}, nil
 	}

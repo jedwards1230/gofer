@@ -103,6 +103,16 @@ type Session struct {
 	// "no opinion" state to distinguish, since clearing the level IS asking
 	// for the provider default. Written by the TUI's `/thinking` command,
 	// which spells the empty value "off".
+	//
+	// NOT YET CONSUMED at session creation — the same status
+	// [Session.PermissionMode] carries, and the reason the /thinking picker's
+	// ✓ deliberately does NOT read it (internal/tui's effortPickerView.
+	// activeEffort): nothing populates a session's Params.Thinking, so a level
+	// stored here reaches no runner and claiming it as active would be a
+	// fiction. Wiring it in is blocked on more than plumbing — see docs/TUI.md's
+	// "reasoning effort" note: the SDK's per-turn overlay sets
+	// Params.Thinking.Effort but never Params.Thinking.Enabled, and both
+	// provider adapters emit reasoning config only when Enabled is true.
 	Effort string `json:"effort,omitempty"`
 	// PermissionMode is the default guardrail mode for new sessions: "ask"
 	// (contain-or-ask, the default) or "yolo". Not yet consumed by
