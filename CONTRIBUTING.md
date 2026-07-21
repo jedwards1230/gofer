@@ -18,9 +18,9 @@ go test ./...
 golangci-lint run
 ```
 
-`go test -race ./...` runs on push to `main` and on release tags rather than
-on the PR lane, so run it locally before anything touching concurrency — a
-race can pass every PR check and still block a release.
+`go test -race ./...` runs on every PR and on push to `main` / release tags.
+Still run it locally before anything touching concurrency so you catch a race
+before CI does — but a data race now blocks the PR, not just the release.
 
 ## Hard rules
 

@@ -55,6 +55,41 @@ func TestStatusReflectsAttachedSession(t *testing.T) {
 	}
 }
 
+// TestGoldenPanelUsage verifies /usage opens the command panel on the Usage
+// tab. Opened from the overview (no attached session) it shows the honest
+// empty state — the attached-session token/cost mapping is pinned at the
+// usageView level (usage_test.go).
+func TestGoldenPanelUsage(t *testing.T) {
+	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
+	m = dispatchSlash(t, m, "/usage")
+	testkit.AssertGolden(t, "app_panel_usage", content(m))
+}
+
+// TestUsageReflectsAttachedSession verifies the end-to-end wiring: /usage
+// opened after attaching to a session shows that session's real token numbers
+// (the GoldenRoster's first row carries a populated Usage fixture).
+func TestUsageReflectsAttachedSession(t *testing.T) {
+	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected session
+	m = dispatchSlash(t, m, "/usage")
+
+	got := content(m)
+	if !strings.Contains(got, "Input tokens: 18234") {
+		t.Errorf("expected the attached session's input tokens, got:\n%s", got)
+	}
+	if !strings.Contains(got, "Cache read tokens: 12000") {
+		t.Errorf("expected the attached session's cache-read tokens, got:\n%s", got)
+	}
+}
+
+// TestGoldenPanelStats verifies /stats opens the command panel on the Stats
+// tab, showing the roster rollup (from the overview, no attached session).
+func TestGoldenPanelStats(t *testing.T) {
+	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
+	m = dispatchSlash(t, m, "/stats")
+	testkit.AssertGolden(t, "app_panel_stats", content(m))
+}
+
 // TestGoldenPanelConfig verifies /config opens the command panel on the
 // Config tab.
 func TestGoldenPanelConfig(t *testing.T) {

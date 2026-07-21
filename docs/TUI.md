@@ -829,12 +829,13 @@ color by construction and would assert nothing here.
 routed with the same precedence as the approval overlay — `panel > approval >
 active screen > global` — and closed by Esc, sized to whatever the active
 tab's body actually renders (`commandPanel.Height`) rather than always a
-worst-case max. Three builtins (`/status`, `/config`, `/model`) register now
-and open the panel on their tab; each opened on a one-line placeholder body
-until its own step landed the real view (`/status` in step 2, `/config` in
-step 3, `/model` in step 4 — see below). `@` and `!` are not
-implemented — the intercept only switches on a leading `/` so they can slot
-in later.
+worst-case max. Five builtins register now and open the panel on their tab —
+the M4 trio (`/status`, `/config`, `/model`) plus the M5 read-only pair
+(`/usage`, `/stats`); each opened on a one-line placeholder body until its own
+step landed the real view (`/status` in step 2, `/config` in step 3, `/model`
+in step 4, `/usage` + `/stats` in the M5 usage-panels step — see below). `@`
+and `!` are not implemented — the intercept only switches on a leading `/` so
+they can slot in later.
 
 **Built (M4 step 2)**: `env.go` adds `CommandEnv` — the panel's read-only
 data seam: `Version`/`Cwd`/`Root` plus `Auth`/`Config` closures wrapping the
@@ -985,6 +986,33 @@ already rides on; once the SDK grows it (see the agent-sdk-go design backlog)
 the control becomes actionable — a persisted `session.effort` default plus a
 same-session hot-swap on the same terms as the model — needing only a spot on
 the tab that ←/→ don't already own.
+
+**Built (M5 usage panels)**: `/usage` (usage.go) and `/stats` (stats.go) are two
+more read-only tabs cut from the same cloth as `/status` — pure, stateless
+views that omit any row the current data can't answer rather than blank-filling
+it, needing no `handleKey`/`handleEscape` of their own (Esc just closes). They
+split the token/money story in two: **`/usage` is where THIS session's tokens
+and money went** — the accumulated `SessionInfo.Usage` (input / output /
+cache-read / cache-write tokens) and the `SessionInfo.Cost` breakdown (USD total
+plus the per-bucket USD when non-zero), both already flowing off the daemon's
+`session/update`. It collapses to one honest line when there's no active session
+or no turn has finished yet (all-zero usage), and shows `Cost: —` rather than
+`$0.0000` for an unpriced (unregistered-model) session. **`/stats` is session
+lifecycle plus portfolio-wide counts** — the current session's age
+(`Created`→now), last-active (`Updated`→now), status, and model, above a roster
+rollup: how many sessions the fleet holds and the summed tokens (every
+normalized bucket) + summed cost across them. Both capture their inputs at open
+time like every other tab — `sess` off `App.currentSessionInfo`, and `/stats`
+additionally the overview's reference `Now()` (so elapsed output stays
+deterministic in goldens) and `Roster()` (the snapshot it sums).
+
+Deferred (issue #175): true per-message / per-tool-call token attribution
+(needs SDK per-item usage granularity absent from v0.14.2, which reports usage
+only at the turn and session level — rendering a synthesized per-message
+estimate as fact is what the issue forbids), and the per-turn activity roll-up
+line ("read N files, ran M commands") the issue flags as M8 polish (needs
+per-tool-call tallying off the event stream this roster-snapshot projection
+doesn't consume).
 
 - **P0**: user markdown commands (`~/.gofer/commands` + project
   `.gofer/commands`, with `$1`, `$ARGUMENTS`, `${1:-def}`, `${@:N}`

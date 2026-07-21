@@ -160,8 +160,8 @@ func TestMenuEnterRunsHighlightedCommand(t *testing.T) {
 }
 
 // TestMenuUpDownMovesHighlight covers ↓/↑ moving the highlighted row across
-// every builtin command (the bare "/" matches all three, Name-sorted:
-// config, model, status).
+// every builtin command (the bare "/" matches all of them, Name-sorted:
+// config, model, stats, status, usage).
 func TestMenuUpDownMovesHighlight(t *testing.T) {
 	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
 	m = type_(t, m, "/")
@@ -176,8 +176,8 @@ func TestMenuUpDownMovesHighlight(t *testing.T) {
 	}
 
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
-	if got := content(m); !strings.Contains(got, "▸ /status") {
-		t.Fatalf("expected a second ↓ to move the highlight to /status, got:\n%s", got)
+	if got := content(m); !strings.Contains(got, "▸ /stats") {
+		t.Fatalf("expected a second ↓ to move the highlight to /stats, got:\n%s", got)
 	}
 
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyUp})

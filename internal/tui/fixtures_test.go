@@ -56,6 +56,11 @@ func GoldenRoster() []SessionInfo {
 			Summary: "overview <-> peek <-> attach nav",
 			Status:  StatusWorking,
 			Cost:    provider.Cost{USD: 0.1120},
+			// Usage is populated (row 2 leaves it zero-valued) so the /usage and
+			// /stats panel goldens render real token numbers, and the Stats
+			// rollup sums a mixed populated/zero roster.
+			Usage:   provider.Usage{InputTokens: 18234, OutputTokens: 4096, CacheReadTokens: 12000, CacheWriteTokens: 512},
+			Created: GoldenNow.Add(-15 * time.Minute),
 			Updated: GoldenNow.Add(-2 * time.Minute),
 		},
 		{
@@ -64,6 +69,7 @@ func GoldenRoster() []SessionInfo {
 			Summary: "turn finished — awaiting the next prompt",
 			Status:  StatusNeedsInput,
 			Cost:    provider.Cost{USD: 0.0450},
+			Created: GoldenNow.Add(-30 * time.Minute),
 			Updated: GoldenNow.Add(-5 * time.Minute),
 		},
 	}

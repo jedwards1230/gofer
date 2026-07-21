@@ -48,7 +48,7 @@ system (component contracts, slash commands, plugin UI);
 go build ./... && go vet ./... && go test ./...   # the CI gate
 go vet -tags workerbench ./...                     # also on the PR lane
 golangci-lint run                                  # lint, zero tolerance
-go test -race ./...                                # push/tags lane only, not PRs
+go test -race ./...                                # PR lane + push/tags
 go run ./cmd/gofer demo                            # offline faux-provider stream
 ```
 
@@ -68,7 +68,8 @@ go run ./cmd/gofer demo                            # offline faux-provider strea
 - `internal/daemon/` — ACP-over-WebSocket listener hosting the supervisor
   (`gofer daemon`); see its package doc.
 - `internal/tui/` (bubbletea) — the attach/peek/overview frontend, plus the
-  slash-command dispatcher and command panel (`/status`, `/config`, `/model`).
+  slash-command dispatcher and command panel (`/status`, `/config`, `/model`,
+  `/usage`, `/stats`).
 - `internal/tuibridge/` — adapts the daemon supervisor to the TUI's narrow
   `Supervisor` interface (the single seam importing both).
 - `internal/render/` — turns a session's typed event stream into terminal

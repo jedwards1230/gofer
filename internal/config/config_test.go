@@ -321,6 +321,31 @@ func TestSessionLoadSettleTimeout(t *testing.T) {
 	}
 }
 
+// TestDaemonDrainTimeout covers the resolver for the graceful-shutdown drain
+// bound: unset and non-positive values fall back to the default, an explicit
+// positive value is taken as a millisecond bound.
+func TestDaemonDrainTimeout(t *testing.T) {
+	ms := func(v int) *int { return &v }
+	tests := []struct {
+		name string
+		in   *int
+		want time.Duration
+	}{
+		{"unset resolves to default", nil, config.DefaultDrainTimeout},
+		{"zero resolves to default", ms(0), config.DefaultDrainTimeout},
+		{"negative resolves to default", ms(-5), config.DefaultDrainTimeout},
+		{"explicit value is a millisecond bound", ms(1500), 1500 * time.Millisecond},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := config.Daemon{DrainTimeoutMS: tt.in}
+			if got := d.DrainTimeout(); got != tt.want {
+				t.Fatalf("DrainTimeout() = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestLoadRejectsMalformedJSON(t *testing.T) {
 	dir := t.TempDir()
 	path := config.DefaultPath(dir)

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -11,6 +12,18 @@ import (
 
 	"github.com/jedwards1230/gofer/internal/daemon"
 )
+
+// jsonRPCMethodNotFound is the standard JSON-RPC 2.0 "method not found" code. A
+// daemon predating gofer/fleet answers with it, which `gofer ps` treats as "no
+// fleet total to show" rather than an error (see fetchFleet).
+const jsonRPCMethodNotFound = -32601
+
+// isMethodNotFound reports whether err is a daemon reply that the called method
+// is unknown — the signal of a daemon older than the method being called.
+func isMethodNotFound(err error) bool {
+	var ce *daemon.CallError
+	return errors.As(err, &ce) && ce.Code == jsonRPCMethodNotFound
+}
 
 // shortIDLen is how many leading characters of a session id `gofer ps` shows
 // — long enough to disambiguate in practice (session ids are UUIDv7, and
@@ -92,6 +105,16 @@ func runPS(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 
 	writePSTable(stdout, rows, *all)
+
+	// Fleet-wide total: with M6 process isolation each session's cost lives in its
+	// own worker, so the daemon aggregates it (gofer/fleet) rather than the client
+	// re-summing the roster. An in-process or older daemon does not report one, in
+	// which case the footer is silently omitted (see fetchFleet).
+	fleet, err := fetchFleet(ctx, c)
+	if err != nil {
+		return err
+	}
+	writeFleetFooter(stdout, fleet, rows)
 	return nil
 }
 
@@ -107,6 +130,61 @@ func fetchRows(ctx context.Context, c *daemon.Client, method string) ([]psRow, e
 		return nil, fmt.Errorf("%s: decode response: %w", method, err)
 	}
 	return rows, nil
+}
+
+// psFleet decodes the gofer/fleet reply: the fleet-wide total the daemon
+// aggregates across live sessions. Supported is false for an in-process daemon
+// (no per-worker fan-out to aggregate), which — like an older daemon that never
+// implements the method — makes `gofer ps` omit the fleet footer.
+type psFleet struct {
+	Supported bool    `json:"supported"`
+	Cost      psCost  `json:"cost"`
+	Usage     psUsage `json:"usage"`
+}
+
+// psUsage decodes the token counters of the fleet total's provider.Usage that
+// the footer renders.
+type psUsage struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+}
+
+// fetchFleet calls gofer/fleet and decodes the fleet total. A method-not-found
+// error from an older daemon that never implemented it is NOT an error to the
+// caller: it degrades to an unsupported (footer-less) result, exactly as a
+// daemon that answers {supported:false} does. Any other error propagates.
+func fetchFleet(ctx context.Context, c *daemon.Client) (psFleet, error) {
+	result, err := c.Call(ctx, "gofer/fleet", nil)
+	if err != nil {
+		if isMethodNotFound(err) {
+			return psFleet{Supported: false}, nil
+		}
+		return psFleet{}, fmt.Errorf("gofer/fleet: %w", err)
+	}
+	var fleet psFleet
+	if err := json.Unmarshal(result, &fleet); err != nil {
+		return psFleet{}, fmt.Errorf("gofer/fleet: decode response: %w", err)
+	}
+	return fleet, nil
+}
+
+// writeFleetFooter prints the fleet-wide cost/usage line beneath the table when
+// the daemon reported a total (a worker-mode daemon). It counts the LIVE rows so
+// the footer says how many sessions the total spans, matching the router's
+// live-only aggregation. Nothing is printed when the total is unsupported, so an
+// in-process or older daemon's `gofer ps` looks exactly as it did before.
+func writeFleetFooter(w io.Writer, fleet psFleet, rows []psRow) {
+	if !fleet.Supported {
+		return
+	}
+	live := 0
+	for _, r := range rows {
+		if r.Live {
+			live++
+		}
+	}
+	_, _ = fmt.Fprintf(w, "\nFleet: $%.4f, %d tokens (%d live)\n",
+		fleet.Cost.USD, fleet.Usage.InputTokens+fleet.Usage.OutputTokens, live)
 }
 
 // writePSTable renders rows as an aligned table: ID (short), STATUS, MODEL,

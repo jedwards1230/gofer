@@ -160,6 +160,24 @@ func toSessionInfoDTOs(infos []supervisor.SessionInfo) []sessionInfoDTO {
 	return out
 }
 
+// fleetUsageDTO is the wire shape for gofer/fleet: the fleet-wide Cost/Usage
+// total across every live session (see [handleGoferFleet]).
+//
+// Supported carries the answer to "does this daemon aggregate a fleet total at
+// all" as data rather than as a JSON-RPC error, so a client can distinguish an
+// unsupported daemon (in-process, or one predating this method) from a supported
+// daemon that genuinely has a $0 fleet — a semantic distinction an error code
+// would collapse. An in-process daemon replies {supported:false}; a worker-mode
+// daemon replies {supported:true, ...} even when the fleet is idle at $0.
+// provider.Cost and provider.Usage already carry their own json tags, so they
+// project verbatim (both are structs, so an unsupported reply still renders their
+// zero values — the client reads Supported, not the zeroed totals).
+type fleetUsageDTO struct {
+	Supported bool           `json:"supported"`
+	Cost      provider.Cost  `json:"cost"`
+	Usage     provider.Usage `json:"usage"`
+}
+
 // modelInfoDTO is the wire shape for the gofer-native gofer/models method: a
 // projection of [provider.ModelInfo] (the SDK provider registry's per-model
 // metadata) plus the gofer-side DisplayName (see [modelmeta.DisplayName], which

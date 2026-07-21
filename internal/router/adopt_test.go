@@ -464,7 +464,8 @@ func TestAdoptWireSkewedWorkerRefusesNewWork(t *testing.T) {
 // TestAdoptBinarySkewedWorkerIsFullyRoutable is the other half of the policy
 // split: a worker whose BINARY differs but whose wire matches is adopted AND
 // keeps taking new work. Refusing here would strand every live session on every
-// daemon upgrade, because Resume cannot yet spawn a replacement worker (Phase 4).
+// daemon upgrade, because migrating a still-live old-binary worker onto a fresh
+// one is not wired yet (only offline resume-spawns-a-worker is).
 func TestAdoptBinarySkewedWorkerIsFullyRoutable(t *testing.T) {
 	shortRuntimeDir(t)
 	root := t.TempDir()

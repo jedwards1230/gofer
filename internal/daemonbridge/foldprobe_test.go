@@ -87,12 +87,25 @@ func awaitFoldComplete(t *testing.T, sup *supervisor.Supervisor, sid string, wan
 	if err != nil {
 		t.Fatalf("WatchRoster: %v", err)
 	}
+	// lastSeen records the most recent status observed for sid so a timeout can
+	// report WHY it never advanced — chiefly to tell apart the two failure modes
+	// that are indistinguishable without it (issue #138): a SHORT fold (the turn's
+	// entries were not all journaled in time) versus a fold that is already
+	// COMPLETE while the needs-input STATUS transition never arrived (a lost/late
+	// roster publish, pump-goroutine starvation under load, or an SDK turn that
+	// never returned Prompt — not a journaling problem at all).
+	lastSeen := "none observed"
 	for {
 		select {
 		case snap, ok := <-roster:
 			if !ok {
 				t.Fatalf("roster watch closed before session %s reported needs-input\n  fold: %s",
 					sid, describeFold(t, sup, sid))
+			}
+			if st, present := statusOf(snap, sid); present {
+				lastSeen = st.String()
+			} else {
+				lastSeen = "absent from roster"
 			}
 			if !needsInput(snap, sid) {
 				continue
@@ -105,10 +118,37 @@ func awaitFoldComplete(t *testing.T, sup *supervisor.Supervisor, sid string, wan
 			}
 			return
 		case <-ctx.Done():
-			t.Fatalf("timed out after %s waiting for session %s to report needs-input\n  fold: %s",
-				defaultWait, sid, describeFold(t, sup, sid))
+			// Classify the timeout so the next occurrence is conclusive on sight
+			// rather than ambiguous (issue #138): if the fold is ALREADY whole, the
+			// journal is not the problem — the missing signal is the needs-input
+			// status transition, which redirects the investigation away from the
+			// journaling window entirely.
+			got := foldBlocks(t, sup, sid)
+			diagnosis := "the fold is SHORT — the turn's entries were not all journaled within the window"
+			if got >= wantBlocks {
+				diagnosis = "the fold is already COMPLETE, so journaling is NOT the culprit; the needs-input" +
+					" status transition is the signal that never arrived (lost/late roster publish, pump-goroutine" +
+					" starvation under load, or an SDK turn that never returned Prompt)"
+			}
+			t.Fatalf("timed out after %s waiting for session %s to report needs-input"+
+				"\n  last status seen: %s"+
+				"\n  fold: %s (%d/%d content blocks)"+
+				"\n  diagnosis: %s",
+				defaultWait, sid, lastSeen, describeFold(t, sup, sid), got, wantBlocks, diagnosis)
 		}
 	}
+}
+
+// statusOf returns sid's status in snap and whether sid was present — the raw
+// signal behind [needsInput], exposed so [awaitFoldComplete]'s timeout can report
+// the last status it observed (issue #138).
+func statusOf(snap []supervisor.SessionInfo, sid string) (supervisor.SessionStatus, bool) {
+	for _, s := range snap {
+		if s.ID == sid {
+			return s.Status, true
+		}
+	}
+	return 0, false
 }
 
 // needsInput reports whether snap holds sid with an idle pump and an empty
