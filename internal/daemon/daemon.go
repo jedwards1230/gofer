@@ -591,6 +591,17 @@ func (d *Daemon) cancelPermRequest(id string) {
 // Route and pending payload are recorded together, unlike the permission pair,
 // because a decision has exactly one observer and no second recording site to
 // interleave with.
+//
+// The protocol a second observer must follow — issue #215's router leg, which
+// will relay an adopted worker's decisions, is the expected one — is that
+// recording FIRST wins the request's whole fan-out: the gofer/decision_requested
+// broadcast AND the session/request_decision requests, both of which the loser
+// must skip entirely (see [Daemon.RequestDecision], which returns on false).
+// The loser must equally not tear anything down on its way out — the route,
+// retained payload, and cancel func belong to the winner and stay live until
+// the request resolves. An observer that broadcast anyway would double every
+// prompt; one that "cleaned up after itself" would unroute a request that is
+// still open, making it unanswerable.
 func (d *Daemon) recordDecisionRoute(key decisionKey, params decisionRequestedParams) (first bool) {
 	d.decisionMu.Lock()
 	defer d.decisionMu.Unlock()

@@ -315,6 +315,18 @@ func (g *Gate) Subscribe(buffer int) *Subscription {
 // blocked forever, and — because the gate's own ErrNoClient check counts
 // subscribers — the dead subscription would keep claiming a client is watching.
 //
+// The ORDER of those first two — a resolution for every open request, and only
+// THEN the closed channels — is load-bearing well beyond clearing a widget, so
+// a rewrite must preserve it. internal/supervisor's watchDecisions deliberately
+// does NOT exit on its session's base context (unlike its permission twin)
+// precisely so it is still draining this subscription when Close publishes:
+// those resolutions are what release the host's per-request bookkeeping —
+// internal/daemon's decisionRoutes, pendingDecisions, and decisionReqCancels. A
+// Close that dropped the open set without publishing, or closed the
+// subscriptions first, would silently leak all three for every request open on
+// a killed session. TestGateCloseResolvesEveryOpenRequestBeforeClosingSubscriptions
+// is the direct guard.
+//
 // Close is idempotent and safe to call concurrently with Request/Answer/
 // Subscribe: it takes mu for the state transition, and the subscription
 // channels are closed only after their subscriptions have been removed from the

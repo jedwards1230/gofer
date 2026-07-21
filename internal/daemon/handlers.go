@@ -1121,7 +1121,9 @@ func (d *Daemon) requestDecisionFromPeers(key decisionKey, questions []acp.Decis
 // free-text Notes: the gate validates them against the question set and
 // normalizes what the client left out, and the tool renders the notes into the
 // model-facing result. Dropping or reshaping them here would silently discard
-// what the human actually said.
+// what the human actually said — TestACPDecisionRoundTrip is the guard, and
+// asserts the note the ACP peer attached reaches the tool result, not just the
+// option it selected.
 //
 // A transport error, a ctx cancellation (the request resolved elsewhere), an
 // undecodable response, or a gate rejection are all no-ops — logged at DEBUG,
@@ -1155,7 +1157,19 @@ func (d *Daemon) askPeerDecision(ctx context.Context, pr *peer, key decisionKey,
 // cleanup a successful answer implies: drop the route (closing the window
 // before the gate's resolution reaches the standing watcher) and retract the
 // outstanding ACP requests at every other peer. Both are idempotent, so the
-// resolution repeating them is a no-op.
+// resolution repeating them is a no-op. There is no ordering hazard behind the
+// word "eager": decision.Gate.Answer publishes its UpdateResolved synchronously,
+// under the same lock that removes the request, before it returns — what is
+// asynchronous is only the standing watcher's delivery of that update back here
+// as [Daemon.ResolveDecision], which is exactly the window these two close.
+//
+// Neither runs on the error path, deliberately. A rejected answer resolves
+// nothing: Gate.Answer leaves the request open so the client can correct and
+// retry (Supervisor.AnswerDecision only wraps that error), so the route and the
+// outstanding ACP requests must SURVIVE the failure. Clearing the route would
+// make the still-blocked request unanswerable — every answer path gates on
+// [Daemon.decisionRouteOpen] — and cancelling would retract the question from
+// the peers while the turn stays blocked on it.
 //
 // A supervisor that does not implement the capability — the M6 router, whose
 // sessions live in worker processes — is reported as a plain, actionable error

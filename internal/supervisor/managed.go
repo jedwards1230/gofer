@@ -357,6 +357,13 @@ func (m *managed) watchPermissions(sub *event.Subscription) {
 // host never relays — a turn blocked on a question no client is ever shown. The
 // headroom is what makes that unreachable while the watcher is briefly busy
 // inside a relay call.
+//
+// It is distinct from the CLIENT-side decision buffers (internal/tuibridge's
+// decisionBuffer, internal/wirestream's decisionSubBuffer), which size
+// subscriptions a client holds and can afford to be smaller: a client that
+// misses a prompt still gets it replayed on its next attach. This one sizes the
+// HOST's subscription to the gate itself — the one hop no replay covers, since
+// the daemon's retained payload is written from this very update.
 const decisionWatchBuffer = 64
 
 // startDecisionWatch subscribes to this session's decision gate and starts the
