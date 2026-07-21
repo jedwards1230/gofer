@@ -44,6 +44,7 @@ func TestSeatbeltContainer_CanContain(t *testing.T) {
 	}{
 		{"available + bash", lookPathHit, loop.ToolCall{Name: "bash"}, true},
 		{"available + read", lookPathHit, loop.ToolCall{Name: "read"}, true},
+		{"available + ask_user", lookPathHit, loop.ToolCall{Name: "ask_user"}, true},
 		{"available + unknown tool", lookPathHit, loop.ToolCall{Name: "unknown"}, false},
 		{"runtime absent + bash", lookPathMiss, loop.ToolCall{Name: "bash"}, false},
 	}
