@@ -36,6 +36,10 @@ type internalFakeSup struct {
 	brokers map[string]*event.Broker
 	replies []replyCall
 
+	// sessionRefs is what ListSessions answers with — the /resume picker's
+	// source list, seeded per test.
+	sessionRefs []SessionRef
+
 	// explains records every Supervisor.ExplainPermission call, and
 	// explainRationale/explainErr are what the next one answers with — both
 	// paths are needed, since ctrl+e's contract is as much about what a FAILED
@@ -92,6 +96,15 @@ func (f *internalFakeSup) Create(_ context.Context, prompt string, _ CreateOptio
 	return SessionInfo{ID: "created-1", Title: prompt, Status: StatusWorking}, nil
 }
 
+// ListSessions answers the /resume picker's list from the same fixture field
+// the golden tests seed; nil (the default) renders the honest empty state.
+func (f *internalFakeSup) ListSessions(context.Context) ([]SessionRef, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]SessionRef(nil), f.sessionRefs...), nil
+}
+
+func (f *internalFakeSup) Resume(context.Context, string, string) error    { return nil }
 func (f *internalFakeSup) Send(context.Context, string, string) error      { return nil }
 func (f *internalFakeSup) Interrupt(context.Context, string) error         { return nil }
 func (f *internalFakeSup) Kill(context.Context, string) error              { return nil }

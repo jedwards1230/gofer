@@ -41,9 +41,46 @@ type fakeSup struct {
 	// The call is still recorded in ops either way.
 	setModelErr error
 
+	// listed/listErr are what ListSessions answers with, and resumeErr what
+	// Resume returns — the /resume picker's list, its load-failure path, and
+	// the unknown-session path respectively. The Resume call is recorded in ops
+	// either way.
+	listed    []tui.SessionRef
+	listErr   error
+	resumeErr error
+	listN     int
+
 	// setEffortErr is setModelErr's effort-axis twin: what SetEffort returns,
 	// for the failed-op path. The call is still recorded in ops either way.
 	setEffortErr error
+}
+
+// createdPrompts, sentPrompts, recordedOps, and listCalls read the recorded
+// call log under the mutex — the assertion surface for tests that drive
+// Supervisor ops asynchronously (through a tea.Cmd resolved on another
+// goroutine's behalf) rather than touching the fields directly.
+func (f *fakeSup) createdPrompts() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.created...)
+}
+
+func (f *fakeSup) sentPrompts() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.sent...)
+}
+
+func (f *fakeSup) recordedOps() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.ops...)
+}
+
+func (f *fakeSup) listCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.listN
 }
 
 func newFakeSup(roster []tui.SessionInfo) *fakeSup {
@@ -79,6 +116,29 @@ func (f *fakeSup) Create(_ context.Context, prompt string, opts tui.CreateOption
 	info := tui.SessionInfo{ID: "created-1", Title: prompt, Status: tui.StatusWorking}
 	f.roster = append(f.roster, info)
 	return info, nil
+}
+
+// ListSessions returns the canned resumable-session list the /resume picker
+// renders. It is nil by default, so a test that never touches /resume sees the
+// honest "no sessions on disk" state rather than a fabricated one.
+func (f *fakeSup) ListSessions(context.Context) ([]tui.SessionRef, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.listN++
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return append([]tui.SessionRef(nil), f.listed...), nil
+}
+
+// Resume records the call (id and cwd, so a test can assert BOTH reached the
+// supervisor) and returns resumeErr — the unknown-session path /resume's error
+// reporting is built on.
+func (f *fakeSup) Resume(_ context.Context, id, cwd string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ops = append(f.ops, "resume:"+id+":"+cwd)
+	return f.resumeErr
 }
 
 func (f *fakeSup) Send(_ context.Context, id, prompt string) error {

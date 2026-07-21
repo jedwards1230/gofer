@@ -330,6 +330,12 @@ func (s *vhsSupervisor) Create(context.Context, string, tui.CreateOptions) (tui.
 	return tui.SessionInfo{}, nil
 }
 
+func (s *vhsSupervisor) ListSessions(context.Context) ([]tui.SessionRef, error) {
+	return nil, nil
+}
+
+func (s *vhsSupervisor) Resume(context.Context, string, string) error { return nil }
+
 func (s *vhsSupervisor) Send(context.Context, string, string) error { return nil }
 
 func (s *vhsSupervisor) Interrupt(context.Context, string) error { return nil }

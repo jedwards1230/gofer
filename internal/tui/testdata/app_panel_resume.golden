@@ -13,12 +13,12 @@ claude-sonnet-5 · ~/orchestration
 
 
 
+
+
 ────────────────────────────────────────────────────────────────────────────────
-Status  Config  Model  [Thinking]  Usage  Stats  Resume
+Status  Config  Model  Thinking  Usage  Stats  [Resume]
 ────────────────────────────────────────────────────────────────────────────────
-Reasoning effort for Sonnet 5:
-▸ ✓ off — no explicit level; the provider decides
-    low — least reasoning, fastest turns
-    medium — balanced reasoning
-    high — most reasoning, slowest and priciest turns
-↑/↓ to choose · Enter to select · Esc to close
+Search sessions…
+  ● wire the app root · 0192a1b2 · 2m · orchestration
+    an offline session · 0192a0c4 · 1h · elsewhere
+Type to filter · ↑/↓ to browse · Enter to resume · Esc to clear

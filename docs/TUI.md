@@ -987,12 +987,13 @@ active screen > global` — and closed by Esc, sized to whatever the active
 tab's body actually renders (`commandPanel.Height`) rather than always a
 worst-case max. Six builtins register now and open the panel on their tab —
 the M4 trio (`/status`, `/config`, `/model`), the M5 read-only pair
-(`/usage`, `/stats`), and the SDK-catch-up `/thinking`; each opened on a
-one-line placeholder body until its own step landed the real view (`/status`
-in step 2, `/config` in step 3, `/model` in step 4, `/usage` + `/stats` in the
-M5 usage-panels step, `/thinking` with `Runner.SetEffort` — all below). The
-first-rune switch the intercept is built on now carries `!` / `!!` and `@`
-beside `/` — see **Built (input prefixes)** below.
+(`/usage`, `/stats`), the SDK-catch-up `/thinking`, and `/resume`; each opened
+on a one-line placeholder body until its own step landed the real view
+(`/status` in step 2, `/config` in step 3, `/model` in step 4, `/usage` +
+`/stats` in the M5 usage-panels step, `/thinking` with `Runner.SetEffort`,
+`/resume` with the session-lifecycle commands — all below). The first-rune
+switch the intercept is built on now carries `!` / `!!` and `@` beside `/` —
+see **Built (input prefixes)** below.
 
 **Built (M4 step 2)**: `env.go` adds `CommandEnv` — the panel's read-only
 data seam: `Version`/`Cwd`/`Root` plus `Auth`/`Config` closures wrapping the
@@ -1245,6 +1246,50 @@ line ("read N files, ran M commands") the issue flags as M8 polish (needs
 per-tool-call tallying off the event stream this roster-snapshot projection
 doesn't consume).
 
+**Built (session-lifecycle commands)**: `/quit` (alias `/exit`), `/new`, and
+`/resume` — the three of the P0 session-lifecycle set the SDK can back today.
+
+`/quit` returns exactly `tea.Quit`, the same one line ctrl-c is bound to on
+every screen and over the panel; the daemon connection, the subscription, and
+the reconstruction core are owned and closed by `cmd/gofer` once the program
+returns, so there is no teardown for the command to duplicate (and no
+confirmation, which would make it more ceremonious than the key it mirrors).
+
+`/new` starts a fresh session — new id, new journal — through the same
+`Supervisor.Create` seam a prompt typed into the dispatch bar takes, and lands
+on the same `createdMsg` attach. The previous session is untouched: still
+running, still on the roster, journal intact (invariant #4). It is **not**
+`/clear`, which resets the transcript view of the session you are in and is a
+separate command. It takes no arguments and declares no `ArgHint`: every string
+is a valid prompt, so a prompt argument can never be "unusable", and
+`TestArgHintCommandsConsumeArgs` requires every hint-declaring command to reject
+an unusable argument with a danger note naming it. Stray arguments are reported
+rather than swallowed.
+
+`/resume` follows `/model`'s bare-opens-the-picker / argument-applies-directly
+shape. Bare, it opens a sixth panel tab (`resumepicker.go`) listing **every
+session on disk, live and offline alike** — the roster answers "what is running
+now", which is the wrong question for a resume picker, so the list comes from a
+new `Supervisor.ListSessions`: ACP `session/list` on the daemon path (paginated,
+every page walked) and `supervisor.List` in process. Rows are newest-first with
+a live mark, short id, relative last-active, and project directory, filtered by
+type-to-search and windowed so the highlight stays on screen. It opens on an
+explicit "Loading sessions…" line — there is no offline floor to guess from, and
+a failed listing says why rather than rendering as "no sessions". Enter resumes
+the highlighted row **into that session's own cwd**; `/resume <id>` resumes
+directly into the client's, matching what `gofer resume` sends. Both land in
+`App.resumeSession`, which skips the op entirely for a session the roster
+already holds — a redundant `session/load` replays the whole history onto the
+reconstruction broker a second time and would double the attach transcript. A
+typed id is admitted on shape alone (non-empty, usable as a single path
+component); whether it exists is the backend's answer, and an unknown one lands
+on the same `sevDanger` status line every other failed op does.
+
+The plumbing is ACP-standard, not gofer-native: `session/load` already existed
+end to end (it is how `gofer resume` reaches a daemon), so the only thing
+missing was the TUI trigger — `tui.Supervisor` gains `Resume`/`ListSessions`,
+mirrored in `internal/tuibridge` and `internal/daemonbridge`.
+
 **Built (input prefixes)**: `/` is no longer the only sigil the submit
 intercept switches on. `hasInputPrefix`/`App.dispatchInput` (shell.go) are the
 single first-rune switch **both** text-entry surfaces route through, so a
@@ -1280,8 +1325,16 @@ input — and it is **leading-only**, so `that worked!` and
   it with its own file tools if it wants more. The trigger is a token
   boundary, so an email address never opens the popup.
 
-- **P0**: `/new` · `/quit` · `/resume` (picker) · `/compact [instructions]`
-  (block-if-busy) · `/yolo` permission-mode toggle (dual-bound command +
+- **P0**: `/compact [instructions]` (block-if-busy) — **blocked on the SDK**: `v0.17.0`
+  ships the `session.compact` op and `session.compacted` event as data types and
+  a `session.NewCompactionEntry` journal entry, but no way for an embedder to
+  TRIGGER compaction. There is no `Runner.Compact`, no compaction option on
+  `runner.Options` or the loop, and `Runner` keeps its `*session.Journal`
+  unexported with no accessor — so gofer cannot summarize-and-append without
+  reaching around the contract (invariant #1). Unblocked by a runner-level
+  entrypoint, e.g. `func (r *Runner) Compact(ctx context.Context, instructions
+  string) error` that folds the history, appends the compaction entry, and emits
+  `session.compacted`. · `/yolo` permission-mode toggle (dual-bound command +
   key; ships before autonomous tool use) · `/help` rendered from the live
   keymap.
 - **P1**: `/init` (first-run project context) · `/fork` · `/tree` ·
