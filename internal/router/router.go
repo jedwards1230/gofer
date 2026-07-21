@@ -285,6 +285,17 @@ type Supervisor struct {
 	workers map[string]*workerHandle
 	closed  bool
 
+	// resuming records the offline session ids with an in-flight
+	// [Supervisor.Resume] spawn, so a second concurrent resume of the SAME id
+	// does not fork a second worker. Two workers keyed by one <uuid> would
+	// collide on the session's non-blocking <uuid>.lock/socket (the loser exits
+	// at once), and the loser's cleanup would GC the WINNER's endpoint file — so
+	// this guard is what keeps a concurrent double-resume from stranding the
+	// live session's adoption artifacts. Guarded by mu; the entry is held for the
+	// whole spawn→load→register and dropped by finishResume. Create needs no such
+	// guard: every Create draws a FRESH uuid, so two Creates never share an id.
+	resuming map[string]struct{}
+
 	// pending counts admitted-but-not-yet-registered spawns, so the MaxWorkers
 	// cap covers workers that are mid-fork/handshake and not yet in workers.
 	// Without it the cap would be a plain TOCTOU check — and unlike the daemon's
@@ -387,6 +398,7 @@ func New(cfg Config) (*Supervisor, error) {
 		newWorkerCmd: cfg.NewWorkerCmd,
 		maxWorkers:   maxWorkers,
 		workers:      make(map[string]*workerHandle),
+		resuming:     make(map[string]struct{}),
 		reaperStop:   make(chan struct{}),
 	}
 
@@ -440,92 +452,23 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts supervisor.
 	// session id (design Option A).
 	sessionID := uuid.Must(uuid.NewV7()).String()
 
-	// The worker writes its per-session runtime files (socket/endpoint/lock)
-	// under the workers dir; its stdout+stderr go to a per-worker log file
-	// there. Create the dir so SpawnDetached can open the log.
-	workersDir, err := daemon.WorkersDir()
+	// Bring the worker up: spawn detached, discover + dial its endpoint, and
+	// complete the gofer/hello handshake. This is the shared bring-up
+	// [Supervisor.Resume] reuses (see spawnWorker); Create and Resume diverge only
+	// on how they seed the worker afterwards — session/new here, session/load
+	// there. On any failure spawnWorker has already torn down whatever it started,
+	// so there is nothing to clean up on this early return; the central `defer {
+	// if reserved { releaseSlot() } }` above returns the admission slot.
+	sw, err := s.spawnWorker(ctx, sessionID, model, opts.Cwd)
 	if err != nil {
 		return supervisor.SessionInfo{}, fmt.Errorf("router: create: %w", err)
 	}
-	if err := os.MkdirAll(workersDir, 0o700); err != nil {
-		return supervisor.SessionInfo{}, fmt.Errorf("router: create: create workers dir: %w", err)
-	}
-	logPath := filepath.Join(workersDir, sessionID+".log")
-
-	// Spawn detached (Setsid): the worker outlives a router restart (design §3).
-	// context.Background, not a Close-cancelled context — a detached worker must
-	// NOT be torn down when the router shuts down.
-	cmd := s.buildWorkerCmd(context.Background(), sessionID, model, opts.Cwd)
-	pid, err := daemon.SpawnDetached(cmd, logPath)
-	if err != nil {
-		return supervisor.SessionInfo{}, fmt.Errorf("router: create: spawn worker: %w", err)
-	}
-	// From here the process is live and MUST be reaped on any failure path.
-	// daemon.Reap is the SOLE owner of cmd.Wait; terminate drains it.
-	waitCh := daemon.Reap(cmd)
-
-	// Discover the worker by POLLING its endpoint file (the uuid we generated
-	// keys it), which the worker writes atomically just before it serves — the
-	// same mechanism the adoption slice will use, so both discovery paths
-	// converge on one structured artifact. The worker's stdout handshake line is
-	// kept as an informational log artifact, not parsed here.
-	readyCtx, readyCancel := context.WithTimeout(ctx, workerSpawnTimeout)
-	ep, exited, err := waitForWorkerEndpoint(readyCtx, sessionID, waitCh)
-	readyCancel()
-	if err != nil {
-		// If the worker already exited, waitForWorkerEndpoint consumed its wait
-		// result — do NOT terminate (a second drain would block forever) — but
-		// still sweep any endpoint/socket a wedged-then-dead worker left behind.
-		if exited {
-			removeWorkerArtifacts(sessionID)
-		} else {
-			cleanupSpawnedWorker(sessionID, cmd, waitCh)
-		}
-		return supervisor.SessionInfo{}, fmt.Errorf("router: create: await worker endpoint: %w", err)
-	}
-
-	dialCtx, dialCancel := context.WithTimeout(ctx, workerDialTimeout)
-	client, err := daemon.Dial(dialCtx, ep.Addr, "")
-	dialCancel()
-	if err != nil {
-		cleanupSpawnedWorker(sessionID, cmd, waitCh)
-		return supervisor.SessionInfo{}, fmt.Errorf("router: create: dial worker %s: %w", ep.Addr, err)
-	}
-
-	// Authoritative version handshake, immediately after the dial — symmetric
-	// with the adopt path (see adoptWorker) so BOTH ways a handle comes into
-	// existence record the same authoritative versions rather than trusting the
-	// endpoint file's pre-dial hint. A worker we just spawned from our own
-	// executable should never fail this, so a failure is a genuine startup
-	// fault: tear the worker down rather than register a handle whose versions
-	// are unknown.
-	//
-	// Reservation accounting: this is a NEW early return between admit() and
-	// registration. It deliberately does NOT release the slot itself — the
-	// central `defer { if reserved { releaseSlot() } }` above covers every such
-	// return (and a panic), which is what makes the release exactly-once. A
-	// manual releaseSlot here would decrement pending twice and over-admit past
-	// MaxWorkers forever.
-	//
-	// The hello WRITE runs under an owned context, not the creating peer's (see
-	// [wireCallCtx]). The borrow is less dangerous here than on an established
-	// handle — this connection is new and owned by the Create that is failing —
-	// but leaving it would invite the next reader to copy the pattern onto a
-	// shared link, so both of Create's wire calls use the same owned bound.
-	helloCtx, helloCancel := wireCallCtx()
-	hello, err := client.Hello(helloCtx)
-	helloCancel()
-	if err != nil {
-		_ = client.Close()
-		cleanupSpawnedWorker(sessionID, cmd, waitCh)
-		return supervisor.SessionInfo{}, fmt.Errorf("router: create: gofer/hello on worker: %w", err)
-	}
-	skew := s.classifyWorker(sessionID, hello)
 
 	// The sink is installed at CONSTRUCTION (wirestream starts its demuxer inside
 	// New, so a later setter would race it) and re-fans every reconstructed event
-	// to this daemon's clients, verbatim — see [Supervisor.eventSink].
-	rec := wirestream.New(client, wirestream.WithEventSink(s.eventSink(sessionID)))
+	// to this daemon's clients, verbatim — see [Supervisor.eventSink]. Create
+	// never replays history (RegisterFresh below), so it needs no replay guard.
+	rec := wirestream.New(sw.client, wirestream.WithEventSink(s.eventSink(sessionID, nil)))
 
 	// Bound the session/new Call like every other router→worker control RPC
 	// (see methods.go): a worker that dialed but then wedged before answering
@@ -534,17 +477,17 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts supervisor.
 	// to contain. The bound is OWNED, not derived from the creating peer's ctx
 	// (see [wireCallCtx]).
 	newCtx, newCancel := wireCallCtx()
-	raw, err := client.Call(newCtx, acp.MethodSessionNew, acp.NewSessionRequest{Cwd: opts.Cwd, Model: model})
+	raw, err := sw.client.Call(newCtx, acp.MethodSessionNew, acp.NewSessionRequest{Cwd: opts.Cwd, Model: model})
 	newCancel()
 	if err != nil {
 		_ = rec.Close()
-		cleanupSpawnedWorker(sessionID, cmd, waitCh)
+		cleanupSpawnedWorker(sessionID, sw.cmd, sw.wait)
 		return supervisor.SessionInfo{}, fmt.Errorf("router: create: session/new on worker: %w", err)
 	}
 	var resp acp.NewSessionResponse
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		_ = rec.Close()
-		cleanupSpawnedWorker(sessionID, cmd, waitCh)
+		cleanupSpawnedWorker(sessionID, sw.cmd, sw.wait)
 		return supervisor.SessionInfo{}, fmt.Errorf("router: create: decode %s response: %w", acp.MethodSessionNew, err)
 	}
 	// The worker MUST echo the pinned uuid as its session id (design Option A).
@@ -553,7 +496,7 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts supervisor.
 	// keyed by — fail loudly rather than silently desync.
 	if resp.SessionID != sessionID {
 		_ = rec.Close()
-		cleanupSpawnedWorker(sessionID, cmd, waitCh)
+		cleanupSpawnedWorker(sessionID, sw.cmd, sw.wait)
 		return supervisor.SessionInfo{}, fmt.Errorf("router: create: worker session id %q != pinned %q", resp.SessionID, sessionID)
 	}
 
@@ -563,27 +506,15 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts supervisor.
 	// contract). RegisterFresh keeps the create/prompt path clean.
 	rec.RegisterFresh(sessionID)
 
-	h := newWorkerHandle(sessionID, cmd, client, rec, pid, waitCh, hello, skew)
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
+	h := newWorkerHandle(sessionID, sw.cmd, sw.client, rec, sw.pid, sw.wait, sw.hello, sw.skew)
+	if registered, _ := s.registerWorker(h); !registered {
+		// A closed router is the only way registration fails for Create (the id is
+		// a fresh uuid, so it can never collide with a live handle).
 		_ = rec.Close()
-		cleanupSpawnedWorker(sessionID, cmd, waitCh)
+		cleanupSpawnedWorker(sessionID, sw.cmd, sw.wait)
 		return supervisor.SessionInfo{}, fmt.Errorf("router: create: %w", ErrNotLive)
 	}
-	s.workers[sessionID] = h
-	// The reservation becomes a live handle under the SAME lock it was taken
-	// under, so a concurrent admit never sees the slot double-counted (pending +
-	// workers) nor momentarily free.
-	s.pending--
 	reserved = false
-	s.reapWG.Add(1)
-	s.watcherWG.Add(1)
-	s.mu.Unlock()
-	// Both started AFTER releasing mu, so neither can deadlock against a
-	// registry operation it triggers.
-	go s.reap(h)
-	go s.watchSession(h)
 
 	if prompt != "" {
 		// Send ignores its ctx by design (wirestream contract); the turn outlives
@@ -591,7 +522,7 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts supervisor.
 		_ = rec.Send(ctx, sessionID, prompt)
 	}
 
-	s.log.Info("worker spawned", "session", sessionID, "addr", ep.Addr, "pid", pid)
+	s.log.Info("worker spawned", "session", sessionID, "addr", sw.ep.Addr, "pid", sw.pid)
 	now := time.Now()
 	status := supervisor.StatusNeedsInput
 	if prompt != "" {
@@ -605,7 +536,7 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts supervisor.
 		Created:       now,
 		Updated:       now,
 		Live:          true,
-		BinaryVersion: hello.BinaryVersion,
+		BinaryVersion: sw.hello.BinaryVersion,
 	}, nil
 }
 
@@ -627,6 +558,146 @@ func (s *Supervisor) buildWorkerCmd(ctx context.Context, sessionID, model, cwd s
 		cmd.Dir = cwd
 	}
 	return cmd
+}
+
+// spawnedWorker is a freshly brought-up worker: its process, the dialed client
+// connection, its [daemon.Reap] channel, and the authoritative handshake result.
+// It is the shared output of [Supervisor.spawnWorker] that both [Supervisor.Create]
+// and [Supervisor.Resume] wrap in a [wirestream.Reconstructor] and register.
+type spawnedWorker struct {
+	cmd    *exec.Cmd
+	client *daemon.Client
+	wait   <-chan error
+	pid    int
+	ep     daemon.WorkerEndpoint
+	hello  daemon.HelloResult
+	skew   skewClass
+}
+
+// spawnWorker forks a DETACHED `gofer session-worker` for sessionID, discovers it
+// by polling its endpoint file, dials it, and completes the authoritative
+// gofer/hello handshake — the bring-up shared by [Supervisor.Create] (which then
+// issues session/new) and [Supervisor.Resume] (which then issues session/load).
+// It is a pure extraction of what Create used to do inline; the behavior is
+// unchanged.
+//
+// It owns cleanup of everything it starts: on any failure the worker process is
+// reaped, its endpoint/socket residue is swept, and the connection (if dialed) is
+// closed, so the caller's failure path has nothing to unwind — it just wraps and
+// returns the error. On success the caller takes ownership of sw.cmd/sw.wait/
+// sw.client and MUST reap them (via registration, or cleanupSpawnedWorker on a
+// later failure).
+//
+// context.Background for the spawn (not ctx): a detached worker must NOT be torn
+// down when the router shuts down (design §3). ctx still bounds the endpoint wait
+// and the dial, so a caller that gives up stops WAITING without killing a worker
+// that may yet come up.
+func (s *Supervisor) spawnWorker(ctx context.Context, sessionID, model, cwd string) (spawnedWorker, error) {
+	// The worker writes its per-session runtime files (socket/endpoint/lock)
+	// under the workers dir; its stdout+stderr go to a per-worker log file there.
+	// Create the dir so SpawnDetached can open the log.
+	workersDir, err := daemon.WorkersDir()
+	if err != nil {
+		return spawnedWorker{}, err
+	}
+	if err := os.MkdirAll(workersDir, 0o700); err != nil {
+		return spawnedWorker{}, fmt.Errorf("create workers dir: %w", err)
+	}
+	logPath := filepath.Join(workersDir, sessionID+".log")
+
+	// Spawn detached (Setsid): the worker outlives a router restart (design §3).
+	cmd := s.buildWorkerCmd(context.Background(), sessionID, model, cwd)
+	pid, err := daemon.SpawnDetached(cmd, logPath)
+	if err != nil {
+		return spawnedWorker{}, fmt.Errorf("spawn worker: %w", err)
+	}
+	// From here the process is live and MUST be reaped on any failure path.
+	// daemon.Reap is the SOLE owner of cmd.Wait; terminate drains it.
+	waitCh := daemon.Reap(cmd)
+
+	// Discover the worker by POLLING its endpoint file (the uuid keys it), which
+	// the worker writes atomically just before it serves — the same mechanism
+	// adoption reuses, so both discovery paths converge on one structured
+	// artifact. The worker's stdout handshake line is kept as an informational log
+	// artifact, not parsed here.
+	readyCtx, readyCancel := context.WithTimeout(ctx, workerSpawnTimeout)
+	ep, exited, err := waitForWorkerEndpoint(readyCtx, sessionID, waitCh)
+	readyCancel()
+	if err != nil {
+		// If the worker already exited, waitForWorkerEndpoint consumed its wait
+		// result — do NOT terminate (a second drain would block forever) — but
+		// still sweep any endpoint/socket a wedged-then-dead worker left behind.
+		if exited {
+			removeWorkerArtifacts(sessionID)
+		} else {
+			cleanupSpawnedWorker(sessionID, cmd, waitCh)
+		}
+		return spawnedWorker{}, fmt.Errorf("await worker endpoint: %w", err)
+	}
+
+	dialCtx, dialCancel := context.WithTimeout(ctx, workerDialTimeout)
+	client, err := daemon.Dial(dialCtx, ep.Addr, "")
+	dialCancel()
+	if err != nil {
+		cleanupSpawnedWorker(sessionID, cmd, waitCh)
+		return spawnedWorker{}, fmt.Errorf("dial worker %s: %w", ep.Addr, err)
+	}
+
+	// Authoritative version handshake, immediately after the dial — symmetric
+	// with the adopt path (see adoptWorker) so every way a handle comes into
+	// existence records the same authoritative versions rather than trusting the
+	// endpoint file's pre-dial hint. A worker we just spawned from our own
+	// executable should never fail this, so a failure is a genuine startup fault:
+	// tear the worker down rather than hand back a connection whose versions are
+	// unknown.
+	//
+	// The hello WRITE runs under an owned context, not a caller's peer ctx (see
+	// [wireCallCtx]).
+	helloCtx, helloCancel := wireCallCtx()
+	hello, err := client.Hello(helloCtx)
+	helloCancel()
+	if err != nil {
+		_ = client.Close()
+		cleanupSpawnedWorker(sessionID, cmd, waitCh)
+		return spawnedWorker{}, fmt.Errorf("gofer/hello on worker: %w", err)
+	}
+
+	return spawnedWorker{
+		cmd:    cmd,
+		client: client,
+		wait:   waitCh,
+		pid:    pid,
+		ep:     ep,
+		hello:  hello,
+		skew:   s.classifyWorker(sessionID, hello),
+	}, nil
+}
+
+// registerWorker installs a freshly brought-up handle into the live set,
+// converting the admission reservation into a live handle and starting its reaper
+// + watcher goroutines. It returns registered=false, closed=true on a closed
+// router (the caller tears the worker down). Both [Supervisor.Create] and
+// [Supervisor.Resume] go through here so the reservation→handle handoff stays
+// identical on both paths.
+//
+// The reservation (pending--) is consumed under the SAME lock as the workers
+// insert, so a concurrent admit never sees the slot double-counted (pending +
+// workers) nor momentarily free. The two goroutines start AFTER releasing mu, so
+// neither can deadlock against a registry operation it triggers.
+func (s *Supervisor) registerWorker(h *workerHandle) (registered, closed bool) {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return false, true
+	}
+	s.workers[h.id] = h
+	s.pending--
+	s.reapWG.Add(1)
+	s.watcherWG.Add(1)
+	s.mu.Unlock()
+	go s.reap(h)
+	go s.watchSession(h)
+	return true, false
 }
 
 // Poll cadence for [waitForWorkerEndpoint]'s endpoint-file discovery: a TIGHT
@@ -915,17 +986,25 @@ func (s *Supervisor) releaseSlot() {
 // nil relay is ignored; events observed before it is set are simply not relayed
 // (no client is attached yet at that point — the daemon is not serving).
 //
-// # Invariant: no [wirestream.Reconstructor.Load] after this call
+// # Invariant: a [wirestream.Reconstructor.Load] after this call must suppress the sink
 //
 // The sink fires for every gofer/event a core reconstructs, and a Load REPLAYS
 // a session's settled history through that same path. Loading a session after
 // the relay is installed would therefore re-broadcast its history to attached
 // clients as if it were live — a duplicated transcript, not merely a noisy one.
-// The router honors this by construction: the only Load it performs is
-// adoption's, inside [New], which runs to completion before the daemon that
-// injects this relay even exists. Any future Load (Phase 4's resume-spawns-a-
-// worker path is the obvious candidate) must either run before this call or
-// suppress the sink for the duration of its replay.
+//
+// Two Loads exist, and each honors the invariant differently:
+//
+//   - ADOPTION's Load runs inside [New], to completion, BEFORE the daemon that
+//     injects this relay is even constructed — so the relay is not yet installed
+//     and the sink relays nothing. The ordering holds by construction.
+//   - RESUME's Load ([Supervisor.Resume] spawning a fresh worker for an offline
+//     session) runs WHILE serving, with the relay already installed and a client
+//     driving the resume — so it cannot run before this call. It instead
+//     SUPPRESSES the sink for the duration of its replay, via a per-resume guard
+//     the sink consults ([Supervisor.eventSink]'s replaySuppressed). The resuming
+//     client still gets exactly one history replay, from the daemon's own
+//     handleSessionLoad History replay.
 func (s *Supervisor) SetEventRelay(relay daemon.EventRelay) {
 	if relay == nil {
 		return
@@ -959,9 +1038,24 @@ func (s *Supervisor) eventRelayFor() daemon.EventRelay {
 // A frame whose session id is not this handle's is dropped: a worker hosts
 // exactly one session, so anything else is protocol drift, and forwarding it
 // would inject events into an unrelated session's client fan-out.
-func (s *Supervisor) eventSink(sessionID string) wirestream.EventSink {
+//
+// # replaySuppressed: the resume-replay gate
+//
+// replaySuppressed, when non-nil and set, DROPS every frame — the guard
+// [Supervisor.Resume] holds while a freshly spawned worker replays its journal as
+// gofer/event frames. That replay is history, not live events: the resuming
+// client's own [Supervisor.History] replay (in the daemon's handleSessionLoad)
+// delivers the transcript once, so re-broadcasting the same frames through this
+// sink would DOUBLE it for every already-attached peer. Create and adopt pass a
+// nil guard (Create never replays; adopt runs before the relay exists), so their
+// sink is never gated. See [Supervisor.Resume] for the guard's lifetime and why
+// clearing it after the load settles has no lost-event race.
+func (s *Supervisor) eventSink(sessionID string, replaySuppressed *atomic.Bool) wirestream.EventSink {
 	return func(evSessionID string, raw json.RawMessage, ev event.Event) {
 		if evSessionID != sessionID {
+			return
+		}
+		if replaySuppressed != nil && replaySuppressed.Load() {
 			return
 		}
 		relay := s.eventRelayFor()

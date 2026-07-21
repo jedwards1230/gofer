@@ -100,9 +100,10 @@
 //     an older worker just runs another turn on that binary; that is not a
 //     hazard, it is SESSION PINNING — the isolation property M6 exists to sell.
 //     A session stays on the binary it started on until it ends; new sessions
-//     get the new binary. Phase 4 flips this to refuse-and-migrate once
-//     [Supervisor.Resume] can spawn a fresh worker to take an offline session
-//     over.
+//     get the new binary. A later refuse-and-migrate policy will flip this to
+//     move an old-binary session onto a fresh worker on its next prompt;
+//     [Supervisor.Resume] already spawns a fresh worker for an OFFLINE session,
+//     which is the mechanism that migration will build on.
 //   - UNKNOWN (exactly one side identified its binary — e.g. a worker predating
 //     the version-reporting wiring) — treated as BINARY skew: surfaced, not
 //     refused. Refusing would brick every worker built before this slice.
@@ -233,22 +234,40 @@
 // [Supervisor.Reply] and the worker's gate. So a turn blocked mid-approval
 // survives a router restart end to end.
 //
+// # Resume: live attach vs offline spawn (§8)
+//
+// [Supervisor.Resume] serves session/load two ways. For a session this router
+// already hosts LIVE (adopted or created) it returns the live snapshot — the §7
+// attach path above. For an OFFLINE id — a journal on disk with no live worker
+// (it crashed, was killed, or a restart could not adopt it) — it SPAWNS a fresh
+// worker (the same [Supervisor.spawnWorker] bring-up Create uses) and rebuilds it
+// from the journal by issuing session/load on the worker. A genuinely unknown id
+// (no live handle, no journal) returns a [session.ErrSessionNotFound]-wrapped
+// error rather than spawning over nothing.
+//
+// The offline replay must NOT reach clients: the worker replays its journal as
+// gofer/event frames, and re-broadcasting them through the event sink would
+// double the transcript for an already-attached peer (the daemon's own
+// handleSessionLoad replays the History to the resuming client once). Resume
+// SUPPRESSES the sink for the duration of the replay via a per-resume guard the
+// sink consults, cleared only after [wirestream.Reconstructor.Load] reports the
+// replay fully settled — see [Supervisor.resumeOffline] for the guard's
+// lost-event-free ordering argument, and [Supervisor.SetEventRelay] for how the
+// two Loads (adoption's and resume's) each honor the no-double-broadcast
+// invariant.
+//
 // # Deliberate cuts for this slice (documented, not oversights)
 //
 //   - Refusing a PROMPT on BINARY skew — which design §6's prose describes as
 //     "the next prompt waits for a fresh worker" — is deliberately NOT
-//     implemented, and the wire-mismatch case above is the only refusal. The
-//     doc's wording presupposes machinery that does not exist yet: with
-//     [Supervisor.Resume] returning [ErrResumeUnsupported] for anything without
-//     a live handle, there is no way to spawn a fresh worker to take an
-//     old-binary session over, so refusing its prompts would strand every LIVE
-//     session permanently on every daemon upgrade. Refuse-and-migrate lands in
-//     Phase 4 together with the resume-spawns-a-worker path that makes it
-//     survivable.
-//   - [Supervisor.Resume] attaches to a session this router already hosts LIVE
-//     (returning its snapshot, the §7 attach path above) but returns
-//     [ErrResumeUnsupported] for an OFFLINE id: spawning a fresh worker for an
-//     offline/old-binary session is Phase 4.
+//     implemented, and the wire-mismatch case above is the only refusal.
+//     Refuse-and-migrate needs to MOVE a live old-binary session onto a fresh
+//     worker on its next prompt; [Supervisor.Resume] can now spawn a worker for an
+//     OFFLINE session, but the drain-and-migrate of a still-LIVE one (interrupt
+//     the old worker, hand the turn to a new one) is not wired, so refusing an
+//     old-binary session's prompts would still strand it. The migration policy is
+//     the remaining follow-up; the resume-spawns-a-worker mechanism it will build
+//     on is in place.
 //   - Asking a pure-ACP peer (a phone, via session/request_permission) to answer
 //     a RE-SURFACED permission on an adopted session is Phase 3: the standing
 //     watcher fans the gofer-native notification (serving the TUI/daemonbridge)
