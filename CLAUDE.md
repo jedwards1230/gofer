@@ -80,6 +80,10 @@ go run ./cmd/gofer demo                            # offline faux-provider strea
   (M4). See its package doc.
 - `internal/sandbox/` — OS containment backends (seatbelt / bwrap+seccomp)
   behind the SDK's permission guard.
+- `internal/decision/` — gofer's structured-decision round trip: the
+  `ask_user` tool (gofer's first tool of its own) plus the per-session `Gate`
+  it blocks on, carrying `acp` decision types over a gofer-native transport
+  because the SDK's Event union has no decision kind. A leaf over the SDK.
 - `internal/telemetry/` — OpenTelemetry (traces/metrics/log-correlation) off
   the Event/Op stream; the only otel importer.
 - `internal/router/` — the M6 thin router daemon: roster aggregation, client

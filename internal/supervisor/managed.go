@@ -10,6 +10,8 @@ import (
 
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/loop"
+
+	"github.com/jedwards1230/gofer/internal/decision"
 )
 
 // managed is one live session's supervisor-side bookkeeping: the Session it
@@ -51,6 +53,11 @@ type managed struct {
 	// [Supervisor.Reply] routes a human's inbound reply into it. One per session,
 	// never nil.
 	gate *loop.Gate
+	// decisions is this session's structured-decision Gate: its ask_user tool
+	// blocks on it, [Supervisor.SubscribeDecisions] watches it, and
+	// [Supervisor.AnswerDecision] resolves through it. One per session, never
+	// nil, and — like gate — immutable after construction, so it needs no lock.
+	decisions *decision.Gate
 	// permDone is closed by the watchPermissions goroutine when it returns, so
 	// stop joins it alongside the pump — leaving no subscription goroutine
 	// behind on shutdown.
@@ -115,7 +122,7 @@ type managed struct {
 // join later. Calling it here, rather than after publish, closes the race
 // where a concurrent Kill/Archive could otherwise observe a live session
 // with no teardown stashed yet (see Config.OnRegister's doc).
-func newManaged(sess Session, model string, now time.Time, clock func() time.Time, notify func(), cwd string, gate *loop.Gate, onRegister func(sess Session) (stop func())) *managed {
+func newManaged(sess Session, model string, now time.Time, clock func() time.Time, notify func(), cwd string, gate *loop.Gate, decisions *decision.Gate, onRegister func(sess Session) (stop func())) *managed {
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &managed{
 		sess:       sess,
@@ -131,6 +138,7 @@ func newManaged(sess Session, model string, now time.Time, clock func() time.Tim
 		baseCancel: cancel,
 		done:       make(chan struct{}),
 		gate:       gate,
+		decisions:  decisions,
 		permDone:   make(chan struct{}),
 		submitCh:   make(chan struct{}, 1),
 		state:      stateIdle,

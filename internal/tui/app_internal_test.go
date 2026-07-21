@@ -10,6 +10,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -17,10 +18,12 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/jedwards1230/agent-sdk-go/acp"
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
 	"github.com/jedwards1230/gofer/internal/config"
+	"github.com/jedwards1230/gofer/internal/decision"
 	"github.com/jedwards1230/gofer/internal/tui/testkit"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
@@ -33,6 +36,20 @@ type internalFakeSup struct {
 	roster  []SessionInfo
 	brokers map[string]*event.Broker
 	replies []replyCall
+	// gates are real per-session decision.Gates, so a test can open a genuine
+	// ask_user request against one and watch it travel App's decision pump —
+	// the same reason brokers above are real event.Brokers rather than canned
+	// responses.
+	gates   map[string]*decision.Gate
+	answers []answerCall
+}
+
+// answerCall records one Supervisor.AnswerDecision invocation for the
+// decision prompt's behavioral tests to assert against.
+type answerCall struct {
+	sessionID string
+	requestID string
+	answers   []acp.DecisionAnswer
 }
 
 // replyCall records one Supervisor.Reply invocation for the approval
@@ -45,7 +62,24 @@ type replyCall struct {
 }
 
 func newInternalFakeSup(roster []SessionInfo) *internalFakeSup {
-	return &internalFakeSup{roster: roster, brokers: map[string]*event.Broker{}}
+	return &internalFakeSup{
+		roster:  roster,
+		brokers: map[string]*event.Broker{},
+		gates:   map[string]*decision.Gate{},
+	}
+}
+
+// gate returns id's decision gate, creating it on first use — the decision-side
+// twin of broker below.
+func (f *internalFakeSup) gate(id string) *decision.Gate {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	g, ok := f.gates[id]
+	if !ok {
+		g = decision.NewGate(id)
+		f.gates[id] = g
+	}
+	return g
 }
 
 func (f *internalFakeSup) broker(id string) *event.Broker {
@@ -83,6 +117,24 @@ func (f *internalFakeSup) Reply(_ context.Context, sessionID, id string, allow, 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.replies = append(f.replies, replyCall{sessionID: sessionID, id: id, allow: allow, remember: remember})
+	return nil
+}
+
+func (f *internalFakeSup) Decisions(_ context.Context, id string) (*decision.Subscription, error) {
+	return f.gate(id).Subscribe(8), nil
+}
+
+// AnswerDecision records the call AND routes it to the real gate, so a test
+// asserting on what the TUI sent and a test driving a real blocked ask_user
+// call both work against the same fake.
+func (f *internalFakeSup) AnswerDecision(_ context.Context, sessionID, requestID string, answers []acp.DecisionAnswer) error {
+	g := f.gate(sessionID)
+	f.mu.Lock()
+	f.answers = append(f.answers, answerCall{sessionID: sessionID, requestID: requestID, answers: answers})
+	f.mu.Unlock()
+	if err := g.Answer(requestID, answers); err != nil && !errors.Is(err, decision.ErrUnknownRequest) {
+		return err
+	}
 	return nil
 }
 

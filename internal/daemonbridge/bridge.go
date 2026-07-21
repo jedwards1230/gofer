@@ -3,6 +3,7 @@ package daemonbridge
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/event"
 
 	"github.com/jedwards1230/gofer/internal/daemon"
+	"github.com/jedwards1230/gofer/internal/decision"
 	"github.com/jedwards1230/gofer/internal/tui"
 	"github.com/jedwards1230/gofer/internal/wirestream"
 )
@@ -328,4 +330,39 @@ func (s *Supervisor) Reply(ctx context.Context, sessionID, id string, allow, rem
 		return fmt.Errorf("daemonbridge: reply %s (session %s): %w", id, sessionID, err)
 	}
 	return nil
+}
+
+// ErrDecisionsUnsupported reports that the daemon-backed path cannot carry a
+// structured decision yet. The relay — a gofer/decision_requested notification
+// out of the daemon and a decision.answer op back in, mirroring the permission
+// pair above — is the follow-up PR for #173; this build ships the in-process
+// (internal/tuibridge) path only.
+var ErrDecisionsUnsupported = errors.New("daemonbridge: structured decisions require the daemon relay (follow-up PR for #173)")
+
+// Decisions returns an already-closed subscription: a daemon-backed session's
+// decision requests do not reach a client until the relay lands (see
+// [ErrDecisionsUnsupported]). Closed rather than merely idle, and nil rather
+// than an error, on purpose — the TUI's pump treats a closed channel as "this
+// stream is over" and stops re-arming, so a daemon-backed attach costs one
+// subscribe and nothing else, while returning an error here would surface a
+// failure banner for a feature the user never invoked.
+//
+// It is a real [decision.Subscription] over a throwaway gate rather than a
+// hand-rolled zero value: Close is what closes C, and going through the gate
+// keeps this stub honest against the package's actual lifecycle.
+func (s *Supervisor) Decisions(ctx context.Context, _ string) (*decision.Subscription, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	sub := decision.NewGate("").Subscribe(0)
+	sub.Close()
+	return sub, nil
+}
+
+// AnswerDecision always fails with [ErrDecisionsUnsupported]: with no relay
+// there is no gate on the far side to route an answer to. It reports that
+// plainly rather than returning nil — a silent success would let a client
+// believe an agent turn had been unblocked when it is still waiting.
+func (s *Supervisor) AnswerDecision(context.Context, string, string, []acp.DecisionAnswer) error {
+	return ErrDecisionsUnsupported
 }

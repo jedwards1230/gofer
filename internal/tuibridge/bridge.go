@@ -15,8 +15,10 @@ package tuibridge
 import (
 	"context"
 
+	"github.com/jedwards1230/agent-sdk-go/acp"
 	"github.com/jedwards1230/agent-sdk-go/event"
 
+	"github.com/jedwards1230/gofer/internal/decision"
 	"github.com/jedwards1230/gofer/internal/supervisor"
 	"github.com/jedwards1230/gofer/internal/tui"
 )
@@ -135,6 +137,32 @@ func (a Adapter) Reply(_ context.Context, sessionID, id string, allow, remember 
 		verdict = event.VerdictAllow
 	}
 	return a.sup.Reply(sessionID, event.PermissionReply{ID: id, Verdict: verdict, Remember: remember})
+}
+
+// decisionBuffer sizes the decision subscription this adapter hands the TUI.
+// A session has one outstanding decision at a time in practice, so the buffer
+// exists only to absorb a burst while the TUI is mid-frame; the gate drops
+// (and counts) rather than blocking when it fills, so an over-small buffer
+// would cost a missed prompt, not a wedged turn.
+const decisionBuffer = 8
+
+// Decisions subscribes to sessionID's open structured-decision requests
+// straight through the supervisor's own gate — the in-process path shares
+// memory with it, so no reconstruction is needed (contrast
+// internal/daemonbridge). ctx is accepted to satisfy [tui.Supervisor]; the
+// subscribe itself is an in-memory registration with nothing to cancel, and
+// the returned subscription's lifetime is the caller's (Close it).
+func (a Adapter) Decisions(_ context.Context, sessionID string) (*decision.Subscription, error) {
+	return a.sup.SubscribeDecisions(sessionID, decisionBuffer)
+}
+
+// AnswerDecision resolves an outstanding decision request by routing to the
+// supervisor's own AnswerDecision, which validates the answers against the
+// request and unblocks the ask_user tool call waiting on it. As with [Reply],
+// ctx is accepted for interface conformance only — the call is synchronous
+// in-memory routing.
+func (a Adapter) AnswerDecision(_ context.Context, sessionID, requestID string, answers []acp.DecisionAnswer) error {
+	return a.sup.AnswerDecision(sessionID, requestID, answers)
 }
 
 // toTUI copies the fields the TUI renders from a supervisor snapshot. The

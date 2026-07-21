@@ -31,8 +31,16 @@ const containedBashMaxTimeout = 600_000 * time.Millisecond
 // Only bash's execution is wrapped: Specs() is untouched, so the model still
 // sees the same bash name, description, and JSON schema the plain builtin
 // advertises.
-func WrapRegistry(cwd string, c Container) loop.ToolRegistry {
-	base := loop.FromRegistry(tool.NewRegistry(tool.Builtins(cwd)...))
+//
+// extra are gofer's OWN tools, registered alongside the builtins — they appear
+// in Specs() and resolve through Get exactly as a builtin does, and they are
+// never sandbox-wrapped (only bash is). It is the seam gofer-authored tools
+// like internal/decision's ask_user enter the session's tool surface through.
+// A name colliding with a builtin panics, matching tool.NewRegistry: the tool
+// set is fixed at wiring time, so a collision is a build-the-supervisor bug, not
+// a runtime condition.
+func WrapRegistry(cwd string, c Container, extra ...tool.Tool) loop.ToolRegistry {
+	base := loop.FromRegistry(tool.NewRegistry(append(tool.Builtins(cwd), extra...)...))
 	if c == nil || !c.Available() {
 		return base
 	}
