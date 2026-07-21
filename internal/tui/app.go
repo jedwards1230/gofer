@@ -455,6 +455,42 @@ func (a App) approvalBodyLines() int {
 	return cfg.TUI.ApprovalBodyLineLimit()
 }
 
+// approvalMinTranscriptRows reports the effective
+// tui.approval_min_transcript_rows setting
+// (config.TUI.ApprovalMinTranscriptRowFloor — default
+// config.DefaultApprovalMinTranscriptRows), read off a.commandEnv.Config() on
+// every call, the same "always current, never a stale snapshot" contract
+// approvalBodyLines follows. It is the transcript budget the inline approval
+// prompt collapses its rationale to protect (see [Model.promptLines]). A nil
+// Config closure or a read error both fall through to the default.
+func (a App) approvalMinTranscriptRows() int {
+	if a.commandEnv.Config == nil {
+		return config.DefaultApprovalMinTranscriptRows
+	}
+	cfg, err := a.commandEnv.Config()
+	if err != nil {
+		return config.DefaultApprovalMinTranscriptRows
+	}
+	return cfg.TUI.ApprovalMinTranscriptRowFloor()
+}
+
+// promptModel is a.sess with the approval prompt's two config knobs plumbed
+// in from the always-current config read — the model BOTH row-arithmetic
+// consumers must use.
+//
+// It exists because [App.render] and [App.transcriptRegion] compute the same
+// footer length independently (render to lay the frame out, transcriptRegion
+// to find which rows a mouse selection may paint), and both now depend on
+// settings that change the prompt's height. Reading them in one place is what
+// keeps the two in lockstep: if transcriptRegion measured a default-configured
+// prompt while render drew a collapsed one, every click-drag highlight on the
+// attach screen would land on the wrong rows.
+func (a App) promptModel() Model {
+	return a.sess.
+		WithApprovalBodyLines(a.approvalBodyLines()).
+		WithApprovalMinTranscriptRows(a.approvalMinTranscriptRows())
+}
+
 // currentSessionInfo returns the roster snapshot for whichever session is
 // currently peeked or attached, or nil on the overview — there is no active
 // session for a command-panel view (e.g. /status's Session name/ID/Model
@@ -568,6 +604,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.setStatus(sevDanger, msg.err.Error())
 		}
 		return a, nil
+
+	case permissionExplainedMsg:
+		// A ctrl+e explain landing (dialog.go). It never resolves or dismisses
+		// the pending request — see applyPermissionExplained, which also drops
+		// a result whose request is no longer the one on screen.
+		return a.applyPermissionExplained(msg), nil
 
 	case daemonDefaultProbedMsg:
 		// The attached daemon's answer to "what is your default model NOW",
@@ -1022,13 +1064,15 @@ func (a App) render() string {
 		// (a.scroll), so it tails off the top for a long enough conversation
 		// exactly like the oldest messages do.
 		//
-		// WithApprovalBodyLines plumbs the tui.approval_body_lines cap into
-		// the render on a LOCAL copy of the model (render has a value
-		// receiver, so nothing here reaches App's own state): the setting is
-		// read fresh on every frame, so a /config edit re-caps the next render
-		// rather than the next process start, and a.sess never carries a stale
-		// snapshot of it.
-		body = a.sess.WithApprovalBodyLines(a.approvalBodyLines()).
+		// promptModel plumbs the approval prompt's tui.approval_body_lines cap
+		// and tui.approval_min_transcript_rows floor into the render on a
+		// LOCAL copy of the model (render has a value receiver, so nothing
+		// here reaches App's own state): both are read fresh on every frame,
+		// so a /config edit applies to the next render rather than the next
+		// process start, and a.sess never carries a stale snapshot of either.
+		// [App.transcriptRegion] measures through the SAME helper — see its
+		// doc for why they must not diverge.
+		body = a.promptModel().
 			ViewWithMenu(a.width, fl.h, fl.menuLines, attachHeaderLines(a.theme, a.over.meta, a.width), a.scroll)
 	default:
 		body = a.over.ViewWithMenu(a.width, fl.h, fl.menuLines, a.scroll, a.panel != nil)

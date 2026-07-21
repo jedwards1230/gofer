@@ -8,6 +8,16 @@ import "errors"
 // on-disk journal, if any, is unaffected; see [Supervisor.List] to find it.
 var ErrNotLive = errors.New("session not live")
 
+// ErrNoPendingPermission indicates [Supervisor.ExplainPermission] was asked
+// about a permission call id that is not outstanding on the named session —
+// it already resolved (by any client, or by an interrupt), it belongs to a
+// different session, or it never existed. It is deliberately distinct from an
+// empty rationale: "that request is no longer pending" and "that request was
+// gated for no stated reason" are different answers, and a client showing the
+// second when the first is true would be telling a user their prompt is still
+// live when it is not.
+var ErrNoPendingPermission = errors.New("no pending permission request with that id")
+
 // ErrRunning indicates [Supervisor.Archive] was called on a session that is
 // still active — a turn in flight, or queued-but-not-yet-dispatched prompts
 // (both surface as StatusWorking). Interrupt or kill it first.

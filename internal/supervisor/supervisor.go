@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jedwards1230/agent-sdk-go/acp"
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/loop"
 	"github.com/jedwards1230/agent-sdk-go/permission"
@@ -18,6 +19,7 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/session"
 
 	"github.com/jedwards1230/gofer/internal/config"
+	"github.com/jedwards1230/gofer/internal/permrationale"
 	"github.com/jedwards1230/gofer/internal/sandbox"
 )
 
@@ -699,6 +701,34 @@ func (s *Supervisor) Reply(sessionID string, op event.PermissionReply) error {
 	}
 	m.gate.Reply(op)
 	return nil
+}
+
+// ExplainPermission answers why sessionID's still-pending callID was gated,
+// deriving the rationale from the guard's own decision trace (see
+// [permrationale.Derive] — the SAME grammar the daemon answers ACP's
+// session/explain_permission with, so a TUI running against an in-process
+// supervisor and one running against a daemon get the same explanation).
+//
+// It is READ-ONLY, and that is a contract, not an implementation detail: it
+// never touches the gate, never resolves the request, and never mutates the
+// retained payload. A client can ask as many times as it likes and the human
+// still has to answer the prompt afterwards.
+//
+// It errors with [ErrNotLive] for an unknown session and
+// [ErrNoPendingPermission] for a call id that is not outstanding on it —
+// including one that belongs to a DIFFERENT session, since each session's
+// retained requests are its own, so one session's rationale can never leak
+// through another's id.
+func (s *Supervisor) ExplainPermission(sessionID, callID string) (acp.PermissionRationale, error) {
+	m, err := s.lookup(sessionID)
+	if err != nil {
+		return acp.PermissionRationale{}, fmt.Errorf("supervisor: explain permission %s: %w", sessionID, err)
+	}
+	pe, ok := m.pendingPerm(callID)
+	if !ok {
+		return acp.PermissionRationale{}, fmt.Errorf("supervisor: explain permission %s/%s: %w", sessionID, callID, ErrNoPendingPermission)
+	}
+	return permrationale.Derive(pe.Tool, pe.Trace), nil
 }
 
 // Kill interrupts any in-flight turn, drops id from the roster, emits

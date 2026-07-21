@@ -362,6 +362,48 @@ func TestTUIApprovalBodyLineLimit(t *testing.T) {
 	}
 }
 
+// TestTUIApprovalMinTranscriptRowFloor covers the resolver for the approval
+// prompt's transcript floor: unset and negative values fall back to the
+// default, an explicit positive value is the floor — and an explicit 0 is
+// HONORED (unlike tui.approval_body_lines' 0), because "never collapse the
+// rationale, show me the whole prompt" is a coherent thing to ask for. The
+// round trip through Save/Load pins that an explicit 0 survives on disk rather
+// than being erased by omitempty (the *int is why).
+func TestTUIApprovalMinTranscriptRowFloor(t *testing.T) {
+	n := func(v int) *int { return &v }
+	tests := []struct {
+		name string
+		in   *int
+		want int
+	}{
+		{"unset resolves to default", nil, config.DefaultApprovalMinTranscriptRows},
+		{"negative resolves to default", n(-5), config.DefaultApprovalMinTranscriptRows},
+		{"zero means never collapse", n(0), 0},
+		{"explicit value is the floor", n(3), 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tui := config.TUI{ApprovalMinTranscriptRows: tt.in}
+			if got := tui.ApprovalMinTranscriptRowFloor(); got != tt.want {
+				t.Fatalf("ApprovalMinTranscriptRowFloor() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+
+	dir := t.TempDir()
+	path := config.DefaultPath(dir)
+	if err := config.Save(path, config.Config{TUI: config.TUI{ApprovalMinTranscriptRows: n(0)}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if floor := got.TUI.ApprovalMinTranscriptRowFloor(); floor != 0 {
+		t.Fatalf("ApprovalMinTranscriptRowFloor() after Save/Load = %d, want the explicit 0 to survive", floor)
+	}
+}
+
 // TestDaemonDrainTimeout covers the resolver for the graceful-shutdown drain
 // bound: unset and non-positive values fall back to the default, an explicit
 // positive value is taken as a millisecond bound.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/jedwards1230/agent-sdk-go/acp"
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/provider"
 )
@@ -183,4 +184,18 @@ type Supervisor interface {
 	// contract: the daemon resolves a permission request by id alone), but
 	// an in-process one routes through it directly.
 	Reply(ctx context.Context, sessionID, id string, allow, remember bool) error
+
+	// ExplainPermission asks why the identified still-pending tool call was
+	// gated. It is READ-ONLY: it never resolves the request, so the prompt
+	// stays open across an explain and the human still answers it.
+	//
+	// The returned [acp.PermissionRationale] is the AGENT's own answer — the
+	// gating decision as the side that made it describes it, as opposed to
+	// the approximation this client derives from the trace riding on the
+	// permission request (see internal/permrationale, which both sides share
+	// so the two are comparable). An unknown or already-resolved call id, or
+	// one belonging to another session, is an error rather than an empty
+	// rationale: "no longer pending" and "gated for no stated reason" are
+	// different answers and a client must be able to tell them apart.
+	ExplainPermission(ctx context.Context, sessionID, callID string) (acp.PermissionRationale, error)
 }

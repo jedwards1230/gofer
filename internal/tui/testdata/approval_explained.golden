@@ -1,21 +1,21 @@
+
+
+
 ────────────────────────────────────────────────────────────────────────────────
 bash command
-  Run the test suite with race detection
 
-  go test -race ./...
-  timeout=120
+  rm -rf /tmp/x
 
-Why you're being asked
+Why you're being asked · the agent's answer
 
-  No permission rule matched this `bash` call, so gofer is asking before it
-  runs. It also cannot be sandboxed on this host, so an allow rule alone will
-  not let it run unattended.
+  The workspace sandbox profile denies deletes outside the session cwd, so this
+  call cannot run unattended.
 
-  Policy: unmatched · containable: false (no container configured)
+  Policy: workspace-write · path: /tmp/x · containable: false · source: project
 
   Press `r` before allowing to remember this exact call for the rest of the
   session. Add a rule to the `permissions` array in `config.json` — e.g.
-  `{"verdict": "allow", "tool": "bash", "specifier": "go *"}` — to stop being
+  `{"verdict": "allow", "tool": "bash", "specifier": "rm *"}` — to stop being
   asked.
 
 Do you want to proceed?
