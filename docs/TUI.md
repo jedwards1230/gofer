@@ -566,29 +566,53 @@ wire (`parentId`/`agent`/`depth`, all omitempty) through to `tui.SessionInfo`;
 from inside a turn is still open — there is deliberately no agent-facing spawn
 tool.
 
-**Upcoming (the render).** The overview renders the parent with its children
-indented beneath it, each child row carrying its own description, run duration,
-and cumulative token/cost tally — the same one-line-per-session shape as a
-top-level row:
+**Built (the render).** The overview renders the parent at the root with its
+children indented beneath it — a depth-first tree, siblings by the usual recency
+rule — each child row the same one-line-per-session shape as a top-level row,
+carrying its own summary, run duration, and token tally:
 
 ```
-● main
-  ○ tui-inline-perm-owner   Own the M3 TUI change…      5m 9s · ↓ 214.7k tokens
-  ○ sandbox-shell-fix-owner Own the M3 sandbox fix…      5m 30s · ↓ 185.3k tokens
-  ○ go-developer            Editing model.go doc comment 6m 47s · ↓ 128.0k tokens
-  ↑/↓ to select · enter to view
+~/orchestration
+▸!ship the subagent roster      Working · two workers…     41m · ↓ 214.7k tokens
+ !  tui-inline-perm-owner       Working · editing ove…   5m 9s · ↓ 214.7k tokens
+ !    go-reviewer               Needs input · reviewi…       42s · ↓ 8.4k tokens
+    go-developer                Working · running the…  6m 47s · ↓ 128.0k tokens
 ```
 
-`↑`/`↓` selects a child; `enter` navigates *into* that child's full session —
-its complete transcript, tool blocks, and approvals — exactly as if it were a
-top-level session (`esc`/`←` returns to the parent). So a supervisor watching
-one task drills into any subagent's whole history without losing the parent
-context, and an approval waiting deep in the tree still surfaces as a
-`Needs input` state on the ancestor row. This is the fan-out tree above made navigable: the tree shows
-*who is working*; entering a node shows *what they did*. It reuses the shared
-row renderer and the id-tracked selection/windowing the M2 roster already
-established — a child session is just a session, so no new navigation model is
-needed, only the parent→child link and the indent.
+- **Indent inside the title column** (2 cells per level), so every other column
+  stays aligned however deep the tree goes. A child is labelled by its **agent**
+  (`go-developer`) rather than by the title derived from its parent's prompt.
+- **Right column.** A roster holding any subagent swaps the bare age for
+  `<elapsed> · ↓ <N> tokens`; one with none renders byte-identically to before.
+  The width is one decision per render, not per row — an ordinary roster keeps
+  its full-width summary column rather than losing half of it to a tally nobody
+  asked for.
+- **Blocked rollup.** The `!` gutter marks a row whose session *or any
+  descendant* awaits the user, so an approval three levels down is visible
+  without descending. Computed once per render, not per row.
+- **Overflow.** When the tree outgrows its row budget the last visible line
+  reads `↓ N more`.
+- **The grouped view (tab) stays flat.** Its sections are status buckets and a
+  child's status is independent of its parent's, so nesting there would
+  contradict the section label; children keep their own section and are
+  identified by the agent label instead.
+- **Orphans render as roots.** The roster is a polled snapshot, so a parent can
+  legitimately be missing — no row is ever dropped or indented under a parent
+  that isn't on screen.
+
+The render reuses the shared row renderer and the id-tracked
+selection/windowing the M2 roster already established — a child session is just
+a session, so it needed no new navigation model, only the parent→child link and
+the indent.
+
+**Upcoming (the navigation).** `↑`/`↓` already selects a child, since a child
+row is an ordinary roster row; `enter` navigating *into* that child's full
+session — its complete transcript, tool blocks, and approvals, exactly as if it
+were a top-level session, with `esc`/`←` returning to the parent — is the
+remaining piece. That is the fan-out tree above made navigable: the tree shows
+*who is working*; entering a node shows *what they did*. So a supervisor
+watching one task will drill into any subagent's whole history without losing
+the parent context.
 
 **Tool-call attribution.** The SDK gate is gone: `runner.Options.Agent`
 (v0.17.0) stamps the originating-agent id onto every `tool.call.*` event a
