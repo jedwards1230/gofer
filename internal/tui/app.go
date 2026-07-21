@@ -114,6 +114,13 @@ type App struct {
 	// the [Command] that runs it.
 	registry Registry
 
+	// menuToken records whether the last [App.syncMenu] found an active
+	// command token in the live buffer. It exists only to detect the
+	// closed→open EDGE, which is when the registry's markdown layer is
+	// reloaded from disk ([App.reloadUserCommands]) — once per "/" typed
+	// rather than once per keystroke.
+	menuToken bool
+
 	// menu is the slash-command autocomplete popup (command_menu.go): closed
 	// (zero value) whenever the overview dispatch bar / attach input's
 	// buffer has no active command token, kept in sync by [App.syncMenu]
@@ -192,6 +199,10 @@ func NewApp(th theme.Theme, sup Supervisor, meta OverviewMeta, env CommandEnv) A
 		registry:   newBuiltinRegistry(),
 		commandEnv: env,
 	}
+	// Markdown commands are a registry LAYER above the builtins (command.go's
+	// CommandSource), loaded once here and refreshed when the autocomplete
+	// popup opens — see App.reloadUserCommands for the reload contract.
+	a = a.reloadUserCommands()
 	// `gofer attach <id>`: open straight into the session's attach screen and
 	// pre-select it in the roster, so backing out with ← lands on it. The
 	// subscription is kicked off in Init.

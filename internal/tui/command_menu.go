@@ -236,6 +236,7 @@ func (m commandMenu) Lines(width int) []string {
 func (a App) syncMenu() App {
 	if a.panel != nil {
 		a.menu = commandMenu{}
+		a.menuToken = false
 		return a
 	}
 	var buf inputBuffer
@@ -246,8 +247,20 @@ func (a App) syncMenu() App {
 		buf = a.sess.input
 	default:
 		a.menu = commandMenu{}
+		a.menuToken = false
 		return a
 	}
+	// Reload the registry's markdown layer on the closed→open EDGE of the
+	// command token — the moment the user types "/" — not on every sync.
+	// syncMenu runs after every key press, so reloading unconditionally would
+	// walk the commands directories once per keystroke; reloading never would
+	// leave a file written after startup permanently invisible. See
+	// [App.reloadUserCommands].
+	_, _, active := commandToken(buf.String(), buf.Cursor())
+	if active && !a.menuToken {
+		a = a.reloadUserCommands()
+	}
+	a.menuToken = active
 	a.menu = newCommandMenu(a.theme, a.registry, buf.String(), buf.Cursor())
 	return a
 }

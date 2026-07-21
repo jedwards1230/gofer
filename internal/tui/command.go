@@ -30,30 +30,117 @@ type Command struct {
 	ArgHint string   // "" for the M4 trio; "[id]" once /model takes one
 	Hidden  bool     // skip autocomplete/palette listing (a future /debug)
 
+	// Source is which layer contributed this command, and therefore who wins
+	// a name collision. The zero value is [sourceBuiltin], so a plain
+	// Command literal registers as a builtin exactly as before this field
+	// existed.
+	Source CommandSource
+
 	// Run applies the command to a, returning the updated App and an
 	// optional follow-on tea.Cmd — the same (App, tea.Cmd) shape every other
 	// App mutator in app.go returns.
 	Run func(App, []string) (App, tea.Cmd)
 }
 
-// Registry maps a command's name and aliases to its [Command]. The zero
-// value is usable empty; [newBuiltinRegistry] builds the M4 command set.
+// CommandSource is a registry layer. Its ORDER is the contract — docs/TUI.md's
+// "extension > markdown > builtin" precedence — so the constants below are
+// ranked lowest-wins-least to highest-wins-most and [Registry.rebuild] simply
+// applies them in that order.
+type CommandSource int
+
+const (
+	// sourceBuiltin is a command compiled into gofer ([newBuiltinRegistry]).
+	// It is the zero value so an un-annotated Command literal is a builtin.
+	sourceBuiltin CommandSource = iota
+	// sourceMarkdown is a user-authored markdown file (internal/usercmd),
+	// loaded per-app from the store root and the project directory. It
+	// deliberately outranks a builtin: overriding /status with your own
+	// prompt file is the point of the feature, not an accident to guard.
+	sourceMarkdown
+	// sourceExtension is a plugin's runtime registerCommand — P1, not built.
+	// The constant exists so the tier it will occupy is already reserved at
+	// the top of the order rather than being retrofitted later.
+	sourceExtension
+	// numCommandSources sizes [Registry.layers]; keep it last.
+	numCommandSources
+)
+
+// Registry resolves a command name or alias to the [Command] that handles it,
+// across the layered sources above. The zero value is usable empty;
+// [newBuiltinRegistry] builds the M4/M5 builtin set.
+//
+// Commands are kept per-layer (layers) rather than only in the resolved index
+// (cmds) for two reasons: precedence must be a property of WHERE a command
+// came from, not of the order someone happened to call register; and a layer
+// must be replaceable wholesale ([Registry.setLayer]) so a reload drops
+// markdown commands whose files were deleted instead of accumulating them.
 type Registry struct {
-	cmds map[string]Command
+	layers [numCommandSources][]Command
+	cmds   map[string]Command // resolved index, rebuilt from layers
 }
 
-// register adds cmd under its Name and every Alias. Collision order for
-// future extension/markdown-template commands (docs/TUI.md's "extension >
-// markdown > builtin") is a registration-time concern this registry doesn't
-// yet need to enforce — M4 only ever registers builtins.
+// register adds cmd to its [Command.Source] layer, under its Name and every
+// Alias.
 func (r *Registry) register(cmd Command) {
-	if r.cmds == nil {
-		r.cmds = map[string]Command{}
+	r.layers[cmd.Source] = append(r.layers[cmd.Source], cmd)
+	r.rebuild()
+}
+
+// setLayer replaces every command from src with cmds (each stamped with src),
+// then re-resolves. Passing nil clears the layer — which is how a markdown
+// reload forgets a deleted file.
+func (r *Registry) setLayer(src CommandSource, cmds []Command) {
+	next := make([]Command, len(cmds))
+	for i, c := range cmds {
+		c.Source = src
+		next[i] = c
 	}
-	r.cmds[cmd.Name] = cmd
-	for _, alias := range cmd.Aliases {
-		r.cmds[alias] = cmd
+	r.layers[src] = next
+	r.rebuild()
+}
+
+// rebuild re-resolves the name/alias index from the layers, lowest source
+// rank first so a higher one overwrites it. Three rules beyond that:
+//
+//   - Within a layer, a later registration wins (unchanged from M4).
+//
+//   - **A name is resolved first, then its aliases follow it.** An alias is a
+//     second spelling of a name, so whatever wins the name owns the spelling:
+//     a markdown `config.md` shadowing builtin /config also answers /cfg.
+//     Leaving /cfg on the shadowed builtin would silently keep the overridden
+//     behavior alive under a name the user believed they had replaced.
+//
+//   - **A NAME always beats an ALIAS**, whatever the layer — aliases are
+//     applied in a first pass and names in a second — so a command called
+//     "cfg" is reachable as /cfg even while /config carries that alias.
+//
+// Together these make [Registry.List] deterministic: exactly one entry per
+// Name, chosen by source rank, never by map iteration order.
+func (r *Registry) rebuild() {
+	type aliasRef struct{ alias, owner string }
+
+	byName := map[string]Command{}
+	order := make([]string, 0, len(r.cmds))
+	var aliases []aliasRef
+	for _, layer := range r.layers {
+		for _, cmd := range layer {
+			if _, seen := byName[cmd.Name]; !seen {
+				order = append(order, cmd.Name)
+			}
+			byName[cmd.Name] = cmd
+			for _, alias := range cmd.Aliases {
+				aliases = append(aliases, aliasRef{alias: alias, owner: cmd.Name})
+			}
+		}
 	}
+	idx := make(map[string]Command, len(byName)+len(aliases))
+	for _, ref := range aliases {
+		idx[ref.alias] = byName[ref.owner] // the winner of the name, not the declarer
+	}
+	for _, name := range order {
+		idx[name] = byName[name]
+	}
+	r.cmds = idx
 }
 
 // Lookup resolves token — a command name or alias, without its leading
