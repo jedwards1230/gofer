@@ -829,11 +829,12 @@ color by construction and would assert nothing here.
 routed with the same precedence as the approval overlay — `panel > approval >
 active screen > global` — and closed by Esc, sized to whatever the active
 tab's body actually renders (`commandPanel.Height`) rather than always a
-worst-case max. Five builtins register now and open the panel on their tab —
-the M4 trio (`/status`, `/config`, `/model`) plus the M5 read-only pair
-(`/usage`, `/stats`); each opened on a one-line placeholder body until its own
-step landed the real view (`/status` in step 2, `/config` in step 3, `/model`
-in step 4, `/usage` + `/stats` in the M5 usage-panels step — see below). `@`
+worst-case max. Six builtins register now and open the panel on their tab —
+the M4 trio (`/status`, `/config`, `/model`), the M5 read-only pair
+(`/usage`, `/stats`), and the SDK-catch-up `/thinking`; each opened on a
+one-line placeholder body until its own step landed the real view (`/status`
+in step 2, `/config` in step 3, `/model` in step 4, `/usage` + `/stats` in the
+M5 usage-panels step, `/thinking` with `Runner.SetEffort` — all below). `@`
 and `!` are not implemented — the intercept only switches on a leading `/` so
 they can slot in later.
 
@@ -978,14 +979,45 @@ model the daemon ASSIGNED in ACP's reserved `_meta`, under the
 gofer-namespaced key `gofer/model`, so `daemonbridge.Create` reports what the
 session actually runs instead of echoing the (normally empty) requested model.
 
-Effort-adjust (←/→) stays deferred (no SDK backing) —
-and has no room on the Model tab regardless, since ←/→ are already claimed by
-the panel host for tab switching. The concrete dependency is a runtime
-`Runner.SetEffort` paralleling the `Runner.SetModel` that `Supervisor.SetModel`
-already rides on; once the SDK grows it (see the agent-sdk-go design backlog)
-the control becomes actionable — a persisted `session.effort` default plus a
-same-session hot-swap on the same terms as the model — needing only a spot on
-the tab that ←/→ don't already own.
+**Built (SDK catch-up): `/thinking`, the reasoning-effort adjuster.** The
+dependency this was waiting on — a runtime `Runner.SetEffort` paralleling the
+`Runner.SetModel` that `Supervisor.SetModel` rides on — arrived in agent-sdk-go
+v0.17.0, so effort now travels the same road as the model, hop for hop:
+`Supervisor.SetEffort` → `gofer/set_effort` (gofer-native JSON-RPC, like
+`gofer/set_model`, forwarded router→worker) → `Runner.SetEffort`, with the
+level surfaced on the roster row (`SessionInfo.Effort`) and persisted as the
+`session.effort` config default.
+
+It is its own **Thinking** tab (effortpicker.go) rather than a ←/→ modifier on
+the Model tab: ←/→ are claimed by the panel host for tab switching, and effort
+is an orthogonal axis. `/thinking` (alias `/effort`) opens it; `/thinking
+low|medium|high|off` applies a level directly through the same commit path a
+picked row takes — `off` (or `none`/`default`) is the empty level, i.e. "clear
+it and let the provider decide". Unlike `/model` there is **no cross-provider
+branch**: a provider client is fixed at session creation, which is what
+constrains a model swap, but effort is provider-agnostic vocabulary each
+backend projects onto its own wire format, so a live session always takes the
+change.
+
+What the tab *does* reason about is **model capability**, which is the
+"toggle vs effort-picker by model capability" the roadmap asked for. The rule
+is the SDK's own, applied client-side so the UI never disagrees with the
+runner: reject only on **positive registry evidence** that the active model
+cannot reason (`provider.Lookup` found it AND `Reasoning` is false). An
+unregistered model — anything newer than this binary — is UNKNOWN, not
+incapable, so its levels are offered and the runner gets the final word. On a
+model the registry says cannot reason, the tab renders one warning line naming
+the remedy instead of four rows the runner would refuse, and `/thinking <level>`
+refuses by name without writing anything (clearing stays legal — it asks for no
+reasoning at all). The tab issues **no vendor request** on open: unlike the
+Model tab's catalog, the level list is a closed four-value enum.
+
+The persisted `session.effort` default is a settings knob today (`/config`'s
+`session.effort` row, `off`/`low`/`medium`/`high`) — like `session.permission_mode`
+it is **not yet read at session creation**, so `/thinking` from the overview
+saves the default and says exactly that, claiming nothing about sessions that
+do not exist yet. Seeding a new session's `Params.Thinking.Effort` from it is
+follow-up work.
 
 **Built (M5 usage panels)**: `/usage` (usage.go) and `/stats` (stats.go) are two
 more read-only tabs cut from the same cloth as `/status` — pure, stateless
@@ -1023,8 +1055,7 @@ doesn't consume).
   keymap · `!` / `!!` shell escape (`!!` runs but excludes output from model
   context) · `@`-file mention.
 - **P1**: `/init` (first-run project context) · `/fork` · `/tree` ·
-  `/export html|jsonl` · `/login` · `/thinking` (toggle vs effort-picker by
-  model capability) · runtime `registerCommand` from plugins ·
+  `/export html|jsonl` · `/login` · runtime `registerCommand` from plugins ·
   `/skill:name` · `/name` · `/session` (id, path, per-model tokens/cost).
 - **P2**: model-cycling key · `/mcp` management · `/debug` (hidden commands
   share the dispatcher, skip autocomplete).

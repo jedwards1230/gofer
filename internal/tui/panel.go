@@ -33,6 +33,7 @@ const (
 	panelStatus commandPanelTab = iota
 	panelConfig
 	panelModel
+	panelEffort
 	panelUsage
 	panelStats
 )
@@ -45,11 +46,15 @@ type panelTab struct {
 
 // panelTabs is the fixed left-to-right tab order every command panel opens
 // with, regardless of which tab the slash command that opened it targeted —
-// once open, all three are reachable with ←/→.
+// once open, all of them are reachable with ←/→. Thinking sits beside Model
+// because the two answer adjacent questions about the same turn (which model,
+// and how hard it thinks), and because the Thinking tab's row list is gated on
+// whichever model the Model tab reports as active.
 var panelTabs = []panelTab{
 	{panelStatus, "Status"},
 	{panelConfig, "Config"},
 	{panelModel, "Model"},
+	{panelEffort, "Thinking"},
 	{panelUsage, "Usage"},
 	{panelStats, "Stats"},
 }
@@ -107,6 +112,11 @@ type commandPanel struct {
 	// model is the Model tab's state (modelpicker.go), built the same way as
 	// cfg — env/sess/defaultModel captured once at open time.
 	model modelPickerView
+
+	// effort is the Thinking tab's state (effortpicker.go), built from the same
+	// three inputs as model — which is what lets it gate its rows on the same
+	// active model the Model tab marks with ✓.
+	effort effortPickerView
 }
 
 // newCommandPanel returns a panel open on tab, rendering through th, with env
@@ -124,14 +134,16 @@ func newCommandPanel(th theme.Theme, tab commandPanelTab, env CommandEnv, sess *
 		roster:       roster,
 		cfg:          newConfigView(th, env),
 		model:        newModelPickerView(th, env, sess, defaultModel),
+		effort:       newEffortPickerView(th, env, sess, defaultModel),
 	}
 }
 
 // handleKey applies one key press to the panel. ←/→ always move the active
 // tab, regardless of what the active tab's own state is (an in-progress
 // Config-tab edit, or the Model tab's row highlight, is simply left as-is on
-// tab-away, same as any other unsaved buffer) — this is also why the Model
-// tab's deferred effort-adjust has no room on ←/→ (see modelpicker.go).
+// tab-away, same as any other unsaved buffer) — which is also why reasoning
+// effort became a tab of its own rather than a ←/→ modifier on the Model tab
+// (see modelpicker.go and effortpicker.go).
 // Every other key routes to the active tab's own handler; Status has none,
 // matching its read-only, no-selection design. Esc is handled by the caller
 // ([App.handlePanelKey]) via [commandPanel.handleEscape] instead of here,
@@ -149,6 +161,8 @@ func (p commandPanel) handleKey(msg tea.KeyPressMsg) commandPanel {
 		p.cfg = p.cfg.handleKey(msg)
 	case panelModel:
 		p.model = p.model.handleKey(msg)
+	case panelEffort:
+		p.effort = p.effort.handleKey(msg)
 	}
 	return p
 }
@@ -275,6 +289,8 @@ func (p commandPanel) footerText() string {
 		return "Type to filter · Enter/↓ to select · ↑ to tabs · Esc to clear"
 	case panelModel:
 		return "Type a model id · ↑/↓ to browse · Enter to select · Esc to clear"
+	case panelEffort:
+		return "↑/↓ to choose · Enter to select · Esc to close"
 	}
 	return "←/→ to switch tabs · esc to close"
 }
@@ -309,6 +325,8 @@ func (p commandPanel) body(width, bodyRows int) string {
 		return p.cfg.View(width, bodyRows)
 	case panelModel:
 		return p.model.View(width, bodyRows)
+	case panelEffort:
+		return p.effort.View(width, bodyRows)
 	}
 	return ""
 }
@@ -416,6 +434,12 @@ func (a App) handlePanelKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// so it intercepts Enter here instead of routing it into
 		// commandPanel.handleKey below.
 		return a.handleModelSelect()
+	case key.Code == tea.KeyEnter && a.panel.active == panelEffort:
+		// Same reason as the Model tab above: the commit needs IO
+		// ([Supervisor.SetEffort], SaveConfig) the pure [effortPickerView]
+		// cannot do, so App — the client that does the calling (invariant #2) —
+		// intercepts Enter here.
+		return a.handleEffortSelect()
 	}
 	was := a.panel.active
 	p := a.panel.handleKey(msg)
@@ -565,6 +589,109 @@ func (a App) applyModelSelection(selected string, sess *SessionInfo) (App, tea.C
 		// meaningful once the swap has settled, and a Batch would fan out two
 		// messages where the second must win.
 		return probe()
+	}
+}
+
+// handleEffortSelect applies Enter on the Thinking tab, the effort-axis twin of
+// [App.handleModelSelect]. Selecting nothing — no row highlighted, or a model
+// the registry says cannot reason, so no rows are offered at all
+// ([effortPickerView.selectedEffort]) — is a pure no-op: the panel stays open,
+// untouched, with the reason already on screen. Every other outcome commits
+// through [App.applyEffortSelection] and closes the panel, matching the
+// picker's "select" semantics.
+func (a App) handleEffortSelect() (tea.Model, tea.Cmd) {
+	effort, ok := a.panel.effort.selectedEffort()
+	if !ok {
+		return a, nil
+	}
+	return a.applyEffortSelection(effort, a.panel.effort.sess)
+}
+
+// applyEffortSelection is the single commit path for a reasoning-effort change,
+// split out of [App.handleEffortSelect] so `/thinking <level>` (command.go)
+// reaches the SAME config write, the same daemon call, and the same status
+// notes as picking a row — the arrangement [App.applyModelSelection] documents
+// for /model, mirrored here rather than reimplemented.
+//
+// It differs from applyModelSelection in exactly two places, both of them
+// consequences of what effort IS:
+//
+//   - No cross-provider branch. A session's provider is fixed at creation,
+//     which is what constrains a model swap; effort is provider-agnostic
+//     vocabulary every backend projects onto its own wire format, so a live
+//     session ALWAYS takes the change (see [Supervisor.SetEffort]).
+//   - A capability gate instead. A non-empty level on a model the registry
+//     KNOWS cannot reason is refused here, client-side, before any write —
+//     mirroring [runner.Runner.SetEffort]'s own positive-evidence-only rule
+//     (see [effortCapable]) so the TUI and the runner never disagree about
+//     what is legal. Clearing the level is always allowed, so it skips the
+//     gate entirely.
+//
+// There is also no daemon re-probe. [App.probeDaemonDefaultCmd] exists because
+// the roster header renders the daemon's default MODEL and this process cannot
+// recompute it; no header line shows effort, so there is nothing to reconcile.
+//
+// effort is assumed to be a valid level — both callers gate on that (the picker
+// only offers the four, `/thinking` parses through [parseEffortArg]), and they
+// differ in what an unusable value does, so the decision stays with them.
+func (a App) applyEffortSelection(effort string, sess *SessionInfo) (App, tea.Cmd) {
+	if effort != "" {
+		if model := activeModelFor(a.commandEnv, sess, a.over.DefaultModel()); !effortCapable(model) {
+			// Refuse WITHOUT writing anything: persisting a level for a model
+			// that cannot use it would leave a default the next session silently
+			// ignores, and the runner would reject the live call anyway.
+			// Same width discipline as every other status note (see
+			// withDefaultReach): short enough that the remedy survives
+			// truncation at the 80-column floor.
+			a.setStatus(sevDanger, modelmeta.DisplayName(model)+" doesn't support reasoning effort — switch with /model.")
+			a.panel = nil
+			return a, nil
+		}
+	}
+
+	var cfg config.Config
+	if a.commandEnv.Config != nil {
+		c, err := a.commandEnv.Config()
+		if err != nil {
+			// Same data-loss guard as applyModelSelection: never fall through to
+			// SaveConfig with a zero-value config, which would overwrite
+			// config.json and drop the user's permissions/telemetry settings.
+			a.setStatus(sevDanger, "couldn't load config: "+err.Error())
+			a.panel = nil
+			return a, nil
+		}
+		cfg = c
+	}
+	cfg.Session.Effort = effort
+	if a.commandEnv.SaveConfig != nil {
+		if err := a.commandEnv.SaveConfig(cfg); err != nil {
+			a.setStatus(sevDanger, "couldn't save default reasoning effort: "+err.Error())
+			a.panel = nil
+			return a, nil
+		}
+	}
+
+	a.panel = nil
+
+	if sess == nil {
+		// The overview: no running session to change, only the persisted
+		// default. The note claims exactly that and no more — unlike
+		// session.model, session.effort is not yet read at session creation
+		// (see config.Session.Effort), so "new sessions will use it" would be
+		// an overclaim on either backend, which is also why this path needs
+		// none of /model's daemon-reach hedging.
+		a.setStatus(sevOK, "Default reasoning effort saved: "+effortLabel(effort)+".")
+		return a, nil
+	}
+
+	a.setStatus(sevOK, "Reasoning effort set to "+effortLabel(effort)+" for this session.")
+	sessionID, sup := sess.ID, a.sup
+	return a, func() tea.Msg {
+		// Off the Update loop: on the daemon path this is a network call. Any
+		// error — including the runner's own capability rejection, should the
+		// client-side gate above have passed a model the daemon knows better
+		// about — comes back through opDoneMsg, the only op→danger route.
+		return opDoneMsg{err: sup.SetEffort(context.Background(), sessionID, effort)}
 	}
 }
 

@@ -300,7 +300,7 @@ func daemonRefreshCommandEnv() tui.CommandEnv {
 // broker so attaching into a session doesn't error — nothing publishes to it,
 // so the transcript underneath the panel stays empty, which is fine: these
 // scenes are about the command panel, not the transcript. The write ops
-// (Create/Send/Interrupt/Kill/Archive/SetModel/Reply) are no-ops; none of
+// (Create/Send/Interrupt/Kill/Archive/SetModel/SetEffort/Reply) are no-ops; none of
 // these tapes exercises them.
 type vhsSupervisor struct {
 	sessions []tui.SessionInfo
@@ -332,5 +332,7 @@ func (s *vhsSupervisor) Kill(context.Context, string) error { return nil }
 func (s *vhsSupervisor) Archive(context.Context, string) error { return nil }
 
 func (s *vhsSupervisor) SetModel(context.Context, string, string) error { return nil }
+
+func (s *vhsSupervisor) SetEffort(context.Context, string, string) error { return nil }
 
 func (s *vhsSupervisor) Reply(context.Context, string, string, bool, bool) error { return nil }

@@ -73,11 +73,12 @@ func (f *internalFakeSup) Create(_ context.Context, prompt string, _ CreateOptio
 	return SessionInfo{ID: "created-1", Title: prompt, Status: StatusWorking}, nil
 }
 
-func (f *internalFakeSup) Send(context.Context, string, string) error     { return nil }
-func (f *internalFakeSup) Interrupt(context.Context, string) error        { return nil }
-func (f *internalFakeSup) Kill(context.Context, string) error             { return nil }
-func (f *internalFakeSup) Archive(context.Context, string) error          { return nil }
-func (f *internalFakeSup) SetModel(context.Context, string, string) error { return nil }
+func (f *internalFakeSup) Send(context.Context, string, string) error      { return nil }
+func (f *internalFakeSup) Interrupt(context.Context, string) error         { return nil }
+func (f *internalFakeSup) Kill(context.Context, string) error              { return nil }
+func (f *internalFakeSup) Archive(context.Context, string) error           { return nil }
+func (f *internalFakeSup) SetModel(context.Context, string, string) error  { return nil }
+func (f *internalFakeSup) SetEffort(context.Context, string, string) error { return nil }
 
 func (f *internalFakeSup) Reply(_ context.Context, sessionID, id string, allow, remember bool) error {
 	f.mu.Lock()

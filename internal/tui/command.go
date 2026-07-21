@@ -138,6 +138,13 @@ func newBuiltinRegistry() Registry {
 		Summary: "Pick the active/default model",
 		Run:     runModel,
 	})
+	r.register(Command{
+		Name:    "thinking",
+		Aliases: []string{"effort"},
+		ArgHint: "[low|medium|high|off]",
+		Summary: "Set the reasoning effort for this session",
+		Run:     runThinking,
+	})
 	return r
 }
 
@@ -200,6 +207,39 @@ func runModel(a App, args []string) (App, tea.Cmd) {
 		return a, nil
 	}
 	return a.applyModelSelection(id, a.currentSessionInfo())
+}
+
+// runThinking is /thinking's [Command.Run], shaped exactly like [runModel]:
+// bare `/thinking` opens the picker on the Thinking tab, while
+// `/thinking <level>` applies that level directly and never opens the panel.
+// Both forms land on [App.applyEffortSelection], the single commit path a
+// picked row also takes, so a typed level and a selected row produce identical
+// config writes, daemon calls, and status notes.
+//
+// Admission is [parseEffortArg] — the SDK's closed four-value vocabulary plus
+// the "off"/"none"/"default" spellings of the empty (clear-the-level) value.
+// That closedness is why this differs from /model's rule: a model id is an
+// open-ended vendor namespace this binary's catalog can only lag behind, so
+// /model deliberately admits ids it has never heard of, whereas an effort
+// level outside the four is not a newer level — it is a typo, and reporting it
+// by name beats forwarding it to a daemon that will reject it anyway.
+func runThinking(a App, args []string) (App, tea.Cmd) {
+	if len(args) == 0 {
+		return openPanel(panelEffort)(a, args)
+	}
+	// parseSlash splits on whitespace and no level contains a space, so more
+	// than one argument is always a mistake — rejected by name rather than
+	// silently applying args[0], for the same reason /model does.
+	if len(args) > 1 {
+		a.setStatus(sevDanger, "/thinking takes a single level — got "+strconv.Itoa(len(args))+" arguments")
+		return a, nil
+	}
+	effort, ok := parseEffortArg(args[0])
+	if !ok {
+		a.setStatus(sevDanger, "can't use reasoning effort "+strconv.Quote(args[0])+": want low, medium, high, or off")
+		return a, nil
+	}
+	return a.applyEffortSelection(effort, a.currentSessionInfo())
 }
 
 // parseSlash splits a submitted "/name arg…" buffer into its command token

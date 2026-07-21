@@ -57,6 +57,25 @@ func settingsRegistry() []Setting {
 			},
 		},
 		{
+			// The four Options are the SDK's unified effort vocabulary with
+			// its empty value spelled "off" — the same spelling /thinking
+			// accepts — because an enum row cycles through Options and renders
+			// the current one, and a literal "" would render as a blank cell
+			// indistinguishable from an unset row.
+			Key:     "session.effort",
+			Label:   "Reasoning effort",
+			Kind:    SettingEnum,
+			Options: []string{"off", "low", "medium", "high"},
+			Get:     func(c config.Config) string { return effortLabel(c.Session.Effort) },
+			Set: func(c config.Config, v string) config.Config {
+				// A value outside the vocabulary cannot arrive here (the view
+				// only ever cycles through Options), so the ok result is
+				// discarded — "off" maps back to the empty level.
+				c.Session.Effort, _ = parseEffortArg(v)
+				return c
+			},
+		},
+		{
 			Key:     "session.permission_mode",
 			Label:   "Permission mode",
 			Kind:    SettingEnum,
