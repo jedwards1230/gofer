@@ -257,7 +257,8 @@ func boolOr(v *bool, def bool) bool {
 // marshalAnswers encodes the answers as the ACP session/request_decision
 // response payload — {"answers":[…]} — for [tool.Metadata].Extra. That shape,
 // rather than a bare array, is deliberate: it is exactly what the daemon relay
-// puts on the wire in the follow-up PR, and it round-trips through
+// puts on the wire (internal/daemon's session/request_decision response), and it
+// round-trips through
 // [acp.RequestDecisionResponse]'s unmarshaller, which is what resolves each
 // outcome back to its concrete variant. Metadata never enters the model's
 // context; it is there for a client that wants to render the structured form.

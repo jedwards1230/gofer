@@ -490,7 +490,7 @@ func forcedChoice() []acp.DecisionQuestion {
 // alienOutcome is a third-party implementation of acp.DecisionOutcome: not one
 // of the four variants the gate and the tool know how to handle, but perfectly
 // able to satisfy the interface. It stands in for whatever a peer might put on
-// the daemon wire in the follow-up PR.
+// the daemon wire.
 type alienOutcome struct{}
 
 func (alienOutcome) Outcome() string              { return "teleport" }

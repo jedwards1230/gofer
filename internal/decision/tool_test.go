@@ -327,7 +327,7 @@ func TestAskUserMetadataAnswersRoundTrip(t *testing.T) {
 		t.Fatalf("Extra[answers] = %T, want json.RawMessage", res.Metadata.Extra["answers"])
 	}
 	// The payload is the ACP session/request_decision response shape, so a
-	// client (and the daemon relay in the follow-up PR) decodes it with the
+	// client (and the daemon relay, which puts this very shape on the wire) decodes it with the
 	// acp unmarshaller that resolves the concrete outcome variant.
 	var resp acp.RequestDecisionResponse
 	if err := json.Unmarshal(raw, &resp); err != nil {
