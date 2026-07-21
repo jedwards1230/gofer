@@ -505,6 +505,25 @@ func (d *Daemon) pendingPermsForSession(sessionID string) []permissionRequestedP
 	return out
 }
 
+// pendingPerm returns the retained params of the OUTSTANDING permission
+// request with this call id, or ok=false once it has resolved (or if it never
+// existed). It is the read behind session/explain_permission (see
+// [handleExplainPermission]): the same retained payload the replay-on-attach
+// path uses, read rather than consumed — nothing here clears it.
+//
+// It exists beside [Daemon.pendingPermsForSession] rather than being expressed
+// through it because an explain identifies a request by call id, and filtering
+// the whole map by session to then search it by id would answer a question
+// nobody asked (and would make "unknown id" and "wrong session" the same
+// outcome; the handler distinguishes them by matching the returned params'
+// SessionID itself).
+func (d *Daemon) pendingPerm(id string) (permissionRequestedParams, bool) {
+	d.pendingPermsMu.Lock()
+	defer d.pendingPermsMu.Unlock()
+	params, ok := d.pendingPerms[id]
+	return params, ok
+}
+
 // registerPermCancel records the cancel func for the session/request_permission
 // requests fanned out for call id. A pre-existing entry (a call-id collision,
 // not expected) is cancelled before being replaced so no cancel func is lost.

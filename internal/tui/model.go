@@ -24,6 +24,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/jedwards1230/agent-sdk-go/acp"
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
@@ -101,6 +102,17 @@ type Model struct {
 	// App.render).
 	approvalBodyLines int
 
+	// approvalMinTranscriptRows is the resolved tui.approval_min_transcript_rows
+	// floor the approval prompt collapses against, or -1 for "use the config
+	// default". It is -1 rather than 0 for the zero value's sake: 0 is a
+	// MEANINGFUL setting here ("never collapse", see
+	// [config.TUI.ApprovalMinTranscriptRowFloor]), so it cannot double as the
+	// unset sentinel the way approvalBodyLines' 0 does. [New] sets it; the App
+	// overwrites it per render off its always-current config read. A Model
+	// built as a zero value (a struct literal in a test) reads 0 and simply
+	// never collapses, which is the pre-collapse behavior.
+	approvalMinTranscriptRows int
+
 	// pending is the session's current unresolved permission request, if any
 	// (nil = none) — the backing state for the interactive inline approval
 	// prompt. It is transient client-side state (like input), NOT a transcript
@@ -126,11 +138,12 @@ type Model struct {
 // New returns an empty Model rendering through th.
 func New(th theme.Theme) Model {
 	return Model{
-		theme:         th,
-		openText:      -1,
-		openReasoning: -1,
-		toolIndex:     map[string]int{},
-		toolAgents:    map[string]string{},
+		theme:                     th,
+		openText:                  -1,
+		openReasoning:             -1,
+		toolIndex:                 map[string]int{},
+		toolAgents:                map[string]string{},
+		approvalMinTranscriptRows: -1, // "use the config default" — see the field doc
 	}
 }
 
@@ -337,6 +350,60 @@ func (m Model) ToggleApprovalRemember() Model {
 	return m
 }
 
+// ApprovalExplaining reports whether a session/explain_permission call is in
+// flight for the pending request — the app root reads it so a second ctrl+e
+// while the first is still out is a no-op rather than a stacked call. False
+// when nothing is pending.
+func (m Model) ApprovalExplaining() bool {
+	return m.pending != nil && m.pending.explaining
+}
+
+// MarkApprovalExplaining records that an explain is in flight for the pending
+// request, reallocating rather than mutating in place (Model's copy-on-write
+// discipline). A no-op when nothing is pending.
+//
+// It does NOT touch the request itself: an explain is read-only, so the prompt
+// stays open and answerable while it runs, and the a/d/r/esc keys keep
+// working exactly as they did (see [App.explainApproval]).
+func (m Model) MarkApprovalExplaining() Model {
+	if m.pending == nil {
+		return m
+	}
+	p := *m.pending
+	p.explaining = true
+	m.pending = &p
+	return m
+}
+
+// SetApprovalRationale records the authoritative rationale an explain returned
+// and clears the in-flight marker, reallocating rather than mutating in place.
+// A no-op when nothing is pending. The pending request is untouched — the
+// human still answers it.
+func (m Model) SetApprovalRationale(r acp.PermissionRationale) Model {
+	if m.pending == nil {
+		return m
+	}
+	p := *m.pending
+	p.explaining = false
+	p.rationale = &r
+	m.pending = &p
+	return m
+}
+
+// ClearApprovalExplaining drops the in-flight marker WITHOUT recording a
+// rationale — the failed-explain path. Whatever rationale was on screen (the
+// local derivation, or an earlier successful answer) stays, so a failed
+// explain costs the user nothing but the status-line note the app root sets.
+func (m Model) ClearApprovalExplaining() Model {
+	if m.pending == nil {
+		return m
+	}
+	p := *m.pending
+	p.explaining = false
+	m.pending = &p
+	return m
+}
+
 // WithApprovalBodyLines sets the row cap the inline approval prompt's body
 // honors, reallocating rather than mutating in place (Model's copy-on-write
 // discipline). n <= 0 means "the config default" — see [Model.approvalBodyLimit].
@@ -357,6 +424,28 @@ func (m Model) approvalBodyLimit() int {
 		return config.DefaultApprovalBodyLines
 	}
 	return m.approvalBodyLines
+}
+
+// WithApprovalMinTranscriptRows sets the transcript-row floor the inline
+// approval prompt collapses against, reallocating rather than mutating in
+// place (Model's copy-on-write discipline). n < 0 means "the config default"
+// — see [Model.approvalTranscriptFloor]. [App.render] calls this with its
+// always-current tui.approval_min_transcript_rows read.
+func (m Model) WithApprovalMinTranscriptRows(n int) Model {
+	m.approvalMinTranscriptRows = n
+	return m
+}
+
+// approvalTranscriptFloor resolves the effective transcript-row floor:
+// config.DefaultApprovalMinTranscriptRows unless a caller plumbed one in
+// through [Model.WithApprovalMinTranscriptRows]. Resolved here, not at the
+// call site, so every render path — App.render, App.transcriptRegion, a golden
+// test calling View directly — agrees on the default.
+func (m Model) approvalTranscriptFloor() int {
+	if m.approvalMinTranscriptRows < 0 {
+		return config.DefaultApprovalMinTranscriptRows
+	}
+	return m.approvalMinTranscriptRows
 }
 
 // DismissApproval clears the pending request without resolving it — the esc
@@ -601,7 +690,7 @@ func (m Model) view(width, height int, menuLines, headerLines []string, scroll i
 	// above tails to fit so the footer stays anchored to the bottom however
 	// long the conversation grows.
 	var footer []string
-	if prompt := m.promptLines(width); prompt != nil {
+	if prompt := m.promptLines(width, height); prompt != nil {
 		footer = prompt
 	} else {
 		rule := strings.Repeat("─", width)
@@ -640,11 +729,29 @@ func (m Model) view(width, height int, menuLines, headerLines []string, scroll i
 // promptLines renders the pending approval as the bottom-anchored, input-
 // replacing prompt's lines, each truncated to width. Empty when nothing is
 // pending. Used by View to anchor the inline approval prompt to the bottom.
-func (m Model) promptLines(width int) []string {
+//
+// height is the frame the prompt has to share with the transcript, and is what
+// makes the block adaptive: the full prompt runs ~22 rows, so on an 80x24
+// terminal it would leave a two-line transcript and scroll the identity header
+// out — the conversation that LED to the gated call disappearing exactly when
+// a human needs it to decide. When the full block would leave fewer than
+// [Model.approvalTranscriptFloor] rows, the rationale collapses to its opening
+// paragraph plus a ctrl+e pointer (see renderApprovalPrompt); everything a
+// decision requires — the header, the gated call, the question, the action row
+// — is never collapsed, and a frame too short even for that falls to View's
+// existing truncate/avail floor rather than to any special case here.
+//
+// The collapsed block is rendered fresh rather than sliced out of the full
+// one: the paragraphs it drops are wrapped text, so cutting rows off a
+// rendered block would leave a half-sentence dangling.
+func (m Model) promptLines(width, height int) []string {
 	if m.pending == nil {
 		return nil
 	}
-	raw := renderApprovalPrompt(m.theme, *m.pending, width, m.approvalBodyLimit())
+	raw := renderApprovalPrompt(m.theme, *m.pending, width, m.approvalBodyLimit(), false)
+	if height-len(raw) < m.approvalTranscriptFloor() {
+		raw = renderApprovalPrompt(m.theme, *m.pending, width, m.approvalBodyLimit(), true)
+	}
 	out := make([]string, len(raw))
 	for i, l := range raw {
 		out[i] = truncate(l, width)

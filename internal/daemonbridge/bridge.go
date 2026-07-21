@@ -318,6 +318,47 @@ func (s *Supervisor) Interrupt(ctx context.Context, sessionID string) error {
 	return nil
 }
 
+// explainTimeout bounds one session/explain_permission round trip. It is a
+// package constant rather than a config knob for the same reason
+// internal/tui's daemonProbeTimeout is: this is a single request answered off
+// daemon-held state (no session, no provider, no disk), so there is no
+// deployment where waiting longer would turn a failure into a success — and
+// the cost of giving up is only that the prompt keeps showing the locally
+// derived rationale it already had. What it buys is that a wedged connection
+// can never leave the approval prompt marked "explaining…" forever.
+const explainTimeout = 5 * time.Second
+
+// ExplainPermission asks the daemon why a still-pending tool call was gated,
+// via ACP session/explain_permission, and returns the daemon's authoritative
+// [acp.PermissionRationale].
+//
+// It is READ-ONLY end to end: the daemon answers from its retained copy of the
+// request without touching the gate (see internal/daemon's
+// handleExplainPermission), so the request the TUI is prompting about is still
+// pending — and still answerable by [Supervisor.Reply] — when this returns.
+//
+// An unknown or already-resolved call id, or one belonging to another session,
+// comes back as a JSON-RPC application error and therefore as a plain messaged
+// error here (the daemon wire carries no error types — see [Supervisor.SetModel]'s
+// doc), which the caller surfaces rather than mistaking for "no reason given".
+func (s *Supervisor) ExplainPermission(ctx context.Context, sessionID, callID string) (acp.PermissionRationale, error) {
+	ctx, cancel := context.WithTimeout(ctx, explainTimeout)
+	defer cancel()
+
+	raw, err := s.client.Call(ctx, acp.MethodSessionExplainPermission, acp.ExplainPermissionRequest{
+		SessionID:  sessionID,
+		ToolCallID: callID,
+	})
+	if err != nil {
+		return acp.PermissionRationale{}, fmt.Errorf("daemonbridge: explain permission %s (session %s): %w", callID, sessionID, err)
+	}
+	var resp acp.ExplainPermissionResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return acp.PermissionRationale{}, fmt.Errorf("daemonbridge: decode %s response: %w", acp.MethodSessionExplainPermission, err)
+	}
+	return resp.Rationale, nil
+}
+
 // Reply answers a pending permission request by sending [methodPermissionReply]
 // — a bare notification, matching the "permission.reply" op's own
 // fire-and-forget contract (see event.PermissionReply's doc: it carries no

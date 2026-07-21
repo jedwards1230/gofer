@@ -14,6 +14,7 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/acp"
 	"github.com/jedwards1230/agent-sdk-go/event"
 
+	"github.com/jedwards1230/gofer/internal/permrationale"
 	"github.com/jedwards1230/gofer/internal/supervisor"
 )
 
@@ -123,7 +124,8 @@ var methodTable = map[string]methodHandler{
 	acp.MethodSessionCancel: handleSessionCancel,
 	acp.MethodSessionList:   handleSessionList,
 
-	acp.MethodSessionSetConfigOption: handleSessionSetConfigOption,
+	acp.MethodSessionSetConfigOption:   handleSessionSetConfigOption,
+	acp.MethodSessionExplainPermission: handleExplainPermission,
 
 	methodGoferRoster:   handleGoferRoster,
 	methodGoferPS:       handleGoferPS,
@@ -651,6 +653,60 @@ func handleSessionSetConfigOption(d *Daemon, ctx context.Context, _ *peer, param
 	return acp.SetConfigOptionResponse{
 		ConfigOptions: []acp.ConfigOption{modelConfigOption(current, d.authedProviders())},
 	}, nil
+}
+
+// handleExplainPermission answers the ACP session/explain_permission request:
+// why is THIS tool call being gated? It is decoded directly rather than via
+// [decodeOp] because acp.DecodeOp deliberately projects no op for it (it is a
+// question about daemon-held state, not an instruction to the session) — the
+// same shape handleSessionSetConfigOption has.
+//
+// The answer comes from the daemon's OWN retained requests
+// ([Daemon.pendingPerm]), which both topologies populate: the in-process
+// prompt handler records one as it broadcasts a permission.requested, and the
+// M6 router relay records one for an adopted session's worker-side request
+// (see permission_relay.go). So this needs nothing from the hosted supervisor
+// — no new [Supervisor] method, no router forwarding — and works identically
+// on a daemon, a worker, and a router.
+//
+// It is READ-ONLY, and that is the whole contract of the method (see
+// [acp.ExplainPermissionResponse]: "the pending permission request is left
+// unresolved"). It clears no route, drops no retained request, and touches no
+// gate: after any number of explains the request is still pending and the
+// human's reply still resolves it. A test pins exactly that
+// (TestExplainPermissionIsReadOnly).
+//
+// Failure modes are errors, never a zero rationale: a client must be able to
+// tell "that request is no longer pending" from "it was gated for no stated
+// reason". An unknown/already-resolved id — and a known id whose session does
+// not match the one asked about, which must not leak another session's
+// rationale — are both [appError]s rather than invalid-params: the request is
+// perfectly well-formed, it is the daemon's live state that cannot satisfy it,
+// exactly like sessionModel's "not found in roster" (the -32602 codes below
+// stay for genuinely malformed params).
+func handleExplainPermission(d *Daemon, _ context.Context, _ *peer, params json.RawMessage) (any, *rpcError) {
+	req, err := acp.DecodeExplainPermission(params)
+	if err != nil {
+		return nil, invalidParams(err)
+	}
+	if req.SessionID == "" {
+		return nil, invalidParamsMsg(acp.MethodSessionExplainPermission + ": sessionId is required")
+	}
+	if req.ToolCallID == "" {
+		return nil, invalidParamsMsg(acp.MethodSessionExplainPermission + ": toolCallId is required")
+	}
+
+	p, ok := d.pendingPerm(req.ToolCallID)
+	if !ok {
+		return nil, appError(fmt.Errorf("%s: tool call %s has no pending permission request (it may already have been answered)", acp.MethodSessionExplainPermission, req.ToolCallID))
+	}
+	if p.SessionID != req.SessionID {
+		// Deliberately does NOT name the session the call actually belongs to:
+		// the caller asked about a session it named, and the honest answer is
+		// that this call is not that session's.
+		return nil, appError(fmt.Errorf("%s: tool call %s does not belong to session %s", acp.MethodSessionExplainPermission, req.ToolCallID, req.SessionID))
+	}
+	return acp.ExplainPermissionResponse{Rationale: permrationale.Derive(p.Tool, p.Trace)}, nil
 }
 
 // sessionModel returns sessionID's current model, read from the live roster —

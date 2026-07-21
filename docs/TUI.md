@@ -76,8 +76,8 @@ shown twice; once answered, the footer returns and the badge becomes visible
 again. It reads as a confirm prompt — a rule, an attributed `<tool> command`
 header, the call's own description and body, a plain-English rationale, the
 question, and the action row, keyed `a`/`d`/`r` (`r` toggles remember, `1`/`2`
-alias allow/deny), `esc` dismisses without answering (the request stays
-pending; a re-attach re-surfaces it):
+alias allow/deny), `ctrl+e` explains (read-only — see below), `esc` dismisses
+without answering (the request stays pending; a re-attach re-surfaces it):
 
 ```
  ────────────────────────────────────────────────
@@ -90,9 +90,9 @@ pending; a re-attach re-surfaces it):
 
  Why you're being asked
 
-   No permission rule matched this call, so gofer is asking before it runs.
-   It also cannot be sandboxed on this host, so an allow rule alone will not
-   let it run unattended.
+   No permission rule matched this `bash` call, so gofer is asking before it
+   runs. It also cannot be sandboxed on this host, so an allow rule alone
+   will not let it run unattended.
 
    Policy: unmatched · containable: false (no container configured)
 
@@ -104,7 +104,7 @@ pending; a re-attach re-surfaces it):
  Do you want to proceed?
    1. [a] Yes   2. [d] No   ·   [r] remember: off
 
- esc cancel · session 0192a1b2-…
+ esc cancel · ctrl+e explain · session 0192a1b2-…
 ```
 
 The header's attribution clause is omitted entirely for an un-attributed call
@@ -127,24 +127,50 @@ rule-source parenthetical is dropped either way.
 **attribution** ("from the `<agent>` agent", correlated from the tool call's
 `event.Agent` — `event.PermissionRequested.ID` *is* the tool call id), its
 **multi-line body** (the real command text, not a one-line `cmd=…` summary),
-and a **rationale derived from the guard's decision trace**
-(`event.PermissionRequested.Trace`): why it was gated in plain English, the
-matched policy with every raw trace entry preserved, and the two escape
-hatches that actually exist — `r` to remember the call for the session, or a
-rule in `config.json`'s `permissions` array (the example specifier is built
-from the call's own first token, and is omitted rather than guessed at when
-there is no command body).
+and a **rationale**: why it was gated in plain English, the matched policy
+with every raw trace entry preserved, and the two escape hatches that actually
+exist — `r` to remember the call for the session, or a rule in `config.json`'s
+`permissions` array (the example specifier is built from the call's own first
+token, and is omitted rather than guessed at when there is no command body).
+
+**Local vs authoritative rationale.** The rationale on screen starts out
+**locally derived** from the guard's decision trace
+(`event.PermissionRequested.Trace`). **`ctrl+e`** asks the agent side for the
+**authoritative** one over ACP `session/explain_permission`, and replaces it;
+the header then reads `Why you're being asked · the agent's answer` (and
+`· explaining…` while the call is in flight, during which a second `ctrl+e` is
+a no-op). Both are produced by the same grammar — `internal/permrationale`,
+shared by the TUI's local render and the daemon's handler — so the two are
+comparable rather than differently-worded restatements. A failed explain says
+so on the status line and leaves the local rationale standing.
+
+`ctrl+e` is **read-only, and that is a contract, not an implementation
+detail**: an explain never resolves the request. The prompt stays open, the
+action row stays armed, and the human still answers — asking why must never
+cost you the ability to decide. The daemon answers from the request it already
+retains, so a client can ask as many times as it likes (`internal/daemon`'s
+`handleExplainPermission`; `internal/supervisor`'s `ExplainPermission` is the
+daemonless path). An unknown or already-resolved call id is an **error**, not
+an empty rationale — "no longer pending" and "gated for no stated reason" are
+different answers.
+
+**Height-aware collapse.** The full block runs ~22 rows, which on an 80×24
+terminal would leave a two-line transcript and scroll the identity header out
+— losing the conversation that led to the gated call exactly when it is needed
+to decide. So the prompt adapts: when the full block would leave fewer than
+`tui.approval_min_transcript_rows` (default 8) transcript rows, the rationale
+collapses to its opening paragraph plus a muted `… ctrl+e to explain`. The
+header, the call's body, the question, the action row, and the hint line are
+**never** collapsed. Set the key to `0` to never collapse at all.
 
 **Richer provenance — what remains backlog.** The **gating hook** that raised
 the request (e.g. `PreToolUse:Bash`) and a copy-paste **override hint**
 carrying its `[plugin:x]` provenance both need fields the permission request
-doesn't carry yet. Two affordances ride the action row — `Tab` to amend the
-call before allowing, `ctrl+e` to explain why it was gated — but both need new
-SDK permission-outcome variants (an amended-input reply and an explain
-request) before the TUI can offer them; see the agent-sdk-go design backlog.
-Neither key is advertised on the prompt until its implementation lands. Once
-`session/explain_permission` exists it supersedes the locally-derived
-rationale above as the source for the "why".
+doesn't carry yet. One affordance still rides the action row unadvertised —
+`Tab` to amend the call before allowing — which needs a new SDK
+permission-outcome variant (an amended-input reply) before the TUI can offer
+it; see the agent-sdk-go design backlog. The key is not advertised on the
+prompt until its implementation lands.
 
 **Remember-as-rule** — a grant never widens silently: the prompt offers
 exact / prefix / broad patterns, but dangerous commands are force-downgraded

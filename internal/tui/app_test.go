@@ -14,6 +14,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/jedwards1230/agent-sdk-go/acp"
 	"github.com/jedwards1230/agent-sdk-go/event"
 
 	"github.com/jedwards1230/gofer/internal/tui"
@@ -131,6 +132,13 @@ func (f *fakeSup) SetEffort(_ context.Context, id, effort string) error {
 // behavioral Reply-emission tests), which this package (tui_test) has no
 // access to.
 func (f *fakeSup) Reply(_ context.Context, _, _ string, _, _ bool) error { return nil }
+
+// ExplainPermission answers with an empty rationale: this package's black-box
+// tests drive navigation, not the approval prompt's ctrl+e (which
+// app_internal_test.go covers against a recording fake).
+func (f *fakeSup) ExplainPermission(_ context.Context, _, _ string) (acp.PermissionRationale, error) {
+	return acp.PermissionRationale{}, nil
+}
 
 // content renders m the way a real frame would, returning just the string
 // content for substring assertions.

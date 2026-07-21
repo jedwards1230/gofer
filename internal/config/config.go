@@ -208,6 +208,22 @@ type TUI struct {
 	// [TUI.ApprovalBodyLineLimit] for the resolved value every caller should
 	// read.
 	ApprovalBodyLines *int `json:"approval_body_lines,omitempty"`
+
+	// ApprovalMinTranscriptRows is how many transcript rows the inline
+	// approval prompt must leave visible above itself: nil (unset) is the
+	// default [DefaultApprovalMinTranscriptRows], and any positive value is a
+	// floor. When the full prompt would leave fewer rows than this, its
+	// rationale collapses to the opening paragraph plus a "… ctrl+e to
+	// explain" pointer (see internal/tui's renderApprovalPrompt); the header,
+	// the gated call's body, the question, and the action row never collapse.
+	// The floor exists because the prompt commandeers the whole footer: at a
+	// 24-row terminal the full block leaves a two-line transcript, so the
+	// conversation that led to the gated call — the context a decision is
+	// actually made on — scrolls out of view exactly when it is needed. A
+	// *int, not a plain int, for the same reason [TUI.Autoscroll] is a *bool.
+	// See [TUI.ApprovalMinTranscriptRowFloor] for the resolved value every
+	// caller should read.
+	ApprovalMinTranscriptRows *int `json:"approval_min_transcript_rows,omitempty"`
 }
 
 // DefaultMaxPasteBytes is [TUI.MaxPasteBytes]'s default: 128 KiB, comfortably
@@ -243,6 +259,26 @@ func (t TUI) ApprovalBodyLineLimit() int {
 		return DefaultApprovalBodyLines
 	}
 	return *t.ApprovalBodyLines
+}
+
+// DefaultApprovalMinTranscriptRows is [TUI.ApprovalMinTranscriptRows]'s
+// default: 8 rows. Enough for the last exchange that led to the gated call to
+// stay readable beside the prompt on the 24-row terminal gofer's own golden
+// renders assume, and small enough that a comfortable terminal never collapses
+// the rationale at all.
+const DefaultApprovalMinTranscriptRows = 8
+
+// ApprovalMinTranscriptRowFloor resolves [TUI.ApprovalMinTranscriptRows]'s
+// effective value: [DefaultApprovalMinTranscriptRows] when unset, and also for
+// a negative stored value. An explicit 0 IS honored — unlike
+// [TUI.ApprovalBodyLineLimit]'s zero-means-default, "reserve no transcript" is
+// a coherent preference (always show the whole prompt, whatever the frame
+// height), so a user who asks for it gets it.
+func (t TUI) ApprovalMinTranscriptRowFloor() int {
+	if t.ApprovalMinTranscriptRows == nil || *t.ApprovalMinTranscriptRows < 0 {
+		return DefaultApprovalMinTranscriptRows
+	}
+	return *t.ApprovalMinTranscriptRows
 }
 
 // AutoscrollEnabled resolves [TUI.Autoscroll]'s effective value: true (the
