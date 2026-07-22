@@ -71,8 +71,50 @@ func TestShellEscapeIsNotSubmittedAsAPrompt(t *testing.T) {
 	if len(sup.created) != 0 {
 		t.Fatalf("a `!` escape created a session from the literal text: %v", sup.created)
 	}
-	if got := content(m); !strings.Contains(got, shellPayload) {
-		t.Fatalf("expected the command's output in the shell pane, got:\n%s", got)
+	// The overview has no transcript to render the run into, so it acknowledges
+	// on the status line instead (shellRun.shellRunStatus) — the run ran, and
+	// its output is bound for the next message.
+	if got := content(m); !strings.Contains(got, "cat payload.txt") || !strings.Contains(got, "sent with your next message") {
+		t.Fatalf("expected the overview to acknowledge the run, got:\n%s", got)
+	}
+}
+
+// TestShellEscapeRendersInTheAttachTranscript is ask #2 end to end: on the
+// attach screen the command and its output read as part of the conversation —
+// in the transcript, not a pane below it — with the disposition marked.
+func TestShellEscapeRendersInTheAttachTranscript(t *testing.T) {
+	sup := newFakeSup(tui.GoldenRoster())
+	m := shellApp(t, sup)
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected session
+
+	m = type_(t, m, "!cat payload.txt")
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	got := content(m)
+	for _, want := range []string{"$ cat payload.txt", shellPayload, "sent with your next message"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("attach transcript missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestDoubleBangRendersNotSentInTheTranscript: a `!!` run shows in the thread
+// too, but marked as withheld — the reader can tell at a glance the agent
+// cannot see it, which is the legibility half of the `!!` contract.
+func TestDoubleBangRendersNotSentInTheTranscript(t *testing.T) {
+	sup := newFakeSup(tui.GoldenRoster())
+	m := shellApp(t, sup)
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
+
+	m = type_(t, m, "!!cat secret.txt")
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	got := content(m)
+	if !strings.Contains(got, shellWithheld) {
+		t.Fatalf("expected the `!!` output shown to the operator in the transcript:\n%s", got)
+	}
+	if !strings.Contains(got, "not sent to the agent") {
+		t.Fatalf("expected the `!!` run marked not-sent in the transcript:\n%s", got)
 	}
 }
 
@@ -108,8 +150,11 @@ func TestDoubleBangOutputNeverReachesThePrompt(t *testing.T) {
 	m = type_(t, m, "!!cat secret.txt")
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 
-	if got := content(m); !strings.Contains(got, shellWithheld) {
-		t.Fatalf("expected `!!` output shown to the OPERATOR, got:\n%s", got)
+	// From the overview the run is acknowledged on the status line (no
+	// transcript to render it into); the full withheld output surfaces in the
+	// thread only once attached — see TestDoubleBangRendersNotSentInTheTranscript.
+	if got := content(m); !strings.Contains(got, "not sent to the agent") {
+		t.Fatalf("expected the overview to acknowledge the `!!` run as withheld, got:\n%s", got)
 	}
 
 	m = type_(t, m, "carry on")

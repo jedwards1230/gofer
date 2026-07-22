@@ -3,18 +3,17 @@ package tui
 // shell_test.go covers the `!` / `!!` shell escape (shell.go) at the unit
 // level: the submit-buffer grammar, the off-loop runner's four robustness
 // cases (non-zero exit, interleaved streams, an unbounded printer, a command
-// that never exits), the output pane's rendering, and — the load-bearing one
-// — the `!!` context exclusion asserted at the PROMPT, not at the pixels. A
-// test that only checked the pane would pass even if the excluded output
-// leaked into every prompt, which is the exact bug `!!` exists to prevent.
-// White-box (package tui) because every one of those seams is unexported.
+// that never exits), the transcript-block and mode-indicator rendering, and —
+// the load-bearing one — the `!!` context exclusion asserted at the PROMPT,
+// not at the pixels. A test that only checked the rendering would pass even if
+// the excluded output leaked into every prompt, which is the exact bug `!!`
+// exists to prevent. White-box (package tui) because every one of those seams
+// is unexported.
 
 import (
 	"strings"
 	"testing"
 	"time"
-
-	tea "charm.land/bubbletea/v2"
 
 	"github.com/jedwards1230/gofer/internal/tui/testkit"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
@@ -339,108 +338,162 @@ func TestDispatchInputRoutesBySigil(t *testing.T) {
 	}
 }
 
-func TestGoldenShellPane(t *testing.T) {
+// TestGoldenShellRunBlock pins the transcript block a completed `!` / `!!` run
+// renders as: a `$ command` header, the output, the outcome, and the muted
+// disposition line — the not-sent marker on the `!!` run being the whole point
+// of the redesign. Rendered through the Model transcript the same way every
+// other block is, so the block reads as part of the conversation.
+func TestGoldenShellRunBlock(t *testing.T) {
+	m := shellRunModel(theme.Test())
+	got := m.View(testkit.Width, testkit.Height)
+	testkit.AssertGolden(t, "shell_run_block", got)
+}
+
+func TestGoldenShellRunBlockStyled(t *testing.T) {
+	m := shellRunModel(testkit.ColorTheme())
+	got := m.View(testkit.Width, testkit.Height)
+	testkit.AssertGoldenStyled(t, "shell_run_block", got)
+}
+
+// shellRunModel is the shared fixture for the two goldens above: a fresh
+// transcript carrying a sent `!` run and a withheld, failed `!!` run, composed
+// the way App.render composes them.
+func shellRunModel(th theme.Theme) Model {
 	ok := finishedRun(1, "git status --short", " M internal/tui/app.go\n?? internal/tui/shell.go", true)
 	failed := finishedRun(2, "cat missing.txt", "cat: missing.txt: No such file or directory", false)
 	failed.exitCode = 1
-	got := strings.Join(shellPaneLines(theme.Test(), []shellRun{ok, failed}, testkit.Width, shellPaneMaxRows), "\n")
-	testkit.AssertGolden(t, "shell_pane", got)
+	return New(th).WithShellRuns([]shellRun{ok, failed})
 }
 
-func TestGoldenShellPaneStyled(t *testing.T) {
-	ok := finishedRun(1, "git status --short", " M internal/tui/app.go\n?? internal/tui/shell.go", true)
-	failed := finishedRun(2, "cat missing.txt", "cat: missing.txt: No such file or directory", false)
-	failed.exitCode = 1
-	got := strings.Join(shellPaneLines(testkit.ColorTheme(), []shellRun{ok, failed}, testkit.Width, shellPaneMaxRows), "\n")
-	testkit.AssertGoldenStyled(t, "shell_pane", got)
+// TestGoldenShellRunRunning pins the in-flight render: a `$ command` header and
+// a muted "running…" line, no output or disposition yet.
+func TestGoldenShellRunRunning(t *testing.T) {
+	m := New(theme.Test()).WithShellRuns([]shellRun{{seq: 1, line: "make test", inContext: true}})
+	testkit.AssertGolden(t, "shell_run_running", m.View(testkit.Width, testkit.Height))
 }
 
-func TestGoldenShellPaneRunning(t *testing.T) {
-	got := strings.Join(shellPaneLines(theme.Test(), []shellRun{{seq: 1, line: "make test", inContext: true}}, testkit.Width, shellPaneMaxRows), "\n")
-	testkit.AssertGolden(t, "shell_pane_running", got)
-}
+// TestWithShellRunsSkipsConsumedRuns is the anti-duplication guard: a `!` run
+// whose output has already been folded into a prompt (consumed) must NOT also
+// render as a shell block, because its content now arrives as the echoed user
+// message. A `!!` run clears on consume too — it was never in the thread to
+// begin with.
+func TestWithShellRunsSkipsConsumedRuns(t *testing.T) {
+	sent := finishedRun(1, "echo SENT", "SENT-OUTPUT", true)
+	sent.consumed = true
+	withheld := finishedRun(2, "echo HELD", "HELD-OUTPUT", false)
+	withheld.consumed = true
 
-// TestShellPaneDegenerateSizes covers the render sizes that have panicked
-// this TUI before: a zero/negative height budget and a zero width.
-func TestShellPaneDegenerateSizes(t *testing.T) {
-	runs := []shellRun{finishedRun(1, "echo hi", "hi", true)}
-	for _, rows := range []int{-1, 0, 1, 2, 3} {
-		if lines := shellPaneLines(theme.Test(), runs, testkit.Width, rows); rows < 3 && lines != nil {
-			t.Fatalf("shellPaneLines(rows=%d) = %v, want nil — the pane can't fit its own rule and hint", rows, lines)
+	m := New(theme.Test()).WithShellRuns([]shellRun{sent, withheld})
+	got := m.View(testkit.Width, testkit.Height)
+	for _, unwanted := range []string{"echo SENT", "SENT-OUTPUT", "echo HELD", "HELD-OUTPUT"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("a consumed run still rendered %q:\n%s", unwanted, got)
 		}
 	}
-	if lines := shellPaneLines(theme.Test(), runs, 0, shellPaneMaxRows); len(lines) == 0 {
-		t.Fatal("shellPaneLines(width=0) rendered nothing; want a clamped, non-panicking render")
-	}
-	if lines := shellPaneLines(theme.Test(), nil, testkit.Width, shellPaneMaxRows); lines != nil {
-		t.Fatalf("shellPaneLines(no runs) = %v, want nil", lines)
+}
+
+// TestWithShellRunsRendersOnlyUnconsumed pairs with the guard above: an
+// unconsumed run IS shown, so the two together prove the filter turns on the
+// consumed flag specifically, not on something incidental.
+func TestWithShellRunsRendersOnlyUnconsumed(t *testing.T) {
+	live := finishedRun(1, "echo LIVE", "LIVE-OUTPUT", true)
+	m := New(theme.Test()).WithShellRuns([]shellRun{live})
+	got := m.View(testkit.Width, testkit.Height)
+	if !strings.Contains(got, "LIVE-OUTPUT") {
+		t.Fatalf("an unconsumed run did not render its output:\n%s", got)
 	}
 }
 
-// TestShellPaneFirstFrameRender is the zero-height first-frame guard: App
-// renders once BEFORE the terminal reports its size, so every overlay must
-// survive a height of 0 without panicking or overflowing the frame.
-func TestShellPaneFirstFrameRender(t *testing.T) {
-	a := NewApp(theme.Test(), newInternalFakeSup(GoldenRoster()), GoldenMeta(), GoldenCommandEnv())
-	a.shellRuns = []shellRun{finishedRun(1, "echo hi", "hi", true)}
-	a.shellOpen = true
-
-	if got := a.render(); strings.Count(got, "\n") > 2 {
-		t.Fatalf("the zero-size first frame rendered %d rows:\n%s", strings.Count(got, "\n")+1, got)
-	}
-
-	a.width, a.height = testkit.Width, testkit.Height
-	if got := strings.Count(a.render(), "\n") + 1; got > testkit.Height {
-		t.Fatalf("the shell pane pushed the frame to %d rows, past the %d-row terminal", got, testkit.Height)
+// TestWithShellRunsNoVisibleRunsLeavesModelUntouched: a transcript with only
+// consumed runs renders byte-for-byte as one with no runs at all, so a session
+// that has moved past its shell commands looks like it never ran any.
+func TestWithShellRunsNoVisibleRunsLeavesModelUntouched(t *testing.T) {
+	consumed := finishedRun(1, "echo hi", "hi", true)
+	consumed.consumed = true
+	base := New(theme.Test())
+	if got, want := base.WithShellRuns([]shellRun{consumed}).View(testkit.Width, testkit.Height), base.View(testkit.Width, testkit.Height); got != want {
+		t.Fatalf("a consumed-only run list changed the render:\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
 }
 
-// TestGoldenShellPaneOverOverview locks the frame arithmetic: the pane is an
-// overlay composed BELOW the roster and ABOVE the dispatch bar, and the
-// screen above it shrinks so the whole frame still totals the terminal
-// height.
-func TestGoldenShellPaneOverOverview(t *testing.T) {
-	a := NewApp(theme.Test(), newInternalFakeSup(GoldenRoster()), GoldenMeta(), GoldenCommandEnv())
-	a.width, a.height = testkit.Width, testkit.Height
-	a.over = a.over.WithSessions(GoldenRoster())
-	a.shellRuns = []shellRun{finishedRun(1, "git status --short", " M internal/tui/app.go", true)}
-	a.shellOpen = true
-
-	got := a.render()
-	if rows := strings.Count(got, "\n") + 1; rows != testkit.Height {
-		t.Fatalf("frame is %d rows, want exactly %d", rows, testkit.Height)
+// TestShellModeLabel pins the mode-indicator chip the input surfaces show
+// while a shell escape is being typed — the affordance ask #1 asked for, and
+// the `!!`/`!` split that makes the disposition legible before the run.
+func TestShellModeLabel(t *testing.T) {
+	tests := []struct {
+		buf  string
+		want string
+	}{
+		{"", ""},
+		{"do a thing", ""},
+		{"/status", ""},
+		{"!", "shell"},
+		{"!ls -la", "shell"},
+		{"!!", "shell · not sent"},
+		{"!!cat secret.txt", "shell · not sent"},
 	}
-	testkit.AssertGolden(t, "app_shell_pane_overview", got)
-}
-
-// TestShellPaneEscDismissKeepsPendingContext covers the two-stage Esc: the
-// pane closes, but a `!` run that hasn't reached a prompt yet still owes its
-// output to the next one.
-func TestShellPaneEscDismissKeepsPendingContext(t *testing.T) {
-	a := App{shellOpen: true, shellRuns: []shellRun{finishedRun(1, "echo hi", "PENDING-OUTPUT", true)}}
-	next, _ := a.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
-	app, ok := next.(App)
-	if !ok {
-		t.Fatal("Update returned a non-App model")
-	}
-	if app.shellOpen {
-		t.Fatal("esc did not dismiss the shell pane")
-	}
-	if got := app.composePrompt("go on"); !strings.Contains(got, "PENDING-OUTPUT") {
-		t.Fatalf("prompt = %q — dismissing the pane discarded output the model was still owed", got)
+	for _, tt := range tests {
+		if got := shellModeLabel(tt.buf); got != tt.want {
+			t.Errorf("shellModeLabel(%q) = %q, want %q", tt.buf, got, tt.want)
+		}
 	}
 }
 
-// TestShellResultDoesNotReopenADismissedPane: an operator who pressed Esc on
-// a long-running `!` asked for their screen back; the result landing later
-// must not paint itself back over whatever they moved on to.
-func TestShellResultDoesNotReopenADismissedPane(t *testing.T) {
-	a := App{shellOpen: false, shellRuns: []shellRun{{seq: 1, line: "sleep 30", inContext: true}}}
-	a = a.applyShellDone(shellDoneMsg{seq: 1, output: "late"})
-	if a.shellOpen {
-		t.Fatal("a finished run re-opened a dismissed pane")
+// TestShellModeRulePlainOffShellMode is the byte-identity guard: a non-shell
+// buffer draws the exact full-width rule every input box always drew, so the
+// mode indicator adds nothing to the common case and churns no existing golden.
+func TestShellModeRulePlainOffShellMode(t *testing.T) {
+	for _, buf := range []string{"", "hello", "/status"} {
+		if got, want := shellModeRule(theme.Test(), testkit.Width, buf), strings.Repeat("─", testkit.Width); got != want {
+			t.Errorf("shellModeRule(%q) = %q, want the plain rule", buf, got)
+		}
 	}
-	if !a.shellRuns[0].done {
-		t.Fatal("the result was dropped along with the pane's visibility")
+}
+
+// TestShellModeRuleLabelsShellMode is its twin: a `!` / `!!` buffer produces a
+// LABELED rule (the text signal that survives Ascii), same width as the plain
+// one so the frame arithmetic is unchanged.
+func TestShellModeRuleLabelsShellMode(t *testing.T) {
+	for _, tt := range []struct {
+		buf   string
+		label string
+	}{{"!ls", "shell"}, {"!!ls", "shell · not sent"}} {
+		got := shellModeRule(theme.Test(), testkit.Width, tt.buf)
+		if !strings.Contains(got, tt.label) {
+			t.Errorf("shellModeRule(%q) = %q, want it to carry the label %q", tt.buf, got, tt.label)
+		}
+		if w := len([]rune(got)); w != testkit.Width {
+			t.Errorf("shellModeRule(%q) width = %d, want %d — the labeled rule must not resize the frame", tt.buf, w, testkit.Width)
+		}
+	}
+}
+
+// TestGoldenShellModeInput locks the whole attach input box in shell mode: the
+// labeled top rule and the accented prompt glyph, the ask-#1 affordance
+// composed exactly as a user sees it while typing a `!!` command.
+func TestGoldenShellModeInput(t *testing.T) {
+	m := New(theme.Test()).SetInput("!!rm -rf /tmp/scratch")
+	testkit.AssertGolden(t, "shell_mode_input", m.View(testkit.Width, testkit.Height))
+}
+
+func TestGoldenShellModeInputStyled(t *testing.T) {
+	m := New(testkit.ColorTheme()).SetInput("!grep -r TODO .")
+	testkit.AssertGoldenStyled(t, "shell_mode_input", m.View(testkit.Width, testkit.Height))
+}
+
+// TestShellRunStatusDisposition pins the transcript-less acknowledgement
+// (overview/peek): a clean `!` run reports success and where its output went, a
+// `!!` run reports it was withheld, and a failed run leads with the failure.
+func TestShellRunStatusDisposition(t *testing.T) {
+	if sev, note := finishedRun(1, "ls", "", true).shellRunStatus(); sev != sevOK || !strings.Contains(note, "sent with your next message") {
+		t.Errorf("clean `!` run status = (%v, %q), want ok + sent disposition", sev, note)
+	}
+	if sev, note := finishedRun(2, "cat s", "", false).shellRunStatus(); sev != sevOK || !strings.Contains(note, "not sent to the agent") {
+		t.Errorf("clean `!!` run status = (%v, %q), want ok + not-sent disposition", sev, note)
+	}
+	bad := finishedRun(3, "false", "", true)
+	bad.exitCode = 1
+	if sev, note := bad.shellRunStatus(); sev != sevWarn || !strings.Contains(note, "exited 1") {
+		t.Errorf("failed run status = (%v, %q), want warn + exit code", sev, note)
 	}
 }

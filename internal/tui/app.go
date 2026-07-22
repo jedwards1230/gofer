@@ -118,15 +118,15 @@ type App struct {
 	registry Registry
 
 	// shellRuns is every `!` / `!!` shell escape this client has run, oldest
-	// first (shell.go). It is the backing state for BOTH the output pane and
-	// the model-context fold, which is deliberate: one list, one flag per run
-	// (shellRun.inContext), so what the user sees and what the model sees can
-	// never be computed from different data. shellOpen is the pane's
-	// visibility (Esc dismisses it without discarding the runs — a dismissed
-	// `!` run still owes its output to the next prompt), and shellSeq is the
-	// monotonic id a dispatched run is matched back by.
+	// first (shell.go). It is the backing state for BOTH the transcript
+	// rendering and the model-context fold, which is deliberate: one list, one
+	// flag per run (shellRun.inContext), so what the user sees and what the
+	// model sees can never be computed from different data. shellSeq is the
+	// monotonic id a dispatched run is matched back by. Runs render into the
+	// attach transcript via Model.WithShellRuns; unconsumed runs there are the
+	// ones a subsequent prompt will fold in (see App.composePrompt), so what
+	// shows and what will be sent stay one truth.
 	shellRuns []shellRun
-	shellOpen bool
 	shellSeq  int
 
 	// files is the `@` file-mention completion's cached candidate list
@@ -829,11 +829,21 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a.applyDaemonDefault(msg), nil
 
 	case shellDoneMsg:
-		// A `!` / `!!` escape finishing (shell.go). It never touches
-		// a.status: the pane already carries the exit code, the timeout note,
-		// and the truncation marker, and a status line would talk over
-		// whatever the user is reading.
-		return a.applyShellDone(msg), nil
+		// A `!` / `!!` escape finishing (shell.go). On the attach screen the
+		// run renders as a transcript block (Model.WithShellRuns) carrying its
+		// exit code, note, and truncation marker, so a status line there would
+		// only talk over what the reader is looking at. On a screen with no
+		// transcript (the overview's dispatch bar, peek) there is nowhere for
+		// the block to land, so post a one-line acknowledgement instead — a `!`
+		// typed at the roster still needs to show it ran and where its output
+		// went (see shellRun.shellRunStatus).
+		a = a.applyShellDone(msg)
+		if a.scr != screenAttach {
+			if r, ok := a.shellRunBySeq(msg.seq); ok {
+				a.setStatus(r.shellRunStatus())
+			}
+		}
+		return a, nil
 
 	case filesLoadedMsg:
 		// The `@` mention's background cwd enumeration landing
@@ -905,17 +915,6 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if next, cmd, handled := a.handleMenuKey(msg); handled {
 				return next, cmd
 			}
-		}
-		// The shell-output pane (shell.go) claims Esc while it is showing,
-		// ahead of the per-screen handlers' own Esc meanings (interrupt on
-		// attach, clear the dispatch bar on the overview) — the same
-		// two-stage Esc the /config panel already uses. It claims nothing
-		// else: the pane is read-only output, not a focusable surface.
-		// Dismissing it does NOT discard the runs — a `!` run that has not
-		// reached a prompt yet still owes its output to the next one.
-		if a.shellOpen && msg.Key().Code == tea.KeyEscape {
-			a.shellOpen = false
-			return a, nil
 		}
 		next, cmd := a.handleKey(msg)
 		if app, ok := next.(App); ok {
@@ -1335,11 +1334,10 @@ func (a App) handleAttachKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // same numbers to find the active screen's selectable rows within the frame
 // render produces).
 type frameLayout struct {
-	h          int      // content budget handed to the active screen's own render
-	footer     string   // trailing status line, "" when a.status is unset
-	panelH     int      // command-panel row count, 0 when a.panel is nil
-	shellLines []string // pre-rendered shell-output pane rows, nil when dismissed/empty
-	menuLines  []string // pre-rendered command-menu rows, nil when closed/not applicable
+	h         int      // content budget handed to the active screen's own render
+	footer    string   // trailing status line, "" when a.status is unset
+	panelH    int      // command-panel row count, 0 when a.panel is nil
+	menuLines []string // pre-rendered command-menu rows, nil when closed/not applicable
 }
 
 func (a App) frameLayout() frameLayout {
@@ -1362,27 +1360,6 @@ func (a App) frameLayout() frameLayout {
 			panelH = h
 		}
 		h -= panelH
-	}
-
-	// The shell-output pane (shell.go) takes its slice out of the same
-	// budget the panel does, and for the same reason: it is an overlay
-	// composed BELOW the active screen's own render, so the screen must
-	// shrink to make room. It is budgeted before the menu (which the screens
-	// carve out themselves) and clamped to whatever h is left, so a terminal
-	// too short for it simply drops rows rather than pushing the input line
-	// off the bottom. Guarded on h > 0 for the same first-frame reason the
-	// menu is: a.height is 0 until WindowSizeMsg arrives.
-	var shellLines []string
-	if a.shellOpen && h > 0 {
-		rows := shellPaneMaxRows
-		if rows > h {
-			rows = h
-		}
-		shellLines = shellPaneLines(a.theme, a.shellRuns, a.width, rows)
-		h -= len(shellLines)
-		if h < 0 {
-			h = 0
-		}
 	}
 
 	// The command-autocomplete menu (command_menu.go) is part of the
@@ -1410,7 +1387,7 @@ func (a App) frameLayout() frameLayout {
 		// shrink the bottom-anchored frame short of a.height.
 	}
 
-	return frameLayout{h: h, footer: footer, panelH: panelH, shellLines: shellLines, menuLines: menuLines}
+	return frameLayout{h: h, footer: footer, panelH: panelH, menuLines: menuLines}
 }
 
 // This is the pure core [App.View] wraps into a tea.View, kept separate so
@@ -1447,15 +1424,21 @@ func (a App) render() string {
 		// separate session with its own journal — see docs/TUI.md), so the block
 		// is composed per frame off the latest poll instead of being ingested
 		// once and going stale as children come and go.
+		//
+		// WithShellRuns rides it too: a `!` / `!!` run is App state (shell.go),
+		// not an event on this session's stream, and an unconsumed run is
+		// transient — it clears the frame it is folded into the next prompt (a
+		// `!` run's content then arrives as the echoed user message; a `!!`
+		// run's was never sent). Composing per frame off the live run list is
+		// what keeps the transcript block and App.composePrompt reading the same
+		// truth about what is pending. It is chained AFTER background agents so
+		// the most recent operator action sits closest to the input.
 		body = a.promptModel().
 			WithBackgroundAgents(a.over.Children(a.sessID)).
+			WithShellRuns(a.shellRuns).
 			ViewWithMenu(a.width, fl.h, fl.menuLines, attachHeaderLines(a.theme, a.over.meta, a.width), a.scroll)
 	default:
 		body = a.over.ViewWithMenu(a.width, fl.h, fl.menuLines, a.scroll, a.panel != nil)
-	}
-
-	if len(fl.shellLines) > 0 {
-		body += "\n" + strings.Join(fl.shellLines, "\n")
 	}
 
 	if a.panel != nil {
