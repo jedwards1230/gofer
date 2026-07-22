@@ -260,7 +260,8 @@ func TestEmailAddressDoesNotOpenTheMentionPopup(t *testing.T) {
 // nothing to do with commands.
 //
 // A deliberately unloadable command file (a space in the name) is the probe:
-// [App.reloadUserCommands] is the only thing that raises its warning note, so
+// the markdown reload ([App.loadUserCommandsCmd], landing in
+// [App.applyUserCommands]) is the only thing that raises its warning note, so
 // the note's presence IS the reload. The `/` half at the end is the must-fire
 // twin — without it this test would still pass if the note could never appear
 // at all.

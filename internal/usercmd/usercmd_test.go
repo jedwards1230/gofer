@@ -222,6 +222,38 @@ func TestLoadMaxFileBytes(t *testing.T) {
 	}
 }
 
+// TestLoadMaxFileBytesBoundary pins the cap's exact edge. The reader asks for
+// maxBytes+1 so that an at-cap file is accepted without a second syscall to
+// size it — an off-by-one either way silently changes which files load, and
+// the size is not otherwise observable through the API.
+func TestLoadMaxFileBytesBoundary(t *testing.T) {
+	const cap = 64
+	for _, tt := range []struct {
+		name   string
+		size   int
+		loaded bool
+	}{
+		{"under the cap", cap - 1, true},
+		{"exactly at the cap", cap, true},
+		{"one byte over the cap", cap + 1, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root, cwd := scopes(t)
+			writeCmd(t, usercmd.UserDir(root), "c.md", strings.Repeat("x", tt.size))
+
+			cmds, warns := usercmd.Load(root, cwd, usercmd.Options{MaxFileBytes: cap})
+			if got := len(cmds) == 1; got != tt.loaded {
+				t.Fatalf("%d-byte file under a %d-byte cap: loaded = %v, want %v (warnings %v)",
+					tt.size, cap, got, tt.loaded, warns)
+			}
+			if tt.loaded && len(cmds) == 1 && len(cmds[0].Body) != tt.size {
+				t.Errorf("body is %d bytes, want the whole %d — an accepted file must never be truncated",
+					len(cmds[0].Body), tt.size)
+			}
+		})
+	}
+}
+
 func TestLoadFrontmatter(t *testing.T) {
 	tests := []struct {
 		name     string

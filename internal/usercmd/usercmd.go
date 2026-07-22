@@ -59,6 +59,7 @@ package usercmd
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -286,17 +287,7 @@ func loadFile(dir, path string, scope Scope, opts Options) (*Command, *Warning) 
 		return nil, &Warning{Path: path, Err: fmt.Errorf(
 			"/%s is a builtin command; a project file may not replace one (move it to the user commands directory to override it deliberately)", name)}
 	}
-	if opts.MaxFileBytes > 0 {
-		info, statErr := os.Stat(path)
-		if statErr != nil {
-			return nil, &Warning{Path: path, Err: statErr}
-		}
-		if info.Size() > int64(opts.MaxFileBytes) {
-			return nil, &Warning{Path: path, Err: fmt.Errorf(
-				"%d bytes exceeds the %d-byte command-file cap (tui.max_command_file_bytes)", info.Size(), opts.MaxFileBytes)}
-		}
-	}
-	data, err := os.ReadFile(path) //nolint:gosec // the path comes from walking the user's own commands dir
+	data, err := readCapped(path, opts.MaxFileBytes)
 	if err != nil {
 		return nil, &Warning{Path: path, Err: err}
 	}
@@ -316,6 +307,35 @@ func loadFile(dir, path string, scope Scope, opts Options) (*Command, *Warning) 
 		return &cmd, &Warning{Path: path, Err: err}
 	}
 	return &cmd, nil
+}
+
+// readCapped reads path, refusing anything larger than maxBytes (<= 0 = no
+// cap). The cap is enforced on the open handle with an [io.LimitReader]
+// rather than by stat-then-read: a file that grows between the two calls
+// would beat the stat, and the read is the thing that actually allocates. It
+// also costs one syscall fewer.
+//
+// It reads one byte PAST the cap so an at-cap file is accepted and an
+// over-cap one is detected without a second syscall to size it. The refusal
+// is a plain "over the cap" — the exact size isn't known here by
+// construction, and isn't what the reader needs to act.
+func readCapped(path string, maxBytes int) ([]byte, error) {
+	f, err := os.Open(path) //nolint:gosec // the path comes from walking the user's own commands dir
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }() // read-only: a Close error says nothing about the bytes already read
+	if maxBytes <= 0 {
+		return io.ReadAll(f)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, int64(maxBytes)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxBytes {
+		return nil, fmt.Errorf("over the %d-byte command-file cap (tui.max_command_file_bytes)", maxBytes)
+	}
+	return data, nil
 }
 
 // commandName maps a file path under dir to its dispatcher token: the
