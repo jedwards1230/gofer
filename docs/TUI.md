@@ -1675,21 +1675,51 @@ input — and it is **leading-only**, so `that worked!` and
 `mail me@example.com` submit as ordinary prompts.
 
 - **`!` / `!!` shell escape** (shell.go). `!cmd` runs cmd under `$SHELL -c`
-  (falling back to `/bin/sh`) in the session's cwd, off the Update loop, and
-  shows the result in a bottom overlay pane composed like the command panel
-  (Esc dismisses it). **`!` output is folded into the next prompt this client
-  submits; `!!` output never is.** That exclusion is structural, not
-  cosmetic: `App.composePrompt` — the one place local content becomes model
-  input — walks the run list and skips any run flagged not-in-context, so no
-  rendering, copy, or re-submit path can leak it. A `!!` run is marked
-  consumed without contributing, so a later prompt can't pick it up either.
-  Output is bounded (`tui.shell_max_output_bytes`, default 64 KiB, with a
-  visible truncation marker) and so is runtime (`tui.shell_timeout_ms`,
-  default 30s); a non-zero exit is reported as an exit code with the
-  command's own stderr retained, stdout and stderr interleave in arrival
-  order, and a bare `!` runs nothing. It is **not** a tool call and
-  deliberately touches no part of the permission/approval path — the user
-  typed it themselves, and nothing the model emits can reach it.
+  (falling back to `/bin/sh`) in the session's cwd, off the Update loop.
+  **`!` output is folded into the next prompt this client submits; `!!` output
+  never is.** That exclusion is structural, not cosmetic: `App.composePrompt`
+  — the one place local content becomes model input — walks the run list and
+  skips any run flagged not-in-context, so no rendering, copy, or re-submit
+  path can leak it. A `!!` run is marked consumed without contributing, so a
+  later prompt can't pick it up either. Output is bounded
+  (`tui.shell_max_output_bytes`, default 64 KiB, with a visible truncation
+  marker) and so is runtime (`tui.shell_timeout_ms`, default 30s); a non-zero
+  exit is reported as an exit code with the command's own stderr retained,
+  stdout and stderr interleave in arrival order, and a bare `!` runs nothing.
+  It is **not** a tool call and deliberately touches no part of the
+  permission/approval path — the user typed it themselves, and nothing the
+  model emits can reach it.
+
+  **Presentation (the UX rework).** Three things make the escape legible:
+  - **Mode indicator.** While a `!` / `!!` command is being *typed*, both
+    text-entry surfaces flag shell mode — the input box's top framing rule
+    becomes an accented, labeled rule (`── shell ──` for `!`,
+    `── shell · not sent ──` for `!!`) and the prompt glyph goes accent
+    (`shellModeRule` / `shellPromptGlyph`). The label is TEXT, not just color,
+    so it reads under the Ascii golden profile; it clears the instant the `!`
+    prefix stops applying. A non-shell buffer draws the plain rule byte-for-byte
+    as before, so no existing golden churns.
+  - **In the transcript, not a pane.** On the attach screen a run renders as a
+    transcript block (`itemShellRun`, composed per frame by
+    `Model.WithShellRuns` — the same render-local pattern the background-agents
+    block uses): a `$ command` header, the output, its outcome, and a muted
+    disposition line. It reads as part of the conversation rather than a
+    dismissible overlay below it. **Only unconsumed/running runs render**: once
+    `composePrompt` folds a `!` run into a prompt, its content arrives as the
+    echoed user message, so rendering the run too would duplicate it; a `!!`
+    run clears on consume for the same reason it was never in a prompt. So the
+    only shell blocks on screen are the ones a subsequent prompt will act on —
+    which is exactly why rendering them at the transcript TAIL is correct.
+    Screens with no transcript (the overview dispatch bar, peek) acknowledge a
+    finished run on the status line instead (`shellRun.shellRunStatus`); its
+    output surfaces in the thread the moment a session is created/attached and
+    the fold's user message lands.
+  - **Context disposition is visible.** The block LABELS its disposition —
+    `· sent with your next message` for a `!` run, `· not sent to the agent`
+    for a `!!` run — so a reader can tell at a glance what the model can see.
+    But the label is read off `shellRun.inContext` for DISPLAY only;
+    `composePrompt` remains the SOLE decider of what reaches the model, so no
+    view change can move a byte in or out of context.
 - **`@` file mention** (filemention.go). Typing `@` at a token boundary opens
   the same popup the slash commands use, sourced from the paths under the
   session's cwd — `git ls-files` inside a repository (which is what makes it

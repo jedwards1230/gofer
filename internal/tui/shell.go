@@ -13,6 +13,19 @@ package tui
 // model input ([App.composePrompt] below), by a flag on the run — not by
 // rendering it differently.
 //
+// Presentation is legibility, never policy. A completed run renders INTO the
+// attach transcript as an [itemShellRun] block (composed per frame by
+// [Model.WithShellRuns], the same render-local pattern the background-agents
+// block uses), so the command and its output read as part of the conversation
+// rather than in a pane below it. The block LABELS its disposition — a `!` run
+// as "sent with your next message", a `!!` run as "not sent to the agent" — so
+// a reader can tell at a glance what the model can see. But the label is read
+// off [shellRun.inContext] for display only; [App.composePrompt] remains the
+// SOLE decider of what actually reaches the model, so no view change can move
+// a byte in or out of context. While the buffer is still being typed, both
+// input surfaces flag shell mode ([shellModeRule], [shellPromptGlyph]) with an
+// accented, labeled framing rule that clears the instant the `!` prefix stops.
+//
 // NOT a tool call, and deliberately not routed through anything that resembles
 // one: this is the user running a command in their own terminal, at their own
 // explicit keystroke, in this client's process. It never reaches the SDK's
@@ -33,6 +46,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
@@ -60,12 +74,6 @@ const fallbackShell = "/bin/sh"
 // for — it is the grace period between "this command is over" and "stop
 // waiting on its stragglers".
 const shellWaitDelay = 2 * time.Second
-
-// shellPaneMaxRows caps how many rows the shell-output pane occupies. Output
-// longer than that is tailed (the newest lines win — the end of a command's
-// output is what the operator just asked for), with the full text still going
-// to the model when the run is a `!` run.
-const shellPaneMaxRows = 10
 
 // shellRun is one `!` / `!!` invocation: what was typed, what came back, and
 // whether the output is the model's to see.
@@ -146,10 +154,11 @@ func parseShellEscape(buf string) (line string, inContext bool, ok bool) {
 	return line, inContext, line != ""
 }
 
-// dispatchShell starts a submitted shell escape: it records a running row for
-// the pane (so `!sleep 5` shows "running…" rather than nothing) and returns
-// the [tea.Cmd] that actually runs the command OFF the Update loop — same
-// discipline as [App.discoverModelsCmd]. Nothing about the process runs here.
+// dispatchShell starts a submitted shell escape: it records a running row (so
+// `!sleep 5` shows "running…" in the transcript rather than nothing) and
+// returns the [tea.Cmd] that actually runs the command OFF the Update loop —
+// same discipline as [App.discoverModelsCmd]. Nothing about the process runs
+// here.
 func (a App) dispatchShell(buf string) (App, tea.Cmd) {
 	line, inContext, ok := parseShellEscape(buf)
 	if !ok {
@@ -162,20 +171,14 @@ func (a App) dispatchShell(buf string) (App, tea.Cmd) {
 		line:      line,
 		inContext: inContext,
 	})
-	a.shellOpen = true
 	return a, runShellCmd(a.commandEnv.Cwd, a.shellSeq, line, a.shellTimeout(), a.shellOutputLimit())
 }
 
-// applyShellDone folds a finished run into the pane. A result whose seq no
-// longer matches a live row (the pane was cleared while it was in flight) is
-// dropped rather than resurrecting it.
-//
-// It deliberately does NOT re-open a dismissed pane: an operator who pressed
-// Esc on a running `!sleep 30` asked for their screen back, and having the
-// overlay reappear half a minute later over whatever they moved on to is the
-// opposite of what they asked for. The run itself is unaffected — a `!` run
-// still owes its output to the next prompt whether or not anyone looked at
-// it.
+// applyShellDone folds a finished run's result onto its recorded row. A result
+// whose seq no longer matches a live row (the run list was cleared while it
+// was in flight) is dropped rather than resurrecting it. The run itself is
+// unaffected by whether anyone was looking — a `!` run still owes its output
+// to the next prompt regardless of which screen was showing when it finished.
 func (a App) applyShellDone(msg shellDoneMsg) App {
 	runs := append([]shellRun(nil), a.shellRuns...)
 	for i := range runs {
@@ -191,6 +194,17 @@ func (a App) applyShellDone(msg shellDoneMsg) App {
 		return a
 	}
 	return a
+}
+
+// shellRunBySeq returns the recorded run with the given seq, for the status
+// acknowledgement the [shellDoneMsg] handler posts on a transcript-less screen.
+func (a App) shellRunBySeq(seq int) (shellRun, bool) {
+	for _, r := range a.shellRuns {
+		if r.seq == seq {
+			return r, true
+		}
+	}
+	return shellRun{}, false
 }
 
 // shellTimeout and shellOutputLimit resolve tui.shell_timeout_ms and
@@ -375,70 +389,90 @@ func (r shellRun) contextBlock() string {
 	return b.String()
 }
 
-// shellPaneLines renders the shell-output pane: a rule, then the tail of every
-// run's block, then a hint row. It mirrors [commandMenu.Lines]' shape — plain
-// rules, pre-truncated rows, nil when there is nothing to show — so
-// [App.frameLayout] budgets for it exactly the same way. Newest content wins
-// when the block overflows maxRows: the end of a command's output is what the
-// operator just asked for.
-func shellPaneLines(th theme.Theme, runs []shellRun, width, maxRows int) []string {
-	if len(runs) == 0 || maxRows < 1 {
-		return nil
+// shellDispositionLabel is the one-line disposition a run wears in the
+// transcript block ([Model.renderShellRunLines]) and in the transcript-less
+// status ack ([shellRun.shellRunStatus]): whether its output is the model's to
+// see. It is derived from [shellRun.inContext] for DISPLAY only —
+// [App.composePrompt] is what actually includes or excludes the bytes, so this
+// label can never be the thing that leaks a `!!` run.
+func (r shellRun) shellDispositionLabel() string {
+	if r.inContext {
+		return "sent with your next message"
 	}
+	return "not sent to the agent"
+}
+
+// shellRunStatus is the one-line acknowledgement a finished run posts on the
+// STATUS line — used only on screens with no transcript to render it into (the
+// overview, peek), so a `!` typed at the dispatch bar still gives feedback that
+// it ran and where its output went. On the attach screen the transcript block
+// ([Model.WithShellRuns]) carries all of this, so the handler skips the note
+// there rather than talk over what the reader is looking at.
+func (r shellRun) shellRunStatus() (statusSeverity, string) {
+	disp := " — " + r.shellDispositionLabel()
+	switch {
+	case r.note != "":
+		// A timed-out / failed-to-start `!` run still folds whatever partial
+		// output it collected (composePrompt does not gate on note), so the
+		// disposition is as relevant here as on the other branches.
+		return sevDanger, fmt.Sprintf("%s: %s%s", r.line, r.note, disp)
+	case r.exitCode != 0:
+		return sevWarn, fmt.Sprintf("%s exited %d%s", r.line, r.exitCode, disp)
+	default:
+		return sevOK, "ran " + r.line + disp
+	}
+}
+
+// shellModeLabel is the chip the input surfaces show while a shell escape is
+// being TYPED (before it is run): "" when the buffer is not a shell escape, so
+// an ordinary prompt's input frame is byte-identical to what it always drew.
+// `!!` announces up front that the run will be withheld, so the disposition is
+// legible before the command even executes — not only afterward.
+func shellModeLabel(buf string) string {
+	if !strings.HasPrefix(buf, "!") {
+		return ""
+	}
+	if strings.HasPrefix(buf, "!!") {
+		return "shell · not sent"
+	}
+	return "shell"
+}
+
+// shellModeRule renders the input box's top framing rule, labeled and accented
+// when buf is a shell escape and the plain full-width rule otherwise. Both
+// text-entry surfaces (the overview dispatch bar, the attach input) call it in
+// place of their own `strings.Repeat("─", width)`, so shell mode reads the
+// same wherever a command is typed. The label is TEXT, not just color, so it
+// survives the Ascii profile the golden tests force (this TUI's
+// "state reads without color" rule); the accent is the color-only layer a
+// styled golden pins on top.
+func shellModeRule(th theme.Theme, width int, buf string) string {
 	if width < 1 {
 		width = 1
 	}
-
-	var body []string
-	for _, r := range runs {
-		body = append(body, r.paneLines(th, width)...)
+	label := shellModeLabel(buf)
+	if label == "" {
+		return strings.Repeat("─", width)
 	}
-	// Reserve the rule and the hint row out of maxRows before tailing the
-	// body, so the pane never renders taller than the budget it was given.
-	avail := maxRows - 2
-	if avail < 1 {
-		return nil
+	// "── <label> " then fill the remainder with rule, to exactly width cells
+	// before styling (styling adds ANSI but no visible width). A width too
+	// narrow for the label degrades to a plain accented rule rather than
+	// overflowing.
+	prefix := "── " + label + " "
+	if ansi.StringWidth(prefix) >= width {
+		return truncate(th.AccentStyle().Render(strings.Repeat("─", width)), width)
 	}
-	if len(body) > avail {
-		body = body[len(body)-avail:]
-	}
-
-	lines := make([]string, 0, len(body)+2)
-	lines = append(lines, strings.Repeat("─", width))
-	lines = append(lines, body...)
-	lines = append(lines, truncate(th.MutedStyle().Render("shell output · esc to dismiss"), width))
-	return lines
+	rule := prefix + strings.Repeat("─", width-ansi.StringWidth(prefix))
+	return truncate(th.AccentStyle().Render(rule), width)
 }
 
-// paneLines renders one run for the pane: a `$ command` header carrying the
-// run's context disposition, its output, and its outcome. The `!!` marker is
-// shown because the operator needs to know which spelling they used — but it
-// is only a LABEL. The exclusion itself is [App.composePrompt]'s, so a
-// rendering bug here can never turn into a context leak.
-func (r shellRun) paneLines(th theme.Theme, width int) []string {
-	header := "$ " + r.line
-	if !r.inContext {
-		header += "  (not sent to the model)"
+// shellPromptGlyph renders a text-entry surface's prompt glyph (the overview's
+// "❯", the attach input's ">"), accented while the buffer is a shell escape so
+// the caret itself signals shell mode alongside the labeled rule above it. A
+// non-shell buffer returns the bare glyph, unstyled, exactly as before.
+func shellPromptGlyph(th theme.Theme, glyph, buf string) string {
+	if strings.HasPrefix(buf, "!") {
+		return th.AccentStyle().Render(glyph)
 	}
-	lines := []string{truncate(th.AccentStyle().Render(header), width)}
-
-	if !r.done {
-		return append(lines, truncate(th.MutedStyle().Render("  running…"), width))
-	}
-	for _, l := range strings.Split(strings.TrimRight(r.output, "\n"), "\n") {
-		if l == "" && r.output == "" {
-			continue
-		}
-		lines = append(lines, truncate("  "+l, width))
-	}
-	switch {
-	case r.note != "":
-		lines = append(lines, truncate(th.DangerStyle().Render("  "+r.note), width))
-	case r.exitCode != 0:
-		lines = append(lines, truncate(th.DangerStyle().Render(fmt.Sprintf("  exit %d", r.exitCode)), width))
-	}
-	if r.truncated {
-		lines = append(lines, truncate(th.MutedStyle().Render("  … output truncated"), width))
-	}
-	return lines
+	return glyph
 }

@@ -1,8 +1,0 @@
-────────────────────────────────────────────────────────────────────────────────
-$ git status --short
-   M internal/tui/app.go
-  ?? internal/tui/shell.go
-$ cat missing.txt  (not sent to the model)
-  cat: missing.txt: No such file or directory
-  exit 1
-shell output · esc to dismiss

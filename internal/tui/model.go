@@ -51,6 +51,12 @@ const (
 	// the children are a ROSTER fact the app composes onto a render-local copy
 	// of the model (see [Model.WithBackgroundAgents]), never an ingested one.
 	itemBackgroundAgents
+	// itemShellRun is one `!` / `!!` shell escape the operator ran (shell.go).
+	// Like itemBackgroundAgents it is composed onto a render-local copy of the
+	// model, never ingested: a run is App state, and an unconsumed one is
+	// transient — it stops rendering the moment [App.composePrompt] folds it
+	// into a prompt (see [Model.WithShellRuns]).
+	itemShellRun
 )
 
 // spawnedAgent is one child session named by an [itemBackgroundAgents] block:
@@ -86,6 +92,11 @@ type item struct {
 	// approvalVerdict is itemApprovalResolved-only: the resolved
 	// event.Verdict ("allow"/"deny").
 	approvalVerdict string
+
+	// shell is itemShellRun-only: the `!` / `!!` run this block renders. Its
+	// inContext flag drives the block's disposition LABEL only — what actually
+	// reaches the model is [App.composePrompt]'s call, never this copy.
+	shell shellRun
 }
 
 // Model is gofer's minimal attach surface. It is immutable from the
@@ -488,6 +499,52 @@ func (m Model) WithBackgroundAgents(children []SessionInfo) Model {
 	items := make([]item, 0, len(m.items)+1)
 	items = append(items, m.items...)
 	m.items = append(items, item{kind: itemBackgroundAgents, done: true, spawned: spawned})
+	return m
+}
+
+// WithShellRuns returns a copy of the model whose transcript ends with one
+// block per shell escape (shell.go) that is either still running or finished
+// but NOT YET consumed by a prompt. A consumed run is deliberately skipped:
+//
+//   - a `!` run's output has by then been folded into a real prompt
+//     ([App.composePrompt]) and comes back as the echoed user message, so
+//     rendering the run too would duplicate it; and
+//   - a `!!` run's output was operator-only and was never sent, so once the
+//     operator moves on (sends their next prompt, consuming it) there is
+//     nothing in the thread it belongs beside.
+//
+// So the only shell blocks on screen are the ones a subsequent prompt will
+// act on — which is exactly what makes rendering them at the TAIL correct:
+// they are the most recent thing the operator did, and nothing follows them
+// until a prompt is sent. runs with no visible entries returns the model
+// untouched, byte-for-byte as a session that ran no commands.
+//
+// Like [Model.WithBackgroundAgents] this is a per-render composition, never an
+// Ingest: the runs are App state (they must survive a screen switch and feed
+// composePrompt), and appending leaves every existing item index untouched,
+// which the pending approval's badgeIdx depends on.
+func (m Model) WithShellRuns(runs []shellRun) Model {
+	// Count first so the common steady state — no runs, or every run already
+	// folded into a prompt (consumed) — returns untouched without cloning the
+	// transcript, mirroring WithBackgroundAgents' len(children)==0 short circuit.
+	visible := 0
+	for _, r := range runs {
+		if !r.consumed {
+			visible++
+		}
+	}
+	if visible == 0 {
+		return m
+	}
+	items := make([]item, 0, len(m.items)+visible)
+	items = append(items, m.items...)
+	for _, r := range runs {
+		if r.consumed {
+			continue
+		}
+		items = append(items, item{kind: itemShellRun, done: r.done, shell: r})
+	}
+	m.items = items
 	return m
 }
 
@@ -1041,9 +1098,15 @@ func (m Model) view(width, height int, menuLines, headerLines []string, scroll i
 	if prompt := m.promptLines(width, height); prompt != nil {
 		footer = prompt
 	} else {
+		// The TOP framing rule doubles as the shell-mode indicator: when the
+		// buffer is a `!` / `!!` escape being typed it becomes an accented,
+		// labeled rule (shellModeRule), clearing the instant the prefix stops.
+		// The bottom rule stays plain — one labeled edge reads as a header for
+		// the box, two would read as a box drawn in the wrong color.
+		topRule := shellModeRule(m.theme, width, m.input.String())
 		rule := strings.Repeat("─", width)
 		footer = append(footer, menuLines...)
-		footer = append(footer, rule, truncate(m.inputLine(), width), rule)
+		footer = append(footer, topRule, truncate(m.inputLine(), width), rule)
 		// The status line carries only usage/cost now, and only once a turn has
 		// finished — omit it (no blank row) until then, so the box sits flush
 		// against the transcript.
@@ -1216,6 +1279,9 @@ func (m Model) renderItemLines(it item) []string {
 	case itemBackgroundAgents:
 		return m.renderBackgroundAgentLines(it)
 
+	case itemShellRun:
+		return m.renderShellRunLines(it.shell)
+
 	default: // itemAssistantText
 		// Same empty-guard as itemAssistantReasoning above: an assistant-text
 		// item with no content yet (or that resolved empty) renders nothing
@@ -1344,6 +1410,54 @@ func (m Model) renderBackgroundAgentLines(it item) []string {
 	return lines
 }
 
+// renderShellRunLines renders one `!` / `!!` run (shell.go) as a transcript
+// block: a `$ command` header, the command's output, its outcome (a non-zero
+// exit, a timeout/failure note, a truncation marker — each shown only when
+// there is something abnormal to say), and a muted disposition line stating
+// whether the output is the model's to see. Marker-only styled like every
+// other block: the `$` glyph carries the color (accent for a `!` run bound for
+// the model, muted for a withheld `!!` run), the body stays plain, and the
+// disposition is a TEXT line so a reader can tell a not-sent run from a sent
+// one under the Ascii profile the goldens force, not only by color.
+//
+// The disposition is read off r.inContext for DISPLAY only. What reaches the
+// model is [App.composePrompt]'s decision; this block moves no bytes in or out
+// of context, so a mislabeled run would be a cosmetic bug, never a leak — the
+// same structural split shell.go's package doc describes.
+func (m Model) renderShellRunLines(r shellRun) []string {
+	marker := m.theme.AccentStyle()
+	if !r.inContext {
+		marker = m.theme.MutedStyle() // a withheld run is de-emphasized
+	}
+	// styledMarkerLines splits a multi-line command (a heredoc, a pasted
+	// multi-statement script) the same way the transcript's text items split,
+	// for the same one-slice-entry-per-row height accounting (see its doc).
+	lines := styledMarkerLines(marker, "$", r.line, plainRender)
+
+	if !r.done {
+		return append(lines, m.theme.MutedStyle().Render("  running…"))
+	}
+
+	// A command that printed nothing (or only trailing newlines) adds no blank
+	// output row — TrimRight collapses that to "" so the loop is skipped
+	// entirely, rather than emitting a lone indented empty line.
+	if body := strings.TrimRight(r.output, "\n"); body != "" {
+		for _, l := range strings.Split(body, "\n") {
+			lines = append(lines, "  "+l)
+		}
+	}
+	switch {
+	case r.note != "":
+		lines = append(lines, m.theme.DangerStyle().Render("  "+r.note))
+	case r.exitCode != 0:
+		lines = append(lines, m.theme.DangerStyle().Render(fmt.Sprintf("  exit %d", r.exitCode)))
+	}
+	if r.truncated {
+		lines = append(lines, m.theme.MutedStyle().Render("  … output truncated"))
+	}
+	return append(lines, m.theme.MutedStyle().Render("  · "+r.shellDispositionLabel()))
+}
+
 // statusLine reports the turn's token usage and cost once TurnFinished has
 // been seen, muted; it returns "" before then (while streaming, mid tool call,
 // or before any turn has finished). The per-line marker colors already carry
@@ -1362,9 +1476,11 @@ func (m Model) statusLine() string {
 
 // inputLine renders the input buffer with the cursor marker spliced in at
 // its actual position — mid-text when the cursor sits mid-buffer, not
-// always at the end.
+// always at the end. The prompt glyph goes accent while the buffer is a shell
+// escape (shellPromptGlyph), so the caret signals shell mode alongside the
+// labeled rule above it.
 func (m Model) inputLine() string {
-	return "> " + m.input.Render("▏")
+	return shellPromptGlyph(m.theme, ">", m.input.String()) + " " + m.input.Render("▏")
 }
 
 // FullTranscript renders every transcript item unclipped by height, followed
