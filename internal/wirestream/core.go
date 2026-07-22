@@ -12,6 +12,7 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
 	"github.com/jedwards1230/gofer/internal/daemon"
+	"github.com/jedwards1230/gofer/internal/decision"
 )
 
 // The gofer-native control/notification methods this reconstruction core reads
@@ -34,6 +35,18 @@ const (
 	methodGoferPermissionRequested = "gofer/permission_requested"
 	methodGoferPermissionResolved  = "gofer/permission_resolved"
 
+	// methodGoferDecisionRequested / methodGoferDecisionResolved are the
+	// gofer-native notifications the daemon fans a session's structured-decision
+	// (ask_user) requests out to every attached peer with — mirroring
+	// internal/daemon/handlers.go's constants of the same names (unexported
+	// there; redeclared here for the same reason as the others above). Unlike the
+	// permission pair they do NOT reconstruct into events — the SDK's Event union
+	// carries no decision kind, which is the whole reason internal/decision
+	// exists — so they land on a per-session [decision.Stream] instead of the
+	// session broker. See reconstruct.go's handleDecisionRequested/Resolved.
+	methodGoferDecisionRequested = "gofer/decision_requested"
+	methodGoferDecisionResolved  = "gofer/decision_resolved"
+
 	// methodGoferEvent is the M3 lossless-attach notification carrying a
 	// source [event.Event]'s own MarshalJSON envelope, verbatim — mirroring
 	// internal/daemon/handlers.go's own methodGoferEvent constant (unexported
@@ -52,6 +65,15 @@ const (
 	subBuffer   = 256
 	replayDepth = 256
 )
+
+// decisionSubBuffer sizes each decision subscription this core hands out. A
+// session has one outstanding decision at a time in practice, so this is pure
+// headroom for a consumer that is mid-frame when one arrives; delivery is
+// drop-on-full (see decision.Subscribe), so the cost of an undersized buffer
+// would be a missed prompt rather than a stalled demuxer. It matches the
+// in-process path's own buffer (internal/tuibridge's decisionBuffer) in intent,
+// and is larger only because this stream also carries a replay burst on attach.
+const decisionSubBuffer = 32
 
 // ErrClosed is returned by [Reconstructor.Subscribe]/[Reconstructor.SubscribeLive]
 // once the Reconstructor has been closed — its brokers are reaped and the
@@ -207,6 +229,15 @@ type sessionState struct {
 	id     string
 	broker *event.Broker
 
+	// decisions is this session's client-side structured-decision stream: the
+	// parallel, non-event channel the daemon's gofer/decision_* notifications
+	// reconstruct onto (see reconstruct.go's handleDecisionRequested). It is
+	// separate from broker because a decision is NOT an [event.Event] — the SDK's
+	// union is closed and has no decision kind — so there is nothing to publish
+	// onto a broker even in principle. Safe for concurrent use on its own, like
+	// the broker beside it.
+	decisions *decision.Stream
+
 	// turnTerminated reports whether a terminal gofer/event turn.finished
 	// (stop reason != "tool_use") has already been replayed for the
 	// currently-open turn — see handleGoferEvent. handleTurnEnd reads it to
@@ -233,9 +264,10 @@ type sessionState struct {
 // away (RegisterFresh, a session known to have no history).
 func newSessionState(id string) *sessionState {
 	return &sessionState{
-		id:       id,
-		broker:   event.NewBroker(event.WithReplay(replayDepth)),
-		loadDone: make(chan struct{}),
+		id:        id,
+		broker:    event.NewBroker(event.WithReplay(replayDepth)),
+		decisions: decision.NewStream(),
+		loadDone:  make(chan struct{}),
 	}
 }
 
@@ -437,6 +469,35 @@ func (r *Reconstructor) SubscribeLive(_ context.Context, sessionID string) (*eve
 		return nil, ErrClosed
 	}
 	return rec.broker.SubscribeLive(event.FilterAll, subBuffer), nil
+}
+
+// Decisions returns a subscription to sessionID's reconstructed
+// structured-decision stream: the questions an agent on the far side asked with
+// the ask_user tool and is blocked on, as reconstructed from the daemon's
+// gofer/decision_requested / gofer/decision_resolved notifications. Every
+// request already open is replayed first (see [decision.Stream.Subscribe]), so
+// a consumer attaching mid-question still sees the prompt.
+//
+// It is a SECOND stream alongside [Reconstructor.Subscribe], not part of the
+// event stream, for the same reason it is on the in-process path: the SDK's
+// Event union carries no decision kind (see internal/decision's package doc).
+//
+// Like Subscribe it creates the session's reconstruction state on first
+// reference — which triggers the one-shot history load, whose session/load is
+// ALSO what makes the daemon replay any open decision (see internal/daemon's
+// handleSessionLoad), so a first-reference Decisions is self-sufficient: it does
+// not depend on a prior Subscribe to surface an already-open question.
+//
+// The caller owns the returned subscription and must Close it. It does not have
+// to poll for the connection ending: [Reconstructor.Close] closes every
+// session's stream, so the channel closing is how a consumer learns the stream
+// is over — exactly as with an event subscription.
+func (r *Reconstructor) Decisions(_ context.Context, sessionID string) (*decision.Subscription, error) {
+	rec := r.session(sessionID)
+	if rec == nil {
+		return nil, ErrClosed
+	}
+	return rec.decisions.Subscribe(decisionSubBuffer), nil
 }
 
 // Load references sessionID and blocks until its one-shot history load (the

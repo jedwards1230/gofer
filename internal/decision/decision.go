@@ -29,6 +29,13 @@
 // not carry: a gofer-assigned request id, the open/resolved stream, and the
 // id-assignment scheme (see [AssignIDs]).
 //
+// [Stream] is the same set seen from the far side of a daemon connection: a
+// client that reconstructs a remote session's decisions off the wire applies
+// them to a Stream and subscribes to it, getting the identical [Subscription]
+// (and the identical replay-on-attach) without holding a primitive whose whole
+// purpose is to block an agent turn it does not run. Both sources publish
+// through the shared [fanout].
+//
 // # Escape-hatch defaults
 //
 // [DefaultAllowFreeText] and [DefaultAllowChat] are both true, and the tool's

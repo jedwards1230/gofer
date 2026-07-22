@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jedwards1230/agent-sdk-go/event"
@@ -71,6 +72,18 @@ type managed struct {
 	// stop joins it alongside the pump — leaving no subscription goroutine
 	// behind on shutdown.
 	permDone chan struct{}
+	// decisionOnce guards starting the decision watcher, which two racing
+	// callers can reach: [Supervisor.register] (for a session created after a
+	// relay was installed) and [Supervisor.SetDecisionRelay] (for a session that
+	// already existed when one was). Exactly one wins; the loser is a no-op.
+	decisionOnce sync.Once
+	// decisionStarted reports that decisionOnce actually started a watcher, so
+	// stop knows whether decisionDone will ever close. Set INSIDE the once,
+	// before the goroutine is spawned.
+	decisionStarted atomic.Bool
+	// decisionDone is closed by the watchDecisions goroutine when it returns,
+	// joined by stop the same way permDone is.
+	decisionDone chan struct{}
 	// teardown is the func returned by Config.OnRegister (nil if unset or if
 	// OnRegister itself returned nil), joined by stop after the pump and
 	// permission watcher have both exited. Set once, in newManaged, before m
@@ -150,27 +163,28 @@ type managed struct {
 func newManaged(sess Session, model, effort string, now time.Time, clock func() time.Time, notify func(), cwd string, gate *loop.Gate, decisions *decision.Gate, meta sessionMeta, onRegister func(sess Session) (stop func())) *managed {
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &managed{
-		sess:       sess,
-		id:         sess.ID(),
-		project:    filepath.Base(filepath.Dir(sess.JournalPath())),
-		model:      model,
-		effort:     effort,
-		cwd:        cwd,
-		parentID:   meta.ParentID,
-		agent:      meta.Agent,
-		depth:      meta.Depth,
-		createdAt:  now,
-		updated:    now,
-		clock:      clock,
-		notify:     notify,
-		baseCtx:    ctx,
-		baseCancel: cancel,
-		done:       make(chan struct{}),
-		gate:       gate,
-		decisions:  decisions,
-		permDone:   make(chan struct{}),
-		submitCh:   make(chan struct{}, 1),
-		state:      stateIdle,
+		sess:         sess,
+		id:           sess.ID(),
+		project:      filepath.Base(filepath.Dir(sess.JournalPath())),
+		model:        model,
+		effort:       effort,
+		cwd:          cwd,
+		parentID:     meta.ParentID,
+		agent:        meta.Agent,
+		depth:        meta.Depth,
+		createdAt:    now,
+		updated:      now,
+		clock:        clock,
+		notify:       notify,
+		baseCtx:      ctx,
+		baseCancel:   cancel,
+		done:         make(chan struct{}),
+		gate:         gate,
+		decisions:    decisions,
+		permDone:     make(chan struct{}),
+		decisionDone: make(chan struct{}),
+		submitCh:     make(chan struct{}, 1),
+		state:        stateIdle,
 
 		pendingPerms: make(map[string]event.PermissionRequested),
 	}
@@ -364,6 +378,65 @@ func (m *managed) watchPermissions(sub *event.Subscription) {
 	}
 }
 
+// decisionWatchBuffer sizes the decision subscription the standing watcher
+// holds. A session has one outstanding decision at a time in practice, so this
+// is pure headroom: the gate DROPS (and counts) rather than blocking when a
+// subscriber's buffer fills, and a dropped update here would mean a request the
+// host never relays — a turn blocked on a question no client is ever shown. The
+// headroom is what makes that unreachable while the watcher is briefly busy
+// inside a relay call.
+//
+// It is distinct from the CLIENT-side decision buffers (internal/tuibridge's
+// decisionBuffer, internal/wirestream's decisionSubBuffer), which size
+// subscriptions a client holds and can afford to be smaller: a client that
+// misses a prompt still gets it replayed on its next attach. This one sizes the
+// HOST's subscription to the gate itself — the one hop no replay covers, since
+// the daemon's retained payload is written from this very update.
+const decisionWatchBuffer = 64
+
+// startDecisionWatch subscribes to this session's decision gate and starts the
+// standing watcher that drives relay. It is idempotent — see decisionOnce — so
+// [Supervisor.register] and [Supervisor.SetDecisionRelay] can both call it for
+// the same session without racing two watchers onto one gate (which would
+// double every relayed request).
+//
+// Subscribing here is also what satisfies [decision.Gate.Request]'s
+// "is any client watching?" check under a host, so it must happen before the
+// session's first turn can run — see [Supervisor.register].
+func (m *managed) startDecisionWatch(relay DecisionRelay) {
+	m.decisionOnce.Do(func() {
+		m.decisionStarted.Store(true)
+		go m.watchDecisions(m.decisions.Subscribe(decisionWatchBuffer), relay)
+	})
+}
+
+// watchDecisions relays this session's structured-decision updates to the host
+// (see [DecisionRelay]) for the session's whole lifetime.
+//
+// Unlike watchPermissions it does NOT exit on baseCtx cancellation, and that is
+// the load-bearing difference: cancelling baseCtx is step one of teardown, and
+// the resolutions that release the host's per-request bookkeeping (its route
+// table, its retained replay payload, its outstanding client requests) are
+// published by [decision.Gate.Close] in step three. A watcher that quit at step
+// one would leave every open request of a killed session leaked in the host,
+// and every attached client rendering a prompt nothing will ever resolve. So it
+// exits only when the subscription closes — which Close guarantees, after it has
+// published a resolution for every request still open.
+//
+// sub is closed on exit so the gate drops it.
+func (m *managed) watchDecisions(sub *decision.Subscription, relay DecisionRelay) {
+	defer close(m.decisionDone)
+	defer sub.Close()
+	for u := range sub.C {
+		switch u.Kind {
+		case decision.UpdateRequested:
+			relay.RequestDecision(m.id, u.Request.ID, u.Request.Questions)
+		case decision.UpdateResolved:
+			relay.ResolveDecision(m.id, u.Request.ID)
+		}
+	}
+}
+
 // adjustPending bumps the outstanding-approval count by delta and pushes a
 // fresh roster snapshot. It clamps at zero so a stray resolved (e.g. a
 // replayed must-deliver event with no matching request) never drives the count
@@ -409,9 +482,10 @@ func (m *managed) pendingPerm(id string) (event.PermissionRequested, bool) {
 
 // stop marks m closing, cancels its base context (interrupting any in-flight
 // turn, waking an idle pump, and waking watchPermissions), waits for both its
-// pump and permission-watcher goroutines to exit, closes the decision gate, and
-// finally joins the OnRegister teardown (if any) — mirroring the permDone
-// discipline above, so no observer goroutine outlives the session.
+// pump and permission-watcher goroutines to exit, closes the decision gate,
+// joins the decision watcher the close unwinds, and finally joins the
+// OnRegister teardown (if any) — mirroring the permDone discipline above, so no
+// observer goroutine outlives the session.
 //
 // The gate is closed here rather than left to the caller for the same reason
 // the session's broker is closed on the way out: a client watching this
@@ -429,6 +503,18 @@ func (m *managed) stop() {
 	<-m.done
 	<-m.permDone
 	m.decisions.Close()
+	// Joined AFTER the gate closes, because closing it is what ends the
+	// watcher's subscription (see watchDecisions): waiting first would deadlock.
+	// The started check keeps a relay-less supervisor — where no watcher was ever
+	// spawned and decisionDone will never close — from blocking here. A
+	// startDecisionWatch racing this teardown (SetDecisionRelay snapshotting the
+	// roster just before a Kill takes the session out of it) is safe either way:
+	// it either wins and is joined here, or it loses and subscribes to an already
+	// closed gate, which hands back an already-closed subscription its watcher
+	// returns from immediately.
+	if m.decisionStarted.Load() {
+		<-m.decisionDone
+	}
 	if m.teardown != nil {
 		m.teardown()
 	}

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"slices"
 	"sync"
-	"sync/atomic"
 
 	"github.com/jedwards1230/agent-sdk-go/acp"
 )
@@ -45,7 +44,11 @@ type Gate struct {
 	// settle) / Close gets there first).
 	open  map[string]*pending
 	order []string
-	subs  map[*Subscription]struct{}
+	// fan is this gate's subscriber registry, shared in TYPE (not in state) with
+	// the client-side [Stream] so both hand out the same [Subscription] — see
+	// [fanout]. Every publish into it happens under mu, which is what keeps an
+	// update's ordering identical to the state change that produced it.
+	fan fanout
 	// closed reports that [Gate.Close] has run: the session is gone, so no new
 	// request may open and no new subscription may register. Guarded by mu;
 	// done is its lock-free twin for the blocked waiters in Request, which
@@ -71,7 +74,6 @@ func NewGate(sessionID string) *Gate {
 	return &Gate{
 		sessionID: sessionID,
 		open:      make(map[string]*pending),
-		subs:      make(map[*Subscription]struct{}),
 		done:      make(chan struct{}),
 	}
 }
@@ -98,6 +100,26 @@ func (g *Gate) Bind(sessionID string) {
 // inherently racy at its edges (a client may detach a microsecond later); that
 // residual case is what ctx cancellation is for.
 //
+// # ErrNoClient means "no SUBSCRIBER", which under a daemon is always false
+//
+// The check counts subscribers, not humans. On the daemonless path that
+// distinction does not exist — the only subscriber is the attached TUI — so a
+// session nobody is watching gets ErrNoClient and the tool tells the model to
+// continue in prose. Under a daemon it does: the supervisor installs its OWN
+// standing watcher per session (see internal/supervisor's SetDecisionRelay),
+// because the daemon has to observe a request to put it on the wire at all.
+// That watcher is a subscriber, so ErrNoClient never fires in daemon mode and a
+// decision asked with ZERO peers attached simply stays open until a peer
+// attaches (session/load replays it), the turn is interrupted, or the session
+// ends.
+//
+// That is deliberate, and it is exactly what a PERMISSION asked with zero peers
+// attached already does today — it blocks on its gate until someone answers or
+// the turn is cancelled. Both are "the agent needs a human; wait for one",
+// which is the consistent behavior for a supervisor whose whole purpose is that
+// clients come and go. There is no decision-side timeout, and inventing one
+// would silently answer a question the user never saw.
+//
 // The returned answers are normalized by [Gate.Answer]: exactly one per
 // question, in question order, with anything the client left out filled in as
 // [acp.DecisionOutcomeCancelled]. On ctx cancellation the request is dropped
@@ -123,7 +145,7 @@ func (g *Gate) Request(ctx context.Context, questions []acp.DecisionQuestion) ([
 		g.mu.Unlock()
 		return nil, ErrClosed
 	}
-	if len(g.subs) == 0 {
+	if g.fan.count() == 0 {
 		g.mu.Unlock()
 		return nil, ErrNoClient
 	}
@@ -193,8 +215,9 @@ func (g *Gate) settle(p *pending) ([]acp.DecisionAnswer, bool) {
 // correct and retry.
 //
 // Validating here rather than in [Gate.Request]'s caller is deliberate: this is
-// the seam untrusted-ish input (a peer's answer over the daemon wire, in the
-// follow-up PR) enters through, and the tool downstream must be able to trust
+// the seam untrusted-ish input (a peer's answer over the daemon wire — see
+// internal/daemon's decision.answer op) enters through, and the tool downstream
+// must be able to trust
 // that every answer references a real question and a real option.
 func (g *Gate) Answer(requestID string, answers []acp.DecisionAnswer) error {
 	g.mu.Lock()
@@ -225,7 +248,8 @@ func (g *Gate) Answer(requestID string, answers []acp.DecisionAnswer) error {
 // treat it as read-only.
 //
 // It is the "what is this session blocked on right now?" query — used by tests
-// and by the daemon relay's replay-on-attach in the follow-up PR. Note that no
+// and by the daemon relay's replay-on-attach (internal/daemon's
+// pendingDecisionsForSession). Note that no
 // client reconciles against it today: [Gate.Subscribe] already replays the open
 // set on attach, which covers every case except a subscriber that let its own
 // buffer overflow (see [Subscription.Dropped]).
@@ -260,7 +284,7 @@ func (g *Gate) Subscribe(buffer int) *Subscription {
 
 	if g.closed {
 		ch := make(chan Update)
-		sub := &Subscription{C: ch, ch: ch, gate: g}
+		sub := &Subscription{C: ch, ch: ch, src: &g.fan}
 		sub.once.Do(func() { close(ch) })
 		return sub
 	}
@@ -271,11 +295,11 @@ func (g *Gate) Subscribe(buffer int) *Subscription {
 		capacity = len(replay)
 	}
 	ch := make(chan Update, capacity)
-	sub := &Subscription{C: ch, ch: ch, gate: g}
+	sub := &Subscription{C: ch, ch: ch, src: &g.fan}
 	for _, r := range replay {
 		ch <- Update{Kind: UpdateRequested, Request: r} // fits: capacity >= len(replay)
 	}
-	g.subs[sub] = struct{}{}
+	g.fan.add(sub)
 	return sub
 }
 
@@ -290,6 +314,18 @@ func (g *Gate) Subscribe(buffer int) *Subscription {
 // without it, killing an attached session leaves the client's decision reader
 // blocked forever, and — because the gate's own ErrNoClient check counts
 // subscribers — the dead subscription would keep claiming a client is watching.
+//
+// The ORDER of those first two — a resolution for every open request, and only
+// THEN the closed channels — is load-bearing well beyond clearing a widget, so
+// a rewrite must preserve it. internal/supervisor's watchDecisions deliberately
+// does NOT exit on its session's base context (unlike its permission twin)
+// precisely so it is still draining this subscription when Close publishes:
+// those resolutions are what release the host's per-request bookkeeping —
+// internal/daemon's decisionRoutes, pendingDecisions, and decisionReqCancels. A
+// Close that dropped the open set without publishing, or closed the
+// subscriptions first, would silently leak all three for every request open on
+// a killed session. TestGateCloseResolvesEveryOpenRequestBeforeClosingSubscriptions
+// is the direct guard.
 //
 // Close is idempotent and safe to call concurrently with Request/Answer/
 // Subscribe: it takes mu for the state transition, and the subscription
@@ -306,11 +342,7 @@ func (g *Gate) Close() {
 		g.removeLocked(id)
 		g.publishLocked(Update{Kind: UpdateResolved, Request: Request{ID: id, SessionID: g.sessionID}})
 	}
-	subs := make([]*Subscription, 0, len(g.subs))
-	for sub := range g.subs {
-		subs = append(subs, sub)
-	}
-	clear(g.subs)
+	subs := g.fan.drain()
 	close(g.done)
 	g.mu.Unlock()
 
@@ -348,48 +380,12 @@ func (g *Gate) openLocked() []Request {
 }
 
 // publishLocked fans u out to every subscriber, dropping (and counting) on a
-// full buffer rather than blocking — see [Gate.Subscribe]. Callers hold g.mu,
-// which is safe precisely because the send never blocks.
+// full buffer rather than blocking — see [fanout.publish]. Callers hold g.mu,
+// which is safe precisely because the send never blocks, and NECESSARY because
+// publishing under the same lock that changed the open set is what keeps a
+// client's view of that set ordered the same way the gate's own is.
 func (g *Gate) publishLocked(u Update) {
-	for sub := range g.subs {
-		select {
-		case sub.ch <- u:
-		default:
-			sub.dropped.Add(1)
-		}
-	}
-}
-
-// Subscription is a receive stream of [Update]s from a [Gate]. Range over C to
-// consume updates; call Close to unsubscribe. C is closed either by Close or by
-// the gate's own [Gate.Close] when the session ends — a consumer must treat a
-// closed channel as "this session is gone", exactly as it treats an event
-// subscription closing.
-type Subscription struct {
-	// C receives updates. It is closed when the subscription is closed.
-	C <-chan Update
-
-	ch      chan Update
-	gate    *Gate
-	dropped atomic.Uint64
-	once    sync.Once
-}
-
-// Dropped returns how many updates were discarded because this subscriber's
-// buffer was full — a diagnostic: a non-zero count means this client may be
-// missing an open request. No consumer acts on it today (see [Gate.Subscribe]
-// for why buffer sizing is the mitigation instead); reconciling against
-// [Gate.Open] is what acting on it would mean.
-func (s *Subscription) Dropped() uint64 { return s.dropped.Load() }
-
-// Close unsubscribes and closes C. It is idempotent and safe to call
-// concurrently with delivery: the unsubscribe takes the gate's lock, which a
-// concurrent publish also holds, so no send can race the close.
-func (s *Subscription) Close() {
-	s.gate.mu.Lock()
-	delete(s.gate.subs, s)
-	s.gate.mu.Unlock()
-	s.once.Do(func() { close(s.ch) })
+	g.fan.publish(u)
 }
 
 // normalize validates answers against questions and returns exactly one answer
@@ -435,7 +431,8 @@ func normalize(questions []acp.DecisionQuestion, answers []acp.DecisionAnswer) (
 // validateOutcome checks one answer's outcome against the question it answers.
 // The type switch is CLOSED on purpose — its default rejects rather than waves
 // through — because this is the seam untrusted input enters by (a peer's answer
-// off the daemon wire, in the follow-up PR). A pointer to an outcome variant,
+// off the daemon wire, via internal/daemon's decision.answer op or a client's
+// session/request_decision response). A pointer to an outcome variant,
 // or a third-party implementation of the acp.DecisionOutcome interface, matches
 // no case here; letting one past would skip every check below and then fall out
 // of the tool's describeOutcome default, silently losing the id/label echo the

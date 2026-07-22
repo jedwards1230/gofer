@@ -310,6 +310,17 @@
 //     watcher fans the gofer-native notification (serving the TUI/daemonbridge)
 //     and records the route so ANY client's routed reply resolves, but does not
 //     itself issue the spec-ACP request.
+//   - STRUCTURED DECISIONS (the ask_user tool — see internal/decision) do not
+//     cross this hop. The relay landed for a single daemon hosting the in-process
+//     supervisor: that supervisor runs a standing per-session watcher over each
+//     session's decision gate and drives the daemon's fan-out from it (see
+//     internal/daemon's DecisionRelay). A worker's own daemon installs no such
+//     relay, and this Supervisor implements no [daemon.DecisionAnswerer], so under
+//     --workers an ask_user reaches no client and an answer routed here is refused
+//     with a clear error rather than silently swallowed. Closing it needs the same
+//     treatment permissions got — relaying the worker's decision updates up and a
+//     decision.answer Notify back down — plus decision methods in the skew subset
+//     (skew.go), since an old-binary worker will not speak them.
 //   - [Supervisor.EmitConfigOptions] returns [ErrEmitConfigUnsupported]: there is
 //     no wire method for a client to make a daemon emit config options, and it is
 //     off the crash-isolation critical path. The live config_option_update a model

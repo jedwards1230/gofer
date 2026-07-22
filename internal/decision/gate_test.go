@@ -490,7 +490,7 @@ func forcedChoice() []acp.DecisionQuestion {
 // alienOutcome is a third-party implementation of acp.DecisionOutcome: not one
 // of the four variants the gate and the tool know how to handle, but perfectly
 // able to satisfy the interface. It stands in for whatever a peer might put on
-// the daemon wire in the follow-up PR.
+// the daemon wire.
 type alienOutcome struct{}
 
 func (alienOutcome) Outcome() string              { return "teleport" }
@@ -618,6 +618,59 @@ func TestGateCloseReleasesEverything(t *testing.T) {
 		t.Error("Subscribe after Close returned a live channel, want a closed one")
 	}
 	late.Close() // must not panic on a channel Close already closed
+}
+
+// TestGateCloseResolvesEveryOpenRequestBeforeClosingSubscriptions pins the
+// ordering the HOST depends on, which TestGateCloseReleasesEverything only
+// exercises for a single request as part of the wider teardown contract: Close
+// publishes a resolution for EVERY open request while the subscription is still
+// live, and closes it only afterwards. internal/supervisor's watchDecisions
+// stays subscribed through teardown precisely to receive those, and they are
+// what release internal/daemon's decisionRoutes / pendingDecisions /
+// decisionReqCancels — so a Close that dropped the open set without publishing,
+// or closed the channels first, would leak all three per open request of every
+// killed session with nothing to notice.
+func TestGateCloseResolvesEveryOpenRequestBeforeClosingSubscriptions(t *testing.T) {
+	g := NewGate("sess-1")
+	sub := g.Subscribe(8)
+	defer sub.Close()
+
+	out1, req1 := openRequest(t, context.Background(), g, sub, twoQuestions())
+	out2, req2 := openRequest(t, context.Background(), g, sub, twoQuestions())
+	if req1.ID == req2.ID {
+		t.Fatalf("both requests opened as %q — the fixture is not exercising two of them", req1.ID)
+	}
+
+	g.Close()
+
+	// One resolution per open request, in open order, and each still carrying the
+	// session id a multiplexing client routes it by.
+	for _, want := range []string{req1.ID, req2.ID} {
+		up := recvUpdate(t, sub)
+		if up.Kind != UpdateResolved || up.Request.ID != want {
+			t.Fatalf("update = %v %q, want resolved %q", up.Kind, up.Request.ID, want)
+		}
+		if up.Request.SessionID != "sess-1" {
+			t.Errorf("resolution %q session = %q, want sess-1", want, up.Request.SessionID)
+		}
+	}
+	select {
+	case up, ok := <-sub.C:
+		if ok {
+			t.Fatalf("update %v %q after the last resolution, want the channel closed", up.Kind, up.Request.ID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("subscription stayed open after Close — the watcher's pump would park forever")
+	}
+
+	for i, out := range []<-chan requestResult{out1, out2} {
+		if res := recvResult(t, out); !errors.Is(res.err, ErrClosed) {
+			t.Errorf("request %d after Close = %v, want ErrClosed", i, res.err)
+		}
+	}
+	if open := g.Open(); len(open) != 0 {
+		t.Errorf("open after Close = %v, want none", open)
+	}
 }
 
 // TestGateCloseRacesRequestAnswerSubscribe is the -race guard on the shutdown

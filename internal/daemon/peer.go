@@ -58,22 +58,23 @@ type peer struct {
 	attached map[string]struct{}
 
 	// goferNative reports whether this peer speaks the gofer-native control
-	// surface (it has invoked a gofer/* method or permission.reply) rather than
-	// being a pure ACP client. It gates the daemon's spec-ACP
-	// session/request_permission fan-out: that request is a JSON-RPC REQUEST a
-	// client must answer, which a gofer-native client (internal/daemonbridge)
-	// does not — it answers via the permission.reply notification and consumes
-	// gofer/permission_requested instead. Default false (assume ACP) is the safe
+	// surface (it has invoked a gofer/* method, permission.reply, or
+	// decision.answer) rather than being a pure ACP client. It gates the daemon's
+	// spec-ACP session/request_permission and session/request_decision fan-outs:
+	// each is a JSON-RPC REQUEST a client must answer, which a gofer-native client
+	// (internal/daemonbridge) does not — it answers via the permission.reply /
+	// decision.answer notification and consumes the matching gofer-native
+	// notification instead. Default false (assume ACP) is the safe
 	// direction: an ACP client (which never calls a gofer/* method) is never
 	// mismarked and so is never skipped, while a gofer-native client that has not
 	// yet been marked merely receives a request it silently drops (harmless — it
 	// still answers via permission.reply). See [Daemon.requestPermissionFromPeers].
 	goferNative atomic.Bool
 
-	// outIDC generates ids for daemon-initiated requests (session/request_permission)
-	// this peer sends to its client. Separate id space from the client's own
-	// request ids — the two never collide because they key different maps
-	// (pendingOut here vs the client's own pending table).
+	// outIDC generates ids for daemon-initiated requests (session/request_permission,
+	// session/request_decision) this peer sends to its client. Separate id space
+	// from the client's own request ids — the two never collide because they key
+	// different maps (pendingOut here vs the client's own pending table).
 	outIDC atomic.Int64
 	// pendingMu guards pendingOut.
 	pendingMu sync.Mutex
@@ -179,8 +180,9 @@ func (p *peer) handleFrame(ctx context.Context, data []byte) {
 		p.reply(ctx, nil, nil, parseError(err))
 		return
 	}
-	// A response to a daemon-initiated request (session/request_permission): route
-	// it to the waiting [peer.request] and stop — it is NOT a method call.
+	// A response to a daemon-initiated request (session/request_permission or
+	// session/request_decision): route it to the waiting [peer.request] and stop
+	// — it is NOT a method call.
 	if env.isResponse() {
 		p.deliverReply(env.ID, peerReply{Result: env.Result, Err: env.Error})
 		return
@@ -289,17 +291,21 @@ func (p *peer) writeJSON(ctx context.Context, v any) error {
 }
 
 // isGoferNativeMethod reports whether method belongs to the gofer-native control
-// surface — any gofer/* method or the permission.reply op. A peer that invokes
-// one is a gofer client (internal/daemonbridge), not a pure ACP one, and is
-// excluded from the spec-ACP session/request_permission fan-out (see
-// [peer.goferNative]). ACP method names never carry the gofer/ prefix, so an
+// surface — any gofer/* method, the permission.reply op, or the decision.answer
+// op. A peer that invokes one is a gofer client (internal/daemonbridge), not a
+// pure ACP one, and is excluded from the spec-ACP session/request_permission and
+// session/request_decision fan-outs (see [peer.goferNative]). ACP method names
+// never carry the gofer/ prefix, and the two dotted ops are gofer's own, so an
 // ACP client can never trip this.
 func isGoferNativeMethod(method string) bool {
-	return strings.HasPrefix(method, "gofer/") || method == methodPermissionReply
+	return strings.HasPrefix(method, "gofer/") ||
+		method == methodPermissionReply ||
+		method == methodDecisionAnswer
 }
 
-// request sends a daemon-initiated JSON-RPC request (session/request_permission)
-// to this peer's client and blocks for its matching response. It is the mirror
+// request sends a daemon-initiated JSON-RPC request (session/request_permission
+// or session/request_decision) to this peer's client and blocks for its
+// matching response. It is the mirror
 // of [Client.Call], running in the agent->client direction: the daemon here is
 // the requester and the connected client answers. The response is routed back
 // by [peer.handleFrame] via [peer.deliverReply].

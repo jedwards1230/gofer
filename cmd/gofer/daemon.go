@@ -226,6 +226,11 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 	var sup daemon.Supervisor
 	var closeSup func() error
 	var routerSup *router.Supervisor
+	// inProcSup is the same value as sup on the non-workers path, kept in its
+	// concrete type so the decision relay can be injected after the daemon is
+	// built (see SetDecisionRelay below) — that setter is the in-process
+	// supervisor's own, not part of the daemon.Supervisor hosting interface.
+	var inProcSup *supervisor.Supervisor
 	if *workers {
 		// Each worker is spawned from THIS gofer binary (`gofer session-worker`),
 		// so the router needs its own executable path.
@@ -287,7 +292,7 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 		if serr != nil {
 			return fmt.Errorf("build supervisor: %w", serr)
 		}
-		sup, closeSup = isup, isup.Close
+		sup, closeSup, inProcSup = isup, isup.Close, isup
 	}
 
 	d := daemon.New(sup, daemon.Config{
@@ -359,6 +364,24 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 	if routerSup != nil {
 		routerSup.SetPermissionRelay(d)
 		routerSup.SetEventRelay(d)
+	}
+
+	// Let a structured decision (the ask_user tool — see internal/decision) cross
+	// the daemon wire. Unlike the two relays above this is NOT a worker-mode
+	// bridge: a decision rides no event stream, so the supervisor's standing
+	// per-session gate watcher is the daemon's ONLY way to observe one at all,
+	// and without this every ask_user on a daemon-hosted session would be
+	// invisible to every client. Injected here, after daemon.New, for the same
+	// reason as the others — the daemon does not exist when the supervisor is
+	// built — and before Serve, so no session can be created before it is
+	// installed.
+	//
+	// The --workers path is deliberately NOT wired: its sessions live in worker
+	// processes and the relay does not yet cross the router↔worker hop (see
+	// internal/daemon's DecisionAnswerer). A decision there is refused with a
+	// clear error rather than silently swallowed.
+	if inProcSup != nil {
+		inProcSup.SetDecisionRelay(d)
 	}
 
 	// Install the interrupt handler around the whole serve loop: the daemon
