@@ -268,6 +268,10 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 			// config (session.max_subagent_depth) rather than a literal; an unset
 			// value resolves to the package default.
 			MaxSubagentDepth: cfg.Session.SubagentDepthLimit(),
+			// Re-read per session (not the startup snapshot cfg above) so a
+			// /yolo from an attached TUI reaches the next session this daemon
+			// creates — see permissionModeResolver.
+			PermissionMode: permissionModeResolver(rootDir),
 			// Attach a per-session telemetry observer at registration, before the
 			// session's first turn — subscribing here (rather than after a turn
 			// has already started) means Events' replay backlog is still empty,
@@ -525,6 +529,30 @@ func daemonDefaultModelResolver(pinned bool, root string) func(context.Context) 
 	}
 	return func(ctx context.Context) (string, error) {
 		return resolveRunModel(ctx, root)
+	}
+}
+
+// permissionModeResolver is [supervisor.Config.PermissionMode] for a process
+// rooted at root: it RE-READS <root>/config.json every time a session is
+// created, so a `/yolo` toggle (or a hand-edited `session.permission_mode`)
+// governs the next session this process starts rather than only the next
+// process. It is the guardrail twin of [daemonDefaultModelResolver], and it is
+// wired into every supervisor gofer builds — the daemon's, a session worker's,
+// and the TUI's local in-process fallback.
+//
+// A config that won't load resolves to [config.PermissionModeAsk]. The
+// alternative — carrying the last good value, or defaulting to whatever the
+// process started with — would mean a config.json that goes unreadable mid-run
+// silently keeps guardrails OFF. Failing toward asking is the only safe
+// reading. (A malformed config is already a hard start-up failure on every path
+// that loads one, so this is the mid-life corruption case only.)
+func permissionModeResolver(root string) func() config.PermissionMode {
+	return func() config.PermissionMode {
+		cfg, err := config.Load(config.DefaultPath(root))
+		if err != nil {
+			return config.PermissionModeAsk
+		}
+		return cfg.Session.Mode()
 	}
 }
 

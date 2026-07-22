@@ -931,8 +931,15 @@ func (a App) handleWheel(msg tea.MouseWheelMsg) App {
 	return a
 }
 
-// handleKey dispatches a key press to the current screen's handler.
+// handleKey dispatches a key press: first the global keymap (keymap.go's
+// table, which is where ctrl+c and ctrl+y are DEFINED as well as documented —
+// each screen's switch used to carry its own ctrl+c copy), then the current
+// screen's handler for everything else. The order matches what those copies
+// had: ctrl+c was the first case in every screen's switch.
 func (a App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if next, cmd, handled := dispatchGlobalKey(a, msg.Key()); handled {
+		return next, cmd
+	}
 	switch a.scr {
 	case screenPeek:
 		return a.handlePeekKey(msg)
@@ -949,9 +956,6 @@ func (a App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.Key()
 	switch {
-	case key.Mod.Contains(tea.ModCtrl) && key.Code == 'c':
-		return a, tea.Quit
-
 	case key.Code == tea.KeyUp:
 		a.over = a.over.MoveUp()
 		return a, nil
@@ -1071,6 +1075,15 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		a.setStatus(sevOK, fmt.Sprintf("Stopping %s.", plural(len(ids), "subagent")))
 		return a, a.doKillTree(ids)
+
+	case key.Text == "?" && a.over.InputEmpty():
+		// The roster footer has advertised "? shortcuts" since M2 with nothing
+		// bound behind it; /help is what it was promising. Conditional on an
+		// EMPTY dispatch bar, exactly like the bare → above: with text typed,
+		// "?" is an ordinary character and falls through to the input keymap,
+		// so it never interrupts a prompt mid-sentence.
+		app, cmd := openPanel(panelHelp)(a, nil)
+		return app, cmd
 	}
 
 	// Every key not already claimed by the navigation contract above falls
@@ -1096,9 +1109,6 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (a App) handlePeekKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.Key()
 	switch {
-	case key.Mod.Contains(tea.ModCtrl) && key.Code == 'c':
-		return a, tea.Quit
-
 	case key.Code == tea.KeyUp:
 		a.over = a.over.MoveUp()
 		return a, nil
@@ -1161,9 +1171,6 @@ func (a App) handlePeekKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (a App) handleAttachKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.Key()
 	switch {
-	case key.Mod.Contains(tea.ModCtrl) && key.Code == 'c':
-		return a, tea.Quit
-
 	case key.Code == tea.KeyEscape:
 		if a.sessID != "" {
 			return a, a.doInterrupt(a.sessID)

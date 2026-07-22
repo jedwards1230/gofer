@@ -160,20 +160,25 @@ func selectTUIBackend(ctx context.Context, df *daemonFlags, cwd, root string, st
 	// honors session.max_subagent_depth exactly as `gofer daemon` and
 	// `gofer session-worker` do — a cap silently ignored on one of the three
 	// paths that create sessions would be a config knob that only sometimes
-	// works. Read best-effort, matching resolveOverviewModel's posture just
-	// below: config.Load's zero value resolves to the package default, so an
-	// unreadable or malformed config leaves the cap at its default rather than
-	// keeping the roster from opening at all.
+	// works. The guardrail posture (session.permission_mode) is honored on the
+	// same terms and for the same reason: this is the backend the TUI actually
+	// runs on when no daemon is reachable, which is exactly where a /yolo that
+	// reached nothing would be most misleading. Read best-effort, matching
+	// resolveOverviewModel's posture just below: config.Load's zero value
+	// resolves to the package default, so an unreadable or malformed config
+	// leaves the cap at its default rather than keeping the roster from opening
+	// at all.
 	//
-	// NOTE: this call deliberately mirrors only what this PR owns. It also passes
-	// no Permissions (so local-backend sessions run the supervisor's built-in
-	// contain-or-ask catch-all rather than the operator's configured ruleset) —
-	// pre-existing, unrelated to subagents, and left alone here rather than
-	// changed under cover of this work.
+	// NOTE: this call still passes no Permissions, so local-backend sessions run
+	// the supervisor's built-in contain-or-ask catch-all rather than the
+	// operator's configured RULESET. That gap is pre-existing and unrelated to
+	// either the subagent cap or the permission MODE, and is left alone here
+	// rather than changed under cover of this work.
 	localCfg, _ := config.Load(config.DefaultPath(rootDir))
 	sup, err := supervisor.New(supervisor.Config{
 		Root:             rootDir,
 		MaxSubagentDepth: localCfg.Session.SubagentDepthLimit(),
+		PermissionMode:   permissionModeResolver(rootDir),
 	})
 	if err != nil {
 		return tuiBackend{}, fmt.Errorf("build supervisor: %w", err)

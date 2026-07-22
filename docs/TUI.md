@@ -1540,6 +1540,60 @@ autocomplete popup — once per `/` typed, never per keystroke and never inside
 `Registry.matching` — so a file written while the TUI runs appears the next
 time the popup opens.
 
+**Built (`/yolo`)**: the guardrail toggle, dual-bound as `/yolo` and **ctrl+y**
+— both routed through one commit path (`yolo.go`'s `applyPermissionMode`) so
+they cannot drift. Bare `/yolo` flips; `/yolo on|off` states the posture
+outright. It writes `session.permission_mode` through the same
+`CommandEnv.Config`/`SaveConfig` pair `/model` uses (a failed READ aborts rather
+than overwriting config.json with a zero value), and that value is now
+**consumed**: `supervisor.Config.PermissionMode` resolves it PER SESSION
+CREATION — `cmd/gofer`'s `permissionModeResolver` re-reads `config.json` on each
+create, the same shape as the daemon's `ResolveDefaultModel` — so the next
+session a running gofer starts gets the new posture with no restart, on every
+backend (daemon, worker, local in-process). `ask` builds the SDK's
+`loop.RuleGuard` over the sandbox container (contain-or-ask); `yolo` builds
+`supervisor`'s `yoloGuard` over the same engine plus the **unwrapped** builtin
+registry — no prompt, no containment, but **config `deny` rules still block** (a
+rule written as "never" is not repealed by a second knob). It is deliberately
+NOT a `Config.Engine` change: the engine's vocabulary is allow/ask/deny and its
+allow already means contain-or-ask, so the mode selects the *guard*, not the
+ruleset.
+
+**It does not change a session that is already running**, and both status notes
+say so ("… for NEW sessions; running sessions keep theirs"). The SDK fixes a
+session's guard at construction (`runner.Options.Guard`) and carries no op to
+swap it — there is no `session.set_permission_mode` beside `session.set_model`,
+and `Runner` exposes no `SetGuard` — so plumbing a live swap would mean reaching
+past the Event/Op contract, which invariant #1 forbids. Turning guardrails OFF
+is a `sevWarn` (yellow), never a bare `sevOK`: the action succeeded, but the
+posture it leaves the user in is the one thing in the TUI that most deserves to
+be visible. Turning them back on is `sevOK`.
+
+**Built (`/help`)**: the last command-panel tab (`help.go`), scrollable with
+↑/↓/PgUp/PgDn because the whole table is far longer than `panelBodyRows` and a
+silently truncated help screen is worse than none. Its **Commands** section
+renders straight from `Registry.List()` — the same registry the dispatcher
+resolves against, across every layer — so a command registered anywhere (a
+builtin, a user's markdown file, a plugin's runtime registration in M7) appears
+with no edit to `help.go`; that is pinned by a test that registers a command the
+file has never heard of and expects to find it. Aliases ride on the summary
+column rather than the name column, since the name column is padded to its
+widest entry and one long `ArgHint` would otherwise truncate every other row's
+summary. Its **Keys** section renders from `keymap.go`, a new declarative table.
+That table is honestly two-tier: its **global** rows (`ctrl+c`, `ctrl+y`) are
+LIVE — `App.handleKey` dispatches through `dispatchGlobalKey`, replacing the
+per-screen `ctrl+c` copies — while the per-screen rows are **descriptive only
+and can drift**, because several of those bindings are conditional on state a
+table can't express (a bare → attaches only from an *empty* dispatch bar) and
+routing them all through the table is a whole-TUI key refactor, not this
+change. `keymap.go` says so at the top; a collision test sweeps every key the
+package binds against the global rows so a future global can't silently steal
+one. The table also carries an **Input prefixes** section (`/name`, `!cmd`,
+`!!cmd`, `@path`): those are a submit-time grammar rather than bindings, but
+they are the part of the input surface a user is least likely to find unaided.
+`?` on an empty dispatch bar also opens the panel — the roster footer has
+advertised "? shortcuts" since M2 with nothing behind it.
+
 Deferred (issue #175): true per-message / per-tool-call token attribution
 (needs SDK per-item usage granularity absent from v0.14.2, which reports usage
 only at the turn and session level — rendering a synthesized per-message
@@ -1636,9 +1690,7 @@ input — and it is **leading-only**, so `that worked!` and
   reaching around the contract (invariant #1). Unblocked by a runner-level
   entrypoint, e.g. `func (r *Runner) Compact(ctx context.Context, instructions
   string) error` that folds the history, appends the compaction entry, and emits
-  `session.compacted`. · `/yolo` permission-mode toggle (dual-bound command +
-  key; ships before autonomous tool use) · `/help` rendered from the live
-  keymap.
+  `session.compacted`.
 - **P1**: `/init` (first-run project context) · `/fork` · `/tree` ·
   `/export html|jsonl` · `/login` · runtime `registerCommand` from plugins ·
   `/skill:name` · `/name` · `/session` (id, path, per-model tokens/cost).

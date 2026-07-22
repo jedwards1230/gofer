@@ -252,6 +252,17 @@ func newBuiltinRegistry() Registry {
 		Summary: "Set the reasoning effort for this session",
 		Run:     runThinking,
 	})
+	r.register(Command{
+		Name:    "yolo",
+		ArgHint: "[on|off]",
+		Summary: "Toggle guardrails for new sessions",
+		Run:     runYolo,
+	})
+	r.register(Command{
+		Name:    "help",
+		Summary: "List commands and keys",
+		Run:     openPanel(panelHelp),
+	})
 	return r
 }
 
@@ -344,7 +355,7 @@ func validSessionID(id string) bool {
 // [Overview.DefaultModel].
 func openPanel(tab commandPanelTab) func(App, []string) (App, tea.Cmd) {
 	return func(a App, _ []string) (App, tea.Cmd) {
-		p := newCommandPanel(a.theme, tab, a.commandEnv, a.currentSessionInfo(), a.over.DefaultModel(), a.over.Now(), a.over.Roster())
+		p := newCommandPanel(a.theme, tab, a.commandEnv, a.currentSessionInfo(), a.over.DefaultModel(), a.over.Now(), a.over.Roster(), a.registry)
 		a.panel = &p
 		switch tab {
 		case panelModel:

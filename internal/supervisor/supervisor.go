@@ -53,6 +53,21 @@ type Config struct {
 	// policy never runs a tool uncontained without asking.
 	Permissions func() *permission.Engine
 
+	// PermissionMode resolves the guardrail posture each NEW session is created
+	// with (see [config.Session.Mode]). Like Permissions it is a factory, called
+	// once per Create/Resume rather than sampled at construction, so a
+	// `session.permission_mode` write — the /yolo toggle, or a hand-edited
+	// config.json — governs the next session a RUNNING gofer starts, with no
+	// restart (the same shape, and the same reason, as the daemon's
+	// ResolveDefaultModel; issue #156).
+	//
+	// It cannot reach a session that already exists: the SDK fixes a session's
+	// guard at construction (runner.Options.Guard) and exposes no way to swap
+	// it, so a live session keeps the posture it was created under for its
+	// lifetime. Nil defaults to [config.PermissionModeAsk] — contain-or-ask,
+	// identical to gofer before this seam existed.
+	PermissionMode func() config.PermissionMode
+
 	// Store, when set, is used instead of building a store from Root, and is
 	// NOT closed by [Supervisor.Close] — the caller owns its lifecycle. Test
 	// seam.
@@ -101,6 +116,10 @@ type Supervisor struct {
 	// (never nil after New — a nil Config.Permissions resolves to the default
 	// contain-or-ask catch-all factory).
 	newEngine func() *permission.Engine
+
+	// permissionMode mirrors Config.PermissionMode; never nil after New (a nil
+	// Config.PermissionMode resolves to a constant ask factory).
+	permissionMode func() config.PermissionMode
 
 	// resumeMu serializes Resume end-to-end (roster check through
 	// registration) so two concurrent Resumes of the same id can never both
@@ -191,6 +210,13 @@ func New(cfg Config) (*Supervisor, error) {
 		maxDepth = config.DefaultMaxSubagentDepth
 	}
 
+	permissionMode := cfg.PermissionMode
+	if permissionMode == nil {
+		// No explicit posture: contain-or-ask, the same fail-safe
+		// config.Session.Mode resolves an unset knob to.
+		permissionMode = func() config.PermissionMode { return config.PermissionModeAsk }
+	}
+
 	return &Supervisor{
 		root:             root,
 		store:            store,
@@ -201,6 +227,7 @@ func New(cfg Config) (*Supervisor, error) {
 		maxSubagentDepth: maxDepth,
 		onRegister:       cfg.OnRegister,
 		newEngine:        newEngine,
+		permissionMode:   permissionMode,
 		roster:           make(map[string]*managed),
 		watchers:         make(map[*watcher]struct{}),
 		watchDone:        make(chan struct{}),
@@ -212,19 +239,43 @@ func New(cfg Config) (*Supervisor, error) {
 // backing the session's own ask_user tool (routing is per-session for the same
 // reason — see [Supervisor.AnswerDecision]), a sandbox Container shared between
 // the RuleGuard's containability check and the sandbox-wrapping tool registry,
-// and the compiled RuleGuard over the shared engine. It returns the three
+// and the compiled guard over a fresh engine. It returns the three
 // runner.Options fields to inject plus the two Gates to store on the managed
 // session.
 //
 // The decision gate is built with an empty session id and bound in [register]:
 // the tool registry closes over the gate and must be handed to runner.New, and
 // only that call mints a created session's id (see [decision.Gate.Bind]).
+//
+// The guardrail posture is resolved HERE, per session, so a
+// `session.permission_mode` change reaches the next session a running gofer
+// creates (see [Config.PermissionMode]):
+//
+//   - ask (the default) — [loop.RuleGuard] over a sandbox Container, with the
+//     bash-wrapping registry: allow ⇒ run contained, else escalate to a human.
+//   - yolo — [yoloGuard] over the same engine, with the PLAIN builtin registry
+//     (WrapRegistry with a nil Container): deny rules still block, everything
+//     else runs, uncontained and unasked.
+//
+// Both Gates, and the ask_user tool, are built the SAME way in either mode.
+// yolo turns off the guardrail — the human in front of a tool call gofer wants
+// to run — and nothing else. ask_user is the agent asking a question of its own
+// accord, which is a capability rather than a gate, so dropping it under yolo
+// would silently take a feature away in the name of removing a restriction.
+// Keeping the reply Gate uniform likewise means the managed session's routing
+// doesn't need to know which mode built it (a yolo session simply never emits a
+// permission request for it to carry).
 func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.Gate, decisions *decision.Gate, tools loop.ToolRegistry) {
 	gate := loop.NewGate()
 	dgate := decision.NewGate("")
+	askUser := decision.NewAskUser(dgate)
+	engine := s.newEngine()
+	if s.permissionMode() == config.PermissionModeYolo {
+		return yoloGuard{engine: engine}, gate, dgate, sandbox.WrapRegistry(cwd, nil, askUser)
+	}
 	container := sandbox.New()
-	rg := loop.RuleGuard{Engine: s.newEngine(), Container: container, Target: sandbox.ToolTarget}
-	return rg, gate, dgate, sandbox.WrapRegistry(cwd, container, decision.NewAskUser(dgate))
+	rg := loop.RuleGuard{Engine: engine, Container: container, Target: sandbox.ToolTarget}
+	return rg, gate, dgate, sandbox.WrapRegistry(cwd, container, askUser)
 }
 
 // ResolveRoot is gofer's single source of the ~/.gofer default — the SDK
