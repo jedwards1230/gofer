@@ -134,6 +134,21 @@ type SessionInfo struct {
 	// distinguish). Additive — a consumer that ignores it is unaffected.
 	BinaryVersion string
 
+	// ParentID is the id of the session that SPAWNED this one — "" for a root
+	// session, which every session predating subagents is. A subagent session is
+	// a real session with its own journal, cost and transcript; this link is what
+	// makes it a child rather than a sibling. It is gofer-native (the SDK has no
+	// session-parent concept) and durable: it is persisted beside the journal, so
+	// a disk-only entry from [Supervisor.List] carries it too.
+	ParentID string
+	// Agent is the session's agent type/identity (e.g. "go-developer"), the same
+	// value forwarded to [runner.Options.Agent] so its tool-call events carry the
+	// attribution field. "" is un-attributed. Independent of ParentID.
+	Agent string
+	// Depth is the session's depth in the subagent tree: 0 for a root session,
+	// parent+1 for a child, capped by [Config.MaxSubagentDepth].
+	Depth int
+
 	// Cwd is the working directory the session was created/resumed into.
 	// Live sessions carry it from their [managed] bookkeeping; a disk-only
 	// entry from [Supervisor.List] reads it back from the journal's

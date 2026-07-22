@@ -105,7 +105,9 @@ func runResume(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 	defer stop()
 
 	if daemonRunning {
-		return driveDaemonSession(ctx, daemonClient, "resume", id, cwd, prompt, *asJSON, stdout, stderr)
+		// No subagent link: a resume reopens an existing session, whose parent/
+		// agent link (if any) is already persisted beside its journal.
+		return driveDaemonSession(ctx, daemonClient, "resume", id, cwd, prompt, subagentLink{}, *asJSON, stdout, stderr)
 	}
 
 	r, err := runner.Resume(ctx, id, runner.Options{

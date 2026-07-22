@@ -2,6 +2,7 @@ package daemonbridge_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http/httptest"
@@ -799,7 +800,7 @@ func TestPermissionRelayEndToEnd(t *testing.T) {
 	// Reply through the exact bridge method the TUI's approval dialog calls
 	// (see internal/tui/dialog.go's doReply) — the client-side half of
 	// contract #1, not a supervisor-internal shortcut.
-	if err := b.Reply(context.Background(), info.ID, pr.ID, true, false); err != nil {
+	if err := b.Reply(context.Background(), info.ID, pr.ID, tui.PermissionDecision{Allow: true}); err != nil {
 		t.Fatalf("Reply: %v", err)
 	}
 
@@ -833,6 +834,67 @@ func TestPermissionRelayEndToEnd(t *testing.T) {
 	}
 	if tf.StopReason != "end_turn" {
 		t.Errorf("TurnFinished.StopReason = %q, want end_turn", tf.StopReason)
+	}
+}
+
+// TestAmendedPermissionReplyReachesTheGate is TestPermissionRelayEndToEnd for
+// an AMENDED allow: the reply carries replacement tool input, and the call the
+// SDK then runs must be the human's, not the model's.
+//
+// The proof is the post-reply ToolCallFinished. The SDK's loop substitutes
+// event.PermissionReply.Input into call.Input inside awaitApproval and emits
+// that call's input on tool.call.finished (loop.runOneTool), so an
+// unsubstituted (or dropped) input shows up here as the model's original
+// {"path":"a.txt"}. That single assertion covers every layer between: the
+// bridge's wire params, the daemon's permissionReplyParams, and the gate.
+func TestAmendedPermissionReplyReachesTheGate(t *testing.T) {
+	sup := newTestSupervisorGuarded(t, func() provider.Provider { return &toolTurnProvider{} }, true)
+	url := newTestDaemon(t, sup)
+	b := newBridge(t, url)
+
+	info, err := b.Create(context.Background(), "", tui.CreateOptions{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sub, err := b.Subscribe(context.Background(), info.ID)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer sub.Close()
+
+	if err := b.Send(context.Background(), info.ID, "read a.txt"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	before := drainFirstTurnEvents(t, sub, "read a.txt", 6)
+	pr, ok := before[5].(event.PermissionRequested)
+	if !ok {
+		t.Fatalf("event 5 = %+v, want PermissionRequested", before[5])
+	}
+
+	// The amended input the human "typed": the full original spec with the
+	// path replaced, exactly as the TUI's editor builds it (see
+	// tui.Model.AmendedInput).
+	amended := json.RawMessage(`{"path":"b.txt"}`)
+	d := tui.PermissionDecision{Allow: true, Input: amended}
+	if err := b.Reply(context.Background(), info.ID, pr.ID, d); err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+
+	after := drainEvents(t, sub, 7)
+	resolved, ok := after[0].(event.PermissionResolved)
+	if !ok {
+		t.Fatalf("event 0 (post-reply) = %+v, want PermissionResolved", after[0])
+	}
+	if resolved.Verdict != event.VerdictAllow {
+		t.Errorf("PermissionResolved.Verdict = %q, want allow", resolved.Verdict)
+	}
+	finished, ok := after[1].(event.ToolCallFinished)
+	if !ok {
+		t.Fatalf("event 1 (post-reply) = %+v, want ToolCallFinished", after[1])
+	}
+	if got := string(finished.Input); got != string(amended) {
+		t.Errorf("the executed call's input = %s, want the amended %s — the replacement input did not reach the gate", got, amended)
 	}
 }
 

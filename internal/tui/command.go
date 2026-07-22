@@ -9,6 +9,7 @@ package tui
 // /model behavior lands in follow-up PRs without changing this seam.
 
 import (
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -192,10 +193,12 @@ func (r Registry) matching(partial string) []Command {
 }
 
 // newBuiltinRegistry returns the M4 registry: the three commands that open
-// the command panel on their respective tab. `/` is command-only; `@`
-// (file mention) and `!` (shell escape) are separate future prefixes
-// (docs/TUI.md) — out of scope here, but [dispatchSlash]'s caller switches
-// on the buffer's first rune so they slot in beside `/` later.
+// the command panel on their respective tab. `/` is command-only — the other
+// two input prefixes live outside this registry: `!` / `!!` (shell escape)
+// dispatches beside it through the same first-rune switch
+// ([App.dispatchInput], shell.go), and `@` (file mention) is a completion
+// affordance inside a prompt rather than a dispatched command
+// (filemention.go).
 func newBuiltinRegistry() Registry {
 	var r Registry
 	r.register(Command{
@@ -226,6 +229,23 @@ func newBuiltinRegistry() Registry {
 		Run:     runModel,
 	})
 	r.register(Command{
+		Name:    "new",
+		Summary: "Start a new session and attach to it",
+		Run:     runNew,
+	})
+	r.register(Command{
+		Name:    "resume",
+		ArgHint: "[session-id]",
+		Summary: "Reopen a session from disk",
+		Run:     runResume,
+	})
+	r.register(Command{
+		Name:    "quit",
+		Aliases: []string{"exit"},
+		Summary: "Quit gofer",
+		Run:     runQuit,
+	})
+	r.register(Command{
 		Name:    "thinking",
 		Aliases: []string{"effort"},
 		ArgHint: "[low|medium|high|off]",
@@ -233,6 +253,89 @@ func newBuiltinRegistry() Registry {
 		Run:     runThinking,
 	})
 	return r
+}
+
+// runQuit is /quit's [Command.Run]. Quitting the TUI is exactly tea.Quit
+// everywhere else it is bound (ctrl-c, on every screen and over the panel — see
+// app.go/panel.go/dialog.go), with no teardown of its own: the daemon
+// connection, the event subscription, and the reconstruction core are all owned
+// and closed by cmd/gofer once the program returns, not by the model. So this
+// command is that same one line, and adding a confirmation here would make the
+// command MORE ceremonious than the key it duplicates.
+func runQuit(a App, _ []string) (App, tea.Cmd) {
+	return a, tea.Quit
+}
+
+// runNew is /new's [Command.Run]: it starts a fresh session — new id, new
+// journal — through [Supervisor.Create] and attaches into it, which is the same
+// seam (and the same createdMsg landing) a prompt typed into the overview
+// dispatch bar already takes. The previous session is left entirely alone: it
+// keeps running, keeps its journal (repo invariant #4), and stays on the
+// roster. /new is NOT /clear — resetting the transcript VIEW of the session you
+// are in is a different command, and is not this one.
+//
+// It takes no arguments, and so declares no ArgHint. A seeded first prompt was
+// considered and deliberately dropped: every string is a valid prompt, so a
+// prompt argument can never be "unusable", and TestArgHintCommandsConsumeArgs
+// (command_args_test.go) requires every ArgHint-declaring command to reject an
+// unusable argument with a danger note naming it. Advertising an argument that
+// cannot satisfy that guard would mean weakening the guard for every command.
+// Typing the prompt into the fresh session's input — one keystroke sequence
+// later, through the identical Create/Send path — costs nothing by comparison.
+//
+// Stray arguments are therefore REPORTED, never swallowed: silently discarding
+// "/new fix the flaky test" would drop text the user clearly meant to send.
+func runNew(a App, args []string) (App, tea.Cmd) {
+	if len(args) > 0 {
+		a.setStatus(sevDanger, "/new takes no arguments — it opens an empty session; type the prompt there")
+		return a, nil
+	}
+	return a, a.doCreate("")
+}
+
+// runResume is /resume's [Command.Run], with the same bare-opens-the-picker /
+// argument-applies-directly shape [runModel] has: bare `/resume` opens the
+// command panel on the Resume tab (resumepicker.go) and lists what is on disk,
+// while `/resume <id>` reopens that id immediately and never opens the panel.
+//
+// Both paths land in [App.resumeSession], so a typed id and a picked row
+// produce the same op, the same attach, and the same error reporting.
+//
+// The typed id is admitted on SHAPE alone — non-empty, and usable as the single
+// path component that names the journal file. Whether the session actually
+// exists is a question only the backend can answer, and it does: an unknown id
+// comes back as an error on [resumedMsg] and lands on the same sevDanger status
+// line every other failed op does. Guessing here — matching against the roster,
+// say — would refuse ids that are perfectly resumable, since the whole point of
+// the command is sessions the roster does NOT hold.
+func runResume(a App, args []string) (App, tea.Cmd) {
+	if len(args) == 0 {
+		return openPanel(panelResume)(a, args)
+	}
+	// parseSlash splits on whitespace and a session id can contain none, so more
+	// than one argument is always a mistake — reported by name rather than
+	// silently taking args[0], the same rule runModel applies.
+	if len(args) > 1 {
+		a.setStatus(sevDanger, "/resume takes a single session id — got "+strconv.Itoa(len(args))+" arguments")
+		return a, nil
+	}
+	id := args[0]
+	if !validSessionID(id) {
+		a.setStatus(sevDanger, "can't resume "+strconv.Quote(id)+": not a valid session id")
+		return a, nil
+	}
+	return a.resumeSession(id, a.cwd)
+}
+
+// validSessionID reports whether id can name a session at all. A session id is
+// used verbatim as the single path component of its <id>.jsonl journal, so the
+// store rejects "."/".."/anything containing a separator (session.ErrInvalidID);
+// this is the client-side mirror of that rule, so an id that could never address
+// a session is refused here with a message rather than sent to the daemon to be
+// refused there.
+func validSessionID(id string) bool {
+	return id != "" && id != "." && id != ".." &&
+		!strings.ContainsRune(id, '/') && !strings.ContainsRune(id, os.PathSeparator)
 }
 
 // openPanel returns a [Command.Run] that opens the command panel on tab,
@@ -243,11 +346,15 @@ func openPanel(tab commandPanelTab) func(App, []string) (App, tea.Cmd) {
 	return func(a App, _ []string) (App, tea.Cmd) {
 		p := newCommandPanel(a.theme, tab, a.commandEnv, a.currentSessionInfo(), a.over.DefaultModel(), a.over.Now(), a.over.Roster())
 		a.panel = &p
-		if tab == panelModel {
+		switch tab {
+		case panelModel:
 			// Only /model pays for a listing. Opening /status or /config must
 			// not issue a vendor request the user never asked for — tabbing
 			// across to Model later fetches then (see App.handlePanelKey).
 			return a, a.discoverModelsCmd()
+		case panelResume:
+			// Same rule, same reason: only /resume pays for the store walk.
+			return a, a.listSessionsCmd()
 		}
 		return a, nil
 	}

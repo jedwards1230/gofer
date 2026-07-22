@@ -2,6 +2,7 @@ package daemonbridge_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http/httptest"
 	"reflect"
@@ -72,7 +73,11 @@ func (r *routerSupervisor) SubscribeLive(ctx context.Context, sessionID string) 
 }
 
 func (r *routerSupervisor) Reply(sessionID string, op event.PermissionReply) error {
-	return r.b.Reply(context.Background(), sessionID, op.ID, op.Verdict == event.VerdictAllow, op.Remember)
+	return r.b.Reply(context.Background(), sessionID, op.ID, tui.PermissionDecision{
+		Allow:    op.Verdict == event.VerdictAllow,
+		Remember: op.Remember,
+		Input:    op.Input,
+	})
 }
 
 func (r *routerSupervisor) Interrupt(ctx context.Context, sessionID string) error {
@@ -273,7 +278,7 @@ func TestDoubleHopPermissionRoundTrip(t *testing.T) {
 		t.Errorf("PermissionRequested.Tool = %q, want %q", pr.Tool, "read_file")
 	}
 
-	if err := b.Reply(context.Background(), info.ID, pr.ID, true, false); err != nil {
+	if err := b.Reply(context.Background(), info.ID, pr.ID, tui.PermissionDecision{Allow: true}); err != nil {
 		t.Fatalf("Reply: %v", err)
 	}
 
@@ -296,6 +301,59 @@ func TestDoubleHopPermissionRoundTrip(t *testing.T) {
 	}
 	if tf.StopReason != "end_turn" {
 		t.Errorf("TurnFinished.StopReason = %q, want end_turn", tf.StopReason)
+	}
+}
+
+// TestDoubleHopAmendedPermissionSurvivesTheWorkerHop is
+// TestAmendedPermissionReplyReachesTheGate across two hops: a router-backed
+// session must amend identically to an in-process one, so the replacement
+// input has to survive client → router → worker intact rather than being
+// dropped at the extra serialize/deserialize boundary the router adds (its
+// own permission.reply forward — see internal/router's Supervisor.Reply,
+// whose params this prototype's routerSupervisor stands in for).
+//
+// As in the single-hop test, the proof is the executed call's input on the
+// post-reply ToolCallFinished: the SDK substitutes the amended input into
+// call.Input, so a hop that lost it shows the model's original {"path":"a.txt"}.
+func TestDoubleHopAmendedPermissionSurvivesTheWorkerHop(t *testing.T) {
+	sup := newTestSupervisorGuarded(t, func() provider.Provider { return &toolTurnProvider{} }, true)
+	workerURL := newTestDaemon(t, sup)
+	routerURL := newRouterDaemon(t, workerURL)
+	b := newBridge(t, routerURL)
+
+	info, err := b.Create(context.Background(), "", tui.CreateOptions{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sub, err := b.Subscribe(context.Background(), info.ID)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer sub.Close()
+
+	if err := b.Send(context.Background(), info.ID, "read a.txt"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	before := drainFirstTurnEvents(t, sub, "read a.txt", 6)
+	pr, ok := before[5].(event.PermissionRequested)
+	if !ok {
+		t.Fatalf("event 5 = %+v, want PermissionRequested", before[5])
+	}
+
+	amended := json.RawMessage(`{"path":"b.txt"}`)
+	d := tui.PermissionDecision{Allow: true, Input: amended}
+	if err := b.Reply(context.Background(), info.ID, pr.ID, d); err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+
+	after := drainEvents(t, sub, 7)
+	finished, ok := after[1].(event.ToolCallFinished)
+	if !ok {
+		t.Fatalf("event 1 (post-reply) = %+v, want ToolCallFinished", after[1])
+	}
+	if got := string(finished.Input); got != string(amended) {
+		t.Errorf("the executed call's input = %s, want the amended %s — the replacement input was lost on the worker hop", got, amended)
 	}
 }
 

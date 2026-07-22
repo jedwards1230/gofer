@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/jedwards1230/agent-sdk-go/acp"
@@ -84,16 +85,77 @@ type SessionInfo struct {
 	// signal, and stamping an identical version on every row would be noise.
 	// Empty for an offline row (no process) and from any pre-M6 daemon.
 	BinaryVersion string
+
+	// ParentID is the id of the session that spawned this one — "" for a root
+	// session. A subagent is a real session with its own journal, cost and
+	// transcript, so a child row is an ordinary roster row plus this link; the
+	// link is what lets the overview render children indented beneath their
+	// parent instead of as unrelated siblings.
+	ParentID string
+	// Agent is the session's agent identity (e.g. "go-developer"), the same id
+	// its tool-call events are stamped with. "" is un-attributed.
+	Agent string
+	// Depth is the row's depth in the subagent tree: 0 for a root session,
+	// parent+1 for a child — the indent level a tree render uses.
+	Depth int
+}
+
+// SessionRef is one entry in the /resume picker's list: a session that exists
+// on disk and can therefore be brought back under live supervision. It is
+// deliberately NOT a [SessionInfo] — a session that is merely on disk has no
+// status, no cost, and no usage to report, and reusing the roster row would
+// present those zero values as fact (the same "omit what you can't answer
+// honestly" rule status.go states). These four fields are exactly what BOTH
+// backends can answer for an offline session: the in-process supervisor reads
+// them back off the journal ([supervisor.Supervisor.List]), and the daemon
+// path gets them off the ACP session/list response.
+type SessionRef struct {
+	ID      string    // stable session id (a UUID) — what Resume addresses
+	Title   string    // task title, seeded from the first prompt; may be empty
+	Cwd     string    // the directory the session was created in; may be empty
+	Updated time.Time // last activity — the newest-first sort key; may be zero
 }
 
 // CreateOptions configures [Supervisor.Create]. The zero value is the
 // daemon's default: a credential-driven model in the daemon's working
-// directory. The daemon supervisor's CreateOptions carries more fields
-// (System, Params, MaxIters); the TUI only sets these two, so this local copy
-// mirrors just them until the reconciliation PR imports the daemon type.
+// directory, as a ROOT session. The daemon supervisor's CreateOptions carries
+// more fields (System, Params, MaxIters); the TUI only sets these, so this local
+// copy mirrors just them until the reconciliation PR imports the daemon type.
 type CreateOptions struct {
 	Model string
 	Cwd   string
+	// ParentID, when set, creates the session as a SUBAGENT of that session
+	// rather than as a root one (see [SessionInfo.ParentID]). An unknown parent,
+	// or one already at the daemon's depth cap, fails the create.
+	ParentID string
+	// Agent is the new session's agent identity, stamped onto its tool-call
+	// events (see [SessionInfo.Agent]).
+	Agent string
+}
+
+// PermissionDecision is a human's answer to a pending permission request:
+// the verdict, whether to remember it, and — for an amend-before-approve —
+// the replacement tool input the call runs with instead of the model's
+// original arguments. It mirrors the SDK's event.PermissionReply.
+//
+// It is a struct rather than a third positional argument on [Supervisor.Reply]
+// because the three fields are one decision: a six-parameter, two-bool
+// signature reads the same at the call site whichever way the bools are
+// ordered, and this one is answered by a human under time pressure.
+type PermissionDecision struct {
+	Allow    bool
+	Remember bool
+	// Input, when non-nil, is the replacement tool input for an amended
+	// allow. It is honored only with Allow; a nil Input is the plain
+	// allow/deny path, byte-identical to before amend existed.
+	//
+	// The SDK does NOT re-run the permission guard over it — see
+	// loop.awaitApproval, which substitutes it into the call after the guard
+	// already evaluated the model's original arguments, and substitutes it
+	// BEFORE calling Grant, so a remembered amend pins the amended call. The
+	// approval prompt says both out loud (see approval.go's warning lines);
+	// nothing on this path may imply otherwise.
+	Input json.RawMessage
 }
 
 // Supervisor is the client-side view of the daemon the TUI drives. Every
@@ -117,6 +179,27 @@ type Supervisor interface {
 	// sets Model/Cwd at create time. An empty prompt creates an idle session
 	// with no first turn (the ACP path).
 	Create(ctx context.Context, prompt string, opts CreateOptions) (SessionInfo, error)
+
+	// ListSessions enumerates every session on disk — live and offline alike —
+	// as the /resume picker's source list. It is a strictly WIDER read than
+	// Roster: Roster answers "what is under live supervision right now", while
+	// this answers "what could be brought back", which is the only question a
+	// resume picker can be built from. Ordering is the backend's; the caller
+	// sorts. A backend with no store to walk returns an empty list, not an
+	// error.
+	ListSessions(ctx context.Context) ([]SessionRef, error)
+
+	// Resume reopens a persisted session as a live one and leaves it addressable
+	// by every other method here — the client-side half of ACP's session/load.
+	// It is idempotent: resuming a session that is already live is a no-op that
+	// succeeds, so the caller may always follow it with a Subscribe.
+	//
+	// cwd is the working directory to reload the session INTO, and per ACP v1 it
+	// is the client's call, not the daemon's (LoadSessionRequest.cwd is
+	// required). Callers pass the session's own persisted directory when they
+	// know it (the picker reads it off [SessionRef.Cwd]) and their own working
+	// directory otherwise — the same value `gofer resume` sends from os.Getwd.
+	Resume(ctx context.Context, sessionID, cwd string) error
 
 	// Send submits prompt as the next turn on an existing session — the
 	// multi-turn attach loop's send-when-idle path.
@@ -156,16 +239,33 @@ type Supervisor interface {
 	// cross the daemon wire.
 	SetEffort(ctx context.Context, sessionID, effort string) error
 
-	// Reply answers a pending permission request identified by id: allow or
-	// deny it, and — when remember is true — persist the verdict as a
-	// standing grant for future matching calls (the SDK's
-	// loop.RuleGuard/Grant path). The inline approval prompt's key handling
-	// (see app.go/dialog.go) is the sole caller. sessionID scopes the reply
-	// to the session the prompt was raised for; a daemon-backed Supervisor
-	// need not put it on the wire itself (see internal/daemonbridge's
-	// contract: the daemon resolves a permission request by id alone), but
-	// an in-process one routes through it directly.
-	Reply(ctx context.Context, sessionID, id string, allow, remember bool) error
+	// Reply answers a pending permission request identified by id with d:
+	// allow or deny it, and — when d.Remember is true — persist the verdict
+	// as a standing grant for future matching calls (the SDK's
+	// loop.RuleGuard/Grant path). A non-nil d.Input is an amend: the call
+	// runs with that input instead of the model's, and a remembered amend
+	// grants the AMENDED call (see [PermissionDecision.Input]). The inline
+	// approval prompt's key handling (see app.go/dialog.go) is the sole
+	// caller. sessionID scopes the reply to the session the prompt was
+	// raised for; a daemon-backed Supervisor need not put it on the wire
+	// itself (see internal/daemonbridge's contract: the daemon resolves a
+	// permission request by id alone), but an in-process one routes through
+	// it directly.
+	Reply(ctx context.Context, sessionID, id string, d PermissionDecision) error
+
+	// ExplainPermission asks why the identified still-pending tool call was
+	// gated. It is READ-ONLY: it never resolves the request, so the prompt
+	// stays open across an explain and the human still answers it.
+	//
+	// The returned [acp.PermissionRationale] is the AGENT's own answer — the
+	// gating decision as the side that made it describes it, as opposed to
+	// the approximation this client derives from the trace riding on the
+	// permission request (see internal/permrationale, which both sides share
+	// so the two are comparable). An unknown or already-resolved call id, or
+	// one belonging to another session, is an error rather than an empty
+	// rationale: "no longer pending" and "gated for no stated reason" are
+	// different answers and a client must be able to tell them apart.
+	ExplainPermission(ctx context.Context, sessionID, callID string) (acp.PermissionRationale, error)
 
 	// Decisions subscribes to sessionID's open structured-decision requests —
 	// the questions an agent asked with the ask_user tool and is blocked on

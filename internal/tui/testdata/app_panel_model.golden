@@ -17,7 +17,7 @@ claude-sonnet-5 · ~/orchestration
 
 
 ────────────────────────────────────────────────────────────────────────────────
-Status  Config  [Model]  Thinking  Usage  Stats
+Status  Config  [Model]  Thinking  Usage  Stats  Resume
 ────────────────────────────────────────────────────────────────────────────────
 Model id: (type any id, listed or not)
 No providers authenticated. Run /login (or 'gofer login <anthropic|openai>').
