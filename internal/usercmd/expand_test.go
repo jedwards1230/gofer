@@ -48,6 +48,12 @@ func TestExpand(t *testing.T) {
 		{"tail from one is everything", "${@:1}", []string{"a", "b"}, "a b"},
 		{"tail from zero clamps to everything", "${@:0}", []string{"a", "b"}, "a b"},
 		{"tail past the end is empty", "${@:9}", []string{"a"}, ""},
+		// Regression: an overflowing digit run used to resolve to -1, which
+		// tail clamped to "from the first argument" — so an absurd index
+		// expanded to the ENTIRE list where the doc promises empty.
+		{"tail with an unrepresentable index is empty", "${@:99999999999999999999}", []string{"a", "b", "c"}, ""},
+		{"braced positional with an unrepresentable index is empty", "${99999999999999999999}", []string{"a"}, ""},
+		{"unrepresentable index falls back to its default", "${99999999999999999999:-none}", []string{"a"}, "none"},
 		{"tail with no args is empty", "${@:1}", nil, ""},
 		{"negative tail is not a token", "${@:-1}", []string{"a"}, "${@:-1}"},
 		{"non-numeric tail is not a token", "${@:x}", []string{"a"}, "${@:x}"},

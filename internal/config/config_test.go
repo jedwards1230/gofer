@@ -321,6 +321,46 @@ func TestSessionLoadSettleTimeout(t *testing.T) {
 	}
 }
 
+// TestTUICommandFileLimitBytes covers the resolver for the user markdown
+// command file cap: unset and negative fall back to the default, an explicit
+// 0 is "no limit" (matching tui.max_paste_bytes, unlike the approval row caps
+// where 0 would hide the thing being capped), and any positive value is the
+// cap. The round trip pins that an explicit value survives on disk.
+func TestTUICommandFileLimitBytes(t *testing.T) {
+	n := func(v int) *int { return &v }
+	tests := []struct {
+		name string
+		in   *int
+		want int
+	}{
+		{"unset resolves to default", nil, config.DefaultMaxCommandFileBytes},
+		{"negative resolves to default", n(-1), config.DefaultMaxCommandFileBytes},
+		{"zero is no limit", n(0), 0},
+		{"explicit value is the cap", n(4096), 4096},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tui := config.TUI{MaxCommandFileBytes: tt.in}
+			if got := tui.CommandFileLimitBytes(); got != tt.want {
+				t.Fatalf("CommandFileLimitBytes() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+
+	dir := t.TempDir()
+	path := config.DefaultPath(dir)
+	if err := config.Save(path, config.Config{TUI: config.TUI{MaxCommandFileBytes: n(2048)}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if limit := got.TUI.CommandFileLimitBytes(); limit != 2048 {
+		t.Fatalf("CommandFileLimitBytes() after Save/Load = %d, want 2048", limit)
+	}
+}
+
 // TestTUIApprovalBodyLineLimit covers the resolver for the inline approval
 // prompt's body row cap: unset and non-positive values fall back to the
 // default (a zero-row body would hide the very call being approved — unlike

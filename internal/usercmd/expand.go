@@ -5,6 +5,7 @@ package usercmd
 // the contract a user writes their command file against.
 
 import (
+	"math"
 	"strconv"
 	"strings"
 )
@@ -98,7 +99,7 @@ func token(s string, args []string) (val string, width int, ok bool) {
 		return strings.Join(args, " "), len(argumentsToken), true
 	}
 	if n := digitRun(s[1:]); n > 0 {
-		return arg(args, atoi(s[1:1+n])), 1 + n, true
+		return arg(args, index(s[1:1+n])), 1 + n, true
 	}
 	if strings.HasPrefix(s, "${") {
 		return braceToken(s, args)
@@ -119,14 +120,14 @@ func braceToken(s string, args []string) (val string, width int, ok bool) {
 		if n == 0 || n != len(rest) {
 			return "", 0, false // "${@:x}" / "${@:-1}" / "${@:}" are literal text
 		}
-		return tail(args, atoi(rest)), width, true
+		return tail(args, index(rest)), width, true
 	}
 
 	digits := digitRun(inner)
 	if digits == 0 {
 		return "", 0, false
 	}
-	idx := atoi(inner[:digits])
+	idx := index(inner[:digits])
 	switch rest := inner[digits:]; {
 	case rest == "": // ${N}
 		return arg(args, idx), width, true
@@ -150,14 +151,21 @@ func digitRun(s string) int {
 	return i
 }
 
-// atoi parses a digit run, mapping an overflowing one to an index no argument
-// list can have. Out-of-range is already a defined, non-erroring outcome
+// index parses a digit run into a 1-based argument index, mapping an
+// overflowing run to [math.MaxInt] — past the end of any argument list that
+// could exist. Out-of-range is already a defined, non-erroring outcome
 // (empty), so an unrepresentable index takes the same path rather than
 // inventing a second failure mode.
-func atoi(s string) int {
+//
+// The sentinel must be PAST the end, not before the start. An earlier version
+// used -1, which was out of range for [arg] but not for [tail]: tail clamps
+// idx < 1 to the first argument, so `${@:99999999999999999999}` expanded to
+// the ENTIRE argument list where [Expand]'s doc promises empty. Both
+// consumers have to read the sentinel the same way.
+func index(s string) int {
 	n, err := strconv.Atoi(s)
 	if err != nil {
-		return -1
+		return math.MaxInt
 	}
 	return n
 }

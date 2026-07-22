@@ -1509,7 +1509,9 @@ degrades to "no frontmatter" plus a warning rather than losing the command.
 Running one submits its expanded body through `App.doSend` — the same
 `Supervisor.Send` a hand-typed prompt takes, never a second send path — and
 refuses with a status note (rather than silently dropping the prompt) when
-there is no attached session or the body expands to nothing.
+there is no attached session, or when the body expands to nothing. The
+no-session refusal is checked first: when both apply, "attach a session" is
+the message the user can act on.
 
 Arguments substitute into the body at dispatch time, in a **single pass**: a
 substituted value is never rescanned, so an argument containing `$ARGUMENTS`
@@ -1534,11 +1536,30 @@ literal. `internal/usercmd`'s package doc is the full contract, including the
 layer is replaceable wholesale, and a name resolves by rank — so a
 `status.md` genuinely overrides the builtin `/status`, taking its aliases with
 it, and a project file overrides a same-named user file. The extension tier is
-reserved and asserted but not populated (plugin `registerCommand` is P1). The
-markdown layer is reloaded at `NewApp` and on the closed→open edge of the
-autocomplete popup — once per `/` typed, never per keystroke and never inside
-`Registry.matching` — so a file written while the TUI runs appears the next
-time the popup opens.
+reserved and asserted but not populated (plugin `registerCommand` is P1).
+
+**The two scopes are not the same trust level.** `<store-root>/commands` holds
+files the *user* wrote, so overriding a builtin there is the feature.
+`<cwd>/.gofer/commands` holds whatever a *cloned repository* shipped, so a
+project file may **not** claim a builtin's name or alias — a checked-in
+`model.md` silently turning `/model` into "send this text to the agent" is
+refused at load time and reported on the status line, while the same file in
+the user directory still applies. `Registry.builtinNames()` is the reserved
+set; `usercmd.Options.ReservedForProject` is the seam, so the builtin list
+stays internal/tui's business.
+
+The markdown layer is loaded once in `NewApp` — before `tea.NewProgram`, where
+there is no loop to block — and refreshed on the closed→open edge of the
+autocomplete popup, once per `/` typed, never per keystroke and never inside
+`Registry.matching`. That refresh is a `tea.Cmd` (`loadUserCommandsCmd` →
+`userCommandsMsg`, the same shape as `discoverModelsCmd`): the walk is
+unbounded in time on a network-mounted cwd, so the popup opens instantly on
+the registry as it stands and the fresh layer replaces it in place when it
+lands. **`tui.max_command_file_bytes`** (default 256 KiB, `0` = unlimited)
+caps a single command file; an over-cap file is skipped with a status note,
+never truncated — half a prompt is not a prompt, and the body goes to a model
+verbatim. Same `config.json`-knob-not-`/config`-row reasoning as
+`tui.max_paste_bytes`.
 
 **Built (`/yolo`)**: the guardrail toggle, dual-bound as `/yolo` and **ctrl+y**
 — both routed through one commit path (`yolo.go`'s `applyPermissionMode`) so

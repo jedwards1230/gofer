@@ -319,9 +319,13 @@ func (m commandMenu) Lines(width int) []string {
 // returns, so a.menu always reflects the just-applied edit before the next
 // key's precedence check (a.menu.open()) runs.
 //
-// It returns a [tea.Cmd] because an `@` token is the trigger for enumerating
-// the cwd's files, which must happen OFF the Update loop
-// ([App.fileCandidatesCmd]) — the popup is simply closed until that lands.
+// It returns a [tea.Cmd] because BOTH sigils open a token by kicking off work
+// that must happen OFF the Update loop: `@` enumerates the cwd's files
+// ([App.fileCandidatesCmd] — the popup is simply closed until that lands),
+// and `/` reloads the markdown-command layer ([App.loadUserCommandsCmd] — the
+// popup opens on the registry as it stands and is re-synced when the load
+// lands). At most one of the two can be live, since a token carries one
+// sigil, so the returned Cmd is never actually a batch of both.
 func (a App) syncMenu() (App, tea.Cmd) {
 	if a.panel != nil {
 		a.menu = commandMenu{}
@@ -343,8 +347,11 @@ func (a App) syncMenu() (App, tea.Cmd) {
 	// command token — the moment the user types "/" — not on every sync.
 	// syncMenu runs after every key press, so reloading unconditionally would
 	// walk the commands directories once per keystroke; reloading never would
-	// leave a file written after startup permanently invisible. See
-	// [App.reloadUserCommands].
+	// leave a file written after startup permanently invisible. The walk
+	// itself is dispatched, never run inline: it stats and reads two
+	// directory trees, and none of that is bounded in time on a
+	// network-mounted cwd (see [App.loadUserCommandsCmd], and
+	// [App.applyUserCommands] in Update for the landing).
 	//
 	// This deliberately gates on [commandToken] — the `/`-only narrowing of
 	// [activeToken] — and NOT on activeToken itself. There are no markdown
@@ -362,8 +369,9 @@ func (a App) syncMenu() (App, tea.Cmd) {
 	//     that sees a `/` token with the latch already set, and the reload is
 	//     skipped.
 	_, _, active := commandToken(buf.String(), buf.Cursor())
+	var reload tea.Cmd
 	if active && !a.menuToken {
-		a = a.reloadUserCommands()
+		reload = a.loadUserCommandsCmd()
 	}
 	a.menuToken = active
 
@@ -371,10 +379,10 @@ func (a App) syncMenu() (App, tea.Cmd) {
 	// off the cwd enumeration, off the Update loop (filemention.go). It is the
 	// file-candidate mirror of the markdown reload above — the same "once per
 	// token, not once per keystroke" discipline, a different source.
-	app, cmd := a.syncFileCandidates(buf)
+	app, files := a.syncFileCandidates(buf)
 	a = app
 	a.menu = newInputMenu(a.theme, a.registry, a.files.paths, buf.String(), buf.Cursor())
-	return a, cmd
+	return a, tea.Batch(reload, files)
 }
 
 // handleMenuKey applies one key press to the open menu, ahead of the
@@ -435,6 +443,10 @@ func (a App) completeMenu() (App, tea.Cmd) {
 	case screenAttach:
 		a.sess = a.sess.SetInputCursor(newBuf, newCursor)
 	}
+	// Tab never crosses the closed→open edge of the token it completed (the
+	// menu was already open to be completed from), so no markdown reload
+	// fires here; syncMenu's Cmd is the `@` half's, which a completed mention
+	// path can legitimately re-trigger.
 	return a.syncMenu()
 }
 

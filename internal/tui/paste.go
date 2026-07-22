@@ -75,8 +75,8 @@ func (a App) handlePaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
 	// A pasted "/mod" (or "@internal/") is as much an active token as a typed
 	// one, so the autocomplete menu re-syncs off a paste exactly as it does
 	// after every per-screen key handler (see Update) — carrying syncMenu's
-	// own follow-on command, which for an `@` token is the off-loop cwd
-	// enumeration (filemention.go).
+	// own follow-on command, which is the off-loop markdown-command reload
+	// for a `/` token and the cwd enumeration (filemention.go) for an `@` one.
 	return a.syncMenu()
 }
 

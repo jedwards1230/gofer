@@ -51,11 +51,11 @@ func byName(cmds []usercmd.Command) map[string]usercmd.Command {
 // TestLoadMissingDirectories is the overwhelmingly common case — a user with
 // no commands at all. It must be silent, not a warning.
 func TestLoadMissingDirectories(t *testing.T) {
-	cmds, warns := usercmd.Load(t.TempDir(), t.TempDir())
+	cmds, warns := usercmd.Load(t.TempDir(), t.TempDir(), usercmd.Options{})
 	if len(cmds) != 0 || len(warns) != 0 {
 		t.Fatalf("Load(empty roots) = %v, %v; want no commands and no warnings", cmds, warns)
 	}
-	if cmds, warns := usercmd.Load("", ""); len(cmds) != 0 || len(warns) != 0 {
+	if cmds, warns := usercmd.Load("", "", usercmd.Options{}); len(cmds) != 0 || len(warns) != 0 {
 		t.Fatalf(`Load("", "") = %v, %v; want no commands and no warnings`, cmds, warns)
 	}
 }
@@ -71,7 +71,7 @@ func TestLoadNestingNamespaces(t *testing.T) {
 	writeCmd(t, usercmd.UserDir(root), ".hidden.md", "not a command")
 	writeCmd(t, usercmd.UserDir(root), ".git/config.md", "not a command")
 
-	cmds, warns := usercmd.Load(root, cwd)
+	cmds, warns := usercmd.Load(root, cwd, usercmd.Options{})
 	if len(warns) != 0 {
 		t.Fatalf("warnings = %v; want none", warns)
 	}
@@ -96,7 +96,7 @@ func TestLoadProjectOverridesUser(t *testing.T) {
 	writeCmd(t, usercmd.UserDir(root), "only-user.md", "user only")
 	writeCmd(t, usercmd.ProjectDir(cwd), "review.md", "project body")
 
-	cmds, warns := usercmd.Load(root, cwd)
+	cmds, warns := usercmd.Load(root, cwd, usercmd.Options{})
 	if len(warns) != 0 {
 		t.Fatalf("warnings = %v; want none", warns)
 	}
@@ -120,7 +120,7 @@ func TestLoadSameDirectoryOnce(t *testing.T) {
 	root := filepath.Join(cwd, ".gofer")
 	writeCmd(t, usercmd.UserDir(root), "review.md", "body")
 
-	cmds, warns := usercmd.Load(root, cwd)
+	cmds, warns := usercmd.Load(root, cwd, usercmd.Options{})
 	if len(warns) != 0 {
 		t.Fatalf("warnings = %v; want none", warns)
 	}
@@ -138,7 +138,7 @@ func TestLoadSkipsIllegalNames(t *testing.T) {
 	writeCmd(t, usercmd.UserDir(root), "ns/has:colon.md", "colon is the namespace separator")
 	writeCmd(t, usercmd.UserDir(root), "fine.md", "legal")
 
-	cmds, warns := usercmd.Load(root, cwd)
+	cmds, warns := usercmd.Load(root, cwd, usercmd.Options{})
 	if len(cmds) != 1 || cmds[0].Name != "fine" {
 		t.Fatalf("commands = %+v; want only the legal one", cmds)
 	}
@@ -149,6 +149,75 @@ func TestLoadSkipsIllegalNames(t *testing.T) {
 	for _, want := range []string{"my review.md", "has:colon.md"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("warnings %q do not name %q — a skipped file must say which file", joined, want)
+		}
+	}
+}
+
+// TestLoadReservedNamesAreProjectScopeOnly pins the trust boundary: a
+// reserved name is refused to a PROJECT file (whatever a cloned repo shipped)
+// and still granted to a USER file (something this user wrote), with the
+// refusal reported rather than silent.
+func TestLoadReservedNamesAreProjectScopeOnly(t *testing.T) {
+	root, cwd := scopes(t)
+	writeCmd(t, usercmd.UserDir(root), "model.md", "user override of a builtin")
+	writeCmd(t, usercmd.ProjectDir(cwd), "model.md", "project attempt to hijack a builtin")
+	writeCmd(t, usercmd.ProjectDir(cwd), "deploy.md", "an unreserved project command")
+
+	opts := usercmd.Options{ReservedForProject: func(name string) bool { return name == "model" }}
+	cmds, warns := usercmd.Load(root, cwd, opts)
+
+	idx := byName(cmds)
+	got, ok := idx["model"]
+	if !ok {
+		t.Fatal("the USER's model.md was dropped; only project scope is restricted")
+	}
+	if got.Scope != usercmd.ScopeUser || got.Body != "user override of a builtin" {
+		t.Errorf("model = %+v; want the user file to survive and the project one to be refused", got)
+	}
+	if _, ok := idx["deploy"]; !ok {
+		t.Error("an unreserved project command was dropped")
+	}
+	if len(warns) != 1 || !strings.Contains(warns[0].Error(), "builtin") {
+		t.Fatalf("warnings = %v; want exactly one naming the refused project file", warns)
+	}
+	if !strings.Contains(warns[0].Error(), filepath.Join(".gofer", "commands", "model.md")) {
+		t.Errorf("warning %q does not name the project file it refused", warns[0])
+	}
+}
+
+// TestLoadReservedNilPredicate covers the zero Options: nothing is reserved,
+// so a project file may take any name.
+func TestLoadReservedNilPredicate(t *testing.T) {
+	root, cwd := scopes(t)
+	writeCmd(t, usercmd.ProjectDir(cwd), "model.md", "body")
+
+	cmds, warns := usercmd.Load(root, cwd, usercmd.Options{})
+	if len(cmds) != 1 || len(warns) != 0 {
+		t.Fatalf("Load = %+v, %v; want the command loaded with nothing reserved", cmds, warns)
+	}
+}
+
+// TestLoadMaxFileBytes covers the size cap: an oversized file is SKIPPED with
+// a warning, never truncated — half a prompt is not a prompt — and the files
+// beside it still load.
+func TestLoadMaxFileBytes(t *testing.T) {
+	root, cwd := scopes(t)
+	writeCmd(t, usercmd.UserDir(root), "big.md", strings.Repeat("x", 128))
+	writeCmd(t, usercmd.UserDir(root), "small.md", "ok")
+
+	cmds, warns := usercmd.Load(root, cwd, usercmd.Options{MaxFileBytes: 64})
+	if len(cmds) != 1 || cmds[0].Name != "small" {
+		t.Fatalf("commands = %+v; want only the under-cap file", cmds)
+	}
+	if len(warns) != 1 || !strings.Contains(warns[0].Error(), "cap") {
+		t.Fatalf("warnings = %v; want one naming the cap", warns)
+	}
+
+	// Zero (and negative) means no cap: the same tree loads whole.
+	for _, cap := range []int{0, -1} {
+		cmds, warns := usercmd.Load(root, cwd, usercmd.Options{MaxFileBytes: cap})
+		if len(cmds) != 2 || len(warns) != 0 {
+			t.Errorf("MaxFileBytes %d: Load = %d commands, %v warnings; want 2 and none", cap, len(cmds), warns)
 		}
 	}
 }
@@ -234,7 +303,7 @@ func TestLoadFrontmatter(t *testing.T) {
 			root, cwd := scopes(t)
 			writeCmd(t, usercmd.UserDir(root), "c.md", tt.content)
 
-			cmds, warns := usercmd.Load(root, cwd)
+			cmds, warns := usercmd.Load(root, cwd, usercmd.Options{})
 			if len(cmds) != 1 {
 				t.Fatalf("commands = %+v; want exactly one — malformed frontmatter must degrade, never drop the command", cmds)
 			}
@@ -262,7 +331,7 @@ func TestLoadDefaultSummaryNamesTheScope(t *testing.T) {
 	root, cwd := scopes(t)
 	writeCmd(t, usercmd.ProjectDir(cwd), "p.md", "body")
 
-	cmds, _ := usercmd.Load(root, cwd)
+	cmds, _ := usercmd.Load(root, cwd, usercmd.Options{})
 	if len(cmds) != 1 || cmds[0].Description != "project markdown command" {
 		t.Fatalf("commands = %+v; want a project-scope default summary", cmds)
 	}

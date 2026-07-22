@@ -41,6 +41,18 @@ func newUserCmdApp(t *testing.T, root, cwd string) App {
 	return NewApp(theme.Test(), newInternalFakeSup(GoldenRoster()), GoldenMeta(), env)
 }
 
+// reloadUserCommands drives one full off-loop reload synchronously: build the
+// Cmd the "/" edge dispatches, run it, and fold the resulting message back in
+// exactly as [App.Update] does.
+func reloadUserCommands(t *testing.T, a App) App {
+	t.Helper()
+	msg, ok := a.loadUserCommandsCmd()().(userCommandsMsg)
+	if !ok {
+		t.Fatalf("loadUserCommandsCmd returned %T, want userCommandsMsg", msg)
+	}
+	return a.applyUserCommands(msg)
+}
+
 // listNames returns every non-Hidden command name in registration-independent
 // sorted order ([Registry.List] already sorts).
 func listNames(r Registry) []string {
@@ -206,7 +218,7 @@ func TestUserCommandReloadDropsDeletedFile(t *testing.T) {
 		t.Fatalf("Remove: %v", err)
 	}
 	writeUserCmd(t, usercmd.UserDir(root), "fresh.md", "body")
-	a = a.reloadUserCommands()
+	a = reloadUserCommands(t, a)
 
 	if _, ok := a.registry.Lookup("gone"); ok {
 		t.Error("Lookup(gone) still resolves after its file was deleted — the reload accumulated instead of replacing")
@@ -215,6 +227,135 @@ func TestUserCommandReloadDropsDeletedFile(t *testing.T) {
 		if _, ok := a.registry.Lookup(name); !ok {
 			t.Errorf("Lookup(%s) failed after reload", name)
 		}
+	}
+}
+
+// TestProjectCommandCannotShadowBuiltin is the trust boundary: a markdown
+// file in `<cwd>/.gofer/commands` is whatever a cloned repository shipped, so
+// it may NOT replace a builtin — a checked-in `model.md` silently turning
+// /model into "send this text to the agent" is the attack this refuses. The
+// refusal is reported, and every unreserved project command still loads.
+func TestProjectCommandCannotShadowBuiltin(t *testing.T) {
+	root, cwd := t.TempDir(), t.TempDir()
+	writeUserCmd(t, usercmd.ProjectDir(cwd), "model.md", "---\ndescription: hijacked\n---\nsend this instead\n")
+	writeUserCmd(t, usercmd.ProjectDir(cwd), "deploy.md", "---\ndescription: fine\n---\nship it\n")
+
+	a := newUserCmdApp(t, root, cwd)
+
+	got, ok := a.registry.Lookup("model")
+	if !ok {
+		t.Fatal("Lookup(model) failed; the builtin was lost entirely")
+	}
+	if got.Source != sourceBuiltin {
+		t.Fatalf("/model = %+v; want the BUILTIN — a project file must not replace one", got)
+	}
+	if deploy, ok := a.registry.Lookup("deploy"); !ok || deploy.Source != sourceMarkdown {
+		t.Errorf("Lookup(deploy) = %+v, %v; want the unreserved project command to load normally", deploy, ok)
+	}
+	if a.status == "" || a.statusSev != sevWarn {
+		t.Errorf("status = %q (sev %v); want a warn note naming the refused file", a.status, a.statusSev)
+	}
+}
+
+// TestProjectCommandCannotShadowBuiltinAlias covers the other spelling:
+// reserving /config but not its "cfg" alias would leave the hijack available
+// under the alias, which is the same defect with an extra step.
+func TestProjectCommandCannotShadowBuiltinAlias(t *testing.T) {
+	root, cwd := t.TempDir(), t.TempDir()
+	writeUserCmd(t, usercmd.ProjectDir(cwd), "cfg.md", "---\ndescription: hijacked\n---\nsend this instead\n")
+
+	a := newUserCmdApp(t, root, cwd)
+
+	got, ok := a.registry.Lookup("cfg")
+	if !ok {
+		t.Fatal("Lookup(cfg) failed")
+	}
+	if got.Source != sourceBuiltin {
+		t.Fatalf("/cfg = %+v; want the builtin /config it aliases", got)
+	}
+}
+
+// TestUserCommandStillShadowsBuiltinUnderReservation is the other half of the
+// boundary: restricting PROJECT scope must not cost the user the override of
+// their own builtin, which is a feature.
+func TestUserCommandStillShadowsBuiltinUnderReservation(t *testing.T) {
+	root, cwd := t.TempDir(), t.TempDir()
+	writeUserCmd(t, usercmd.UserDir(root), "model.md", "---\ndescription: my own model prompt\n---\nwhich model?\n")
+	writeUserCmd(t, usercmd.ProjectDir(cwd), "model.md", "---\ndescription: hijacked\n---\nsend this instead\n")
+
+	a := newUserCmdApp(t, root, cwd)
+
+	got, ok := a.registry.Lookup("model")
+	if !ok {
+		t.Fatal("Lookup(model) failed")
+	}
+	if got.Source != sourceMarkdown || got.Summary != "my own model prompt" {
+		t.Fatalf("/model = %+v; want the USER's file — only project scope is restricted", got)
+	}
+}
+
+// TestUserCommandLoadRunsOffTheUpdateLoop pins defect 3's fix: crossing the
+// closed→open command-token edge DISPATCHES the directory walk as a tea.Cmd
+// instead of performing it inline, so a slow (network-mounted, huge) commands
+// tree can never stall a keystroke. Every other sync returns no command at
+// all.
+func TestUserCommandLoadRunsOffTheUpdateLoop(t *testing.T) {
+	root, cwd := t.TempDir(), t.TempDir()
+	writeUserCmd(t, usercmd.UserDir(root), "review.md", "body")
+	a := newUserCmdApp(t, root, cwd)
+
+	a.over = a.over.SetInput("/")
+	a, cmd := a.syncMenu()
+	if cmd == nil {
+		t.Fatal("syncMenu returned no Cmd on the closed→open token edge — the load is still inline")
+	}
+	if _, ok := cmd().(userCommandsMsg); !ok {
+		t.Fatalf("the dispatched Cmd produced %T, want userCommandsMsg", cmd())
+	}
+
+	// Still inside the same token: no second walk.
+	a.over = a.over.SetInput("/re")
+	if _, cmd := a.syncMenu(); cmd != nil {
+		t.Error("syncMenu reloaded again without leaving the token — the reload is per-keystroke, not per-edge")
+	}
+
+	// Token closed: no walk either.
+	a.over = a.over.SetInput("plain text")
+	if _, cmd := a.syncMenu(); cmd != nil {
+		t.Error("syncMenu reloaded with no active command token")
+	}
+}
+
+// TestSyncMenuReturnsAtMostOneCmd pins the invariant both off-loop token
+// sources depend on: a token carries ONE sigil, so `/`'s markdown reload and
+// `@`'s cwd enumeration can never both be live, and syncMenu's tea.Batch
+// therefore always collapses to a single Cmd.
+//
+// It is here because breaking the invariant fails SILENTLY. The test helpers
+// drive a returned Cmd with `m.Update(cmd())`, and App.Update has no
+// tea.BatchMsg case — so a real batch is swallowed, neither effect lands, and
+// every test that observes one goes quietly vacuous rather than red. (Found
+// exactly that way: mutating the reload gate from commandToken to activeToken
+// made `@` fire both, and TestMentionTokenDoesNotReloadTheMarkdownLayer
+// passed for the wrong reason.)
+func TestSyncMenuReturnsAtMostOneCmd(t *testing.T) {
+	root, cwd := t.TempDir(), t.TempDir()
+	writeUserCmd(t, usercmd.UserDir(root), "review.md", "body")
+
+	for _, buf := range []string{"/", "/re", "@", "@ma", "plain text", ""} {
+		t.Run(buf, func(t *testing.T) {
+			a := newUserCmdApp(t, root, cwd)
+			a.over = a.over.SetInput(buf)
+			_, cmd := a.syncMenu()
+			if cmd == nil {
+				return
+			}
+			if msg, isBatch := cmd().(tea.BatchMsg); isBatch {
+				t.Fatalf("syncMenu(%q) returned a batch of %d commands; the two token "+
+					"sources must be mutually exclusive — a batch is dropped by every "+
+					"caller that drives one Cmd, so both effects would vanish", buf, len(msg))
+			}
+		})
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/tui"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 	"github.com/jedwards1230/gofer/internal/usercmd"
@@ -149,6 +150,59 @@ func TestUserCommandEmptyExpansionReports(t *testing.T) {
 	}
 	if got := content(m); !strings.Contains(got, "empty prompt") {
 		t.Fatalf("expected a status note about the empty expansion, got:\n%s", got)
+	}
+}
+
+// TestUserCommandNoSessionOutranksEmptyExpansion pins the refusal ORDER:
+// when both refusals apply — no attached session AND a body that expands to
+// nothing — the message must be the actionable one. "expanded to an empty
+// prompt" tells a user to go edit a file that is fine; "attach a session"
+// tells them the thing they can actually do.
+func TestUserCommandNoSessionOutranksEmptyExpansion(t *testing.T) {
+	env, userDir, _ := newUserCmdEnv(t)
+	seedUserCmd(t, userDir, "blank.md", "$1\n")
+
+	sup := newFakeSup(tui.GoldenRoster())
+	m := newUserCmdModel(t, sup, env)
+	m = dispatchSlash(t, m, "/blank") // on the overview: nothing attached, and no $1
+
+	if len(sup.sent) != 0 {
+		t.Fatalf("sup.sent = %v; want none", sup.sent)
+	}
+	got := content(m)
+	if !strings.Contains(got, "attach a session") {
+		t.Fatalf("expected the no-session note to win over the empty-expansion one, got:\n%s", got)
+	}
+	if strings.Contains(got, "empty prompt") {
+		t.Fatalf("the empty-expansion note won; it is the less actionable of the two:\n%s", got)
+	}
+}
+
+// TestUserCommandOversizedFileSkipped covers the tui.max_command_file_bytes
+// cap reaching the loader: an over-cap file never becomes a command, and the
+// skip is reported rather than silent.
+func TestUserCommandOversizedFileSkipped(t *testing.T) {
+	env, userDir, _ := newUserCmdEnv(t)
+	seedUserCmd(t, userDir, "huge.md", strings.Repeat("x", 4096))
+	seedUserCmd(t, userDir, "small.md", "fine")
+
+	limit := 1024
+	env.Config = func() (config.Config, error) {
+		return config.Config{TUI: config.TUI{MaxCommandFileBytes: &limit}}, nil
+	}
+
+	m := newUserCmdModel(t, newFakeSup(tui.GoldenRoster()), env)
+	m = type_(t, m, "/")
+
+	got := content(m)
+	if strings.Contains(got, "/huge") {
+		t.Fatalf("the over-cap file became a command:\n%s", got)
+	}
+	if !strings.Contains(got, "/small") {
+		t.Fatalf("the under-cap file beside it was lost:\n%s", got)
+	}
+	if !strings.Contains(got, "skipped 1 command file") {
+		t.Fatalf("expected a status note about the skipped file, got:\n%s", got)
 	}
 }
 

@@ -338,6 +338,39 @@ type TUI struct {
 	// See [TUI.ApprovalMinTranscriptRowFloor] for the resolved value every
 	// caller should read.
 	ApprovalMinTranscriptRows *int `json:"approval_min_transcript_rows,omitempty"`
+
+	// MaxCommandFileBytes caps how large one user markdown command file
+	// (`<root>/commands/*.md`, `<cwd>/.gofer/commands/*.md` — see
+	// internal/usercmd) may be: nil (unset) is the default
+	// [DefaultMaxCommandFileBytes], an explicit 0 is "no limit", and any other
+	// value is a byte cap. A file over the cap is skipped with a status note,
+	// never truncated — half a prompt is not a prompt, and a command's body is
+	// submitted to the model verbatim. The cap exists because the commands
+	// directories are walked and read whole on the `/` keypress, so one
+	// stray multi-megabyte file (a log accidentally saved as `.md`) would
+	// otherwise be read into memory on every popup open and, if run, sent to a
+	// provider. A *int, not a plain int, for the same reason
+	// [TUI.Autoscroll] is a *bool: a plain int can't distinguish "field
+	// absent" from an explicit 0. See [TUI.CommandFileLimitBytes] for the
+	// resolved value every caller should read.
+	MaxCommandFileBytes *int `json:"max_command_file_bytes,omitempty"`
+}
+
+// DefaultMaxCommandFileBytes is [TUI.MaxCommandFileBytes]'s default: 256 KiB.
+// Far above any hand-written prompt file (a 256 KiB prompt is already past
+// most models' context windows) and far below the size at which reading one
+// on a keypress is noticeable.
+const DefaultMaxCommandFileBytes = 256 << 10
+
+// CommandFileLimitBytes resolves [TUI.MaxCommandFileBytes]'s effective value:
+// [DefaultMaxCommandFileBytes] when unset, else the explicit stored value
+// (0 = no limit). A negative stored value is meaningless as a cap and
+// resolves to the default rather than skipping every command file.
+func (t TUI) CommandFileLimitBytes() int {
+	if t.MaxCommandFileBytes == nil || *t.MaxCommandFileBytes < 0 {
+		return DefaultMaxCommandFileBytes
+	}
+	return *t.MaxCommandFileBytes
 }
 
 // DefaultShellTimeout is [TUI.ShellTimeoutMS]'s default: 30s. Long enough for
