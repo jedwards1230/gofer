@@ -384,8 +384,12 @@ func TestSelectionRegionExcludesStatusRowKeepsTail(t *testing.T) {
 			t.Fatalf("precondition failed: statusRow=%d ruleRow=%d not found:\n%s", statusRow, ruleRow, a.render())
 		}
 		bottomRosterRow := ruleRow - 1
-		if got := ansi.Strip(lines[bottomRosterRow]); !strings.Contains(got, "session ") {
-			t.Fatalf("precondition failed: bottom roster row %d isn't real session content (roster didn't overflow?): %q", bottomRosterRow, got)
+		// An overflowing roster's bottom row is either a session row or the
+		// "↓ N more" overflow indicator that replaces it (see
+		// Overview.overflowNote) — either way real roster content, not the blank
+		// filler a non-overflowing roster would leave there.
+		if got := ansi.Strip(lines[bottomRosterRow]); !strings.Contains(got, "session ") && !strings.Contains(got, " more") {
+			t.Fatalf("precondition failed: bottom roster row %d isn't real roster content (roster didn't overflow?): %q", bottomRosterRow, got)
 		}
 		if bottomRosterRow >= ruleRow || ruleRow >= statusRow {
 			t.Fatalf("precondition failed: expected bottomRoster(%d) < rule(%d) < status(%d)", bottomRosterRow, ruleRow, statusRow)

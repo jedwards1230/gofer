@@ -26,12 +26,12 @@ import (
 // close c itself once the prompt settles, though — see the comment at that
 // call site — so the caller's own Close is a (harmless, idempotent) safety
 // net for paths that never reach here.
-func driveDaemonSession(ctx context.Context, c *daemon.Client, cmd, resumeID, cwd, prompt string, asJSON bool, stdout, stderr io.Writer) error {
+func driveDaemonSession(ctx context.Context, c *daemon.Client, cmd, resumeID, cwd, prompt string, sub subagentLink, asJSON bool, stdout, stderr io.Writer) error {
 	if _, err := c.Call(ctx, acp.MethodInitialize, acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersion}); err != nil {
 		return fmt.Errorf("daemon initialize: %w", err)
 	}
 
-	sessionID, err := openDaemonSession(ctx, c, resumeID, cwd)
+	sessionID, err := openDaemonSession(ctx, c, resumeID, cwd, sub)
 	if err != nil {
 		return err
 	}
@@ -102,11 +102,34 @@ type callResult struct {
 	err error
 }
 
+// subagentLink is the optional parent/agent pair `gofer run`'s --parent/--agent
+// flags carry into session/new. The zero value — every invocation that names
+// neither — creates an ordinary root session, exactly as before.
+type subagentLink struct {
+	parentID string
+	agent    string
+}
+
+// set reports whether either half was given.
+func (s subagentLink) set() bool { return s.parentID != "" || s.agent != "" }
+
+// newSessionParams builds session/new's params through the one shared
+// constructor ([daemon.NewSessionRequestFor]), which attaches `_meta` only when
+// a subagent link was asked for — so an ordinary run sends the byte-identical
+// request it always has. The model is deliberately left empty: on the daemon
+// path `gofer run`'s -m is inert and the daemon resolves its own default (see
+// run.go's daemon-path notes).
+func (s subagentLink) newSessionParams(cwd string) daemon.NewSessionRequest {
+	return daemon.NewSessionRequestFor(cwd, "", s.parentID, s.agent)
+}
+
 // openDaemonSession creates a fresh session (resumeID == "") via session/new,
-// or reopens an existing one via session/load, returning its id.
-func openDaemonSession(ctx context.Context, c *daemon.Client, resumeID, cwd string) (string, error) {
+// or reopens an existing one via session/load, returning its id. sub is honored
+// only on the session/new path: a resume reopens a session whose parent/agent
+// link is already persisted beside its journal.
+func openDaemonSession(ctx context.Context, c *daemon.Client, resumeID, cwd string, sub subagentLink) (string, error) {
 	if resumeID == "" {
-		result, err := c.Call(ctx, acp.MethodSessionNew, acp.NewSessionRequest{Cwd: cwd})
+		result, err := c.Call(ctx, acp.MethodSessionNew, sub.newSessionParams(cwd))
 		if err != nil {
 			return "", fmt.Errorf("session/new: %w", err)
 		}

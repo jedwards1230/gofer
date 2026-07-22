@@ -50,6 +50,28 @@
 // on-disk journal: gofer's hard invariant (docs/CLAUDE.md) is that journals
 // are never deleted, only the roster forgets them.
 //
+// # Subagent sessions
+//
+// A subagent is not a black box inside a turn: it is a real session with its
+// own journal, cost and transcript, plus a link to the session that spawned it.
+// [CreateOptions.ParentID] makes one — Create resolves the parent (live roster
+// first, then disk), derives Depth = parent+1, and enforces
+// [Config.MaxSubagentDepth] ([ErrNoParent] / [ErrDepthExceeded]).
+// [CreateOptions.Agent] is forwarded to [runner.Options.Agent] so the child's
+// tool-call events carry its agent id.
+//
+// The link is DURABLE and gofer-native: it is written beside the journal as
+// <root>/sessions/<slug>/<id>.meta.json (see the sidecar file), so
+// [Supervisor.List] reports it for offline sessions too and [Supervisor.Resume]
+// restores a child's attribution. Only a session that actually has a parent or
+// an agent writes a sidecar; a plain root session writes none and every session
+// predating this feature reads back as a root, unchanged.
+//
+// [DiskMeta] is that sidecar's exported reader, for the OTHER offline-row
+// builder: internal/router keeps its own List over the same store, and under M6
+// it is the daemon clients actually talk to — so both must read the link, or an
+// offline subagent tree would flatten on the isolated path only.
+//
 // # Prompt queue and steering
 //
 // [Supervisor.Send] never rejects a busy session. A prompt sent to an idle

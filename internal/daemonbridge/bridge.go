@@ -142,6 +142,9 @@ func toTUISessionInfo(d sessionInfoDTO) tui.SessionInfo {
 		Usage:         d.Usage,
 		Pending:       d.Pending,
 		BinaryVersion: d.BinaryVersion,
+		ParentID:      d.ParentID,
+		Agent:         d.Agent,
+		Depth:         d.Depth,
 		Created:       d.Created,
 		Updated:       d.Updated,
 	}
@@ -201,24 +204,31 @@ func (s *Supervisor) Send(ctx context.Context, sessionID, prompt string) error {
 // ever triggers a needless session/load for a session that, by construction,
 // has no history yet.
 func (s *Supervisor) Create(ctx context.Context, prompt string, opts tui.CreateOptions) (tui.SessionInfo, error) {
-	raw, err := s.client.Call(ctx, acp.MethodSessionNew, acp.NewSessionRequest{Cwd: opts.Cwd, Model: opts.Model})
+	raw, err := s.client.Call(ctx, acp.MethodSessionNew,
+		daemon.NewSessionRequestFor(opts.Cwd, opts.Model, opts.ParentID, opts.Agent))
 	if err != nil {
 		return tui.SessionInfo{}, fmt.Errorf("daemonbridge: create: %w", err)
 	}
-	var resp newSessionResponse
+	var resp daemon.NewSessionResponse
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return tui.SessionInfo{}, fmt.Errorf("daemonbridge: decode %s response: %w", acp.MethodSessionNew, err)
 	}
 	s.core.RegisterFresh(resp.SessionID)
 
+	// The subagent link the daemon ASSIGNED, not the one requested — Depth is
+	// computed daemon-side (parent + 1) and is not knowable here at all.
+	parentID, agentID, depth := resp.Meta.SubagentLink()
 	now := time.Now()
 	info := tui.SessionInfo{
-		ID:      resp.SessionID,
-		Model:   resp.assignedModel(opts.Model),
-		Cwd:     opts.Cwd,
-		Status:  tui.StatusNeedsInput,
-		Created: now,
-		Updated: now,
+		ID:       resp.SessionID,
+		Model:    resp.Meta.ModelOr(opts.Model),
+		Cwd:      opts.Cwd,
+		ParentID: parentID,
+		Agent:    agentID,
+		Depth:    depth,
+		Status:   tui.StatusNeedsInput,
+		Created:  now,
+		Updated:  now,
 	}
 	if prompt != "" {
 		info.Status = tui.StatusWorking
@@ -229,31 +239,87 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts tui.CreateO
 	return info, nil
 }
 
-// newSessionResponse is the session/new response as this bridge reads it:
-// ACP's [acp.NewSessionResponse] plus the daemon's gofer-namespaced `_meta`
-// extension carrying the model it ASSIGNED (see internal/daemon's
-// newSessionResult). Decoding it is what lets [Supervisor.Create] report what
-// the session actually runs instead of echoing what it asked for.
-type newSessionResponse struct {
-	acp.NewSessionResponse
-	Meta struct {
-		Model string `json:"gofer/model"`
-	} `json:"_meta"`
+// listSessionsPageCap bounds how many session/list pages [Supervisor.ListSessions]
+// will walk before it stops asking. The daemon pages at 50 rows
+// (internal/daemon's sessionListPageSize), so this is 20 pages ≈ 1000 sessions —
+// far past any plausible store, while still guaranteeing the loop terminates
+// against a daemon whose cursor never advances rather than spinning forever on
+// the Update loop's behalf.
+const listSessionsPageCap = 20
+
+// ListSessions walks session/list — the ACP-standard, fleet-global enumeration
+// of every session the daemon has on disk, live and offline alike (see
+// internal/daemon's handleSessionList) — and maps each page to the TUI's
+// resume-picker row.
+//
+// It follows NextCursor rather than reading only the first page: the picker's
+// whole job is "show me what I can bring back", and silently truncating that at
+// the daemon's page size would hide older sessions with no indication they
+// exist. A page whose cursor does not advance, or one past [listSessionsPageCap],
+// ends the walk with whatever has been collected — a partial list beats hanging.
+// A cancelled ctx needs no separate check between iterations: every iteration's
+// [daemon.Client.Call] selects on ctx.Done() and returns ctx.Err(), so the walk
+// aborts at the very next page request (pinned by
+// TestListSessionsHonorsCancellation).
+//
+// Cwd is deliberately NOT sent: the daemon accepts it for wire compatibility but
+// ignores it as a filter (handleSessionList's doc), and the picker wants the
+// fleet, not this client's directory.
+func (s *Supervisor) ListSessions(ctx context.Context) ([]tui.SessionRef, error) {
+	var (
+		out    []tui.SessionRef
+		cursor string
+	)
+	for range listSessionsPageCap {
+		raw, err := s.client.Call(ctx, acp.MethodSessionList, acp.ListSessionsRequest{Cursor: cursor})
+		if err != nil {
+			return nil, fmt.Errorf("daemonbridge: list sessions: %w", err)
+		}
+		var resp acp.ListSessionsResponse
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			return nil, fmt.Errorf("daemonbridge: decode %s response: %w", acp.MethodSessionList, err)
+		}
+		for _, sess := range resp.Sessions {
+			// UpdatedAt is optional and free-form on the wire (ACP says ISO 8601);
+			// an unparseable or absent value leaves Updated zero, which the picker
+			// renders as "unknown" rather than as the epoch.
+			updated, _ := time.Parse(time.RFC3339, sess.UpdatedAt)
+			out = append(out, tui.SessionRef{
+				ID:      sess.SessionID,
+				Title:   sess.Title,
+				Cwd:     sess.Cwd,
+				Updated: updated,
+			})
+		}
+		if resp.NextCursor == "" || resp.NextCursor == cursor {
+			break
+		}
+		cursor = resp.NextCursor
+	}
+	return out, nil
 }
 
-// assignedModel is the model the new session actually runs: the daemon's own
-// answer, falling back to requested — the model this client asked for — when
-// the daemon sent no `_meta` at all.
+// Resume reopens sessionID as a live session via ACP's session/load — the same
+// method `gofer resume` sends against a reachable daemon (cmd/gofer's
+// openDaemonSession), which the daemon answers by calling its supervisor's own
+// Resume. cwd is the client's, per ACP v1: LoadSessionRequest.cwd is required
+// and authoritative for what directory the session reloads into.
 //
-// The fallback is ONLY for a daemon predating the field. It must never be read
-// as "the request is as good as the response": on the normal path requested is
-// "" (the TUI sends no model and lets the daemon decide), which is exactly why
-// echoing it left the roster row modelless (issue #162, defect 2).
-func (r newSessionResponse) assignedModel(requested string) string {
-	if r.Meta.Model != "" {
-		return r.Meta.Model
+// The reconstruction state is pre-registered BEFORE the call, not after. A
+// session/load replays the session's whole history back to this peer as
+// gofer/event frames while the call is still outstanding, and an unregistered id
+// reaching the demuxer would be first-referenced there — which is the core's one
+// trigger for it to issue a session/load of its OWN (see
+// [wirestream.Reconstructor.session]). Registering first means this call is the
+// only load, and its replay lands on the broker the TUI's follow-up Subscribe
+// then reads back (the same retained-backlog handoff the core's own load path
+// relies on).
+func (s *Supervisor) Resume(ctx context.Context, sessionID, cwd string) error {
+	s.core.RegisterFresh(sessionID)
+	if _, err := s.client.Call(ctx, acp.MethodSessionLoad, acp.LoadSessionRequest{SessionID: sessionID, Cwd: cwd}); err != nil {
+		return fmt.Errorf("daemonbridge: resume %s: %w", sessionID, err)
 	}
-	return requested
+	return nil
 }
 
 // Kill calls gofer/kill.
@@ -327,6 +393,47 @@ func (s *Supervisor) Interrupt(ctx context.Context, sessionID string) error {
 	return nil
 }
 
+// explainTimeout bounds one session/explain_permission round trip. It is a
+// package constant rather than a config knob for the same reason
+// internal/tui's daemonProbeTimeout is: this is a single request answered off
+// daemon-held state (no session, no provider, no disk), so there is no
+// deployment where waiting longer would turn a failure into a success — and
+// the cost of giving up is only that the prompt keeps showing the locally
+// derived rationale it already had. What it buys is that a wedged connection
+// can never leave the approval prompt marked "explaining…" forever.
+const explainTimeout = 5 * time.Second
+
+// ExplainPermission asks the daemon why a still-pending tool call was gated,
+// via ACP session/explain_permission, and returns the daemon's authoritative
+// [acp.PermissionRationale].
+//
+// It is READ-ONLY end to end: the daemon answers from its retained copy of the
+// request without touching the gate (see internal/daemon's
+// handleExplainPermission), so the request the TUI is prompting about is still
+// pending — and still answerable by [Supervisor.Reply] — when this returns.
+//
+// An unknown or already-resolved call id, or one belonging to another session,
+// comes back as a JSON-RPC application error and therefore as a plain messaged
+// error here (the daemon wire carries no error types — see [Supervisor.SetModel]'s
+// doc), which the caller surfaces rather than mistaking for "no reason given".
+func (s *Supervisor) ExplainPermission(ctx context.Context, sessionID, callID string) (acp.PermissionRationale, error) {
+	ctx, cancel := context.WithTimeout(ctx, explainTimeout)
+	defer cancel()
+
+	raw, err := s.client.Call(ctx, acp.MethodSessionExplainPermission, acp.ExplainPermissionRequest{
+		SessionID:  sessionID,
+		ToolCallID: callID,
+	})
+	if err != nil {
+		return acp.PermissionRationale{}, fmt.Errorf("daemonbridge: explain permission %s (session %s): %w", callID, sessionID, err)
+	}
+	var resp acp.ExplainPermissionResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return acp.PermissionRationale{}, fmt.Errorf("daemonbridge: decode %s response: %w", acp.MethodSessionExplainPermission, err)
+	}
+	return resp.Rationale, nil
+}
+
 // Reply answers a pending permission request by sending [methodPermissionReply]
 // — a bare notification, matching the "permission.reply" op's own
 // fire-and-forget contract (see event.PermissionReply's doc: it carries no
@@ -339,19 +446,26 @@ func (s *Supervisor) Interrupt(ctx context.Context, sessionID string) error {
 // the logical operation; the write's lifetime is owned by [daemon.Client.Notify]
 // (which takes no context), so a caller cancellation cannot close the shared
 // daemon link mid-write.
-func (s *Supervisor) Reply(ctx context.Context, sessionID, id string, allow, remember bool) error {
+//
+// An amended allow ([tui.PermissionDecision.Input]) adds an "input" member
+// carrying the replacement tool input. It is `omitempty` on purpose: a plain
+// allow/deny must put the EXACT same bytes on the wire as it did before amend
+// existed, so a daemon too old to know the member is unaffected by this
+// change (pinned by TestReplyPlainAllowOmitsInput).
+func (s *Supervisor) Reply(ctx context.Context, sessionID, id string, d tui.PermissionDecision) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	verdict := event.VerdictDeny
-	if allow {
+	if d.Allow {
 		verdict = event.VerdictAllow
 	}
 	params := struct {
-		ID       string        `json:"id"`
-		Verdict  event.Verdict `json:"verdict"`
-		Remember bool          `json:"remember,omitempty"`
-	}{ID: id, Verdict: verdict, Remember: remember}
+		ID       string          `json:"id"`
+		Verdict  event.Verdict   `json:"verdict"`
+		Remember bool            `json:"remember,omitempty"`
+		Input    json.RawMessage `json:"input,omitempty"`
+	}{ID: id, Verdict: verdict, Remember: d.Remember, Input: d.Input}
 	if err := s.client.Notify(methodPermissionReply, params); err != nil {
 		return fmt.Errorf("daemonbridge: reply %s (session %s): %w", id, sessionID, err)
 	}

@@ -85,6 +85,106 @@ func modelConfigOptionEvent(currentModel string, authed map[string]bool) event.C
 	}
 }
 
+// NewSessionMeta is gofer's `_meta` extension on session/new, in BOTH
+// directions. ACP reserves `_meta` for exactly this — implementation-specific
+// data an unaware peer ignores — so gofer's model and subagent fields ride there
+// rather than in new top-level fields the SDK's shared wire types would have to
+// grow (contract-only consumption).
+//
+// It is EXPORTED, and every producer and consumer in this repo uses this one
+// type: the daemon's session/new handler, internal/daemonbridge, the M6 router's
+// router→worker call, and cmd/gofer's `gofer run`. The keys can only live in
+// struct tags (Go tags cannot reference a constant), so a second declaration of
+// this shape anywhere would be a second, independently-typo-able copy of the
+// wire contract — with a mistake in the REQUEST direction failing silently, as a
+// plain root session and no error. One type is the only way to close that.
+//
+// Request direction: ParentID and Agent state the client's INTENT (Model and
+// Depth are ignored). Response direction: every field states what the daemon
+// actually ASSIGNED — Depth in particular is derived daemon-side (parent + 1)
+// and is not knowable by the client at all.
+type NewSessionMeta struct {
+	// Model is the model the daemon ASSIGNED to the new session: the client's
+	// requested model when it sent one, else the daemon's own resolved default.
+	// Empty only when the daemon could not resolve one at all. A client that sees
+	// no `_meta` at all is talking to a daemon predating this field and falls
+	// back to whatever it requested (see [NewSessionMeta.ModelOr]).
+	Model string `json:"gofer/model,omitempty"`
+	// ParentID names the session SPAWNING this one, making the new session a
+	// subagent of it (see [supervisor.CreateOptions.ParentID]). An unknown parent
+	// is rejected as invalid params, and one already at the depth cap as an
+	// application error — a client learns which, rather than silently getting a
+	// root session.
+	ParentID string `json:"gofer/parent,omitempty"`
+	// Agent is the new session's agent identity, stamped onto its tool-call
+	// events (see [supervisor.CreateOptions.Agent]).
+	Agent string `json:"gofer/agent,omitempty"`
+	// Depth is the assigned depth in the subagent tree (response direction only).
+	Depth int `json:"gofer/depth,omitempty"`
+}
+
+// ModelOr is the model the new session actually runs: the daemon's own answer,
+// falling back to requested — what the client asked for — when the daemon sent
+// no `_meta` at all.
+//
+// The fallback is ONLY for a daemon predating the field. It must never be read
+// as "the request is as good as the response": on the normal path requested is
+// "" (the client sends no model and lets the daemon decide), which is exactly
+// why echoing it left the roster row modelless (issue #162, defect 2).
+func (m *NewSessionMeta) ModelOr(requested string) string {
+	if m != nil && m.Model != "" {
+		return m.Model
+	}
+	return requested
+}
+
+// SubagentLink reports the assigned parent/agent/depth, nil-safe so a consumer
+// needs no nil dance for the overwhelmingly common no-`_meta` response.
+func (m *NewSessionMeta) SubagentLink() (parentID, agent string, depth int) {
+	if m == nil {
+		return "", "", 0
+	}
+	return m.ParentID, m.Agent, m.Depth
+}
+
+// NewSessionRequest is a session/new request: ACP's own
+// [acp.NewSessionRequest] plus gofer's `_meta` extension. The embedded ACP
+// request decodes exactly as it always did, so an ordinary client that sends no
+// `_meta` produces a nil Meta and a plain root session.
+type NewSessionRequest struct {
+	acp.NewSessionRequest
+	Meta *NewSessionMeta `json:"_meta,omitempty"`
+}
+
+// NewSessionRequestFor builds the session/new request every gofer client sends.
+// It attaches `_meta` ONLY when a subagent link was actually asked for, so a
+// plain create is byte-for-byte the request gofer sent before subagents existed
+// — the property that keeps this additive for any peer on either end.
+func NewSessionRequestFor(cwd, model, parentID, agent string) NewSessionRequest {
+	req := NewSessionRequest{
+		NewSessionRequest: acp.NewSessionRequest{Cwd: cwd, Model: model},
+	}
+	if parentID != "" || agent != "" {
+		req.Meta = &NewSessionMeta{ParentID: parentID, Agent: agent}
+	}
+	return req
+}
+
+// NewSessionResponse is a session/new response: ACP's own
+// [acp.NewSessionResponse] plus the `_meta` extension carrying what the daemon
+// assigned.
+//
+// It exists because the ACP response carries only the session id. A client that
+// let the daemon choose the model — the NORMAL path — therefore had no way to
+// learn what it actually got, so internal/daemonbridge's Create could only echo
+// back the model it had REQUESTED (the empty string), and the roster row it
+// returned could never carry the real one (issue #162, defect 2). The subagent
+// link is carried for the same reason.
+type NewSessionResponse struct {
+	acp.NewSessionResponse
+	Meta *NewSessionMeta `json:"_meta,omitempty"`
+}
+
 // sessionInfoDTO is the wire shape for the gofer-native roster/ps methods. It
 // is a deliberate subset of [supervisor.SessionInfo]: Summary, Pending, and
 // Artifacts are reserved-and-always-zero in M2 (see the SessionInfo doc) and
@@ -137,6 +237,15 @@ type sessionInfoDTO struct {
 	// Omitted when empty, which is the normal case for the in-process daemon and
 	// for every disk-only (offline) row: it is live-only state, never journaled.
 	BinaryVersion string `json:"binaryVersion,omitempty"`
+	// ParentID, Agent and Depth are the session's subagent link (see
+	// [supervisor.SessionInfo.ParentID]): which session spawned it, which agent
+	// identity it runs as, and how deep it sits in the resulting tree. All three
+	// are omitempty and all three are zero for a root session, so a roster of
+	// ordinary sessions is byte-for-byte what it was before subagents existed and
+	// an older client simply never reads them.
+	ParentID string `json:"parentId,omitempty"`
+	Agent    string `json:"agent,omitempty"`
+	Depth    int    `json:"depth,omitempty"`
 }
 
 func toSessionInfoDTO(info supervisor.SessionInfo) sessionInfoDTO {
@@ -156,6 +265,9 @@ func toSessionInfoDTO(info supervisor.SessionInfo) sessionInfoDTO {
 		Live:          info.Live,
 		Cwd:           info.Cwd,
 		BinaryVersion: info.BinaryVersion,
+		ParentID:      info.ParentID,
+		Agent:         info.Agent,
+		Depth:         info.Depth,
 	}
 }
 
@@ -313,12 +425,20 @@ type permissionResolvedParams struct {
 }
 
 // permissionReplyParams is the inbound params shape of the "permission.reply"
-// op (contract #1): {id, verdict, remember?}. It carries no session id — the
-// daemon resolves the session from the call id (see handlePermissionReply).
+// op (contract #1): {id, verdict, remember?, input?}. It carries no session id
+// — the daemon resolves the session from the call id (see
+// handlePermissionReply).
+//
+// input is an amend-before-approve's replacement tool input, forwarded
+// verbatim onto [event.PermissionReply.Input] so the session's loop runs the
+// call with the human's arguments instead of the model's. It is optional:
+// every client that predates amend simply omits it, which decodes to a nil
+// RawMessage — the plain allow/deny path.
 type permissionReplyParams struct {
-	ID       string        `json:"id"`
-	Verdict  event.Verdict `json:"verdict"`
-	Remember bool          `json:"remember,omitempty"`
+	ID       string          `json:"id"`
+	Verdict  event.Verdict   `json:"verdict"`
+	Remember bool            `json:"remember,omitempty"`
+	Input    json.RawMessage `json:"input,omitempty"`
 }
 
 // decisionRequestedParams is the wire shape of a gofer/decision_requested

@@ -42,6 +42,19 @@ type internalFakeSup struct {
 	// responses.
 	gates   map[string]*decision.Gate
 	answers []answerCall
+
+	// sessionRefs is what ListSessions answers with — the /resume picker's
+	// source list, seeded per test.
+	sessionRefs []SessionRef
+
+	// explains records every Supervisor.ExplainPermission call, and
+	// explainRationale/explainErr are what the next one answers with — both
+	// paths are needed, since ctrl+e's contract is as much about what a FAILED
+	// explain does (keep the prompt, say so on the status line) as a
+	// successful one.
+	explains         []explainCall
+	explainRationale acp.PermissionRationale
+	explainErr       error
 }
 
 // answerCall records one Supervisor.AnswerDecision invocation for the
@@ -53,12 +66,24 @@ type answerCall struct {
 }
 
 // replyCall records one Supervisor.Reply invocation for the approval
-// prompt's behavioral tests to assert against.
+// prompt's behavioral tests to assert against. input is the amended tool
+// input the decision carried, held as a string so a replyCall stays
+// comparable with == (a json.RawMessage is a slice and is not); "" is the
+// plain allow/deny path's nil Input.
 type replyCall struct {
 	sessionID string
 	id        string
 	allow     bool
 	remember  bool
+	input     string
+}
+
+// explainCall records one Supervisor.ExplainPermission invocation — the
+// counterpart to replyCall, and what the read-only assertions compare against
+// (an explain must appear here and NOT in replies).
+type explainCall struct {
+	sessionID string
+	callID    string
 }
 
 func newInternalFakeSup(roster []SessionInfo) *internalFakeSup {
@@ -107,6 +132,15 @@ func (f *internalFakeSup) Create(_ context.Context, prompt string, _ CreateOptio
 	return SessionInfo{ID: "created-1", Title: prompt, Status: StatusWorking}, nil
 }
 
+// ListSessions answers the /resume picker's list from the same fixture field
+// the golden tests seed; nil (the default) renders the honest empty state.
+func (f *internalFakeSup) ListSessions(context.Context) ([]SessionRef, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]SessionRef(nil), f.sessionRefs...), nil
+}
+
+func (f *internalFakeSup) Resume(context.Context, string, string) error    { return nil }
 func (f *internalFakeSup) Send(context.Context, string, string) error      { return nil }
 func (f *internalFakeSup) Interrupt(context.Context, string) error         { return nil }
 func (f *internalFakeSup) Kill(context.Context, string) error              { return nil }
@@ -114,10 +148,16 @@ func (f *internalFakeSup) Archive(context.Context, string) error           { ret
 func (f *internalFakeSup) SetModel(context.Context, string, string) error  { return nil }
 func (f *internalFakeSup) SetEffort(context.Context, string, string) error { return nil }
 
-func (f *internalFakeSup) Reply(_ context.Context, sessionID, id string, allow, remember bool) error {
+func (f *internalFakeSup) Reply(_ context.Context, sessionID, id string, d PermissionDecision) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.replies = append(f.replies, replyCall{sessionID: sessionID, id: id, allow: allow, remember: remember})
+	f.replies = append(f.replies, replyCall{
+		sessionID: sessionID,
+		id:        id,
+		allow:     d.Allow,
+		remember:  d.Remember,
+		input:     string(d.Input),
+	})
 	return nil
 }
 
@@ -137,6 +177,16 @@ func (f *internalFakeSup) AnswerDecision(_ context.Context, sessionID, requestID
 		return err
 	}
 	return nil
+}
+
+func (f *internalFakeSup) ExplainPermission(_ context.Context, sessionID, callID string) (acp.PermissionRationale, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.explains = append(f.explains, explainCall{sessionID: sessionID, callID: callID})
+	if f.explainErr != nil {
+		return acp.PermissionRationale{}, f.explainErr
+	}
+	return f.explainRationale, nil
 }
 
 // newAppForGolden builds an App wired to a fresh internalFakeSup, sized and
@@ -439,7 +489,21 @@ func TestAppStaleEventGuard(t *testing.T) {
 // for the approval-prompt tests below.
 func attachForDialogTest(t *testing.T, sup *internalFakeSup) App {
 	t.Helper()
-	a := newAppForGolden(t, sup)
+	return attachForDialogTestEnv(t, sup, GoldenCommandEnv())
+}
+
+// attachForDialogTestEnv is [attachForDialogTest] with a caller-supplied
+// [CommandEnv] — the seam a test needs when the approval prompt's own config
+// keys (tui.approval_body_lines, tui.approval_min_transcript_rows) must differ
+// from the defaults a Model carries on its own.
+func attachForDialogTestEnv(t *testing.T, sup *internalFakeSup, env CommandEnv) App {
+	t.Helper()
+	a := NewApp(theme.Test(), sup, GoldenMeta(), env)
+
+	mdl, _ := a.Update(tea.WindowSizeMsg{Width: testkit.Width, Height: testkit.Height})
+	a = mdl.(App)
+	mdl, _ = a.Update(rosterMsg{sessions: GoldenRoster()})
+	a = mdl.(App)
 	mdl, cmd := a.Update(tea.KeyPressMsg{Code: tea.KeyRight})
 	a = mdl.(App)
 	if cmd == nil {
@@ -640,6 +704,242 @@ func TestAppApprovalDialogEscDismissesWithoutReply(t *testing.T) {
 	if len(sup.replies) != 0 {
 		t.Errorf("sup.replies = %+v, want none after esc", sup.replies)
 	}
+}
+
+// ctrlE is the key press the explain affordance is bound to, spelled once so
+// the tests below and handleApprovalKey can't drift on the modifier.
+var ctrlE = tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl}
+
+// explainedRationale is the canned authoritative answer the fake returns.
+func explainedRationale() acp.PermissionRationale {
+	return acp.PermissionRationale{
+		Reason: "The workspace sandbox profile denies deletes outside the session cwd.",
+		Policy: "workspace-write",
+		Source: "project",
+		Trace:  []string{"rule: workspace-write", "containable: false"},
+	}
+}
+
+// TestAppApprovalExplainIsReadOnly is the client half of the read-only
+// guarantee: ctrl+e calls Supervisor.ExplainPermission for the pending
+// request, the answer replaces the locally derived rationale on screen — and
+// the request itself is untouched. The prompt is still pending, and the fake
+// recorded ZERO replies, because an explain answers nothing.
+func TestAppApprovalExplainIsReadOnly(t *testing.T) {
+	sup := newInternalFakeSup(GoldenRoster())
+	sup.explainRationale = explainedRationale()
+	a := attachForDialogTest(t, sup)
+	a = requestApproval(t, a, "perm-1")
+
+	mdl, cmd := a.Update(ctrlE)
+	a = mdl.(App)
+	if cmd == nil {
+		t.Fatal("expected an ExplainPermission cmd after ctrl+e")
+	}
+	if !a.sess.HasPendingApproval() {
+		t.Fatal("ctrl+e dismissed the pending approval — an explain must never resolve it")
+	}
+	if !a.sess.ApprovalExplaining() {
+		t.Error("expected the prompt marked as explaining while the call is in flight")
+	}
+
+	mdl, _ = a.Update(cmd()) // run the Cmd against the fake and fold its msg back in
+	a = mdl.(App)
+
+	if len(sup.explains) != 1 {
+		t.Fatalf("sup.explains = %+v, want exactly one", sup.explains)
+	}
+	if want := (explainCall{sessionID: a.sessID, callID: "perm-1"}); sup.explains[0] != want {
+		t.Errorf("sup.explains[0] = %+v, want %+v", sup.explains[0], want)
+	}
+	if len(sup.replies) != 0 {
+		t.Errorf("sup.replies = %+v, want NONE — ctrl+e must not answer the request", sup.replies)
+	}
+	if !a.sess.HasPendingApproval() {
+		t.Fatal("the approval was resolved by an explain")
+	}
+	if a.sess.ApprovalExplaining() {
+		t.Error("expected the explaining marker cleared once the answer landed")
+	}
+
+	frame := a.render()
+	if !strings.Contains(frame, "sandbox profile denies deletes") {
+		t.Errorf("frame does not show the agent's rationale:\n%s", frame)
+	}
+	if !strings.Contains(frame, "1. [a] Yes   2. [d] No") {
+		t.Errorf("frame lost the action row — the human still has to answer:\n%s", frame)
+	}
+
+	// ...and answering still works afterwards, which is the point of all of it.
+	mdl, replyCmd := a.Update(tea.KeyPressMsg{Text: "a"})
+	a = mdl.(App)
+	if replyCmd == nil {
+		t.Fatal("expected a Reply cmd after 'a' following an explain")
+	}
+	replyCmd()
+	if len(sup.replies) != 1 {
+		t.Fatalf("sup.replies = %+v, want the one reply the human sent", sup.replies)
+	}
+}
+
+// TestAppApprovalExplainErrorKeepsPrompt covers the failure path: a failed
+// explain reports itself on the status line at danger severity, keeps the
+// locally derived rationale on screen, and leaves the request pending and
+// answerable. A rationale that could not be fetched must never cost a user
+// their ability to decide.
+func TestAppApprovalExplainErrorKeepsPrompt(t *testing.T) {
+	sup := newInternalFakeSup(GoldenRoster())
+	sup.explainErr = errors.New("daemonbridge: explain permission perm-1: connection closed")
+	a := attachForDialogTest(t, sup)
+	a = requestApproval(t, a, "perm-1")
+
+	mdl, cmd := a.Update(ctrlE)
+	a = mdl.(App)
+	mdl, _ = a.Update(cmd())
+	a = mdl.(App)
+
+	if !a.sess.HasPendingApproval() {
+		t.Fatal("a failed explain dismissed the pending approval")
+	}
+	if a.sess.ApprovalExplaining() {
+		t.Error("a failed explain left the prompt marked as explaining")
+	}
+	if a.statusSev != sevDanger || !strings.Contains(a.status, "connection closed") {
+		t.Errorf("status = %q (sev %v), want the explain failure at danger severity", a.status, a.statusSev)
+	}
+	if frame := a.render(); !strings.Contains(frame, "No permission rule matched this `bash` call") {
+		t.Errorf("a failed explain dropped the locally derived rationale:\n%s", frame)
+	}
+}
+
+// TestAppApprovalExplainIgnoresSecondPress pins the in-flight guard: ctrl+e
+// while an explain is already out issues no second call, so holding the key
+// cannot stack requests at the daemon.
+func TestAppApprovalExplainIgnoresSecondPress(t *testing.T) {
+	sup := newInternalFakeSup(GoldenRoster())
+	a := attachForDialogTest(t, sup)
+	a = requestApproval(t, a, "perm-1")
+
+	mdl, first := a.Update(ctrlE)
+	a = mdl.(App)
+	if first == nil {
+		t.Fatal("expected an ExplainPermission cmd after the first ctrl+e")
+	}
+	mdl, second := a.Update(ctrlE)
+	a = mdl.(App)
+	if second != nil {
+		t.Error("second ctrl+e issued another explain while one was already in flight")
+	}
+	if !a.sess.HasPendingApproval() {
+		t.Fatal("a repeated ctrl+e dismissed the pending approval")
+	}
+}
+
+// TestAppApprovalExplainStaleResultIgnored is the stale-result guard: a
+// rationale for a DIFFERENT request (the pending one resolved and was replaced
+// while the explain was in flight) must not repaint the prompt now on screen.
+// Applying it would explain one call while the user is being asked about
+// another.
+func TestAppApprovalExplainStaleResultIgnored(t *testing.T) {
+	sup := newInternalFakeSup(GoldenRoster())
+	a := attachForDialogTest(t, sup)
+	a = requestApproval(t, a, "perm-2")
+	before := a.render()
+
+	mdl, _ := a.Update(permissionExplainedMsg{id: "perm-1", rationale: explainedRationale()})
+	a = mdl.(App)
+
+	if got := a.render(); got != before {
+		t.Errorf("a rationale for a superseded request repainted the prompt:\n--- after ---\n%s\n--- before ---\n%s", got, before)
+	}
+
+	// The same guard must hold for the error path, which sets a status line.
+	mdl, _ = a.Update(permissionExplainedMsg{id: "perm-1", err: errors.New("boom")})
+	a = mdl.(App)
+	if a.status != "" {
+		t.Errorf("status = %q, want none — a stale explain failure must stay silent", a.status)
+	}
+}
+
+// TestApprovalPromptFooterLockstep pins the arithmetic App.render and
+// App.transcriptRegion must agree on: a tall prompt in a short frame
+// collapses, and the mouse-selection region must be computed from the SAME
+// collapsed footer. If they disagreed, every click-drag highlight on the
+// attach screen would land on the wrong rows.
+//
+// It asserts against what render actually DREW — the row the prompt's opening
+// rule landed on — rather than recomputing the footer length the way
+// transcriptRegion does, so a transcriptRegion that measures the prompt at a
+// height (or with a config) the render never used fails here instead of
+// agreeing with itself. The transcript is deliberately long enough to overflow
+// the window, which is what makes the region's last row the row immediately
+// above the footer (a short transcript leaves blank filler between the two).
+func TestApprovalPromptFooterLockstep(t *testing.T) {
+	noFloor := 0
+	tests := []struct {
+		name string
+		env  CommandEnv
+	}{
+		// The default floor collapses the prompt at the golden frame height...
+		{name: "default config", env: GoldenCommandEnv()},
+		// ...and an explicit "never collapse" draws the full block instead.
+		// Both must reach transcriptRegion, or it is measuring a prompt the
+		// render never drew.
+		{name: "never collapse", env: envWithTUI(config.TUI{ApprovalMinTranscriptRows: &noFloor})},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sup := newInternalFakeSup(GoldenRoster())
+			a := attachForDialogTestEnv(t, sup, tc.env)
+			for i := range 30 {
+				mdl, _ := a.Update(sessEventMsg{
+					id: a.sessID,
+					ev: event.NewMessageFinished(a.sessID, event.MessageUser, fmt.Sprintf("line %02d", i)),
+				})
+				a = mdl.(App)
+			}
+			a = requestApproval(t, a, "perm-1")
+
+			frame := strings.Split(a.render(), "\n")
+			ruleRow := -1
+			for i, line := range frame {
+				if strings.HasPrefix(line, "\u2500\u2500\u2500") { // the prompt's opening full-width rule
+					ruleRow = i
+				}
+			}
+			if ruleRow < 0 {
+				t.Fatalf("no approval prompt in the rendered frame:\n%s", strings.Join(frame, "\n"))
+			}
+
+			_, bottom, ok := a.transcriptRegion()
+			if !ok {
+				t.Fatal("transcriptRegion reported no selectable rows while a full transcript was on screen")
+			}
+			if bottom+1 != ruleRow {
+				t.Fatalf("selectable rows end at %d, but render put the prompt's first row at %d — "+
+					"the render and mouse windowing paths measured different footers", bottom, ruleRow)
+			}
+		})
+	}
+
+	// The two configs must actually render DIFFERENT prompt heights, or the
+	// cases above are two copies of the same assertion.
+	sup := newInternalFakeSup(GoldenRoster())
+	collapsed := requestApproval(t, attachForDialogTest(t, sup), "perm-1")
+	full := requestApproval(t, attachForDialogTestEnv(t, sup, envWithTUI(config.TUI{ApprovalMinTranscriptRows: &noFloor})), "perm-1")
+	h := collapsed.frameLayout().h
+	if got, want := len(collapsed.promptModel().promptLines(collapsed.width, h)), len(full.promptModel().promptLines(full.width, h)); got >= want {
+		t.Fatalf("the default config rendered a %d-row prompt and never-collapse a %d-row one — the collapse never engaged, so the lockstep is untested", got, want)
+	}
+}
+
+// envWithTUI is [GoldenCommandEnv] with a caller-chosen TUI config block, for
+// the tests that must exercise a non-default approval-prompt setting.
+func envWithTUI(tui config.TUI) CommandEnv {
+	env := GoldenCommandEnv()
+	env.Config = func() (config.Config, error) { return config.Config{TUI: tui}, nil }
+	return env
 }
 
 // TestAppApprovalDialogHiddenOnOverview verifies render()'s screen guard

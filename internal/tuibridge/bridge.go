@@ -89,11 +89,48 @@ func (a Adapter) Create(ctx context.Context, prompt string, opts tui.CreateOptio
 	if model == "" && a.defaultModel != nil {
 		model = a.defaultModel(ctx)
 	}
-	info, err := a.sup.Create(ctx, prompt, supervisor.CreateOptions{Model: model, Cwd: opts.Cwd})
+	info, err := a.sup.Create(ctx, prompt, supervisor.CreateOptions{
+		Model:    model,
+		Cwd:      opts.Cwd,
+		ParentID: opts.ParentID,
+		Agent:    opts.Agent,
+	})
 	if err != nil {
 		return tui.SessionInfo{}, err
 	}
 	return toTUI(info), nil
+}
+
+// ListSessions maps the supervisor's store-wide enumeration — every session on
+// disk, live and offline alike ([supervisor.Supervisor.List]) — to the TUI's
+// resume-picker row. Only the four fields a disk-only session can honestly
+// answer cross over; the operational extras a live row also carries (Status,
+// Cost, Usage) are deliberately dropped rather than shown as zeroes for the
+// offline majority (see [tui.SessionRef]).
+func (a Adapter) ListSessions(ctx context.Context) ([]tui.SessionRef, error) {
+	infos, err := a.sup.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]tui.SessionRef, len(infos))
+	for i, info := range infos {
+		out[i] = tui.SessionRef{ID: info.ID, Title: info.Title, Cwd: info.Cwd, Updated: info.Updated}
+	}
+	return out, nil
+}
+
+// Resume reopens sessionID as a live session in cwd. The model is resolved the
+// same per-call way [Adapter.Create] resolves it — the supervisor requires one
+// on every Resume (the journal does not persist it, see
+// [supervisor.ResumeOptions]) and reading it now rather than at construction
+// keeps a `/model` write made since made effective here too.
+func (a Adapter) Resume(ctx context.Context, sessionID, cwd string) error {
+	var model string
+	if a.defaultModel != nil {
+		model = a.defaultModel(ctx)
+	}
+	_, err := a.sup.Resume(ctx, sessionID, supervisor.ResumeOptions{Cwd: cwd, Model: model})
+	return err
 }
 
 // Send submits prompt as sessionID's next turn.
@@ -139,12 +176,33 @@ func (a Adapter) SetEffort(ctx context.Context, sessionID, effort string) error 
 // [tui.Supervisor] (every other method here takes one), though the
 // supervisor's own Reply is synchronous and never blocks on I/O (routing to
 // an in-memory Gate), so there is nothing for it to cancel.
-func (a Adapter) Reply(_ context.Context, sessionID, id string, allow, remember bool) error {
+//
+// d.Input rides along verbatim as [event.PermissionReply.Input] — the
+// amended tool input an in-process session runs with instead of the model's
+// original arguments. It is nil for a plain allow/deny, leaving that path
+// byte-identical to before amend existed.
+func (a Adapter) Reply(_ context.Context, sessionID, id string, d tui.PermissionDecision) error {
 	verdict := event.VerdictDeny
-	if allow {
+	if d.Allow {
 		verdict = event.VerdictAllow
 	}
-	return a.sup.Reply(sessionID, event.PermissionReply{ID: id, Verdict: verdict, Remember: remember})
+	return a.sup.Reply(sessionID, event.PermissionReply{ID: id, Verdict: verdict, Remember: d.Remember, Input: d.Input})
+}
+
+// ExplainPermission passes through to the supervisor's own read-only
+// rationale lookup — the in-process counterpart of the ACP
+// session/explain_permission round trip [daemonbridge.Supervisor] makes, and
+// the same [permrationale] grammar behind both, so a daemonless TUI explains a
+// gated call exactly as an attached one does.
+//
+// It is called DIRECTLY on the concrete supervisor rather than through any
+// capability interface: the daemon answers explains from its own retained
+// requests (see internal/daemon's handleExplainPermission), so nothing about
+// this method belongs on [daemon.Supervisor]. ctx is accepted to satisfy
+// [tui.Supervisor] and unused for the same reason [Adapter.Reply]'s is — the
+// lookup is an in-memory map read with nothing to cancel.
+func (a Adapter) ExplainPermission(_ context.Context, sessionID, callID string) (acp.PermissionRationale, error) {
+	return a.sup.ExplainPermission(sessionID, callID)
 }
 
 // decisionBuffer sizes the decision subscription this adapter hands the TUI.
@@ -195,5 +253,11 @@ func toTUI(s supervisor.SessionInfo) tui.SessionInfo {
 		// no separate worker process to have its own build), a router stamps it
 		// from the owning worker's gofer/hello.
 		BinaryVersion: s.BinaryVersion,
+		// The subagent link. Zero for a root session — which is every session
+		// created without an explicit parent, so this mapping is inert for the
+		// existing roster.
+		ParentID: s.ParentID,
+		Agent:    s.Agent,
+		Depth:    s.Depth,
 	}
 }

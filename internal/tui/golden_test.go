@@ -8,6 +8,7 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/jedwards1230/agent-sdk-go/acp"
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
@@ -49,6 +50,29 @@ func renderStyled(t *testing.T, name string, events ...event.Event) {
 	t.Helper()
 	got := testkit.Render(ingestColor(events...), testkit.Width, testkit.Height)
 	testkit.AssertGoldenStyled(t, name, got)
+}
+
+// ingestPrompt is ingest for the approval-prompt goldens below, with the
+// transcript floor set to 0 — "never collapse the rationale, whatever the
+// frame height" (see config.TUI.ApprovalMinTranscriptRows, whose default WOULD
+// collapse this block at the standard 24-row golden height).
+//
+// These goldens are about the prompt's CONTENT: what the header says, how the
+// body wraps, which paragraphs the rationale carries. Rendering them at the
+// collapsing default would hide most of that behind the "… ctrl+e to explain"
+// pointer and leave the full block untested at any width. The short-frame
+// behavior has its own golden instead — see TestGoldenApprovalCollapsed, which
+// renders the same request at the DEFAULT floor.
+func ingestPrompt(events ...event.Event) tui.Model {
+	return ingest(events...).WithApprovalMinTranscriptRows(0)
+}
+
+// renderPrompt is render for those same goldens: the whole prompt block, at
+// the standard golden size. See [ingestPrompt].
+func renderPrompt(t *testing.T, name string, events ...event.Event) {
+	t.Helper()
+	got := testkit.Render(ingestPrompt(events...), testkit.Width, testkit.Height)
+	testkit.AssertGolden(t, name, got)
 }
 
 // TestGoldenPlainTextTurn is the first golden test: a turn that streams
@@ -294,9 +318,9 @@ func attributedCall(agent string) []event.Event {
 // after the title.
 func TestGoldenApprovalAttributed(t *testing.T) {
 	events := attributedCall("researcher")
-	render(t, "approval_attributed", events...)
+	renderPrompt(t, "approval_attributed", events...)
 
-	got := testkit.Render(ingest(events...), testkit.Width, testkit.Height)
+	got := testkit.Render(ingestPrompt(events...), testkit.Width, testkit.Height)
 	if want := "bash command" + attributionSuffix + "`researcher` agent"; !strings.Contains(got, want) {
 		t.Errorf("attributed approval header missing %q:\n%s", want, got)
 	}
@@ -309,9 +333,9 @@ func TestGoldenApprovalAttributed(t *testing.T) {
 // bytes are these", never "this thing can't appear".
 func TestGoldenApprovalUnattributed(t *testing.T) {
 	events := attributedCall("")
-	render(t, "approval_unattributed", events...)
+	renderPrompt(t, "approval_unattributed", events...)
 
-	got := testkit.Render(ingest(events...), testkit.Width, testkit.Height)
+	got := testkit.Render(ingestPrompt(events...), testkit.Width, testkit.Height)
 	if !strings.Contains(got, "bash command") {
 		t.Fatalf("un-attributed approval is missing the plain title:\n%s", got)
 	}
@@ -333,9 +357,9 @@ func TestGoldenApprovalMultilineCommand(t *testing.T) {
 	events := []event.Event{
 		event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"cmd": multilineCommand}, tui.GoldenTrace()),
 	}
-	render(t, "approval_multiline_command", events...)
+	renderPrompt(t, "approval_multiline_command", events...)
 
-	got := testkit.Render(ingest(events...), testkit.Width, testkit.Height)
+	got := testkit.Render(ingestPrompt(events...), testkit.Width, testkit.Height)
 	for i, line := range strings.Split(got, "\n") {
 		if w := ansi.StringWidth(line); w > testkit.Width {
 			t.Errorf("line %d exceeds width %d cells (got %d): %q", i, testkit.Width, w, line)
@@ -364,9 +388,9 @@ func TestGoldenApprovalTruncatedBody(t *testing.T) {
 		event.NewPermissionRequested(sid, "perm-1", "bash",
 			map[string]any{"cmd": strings.Join(lines, "\n")}, tui.GoldenTrace()),
 	}
-	render(t, "approval_truncated_body", events...)
+	renderPrompt(t, "approval_truncated_body", events...)
 
-	got := testkit.Render(ingest(events...), testkit.Width, testkit.Height)
+	got := testkit.Render(ingestPrompt(events...), testkit.Width, testkit.Height)
 	// 20 body rows capped at 12: 11 shown, 9 collapsed.
 	if want := "… +9 more lines"; !strings.Contains(got, want) {
 		t.Errorf("over-cap body missing the collapse row %q:\n%s", want, got)
@@ -391,10 +415,10 @@ func TestGoldenApprovalNoTrace(t *testing.T) {
 	events := []event.Event{
 		event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"cmd": "rm -rf /tmp/x"}, nil),
 	}
-	render(t, "approval_no_trace", events...)
+	renderPrompt(t, "approval_no_trace", events...)
 
-	got := testkit.Render(ingest(events...), testkit.Width, testkit.Height)
-	if want := "gofer could not determine why this call was gated."; !strings.Contains(got, want) {
+	got := testkit.Render(ingestPrompt(events...), testkit.Width, testkit.Height)
+	if want := "gofer could not determine why this `bash` call was gated."; !strings.Contains(got, want) {
 		t.Errorf("empty-trace approval missing the fallback reason %q:\n%s", want, got)
 	}
 	if strings.Contains(got, "Policy:") {
@@ -409,7 +433,7 @@ func TestGoldenApprovalNoTrace(t *testing.T) {
 // is exercised too — the first frame arrives before WindowSizeMsg does.
 func TestApprovalPromptDegenerateWidths(t *testing.T) {
 	m := ingest(event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"cmd": "rm -rf /tmp/x"}, tui.GoldenTrace()))
-	for _, size := range []struct{ w, h int }{{0, 0}, {1, 1}, {2, 3}, {3, 24}} {
+	for _, size := range []struct{ w, h int }{{0, 0}, {1, 1}, {2, 3}, {3, 24}, {80, 1}, {80, 2}, {80, 3}} {
 		t.Run(fmt.Sprintf("%dx%d", size.w, size.h), func(t *testing.T) {
 			got := testkit.Render(m, size.w, size.h)
 			for i, line := range strings.Split(got, "\n") {
@@ -427,7 +451,7 @@ func TestApprovalPromptDegenerateWidths(t *testing.T) {
 // placeholder where the body would be, rather than an empty gap.
 func TestApprovalPromptEmptySpecKeepsNoArgs(t *testing.T) {
 	for _, spec := range []map[string]any{nil, {}, {"description": "sweep the workspace"}} {
-		m := ingest(event.NewPermissionRequested(sid, "perm-1", "bash", spec, tui.GoldenTrace()))
+		m := ingestPrompt(event.NewPermissionRequested(sid, "perm-1", "bash", spec, tui.GoldenTrace()))
 		got := testkit.Render(m, testkit.Width, testkit.Height)
 		if !strings.Contains(got, "(no args)") {
 			t.Errorf("approval with spec %v is missing the (no args) placeholder:\n%s", spec, got)
@@ -440,7 +464,7 @@ func TestApprovalPromptEmptySpecKeepsNoArgs(t *testing.T) {
 // Model.pending, approval.go) — the transcript's own itemApproval badge is
 // suppressed while the prompt shows it (see transcriptLines).
 func TestGoldenApproval(t *testing.T) {
-	render(t, "approval",
+	renderPrompt(t, "approval",
 		event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"cmd": "rm -rf /tmp/x"}, tui.GoldenTrace()),
 	)
 }
@@ -450,9 +474,11 @@ func TestGoldenApproval(t *testing.T) {
 // footer — the pending state an Ascii golden can't distinguish from done or
 // error.
 func TestGoldenStyledApproval(t *testing.T) {
-	renderStyled(t, "approval",
-		event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"cmd": "rm -rf /tmp/x"}, tui.GoldenTrace()),
-	)
+	got := testkit.Render(
+		ingestColor(event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"cmd": "rm -rf /tmp/x"}, tui.GoldenTrace())).
+			WithApprovalMinTranscriptRows(0),
+		testkit.Width, testkit.Height)
+	testkit.AssertGoldenStyled(t, "approval", got)
 }
 
 // TestGoldenApprovalPromptInline covers the same pending permission request
@@ -460,9 +486,93 @@ func TestGoldenStyledApproval(t *testing.T) {
 // footer-commandeering block (tool·args, the question, the a/d/r action row,
 // and a dim esc/session footer), replacing the old centered-overlay modal.
 func TestGoldenApprovalPromptInline(t *testing.T) {
-	render(t, "approval_prompt_inline",
+	renderPrompt(t, "approval_prompt_inline",
 		event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"cmd": "rm -rf /tmp/x"}, tui.GoldenTrace()),
 	)
+}
+
+// gatedCall is the one pending request the three ctrl+e goldens below share,
+// so their diffs differ only in the rationale's state.
+func gatedCall() event.Event {
+	return event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"cmd": "rm -rf /tmp/x"}, tui.GoldenTrace())
+}
+
+// TestGoldenApprovalExplaining covers the in-flight state of ctrl+e: the
+// rationale header carries the muted "explaining…" marker while the
+// session/explain_permission call is out, and NOTHING else about the prompt
+// changes — the request is still pending, the action row still answerable.
+func TestGoldenApprovalExplaining(t *testing.T) {
+	m := ingestPrompt(gatedCall()).MarkApprovalExplaining()
+	got := testkit.Render(m, testkit.Width, testkit.Height)
+	testkit.AssertGolden(t, "approval_explaining", got)
+
+	if !strings.Contains(got, "explaining") {
+		t.Errorf("in-flight prompt missing the explaining marker:\n%s", got)
+	}
+	if !strings.Contains(got, "1. [a] Yes   2. [d] No") {
+		t.Errorf("in-flight prompt lost its action row — an explain must not disarm the decision:\n%s", got)
+	}
+}
+
+// TestGoldenApprovalExplained covers the answered state: the agent's own
+// rationale replaces the locally derived one and the header says so, while the
+// escape hatch — this client's advice, never the agent's — stays beneath it.
+func TestGoldenApprovalExplained(t *testing.T) {
+	m := ingestPrompt(gatedCall()).SetApprovalRationale(acp.PermissionRationale{
+		Reason: "The workspace sandbox profile denies deletes outside the session cwd, so this call cannot run unattended.",
+		Policy: "workspace-write",
+		Source: "project",
+		Trace:  []string{"rule: workspace-write", "path: /tmp/x", "containable: false"},
+	})
+	got := testkit.Render(m, testkit.Width, testkit.Height)
+	testkit.AssertGolden(t, "approval_explained", got)
+
+	if !strings.Contains(got, "agent's answer") {
+		t.Errorf("explained prompt does not say whose answer it is showing:\n%s", got)
+	}
+	if !strings.Contains(got, "workspace-write") || !strings.Contains(got, "path: /tmp/x") {
+		t.Errorf("explained prompt dropped the agent's provenance:\n%s", got)
+	}
+	if strings.Contains(got, "No permission rule matched") {
+		t.Errorf("explained prompt still shows the local derivation:\n%s", got)
+	}
+	if !strings.Contains(got, "Press `r`") {
+		t.Errorf("explained prompt dropped the client's own escape hatch:\n%s", got)
+	}
+}
+
+// TestGoldenApprovalCollapsed covers the short-frame policy at the DEFAULT
+// transcript floor (config.DefaultApprovalMinTranscriptRows) — the state a
+// real 80x24 terminal shows: the rationale drops to its opening paragraph
+// plus a ctrl+e pointer, and everything a decision needs stays on screen.
+func TestGoldenApprovalCollapsed(t *testing.T) {
+	got := testkit.Render(ingest(gatedCall()), testkit.Width, testkit.Height)
+	testkit.AssertGolden(t, "approval_collapsed", got)
+
+	for _, want := range []string{
+		"bash command",  // what is being asked for
+		"rm -rf /tmp/x", // ...and the call itself
+		"No permission rule matched this `bash` call", // the opening paragraph
+		"… ctrl+e to explain",                         // where the rest went
+		"Do you want to proceed?",                     // the question
+		"1. [a] Yes   2. [d] No",                      // how to answer it
+		"esc cancel · ctrl+e explain · session ",      // the hint line
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("collapsed prompt missing %q:\n%s", want, got)
+		}
+	}
+	for _, gone := range []string{"Policy:", "Press `r` before allowing"} {
+		if strings.Contains(got, gone) {
+			t.Errorf("collapsed prompt still carries %q — nothing collapsed:\n%s", gone, got)
+		}
+	}
+	// The collapse must actually buy transcript rows back: the full block
+	// leaves the default floor unmet at this height, the collapsed one meets it.
+	full := testkit.Render(ingestPrompt(gatedCall()), testkit.Width, testkit.Height)
+	if len(strings.Split(got, "\n")) != len(strings.Split(full, "\n")) {
+		t.Fatalf("collapsed and full renders differ in total rows — both are padded to the frame height")
+	}
 }
 
 // TestColorApprovalPromptInlineNarrow proves the inline prompt's lines clamp
