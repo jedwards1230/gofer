@@ -359,6 +359,43 @@ func TestSyncMenuReturnsAtMostOneCmd(t *testing.T) {
 	}
 }
 
+// TestUserCommandsMsgPropagatesFileEnumerationCmd guards the one Cmd on this
+// path that must never be dropped.
+//
+// A landing userCommandsMsg re-syncs the menu, and syncMenu's `@` half
+// ([App.syncFileCandidates]) latches a.files.loading = true BEFORE returning
+// the enumeration Cmd. Only a filesLoadedMsg clears that latch, so swallowing
+// the Cmd leaves loading stuck true and the `@` mention popup dead for the
+// rest of the session — a wedge with no user-visible cause and no way back.
+//
+// The assertion is deliberately the PAIR: the latch was set AND the Cmd came
+// back. Either alone is consistent with the wedge.
+func TestUserCommandsMsgPropagatesFileEnumerationCmd(t *testing.T) {
+	root, cwd := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, "main.go"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := newUserCmdApp(t, root, cwd)
+	a.over = a.over.SetInput("@ma") // an active mention token, nothing enumerated yet
+
+	next, cmd := a.Update(userCommandsMsg{})
+
+	app, ok := next.(App)
+	if !ok {
+		t.Fatalf("Update returned %T, want App", next)
+	}
+	if !app.files.loading {
+		t.Fatal("syncFileCandidates did not latch files.loading; this test no longer probes the wedge it exists for")
+	}
+	if cmd == nil {
+		t.Fatal("Update swallowed syncMenu's Cmd while files.loading was latched — " +
+			"the enumeration never runs, the latch never clears, and `@` mentions are dead for the session")
+	}
+	if _, ok := cmd().(filesLoadedMsg); !ok {
+		t.Fatalf("the propagated Cmd produced %T, want filesLoadedMsg", cmd())
+	}
+}
+
 // TestUserCommandSkippedFileWarns verifies a file that can't become a command
 // surfaces as a status note instead of vanishing — the most confusing
 // possible failure for this feature is a command that silently never appears.

@@ -136,7 +136,7 @@ type App struct {
 	// menuToken records whether the last [App.syncMenu] found an active
 	// command token in the live buffer. It exists only to detect the
 	// closed→open EDGE, which is when the registry's markdown layer is
-	// reloaded from disk ([App.reloadUserCommands]) — once per "/" typed
+	// reloaded from disk ([App.loadUserCommandsCmd]) — once per "/" typed
 	// rather than once per keystroke. It tracks the `/` token specifically
 	// (see syncMenu): an `@` mention has no markdown layer to reload, and
 	// latching this on one would eat the next `/`'s edge.
@@ -852,11 +852,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// A markdown-command load landing off the loop (usercmds.go). The
 		// popup that triggered it opened on the registry as it stood, so
 		// re-sync it here — the new layer may add, drop, or re-summarize rows.
-		// syncMenu cannot re-trigger a load from here: a.menuToken is already
-		// true whenever a load is in flight, so the closed→open edge it gates
-		// on has passed.
-		next, _ := a.applyUserCommands(msg).syncMenu()
-		return next, nil
+		//
+		// syncMenu's Cmd is PROPAGATED, not discarded. It cannot be another
+		// markdown reload — a.menuToken is already true whenever a load is in
+		// flight, so the closed→open edge it gates on has passed — but it can
+		// be the `@` half's cwd enumeration, and dropping THAT would strand
+		// a.files.loading true forever ([App.syncFileCandidates] latches it
+		// before returning the Cmd, and only a filesLoadedMsg clears it),
+		// killing file mentions for the rest of the session. No caller of a
+		// syncMenu that can reach the `@` branch may swallow its Cmd.
+		return a.applyUserCommands(msg).syncMenu()
 
 	case tea.PasteMsg:
 		// Bracketed paste arrives as ONE message carrying the whole payload,

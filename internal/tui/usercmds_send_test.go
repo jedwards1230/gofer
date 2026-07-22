@@ -181,10 +181,18 @@ func TestUserCommandNoSessionOutranksEmptyExpansion(t *testing.T) {
 // TestUserCommandOversizedFileSkipped covers the tui.max_command_file_bytes
 // cap reaching the loader: an over-cap file never becomes a command, and the
 // skip is reported rather than silent.
+//
+// The typed prefix is a shared one the two probe files alone match, NOT a bare
+// "/". The popup renders at most commandMenuMaxRows (6) rows, so a bare "/"
+// asserts against a window into an alphabetically-sorted list — and every
+// builtin added since (M5's /help, /new, /quit, /yolo did exactly this) pushes
+// the row this test needs out of view, failing it for a reason that has
+// nothing to do with the cap. Filtering to the probes makes the assertion
+// depend only on what the loader produced.
 func TestUserCommandOversizedFileSkipped(t *testing.T) {
 	env, userDir, _ := newUserCmdEnv(t)
-	seedUserCmd(t, userDir, "huge.md", strings.Repeat("x", 4096))
-	seedUserCmd(t, userDir, "small.md", "fine")
+	seedUserCmd(t, userDir, "capbig.md", strings.Repeat("x", 4096))
+	seedUserCmd(t, userDir, "capsmall.md", "fine")
 
 	limit := 1024
 	env.Config = func() (config.Config, error) {
@@ -192,17 +200,23 @@ func TestUserCommandOversizedFileSkipped(t *testing.T) {
 	}
 
 	m := newUserCmdModel(t, newFakeSup(tui.GoldenRoster()), env)
-	m = type_(t, m, "/")
 
+	// The note is asserted after the ONE key press that opens the token and
+	// dispatches the reload: Update clears the status line at the top of every
+	// key press, so a note lives for exactly the frame that raised it and
+	// checking after a typed run would find an empty status either way.
+	m = press(t, m, tea.KeyPressMsg{Text: "/"})
+	if got := content(m); !strings.Contains(got, "skipped 1 command file") {
+		t.Fatalf("expected a status note about the skipped file, got:\n%s", got)
+	}
+
+	m = type_(t, m, "cap")
 	got := content(m)
-	if strings.Contains(got, "/huge") {
+	if strings.Contains(got, "/capbig") {
 		t.Fatalf("the over-cap file became a command:\n%s", got)
 	}
-	if !strings.Contains(got, "/small") {
+	if !strings.Contains(got, "/capsmall") {
 		t.Fatalf("the under-cap file beside it was lost:\n%s", got)
-	}
-	if !strings.Contains(got, "skipped 1 command file") {
-		t.Fatalf("expected a status note about the skipped file, got:\n%s", got)
 	}
 }
 
