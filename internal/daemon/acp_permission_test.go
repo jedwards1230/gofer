@@ -29,6 +29,15 @@ func selectedResponse(optionID string) acp.RequestPermissionResponse {
 	return acp.RequestPermissionResponse{Outcome: acp.PermissionOutcomeSelected{OptionID: optionID}}
 }
 
+// amendedResponse builds a session/request_permission response selecting
+// optionID with replacement tool input — the ACP amend-before-approve
+// outcome, now that a client (gofer's own TUI included) can produce one.
+func amendedResponse(optionID string, input json.RawMessage) acp.RequestPermissionResponse {
+	return acp.RequestPermissionResponse{
+		Outcome: acp.PermissionOutcomeAmended{OptionID: optionID, RawInput: input},
+	}
+}
+
 // newACPSession creates a session over driver and returns its id.
 func newACPSession(t *testing.T, driver *wsClient, cwd string) string {
 	t.Helper()
@@ -190,6 +199,137 @@ func TestACPPermissionRememberMapping(t *testing.T) {
 			case got := <-h.fake(sid).replies:
 				if got.Remember != tc.wantRemember {
 					t.Fatalf("gate reply remember = %v, want %v", got.Remember, tc.wantRemember)
+				}
+			case <-time.After(defaultWait):
+				t.Fatal("gate did not receive a reply")
+			}
+			if resp := <-promptDone; resp.Error != nil {
+				t.Fatalf("session/prompt: %v", resp.Error)
+			}
+		})
+	}
+}
+
+// TestACPPermissionAmendedOutcomeReachesGate covers the amend-before-approve
+// path over pure ACP: a client answers session/request_permission with
+// {"outcome":"amended","optionId":…,"rawInput":…} and the gate receives that
+// option's verdict/remember AND the replacement tool input, so the call runs
+// with the human's arguments instead of the model's.
+//
+// The daemon resolves an amended outcome's optionId against the original
+// option set exactly like a plain selection (see answeredOptionID);
+// acp.ToPermissionReply then projects RawInput onto the reply's Input. Both
+// option kinds are covered because the amended outcome does not decide
+// remember — the chosen option still does.
+func TestACPPermissionAmendedOutcomeReachesGate(t *testing.T) {
+	for _, tc := range []struct {
+		option       string
+		wantRemember bool
+	}{
+		{string(acp.PermissionAllowOnce), false},
+		{string(acp.PermissionAllowAlways), true},
+	} {
+		t.Run(tc.option, func(t *testing.T) {
+			h := newApprovalHarness(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+
+			cwd := t.TempDir()
+			driver := dial(t, ctx, h.url, nil)
+			phone := dial(t, ctx, h.url, nil)
+			sid := newACPSession(t, driver, cwd)
+			if lr := phone.request("session/load", map[string]any{"sessionId": sid, "cwd": cwd}); lr.Error != nil {
+				t.Fatalf("session/load: %v", lr.Error)
+			}
+
+			promptDone := make(chan rpcFrame, 1)
+			go func() {
+				promptDone <- driver.request("session/prompt", map[string]any{"sessionId": sid, "text": "rm -rf /"})
+			}()
+
+			input := json.RawMessage(`{"cmd":"rm -rf /tmp/x","timeout":120}`)
+			reqID, _ := awaitPermissionRequest(t, phone)
+			phone.respond(reqID, amendedResponse(tc.option, input))
+
+			select {
+			case got := <-h.fake(sid).replies:
+				if got.Verdict != event.VerdictAllow {
+					t.Errorf("gate verdict = %q, want allow", got.Verdict)
+				}
+				if got.Remember != tc.wantRemember {
+					t.Errorf("gate reply remember = %v, want %v", got.Remember, tc.wantRemember)
+				}
+				if string(got.Input) != string(input) {
+					t.Errorf("gate reply input = %s, want the amended %s", got.Input, input)
+				}
+			case <-time.After(defaultWait):
+				t.Fatal("gate did not receive a reply after the amended answer")
+			}
+			if resp := <-promptDone; resp.Error != nil {
+				t.Fatalf("session/prompt: %v", resp.Error)
+			}
+			waitOutstandingPermReqs(t, h, 0)
+		})
+	}
+}
+
+// TestPermissionReplyInputReachesGate is the gofer-native half: a
+// permission.reply notification carrying an "input" member routes that input
+// to the gate verbatim, and one omitting it leaves the gate's Input nil — the
+// plain allow path, unchanged.
+func TestPermissionReplyInputReachesGate(t *testing.T) {
+	tests := []struct {
+		name      string
+		params    map[string]any
+		wantInput string
+	}{
+		{
+			name:      "plain allow carries no input",
+			params:    map[string]any{"verdict": "allow"},
+			wantInput: "",
+		},
+		{
+			name:      "amended allow carries the replacement input",
+			params:    map[string]any{"verdict": "allow", "input": json.RawMessage(`{"cmd":"ls -la"}`)},
+			wantInput: `{"cmd":"ls -la"}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newApprovalHarness(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+
+			cwd := t.TempDir()
+			c := dial(t, ctx, h.url, nil)
+			if r := c.request("gofer/roster", nil); r.Error != nil {
+				t.Fatalf("gofer/roster: %v", r.Error)
+			}
+			sid := newACPSession(t, c, cwd)
+
+			promptDone := make(chan rpcFrame, 1)
+			go func() {
+				promptDone <- c.request("session/prompt", map[string]any{"sessionId": sid, "text": "ls"})
+			}()
+
+			pr := waitForNotificationMethod(t, c, "gofer/permission_requested")
+			var req struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(pr.Params, &req); err != nil {
+				t.Fatalf("decode gofer/permission_requested params: %v", err)
+			}
+
+			params := map[string]any{"id": req.ID}
+			for k, v := range tc.params {
+				params[k] = v
+			}
+			c.notify("permission.reply", params)
+
+			select {
+			case got := <-h.fake(sid).replies:
+				if string(got.Input) != tc.wantInput {
+					t.Errorf("gate reply input = %q, want %q", got.Input, tc.wantInput)
 				}
 			case <-time.After(defaultWait):
 				t.Fatal("gate did not receive a reply")

@@ -14,7 +14,7 @@ claude-sonnet-5 · ~/orchestration
 
 
 ────────────────────────────────────────────────────────────────────────────────
-Status  Config  Model  [Thinking]  Usage  Stats
+Status  Config  Model  [Thinking]  Usage  Stats  Resume
 ────────────────────────────────────────────────────────────────────────────────
 Reasoning effort for Sonnet 5:
 ▸ ✓ off — no explicit level; the provider decides

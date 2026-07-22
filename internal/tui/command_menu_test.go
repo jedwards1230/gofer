@@ -63,7 +63,7 @@ func TestCommandMenuClosedOnNoMatch(t *testing.T) {
 
 func TestCommandMenuFiltersByPrefixAndExcludesHidden(t *testing.T) {
 	m := newCommandMenu(theme.Test(), wideRegistry(), "/alpha0", 7)
-	if len(m.rows) != 1 || m.rows[0].Name != "alpha0" {
+	if len(m.rows) != 1 || m.rows[0].cmd.Name != "alpha0" {
 		t.Fatalf("expected exactly alpha0 to match, got %v", m.rows)
 	}
 
@@ -71,16 +71,16 @@ func TestCommandMenuFiltersByPrefixAndExcludesHidden(t *testing.T) {
 	if len(all.rows) != 8 {
 		t.Fatalf("expected the bare slash to match every non-Hidden command (8), got %d: %v", len(all.rows), all.rows)
 	}
-	for _, cmd := range all.rows {
-		if cmd.Hidden {
-			t.Fatalf("expected Hidden commands excluded from the popup, got %q", cmd.Name)
+	for _, row := range all.rows {
+		if row.cmd.Hidden {
+			t.Fatalf("expected Hidden commands excluded from the popup, got %q", row.cmd.Name)
 		}
 	}
 }
 
 func TestCommandMenuMatchesAlias(t *testing.T) {
 	m := newCommandMenu(theme.Test(), smallRegistry(), "/cfg", 4)
-	if len(m.rows) != 1 || m.rows[0].Name != "config" {
+	if len(m.rows) != 1 || m.rows[0].cmd.Name != "config" {
 		t.Fatalf("expected the alias prefix to match /config, got %v", m.rows)
 	}
 }
@@ -111,7 +111,7 @@ func TestCommandMenuUpDownClampAtBounds(t *testing.T) {
 // command without one does not (ready to submit).
 func TestCommandMenuCompleteAppendsSpaceForArgHint(t *testing.T) {
 	m := newCommandMenu(theme.Test(), smallRegistry(), "/mo", 3)
-	if len(m.rows) != 1 || m.rows[0].Name != "model" {
+	if len(m.rows) != 1 || m.rows[0].cmd.Name != "model" {
 		t.Fatalf("expected /model to match /mo, got %v", m.rows)
 	}
 	got, ok := m.complete("/mo", 3)
@@ -125,7 +125,7 @@ func TestCommandMenuCompleteAppendsSpaceForArgHint(t *testing.T) {
 
 func TestCommandMenuCompleteNoTrailingSpaceWithoutArgHint(t *testing.T) {
 	m := newCommandMenu(theme.Test(), smallRegistry(), "/conf", 5)
-	if len(m.rows) != 1 || m.rows[0].Name != "config" {
+	if len(m.rows) != 1 || m.rows[0].cmd.Name != "config" {
 		t.Fatalf("expected /config to match /conf, got %v", m.rows)
 	}
 	got, ok := m.complete("/conf", 5)

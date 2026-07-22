@@ -11,13 +11,25 @@ package tui
 // [App.discoverModelsCmd], which only /model pays for), keeps no free-text
 // entry (there is no id to type), and needs no floor/live distinction.
 //
-// The one thing it does think about is CAPABILITY. [runner.Runner.SetEffort]
-// rejects a non-empty level when the registry has POSITIVE evidence the
-// session's current model cannot reason — an unregistered model is UNKNOWN,
-// not "no", so it passes. This view applies that identical rule to what it
-// OFFERS ([effortCapable]), so the picker never presents four values the
-// runner is going to refuse. Any drift between the two would show up as a
-// selectable row that always errors.
+// The one thing it does think about is CAPABILITY, and it mirrors
+// [runner.Runner.SetEffort]'s rule in BOTH directions — neither laxer nor
+// stricter:
+//
+//   - A NON-EMPTY level is refused only on POSITIVE registry evidence that the
+//     session's current model cannot reason; an unregistered model is UNKNOWN,
+//     not "no", so it passes and the runner has the final word
+//     ([effortCapable]). Being laxer would offer rows that always error.
+//   - CLEARING ("") is refused never. The SDK's capability branch sits inside
+//     `if effort != ""`, so `SetEffort("")` is legal for any model at all.
+//     Being stricter here is not a harmless extra safety check: a session that
+//     carried a level into a non-reasoning model still has one, and a picker
+//     that refuses the clear leaves that level visible nowhere and removable
+//     only through a command this screen never mentions. See
+//     [effortPickerView.offOnly].
+//
+// NOTE the level set here does not yet reach a provider request at all — see
+// docs/TUI.md's "Reasoning effort does not reach the provider yet (SDK gap)".
+// That is a gap below this file, not in it.
 //
 // Like statusView/modelPickerView it is a pure value: every method returns an
 // updated copy, so a fixed key sequence replays to the same rendered output in
@@ -101,18 +113,10 @@ func effortLabel(effort string) string {
 	return effort
 }
 
-// modelRegistry is [provider.Lookup] behind a package variable, for ONE
-// reason: every model in the SDK's compiled-in registry today carries
-// Reasoning:true, so [effortCapable]'s refusal branch — the load-bearing half
-// of this file — is unreachable from any test that can only name real ids, and
-// an unreachable branch is an untested one that rots the first time the
-// registry gains a non-reasoning model. Tests substitute a registry that does
-// say no (see effortpicker_test.go's withNonReasoningRegistry); nothing in production
-// ever assigns to it.
-var modelRegistry = provider.Lookup
-
-// effortCapable reports whether a non-empty reasoning effort may be offered or
-// applied for model.
+// effortCapable reports whether a NON-EMPTY reasoning effort may be offered or
+// applied for model. It reads the registry through [CommandEnv.ModelInfo],
+// which is [provider.Lookup] in every production wiring (see that field for
+// why the indirection exists, and why it is not a package-level var).
 //
 // This MIRRORS [runner.Runner.SetEffort]'s own check by design, and the
 // asymmetry is the whole point: it rejects ONLY on positive registry evidence
@@ -123,10 +127,20 @@ var modelRegistry = provider.Lookup
 // exactly the newest models, which is the same class of bug the picker's
 // Resolve-not-Lookup admission rule exists to avoid (see modelpicker.go).
 //
-// Clearing the level ("") is always allowed and never reaches here — model
-// capability is moot when asking for no reasoning at all.
-func effortCapable(model string) bool {
-	info, ok := modelRegistry(model)
+// CLEARING THE LEVEL ("") IS ALWAYS ALLOWED and must never be routed through
+// here. The SDK admits `SetEffort("")` unconditionally — its capability branch
+// sits inside `if effort != ""` — because asking for no reasoning is a
+// coherent request for any model whatsoever. Every caller is responsible for
+// checking `effort != ""` before consulting this function; a caller that
+// forgets makes gofer STRICTER than the runner and turns this surface into a
+// dead end for a session carrying a stale level (see [effortPickerView.offOnly]
+// and [App.applyEffortSelection]).
+func effortCapable(env CommandEnv, model string) bool {
+	lookup := env.ModelInfo
+	if lookup == nil {
+		lookup = provider.Lookup
+	}
+	info, ok := lookup(model)
 	return !ok || info.Reasoning
 }
 
@@ -158,7 +172,45 @@ type effortPickerView struct {
 func newEffortPickerView(th theme.Theme, env CommandEnv, sess *SessionInfo, defaultModel string) effortPickerView {
 	v := effortPickerView{theme: th, env: env, sess: sess, defaultModel: defaultModel}
 	v.cursor = indexOfEffort(v.activeEffort())
+	// Clamp the seed into the selectable range: on a non-reasoning model only
+	// the clear row can be chosen, and seeding onto a level row there would
+	// open the picker with the highlight parked on something Enter refuses.
+	if max := len(v.selectableLevels()) - 1; v.cursor > max {
+		v.cursor = max
+	}
 	return v
+}
+
+// offOnly reports whether this picker may offer ONLY the leading clear row:
+// the active model is one the registry KNOWS cannot reason, so no non-empty
+// level applies to it.
+//
+// The clear row survives that refusal deliberately, and it is the whole point
+// of this method existing rather than the view simply rendering a warning and
+// nothing else. `SetEffort("")` is legal for ANY model — the SDK's capability
+// branch sits inside `if effort != ""` — and a session that was carrying a
+// level before the user switched to a non-reasoning model still has one. If
+// this surface offered nothing at all, that stale level would be visible
+// nowhere and clearable only via `/thinking off`, a command the very screen
+// refusing to help does not mention. Offering the clear keeps the picker's
+// gating exactly as strict as the runner's and no stricter.
+func (v effortPickerView) offOnly() bool {
+	return !effortCapable(v.env, v.activeModel())
+}
+
+// selectableLevels returns the rows Enter may commit: every level normally,
+// just the leading clear row when [effortPickerView.offOnly]. It is the single
+// definition the cursor clamp, the row rendering, and
+// [effortPickerView.selectedEffort] all read, so "shown as available" and
+// "actually committable" cannot drift apart.
+//
+// It relies on the clear being effortLevels[0]; that ordering is asserted by
+// TestEffortLevelsLeadWithTheClear.
+func (v effortPickerView) selectableLevels() []effortLevel {
+	if v.offOnly() {
+		return effortLevels[:1]
+	}
+	return effortLevels
 }
 
 // indexOfEffort returns effort's row index in [effortLevels], or -1 for a level
@@ -180,20 +232,25 @@ func (v effortPickerView) activeModel() string {
 }
 
 // activeEffort resolves the level the ✓ mark applies to: the attached/peeked
-// session's own level, else the persisted session.effort config default, else
-// "" (off). It mirrors [modelPickerView.activeModel]'s shape one rung shorter —
-// there is no credential-derived fallback for effort, since no provider
-// advertises one.
+// session's OWN level, else "" (off).
+//
+// It deliberately does NOT fall back to the persisted session.effort config
+// default, which is where [modelPickerView.activeModel]'s analogous precedence
+// has a middle rung. The ✓ is a claim about what is IN FORCE, and unlike
+// session.model — which `resolveRunModel` genuinely feeds into every new
+// session (cmd/gofer/run.go) — nothing yet feeds session.effort into a
+// session's construction params. So with `session.effort: high` saved, a fresh
+// session's runner sits at "" while a config rung here would render `✓ high`:
+// a level no session ever received, asserted as current. Omitting what we
+// cannot answer honestly beats blank-filling it (the rule status.go states).
+//
+// When the config default IS wired into session creation, the right change is
+// to restore the rung — at which point it will be true.
 func (v effortPickerView) activeEffort() string {
-	if v.sess != nil && v.sess.Effort != "" {
-		return v.sess.Effort
+	if v.sess == nil {
+		return ""
 	}
-	if v.env.Config != nil {
-		if cfg, err := v.env.Config(); err == nil && cfg.Session.Effort != "" {
-			return cfg.Session.Effort
-		}
-	}
-	return ""
+	return v.sess.Effort
 }
 
 // View renders the view's rows, width-truncated and capped to height — the
@@ -214,29 +271,37 @@ func (v effortPickerView) View(width, height int) string {
 }
 
 // lines builds the header naming the model under discussion plus one row per
-// level — or, when that model is one the registry KNOWS cannot reason, a single
-// warning line in place of the rows. Refusing outright is the honest rendering:
-// offering four selectable levels the runner will reject would make the picker
-// a menu of errors, and the remedy (switch models first) is what the user
-// actually needs told.
+// level. On a model the registry KNOWS cannot reason the header becomes a
+// warning and the level rows render muted-but-visible, with only the clear row
+// still selectable.
+//
+// Keeping the unavailable rows ON SCREEN rather than dropping them is what lets
+// the ✓ stay visible: a session that carried `high` into a non-reasoning model
+// still has it, and a user cannot decide to clear a level this screen refuses
+// to show them. The warning says what is wrong, the ✓ says what the session
+// currently has, and the clear row is the way out — none of which is available
+// if the tab collapses to a single complaint.
 func (v effortPickerView) lines() []string {
 	model := v.activeModel()
-	if !effortCapable(model) {
+
+	var out []string
+	if v.offOnly() {
 		// Kept short on purpose: this line is truncated to the panel width, and
 		// a remedy that falls off the right edge leaves only the complaint.
-		return []string{v.theme.WarnStyle().Render(
-			modelmeta.DisplayName(model) + " doesn't support reasoning effort — switch with /model.")}
+		out = append(out, v.theme.WarnStyle().Render(
+			modelmeta.DisplayName(model)+" doesn't support reasoning effort — switch with /model."))
+	} else {
+		header := "Reasoning effort:"
+		if model != "" {
+			header = "Reasoning effort for " + modelmeta.DisplayName(model) + ":"
+		}
+		out = append(out, v.theme.MutedStyle().Render(header))
 	}
-
-	header := "Reasoning effort:"
-	if model != "" {
-		header = "Reasoning effort for " + modelmeta.DisplayName(model) + ":"
-	}
-	out := []string{v.theme.MutedStyle().Render(header)}
 
 	active := v.activeEffort()
+	selectable := len(v.selectableLevels())
 	for i, l := range effortLevels {
-		out = append(out, v.rowLine(i, l, l.value == active))
+		out = append(out, v.rowLine(i, l, l.value == active, i < selectable))
 	}
 	return out
 }
@@ -244,9 +309,15 @@ func (v effortPickerView) lines() []string {
 // rowLine renders one level's marker, active-mark, label, and blurb,
 // accent-styling the highlighted row (i == cursor) — the same row vocabulary
 // modelpicker.go's rowLine uses, so the two tabs read alike.
-func (v effortPickerView) rowLine(i int, l effortLevel, isActive bool) string {
+//
+// An UNSELECTABLE row (a non-empty level on a non-reasoning model) renders
+// muted and never carries the highlight marker, so "available" and "shown" are
+// distinguishable at a glance. It still renders its ✓ when active: that is
+// precisely the stale level the user needs to see in order to decide to clear
+// it.
+func (v effortPickerView) rowLine(i int, l effortLevel, isActive, selectable bool) string {
 	marker := "  "
-	if i == v.cursor {
+	if i == v.cursor && selectable {
 		marker = "▸ "
 	}
 	check := "  "
@@ -254,7 +325,10 @@ func (v effortPickerView) rowLine(i int, l effortLevel, isActive bool) string {
 		check = "✓ "
 	}
 	line := marker + check + l.label + " — " + l.blurb
-	if i == v.cursor {
+	switch {
+	case !selectable:
+		return v.theme.MutedStyle().Render(line)
+	case i == v.cursor:
 		return v.theme.AccentStyle().Render(line)
 	}
 	return line
@@ -284,7 +358,7 @@ func (v effortPickerView) selectDown() effortPickerView {
 		v.cursor = 0
 		return v
 	}
-	if v.cursor < len(effortLevels)-1 {
+	if v.cursor < len(v.selectableLevels())-1 {
 		v.cursor++
 	}
 	return v
@@ -299,19 +373,23 @@ func (v effortPickerView) selectUp() effortPickerView {
 }
 
 // selectedEffort returns what Enter commits and whether there is anything to
-// commit at all. ok=false covers both refusals: a model that cannot reason (no
-// rows are offered, so nothing is selectable) and no row highlighted.
+// commit at all. ok=false means no SELECTABLE row is highlighted — which on a
+// non-reasoning model is any row past the clear
+// ([effortPickerView.selectableLevels]), and otherwise only the no-highlight
+// state.
+//
+// Note what is NOT a refusal: a non-reasoning model by itself. Clearing stays
+// committable there, because the SDK admits `SetEffort("")` for any model at
+// all. Gating the whole method on capability — as this did before — made gofer
+// stricter than the runner and left a stale level unclearable from this tab.
 //
 // The (value, ok) pair is required rather than a bare string because "" is a
-// LEGAL selection here — the off row, which clears the level back to the
-// provider's default — so it cannot double as "nothing selected" the way
-// [modelPickerView.selectedModel]'s empty return does.
+// LEGAL selection here — the clear row — so it cannot double as "nothing
+// selected" the way [modelPickerView.selectedModel]'s empty return does.
 func (v effortPickerView) selectedEffort() (string, bool) {
-	if !effortCapable(v.activeModel()) {
+	selectable := v.selectableLevels()
+	if v.cursor < 0 || v.cursor >= len(selectable) {
 		return "", false
 	}
-	if v.cursor < 0 || v.cursor >= len(effortLevels) {
-		return "", false
-	}
-	return effortLevels[v.cursor].value, true
+	return selectable[v.cursor].value, true
 }

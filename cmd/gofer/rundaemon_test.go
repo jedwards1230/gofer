@@ -209,7 +209,7 @@ func TestDriveDaemonSessionCancelSendsSessionCancel(t *testing.T) {
 	driveDone := make(chan error, 1)
 	var out, errBuf bytes.Buffer
 	go func() {
-		driveDone <- driveDaemonSession(ctx, c, "run", "", t.TempDir(), "hi", false, &out, &errBuf)
+		driveDone <- driveDaemonSession(ctx, c, "run", "", t.TempDir(), "hi", subagentLink{}, false, &out, &errBuf)
 	}()
 
 	<-bp.started // the turn's first model call is genuinely blocked in flight

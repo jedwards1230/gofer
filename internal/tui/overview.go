@@ -169,6 +169,80 @@ func (o Overview) Selected() (SessionInfo, bool) {
 	return SessionInfo{}, false
 }
 
+// SessionByID returns the roster row with that id, or false when the snapshot
+// holds no such session. It is the lookup behind the attach screen's
+// drill-out (← from a child returns to its parent — see [App.parentOf]): the
+// roster is the only place the client learns a session's parent link, and a
+// polled snapshot can legitimately be missing the row it names.
+func (o Overview) SessionByID(id string) (SessionInfo, bool) {
+	if id == "" {
+		return SessionInfo{}, false
+	}
+	for _, s := range o.sessions {
+		if s.ID == id {
+			return s, true
+		}
+	}
+	return SessionInfo{}, false
+}
+
+// Children returns the roster rows spawned directly by id — one level, not the
+// whole subtree — in the same depth-first tree order the roster renders (see
+// [byTree]). The attach transcript's background-agents block lists them (see
+// [Model.WithBackgroundAgents]); a session with no children yields nil, which
+// is what makes that block absent rather than empty.
+func (o Overview) Children(id string) []SessionInfo {
+	if id == "" {
+		return nil
+	}
+	var out []SessionInfo
+	for _, s := range byTree(o.sessions) {
+		if s.ParentID == id && s.ID != id {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// Descendants returns the ids of every session BELOW id in the subagent tree —
+// children, grandchildren, and so on — in depth-first order, excluding id
+// itself. It is what the roster's bulk stop binding kills (one
+// [Supervisor.Kill] per id; see [App.doKillTree]), which is exactly why the
+// parent is not in the list: "stop the agents this session fanned out" must not
+// terminate the session the operator is supervising from.
+//
+// Like [byTree] it is cycle-safe (a visited set bounds the walk) and tolerates
+// a parent link naming a row absent from the polled snapshot: an unreachable
+// row simply isn't a descendant of anything on screen.
+func (o Overview) Descendants(id string) []string {
+	if id == "" {
+		return nil
+	}
+	// Built off the tree ordering rather than the raw snapshot so the kill order
+	// matches the order the roster shows the rows in.
+	children := make(map[string][]string, len(o.sessions))
+	for _, s := range byTree(o.sessions) {
+		if s.ParentID != "" && s.ParentID != s.ID {
+			children[s.ParentID] = append(children[s.ParentID], s.ID)
+		}
+	}
+	visited := map[string]bool{id: true}
+	var out []string
+	var walk func(parent string)
+	walk = func(parent string) {
+		for _, child := range children[parent] {
+			if visited[child] {
+				continue
+			}
+			visited[child] = true
+			out = append(out, child)
+			walk(child)
+		}
+	}
+	walk(id)
+	return out
+}
+
 // TypeRune inserts r into the dispatch-bar buffer at the cursor.
 func (o Overview) TypeRune(r rune) Overview {
 	o.input = o.input.InsertRune(r)
@@ -290,8 +364,20 @@ func (o Overview) resolveSelection(want string) string {
 	return ""
 }
 
-// ordered returns the sessions in the current view's row order: recency-first
-// within the whole list (flat) or within each status group (grouped).
+// ordered returns the sessions in the current view's row order.
+//
+// The flat view is a depth-first SUBAGENT TREE order: each root immediately
+// followed by its descendants, siblings by the same recency rule as before (see
+// [byTree]). A roster with no subagents in it is a forest of roots, which is
+// byte-for-byte the old recency ordering — the tree walk is a superset, not a
+// replacement.
+//
+// The grouped view is deliberately NOT nested: it splits the roster into
+// Working / Needs input / Finished, and a child's status is independent of its
+// parent's, so nesting there would either put a row in a section whose label
+// contradicts its status or duplicate it across sections. Children stay in
+// their own status section and are identified by their agent label instead (see
+// [Overview.rowLabel]).
 func (o Overview) ordered() []SessionInfo {
 	if o.view == viewGrouped {
 		var rows []SessionInfo
@@ -300,7 +386,7 @@ func (o Overview) ordered() []SessionInfo {
 		}
 		return rows
 	}
-	return byRecency(append([]SessionInfo(nil), o.sessions...))
+	return byTree(o.sessions)
 }
 
 // filter returns the sessions in effective status st.
@@ -312,6 +398,106 @@ func (o Overview) filter(st SessionStatus) []SessionInfo {
 		}
 	}
 	return out
+}
+
+// byTree returns sessions in depth-first subagent-tree order — every root
+// immediately followed by its descendants, siblings ordered by the shared
+// recency rule — with each returned row's [SessionInfo.Depth] rewritten to its
+// DISPLAY depth. The rows are copies, so the overview's own snapshot keeps the
+// depth the daemon assigned; the render wants the depth of the tree it can
+// actually see, which is not always the same number.
+//
+// Two snapshot realities it must survive, because the roster is a POLLED
+// snapshot rather than a consistent view of the daemon:
+//
+//   - Orphans. A ParentID naming a session absent from the snapshot (archived,
+//     filtered out, or simply polled between two writes) renders as a root at
+//     depth 0 — indenting a row under a parent that is not on screen reads as a
+//     render bug, and dropping it would lose a live session from the roster.
+//   - Cycles. A parent chain that loops (never produced by the supervisor, but
+//     cheap to defend against) leaves its members unreachable from any root. The
+//     visited set bounds the walk, and the final sweep re-enters anything the
+//     walk never reached, so a cycle degrades to "rendered somewhere" rather
+//     than to a hang or a vanished row. No row is ever dropped.
+func byTree(sessions []SessionInfo) []SessionInfo {
+	// Sorting up front means every derived slice below (roots, each child list)
+	// inherits recency order from the stable sort, with no re-sorting per node.
+	rows := byRecency(append([]SessionInfo(nil), sessions...))
+
+	present := make(map[string]bool, len(rows))
+	for _, s := range rows {
+		present[s.ID] = true
+	}
+	// Indices, not values: ids are unique in practice but a duplicated one must
+	// not make two rows collapse into one.
+	children := make(map[string][]int, len(rows))
+	var roots []int
+	for i, s := range rows {
+		if s.ParentID != "" && s.ParentID != s.ID && present[s.ParentID] {
+			children[s.ParentID] = append(children[s.ParentID], i)
+			continue
+		}
+		roots = append(roots, i)
+	}
+
+	out := make([]SessionInfo, 0, len(rows))
+	visited := make([]bool, len(rows))
+	var walk func(i, depth int)
+	walk = func(i, depth int) {
+		if visited[i] {
+			return
+		}
+		visited[i] = true
+		s := rows[i]
+		s.Depth = depth
+		out = append(out, s)
+		for _, c := range children[s.ID] {
+			walk(c, depth+1)
+		}
+	}
+	for _, i := range roots {
+		walk(i, 0)
+	}
+	for i := range rows {
+		walk(i, 0)
+	}
+	return out
+}
+
+// blockedTree reports, per session id, whether that session or any of its
+// descendants is awaiting the user — the ancestor rollup behind the roster's
+// gutter marker. An approval pending three levels down has to be visible from
+// the ancestor row without descending into it, which is exactly the state a
+// collapsed tree would otherwise hide.
+//
+// It is computed ONCE per render and read per row: walking up from each blocked
+// session is linear in the roster, where asking "does any descendant of this
+// row need input?" per row is not.
+func blockedTree(sessions []SessionInfo) map[string]bool {
+	parent := make(map[string]string, len(sessions))
+	for _, s := range sessions {
+		if s.ParentID != "" && s.ParentID != s.ID {
+			parent[s.ID] = s.ParentID
+		}
+	}
+	blocked := make(map[string]bool, len(sessions))
+	for _, s := range sessions {
+		if effectiveStatus(s) != StatusNeedsInput {
+			continue
+		}
+		blocked[s.ID] = true
+		// Bounded by the roster size so a parent cycle terminates.
+		id := s.ID
+		for range sessions {
+			p, ok := parent[id]
+			if !ok || blocked[p] {
+				break
+			}
+			blocked[p] = true
+			id = p
+		}
+	}
+	return blocked
 }
 
 // byRecency sorts sessions most-recently-active first, breaking ties by id for
