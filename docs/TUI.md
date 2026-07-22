@@ -263,7 +263,7 @@ Input schema (snake_case, matching the SDK builtins):
 { "questions": [ {
     "title":           string   // short chip label, e.g. "Fix rebuilds"
     "question":        string   // required
-    "context":         string   // optional supporting context (side panel, later)
+    "context":         string   // optional supporting context (multi-question side panel)
     "options": [ {
         "label":       string   // required, short — the choice itself
         "rationale":   string   // the indented reasoning/risk body
@@ -329,8 +329,7 @@ the last row onto option 1 is how a stray press sends the wrong answer);
 option answers with it, `Type something.` opens its editor and a **second**
 `Enter` submits, `Chat about this` answers with the chat hatch); `Esc` leaves
 typing mode, or — when not typing — **cancels the request**, answering every
-question in it (including the ones the single-question prompt doesn't render)
-with `cancelled`; `ctrl+c` quits. While typing, the hint reads
+question in it with `cancelled`; `ctrl+c` quits. While typing, the hint reads
 `Enter to submit · Esc to cancel` and every unclaimed key goes to the shared
 input keymap, so digits type digits. `j`/`k` are deliberately unbound — every
 list here is arrow-only, and vi keys would fight the free-text row.
@@ -348,32 +347,103 @@ pending. A request another peer answers, or one an interrupted turn drops,
 clears the prompt the same way with no answer sent from here — as does the
 session ending, which closes its gate (and with it every decision subscription).
 
-### Multi question (not yet built)
+### Multi question (shipped)
 
-Design intent. A tabbed stepper strips across the top; `Tab` switches between
-questions, each with its own option list, and a right-side reference box shows
-the focused option's detail. `n` opens a notes field on that option:
+A request carrying **several** questions grows a tab strip, a side panel, and a
+notes editor — and stops answering on every keystroke. Each answer accumulates
+as a **draft**; the final `Submit` tab commits the whole set in **one**
+`AnswerDecision` call, which is the whole point: an agent that needs four
+sign-offs asks once instead of stalling four times.
+
+The multi-question affordances engage only when the request carries more than
+one question. A single question renders exactly as above — a tab strip with one
+tab, or a Submit tab for one answer, would be noise on the common case.
 
 ```
- ────────────────────────────────────────────────
- ←   □ Q1    □ Q2    ✔ Submit   →
+ ────────────────────────────────────────────────────────────────────────────────
+ decision   2 questions
+ ←   ▸ □ M4 slicing     ✔ Views v1 scope     □ Submit   →
 
- Q1   Which database?
+ How should the M4 milestone be sliced?
 
-   1  Postgres           ┌─ reference ───────────────┐
-   2  SQLite             │ Postgres: the focused      │
-                         │ option's detail renders    │
-   › Type something.     │ here.                      │
-   ↳ Chat about this     └────────────────────────────┘
-                                press n to add notes
+ ▸ 1  Renderer first, wiring after                   │ context
+        goldens land early, so the frame is          │ M4 is the TUI polish
+        reviewable before any plumbing moves         │ milestone; whichever half
+   2  Wiring first, renderer after  (Recommended)    │ lands first is what M5 has
+        unblocks the daemon path sooner, at the cost │ to build on.
+        of an unreviewable frame                     │
+                                                     │ reference
+   › Type something.                                 │ docs/TUI.md#rendering
+   ↳ Chat about this                                 │
+                                                     │ notes
+                                                     │ leaning renderer-first,
+                                                     │ ask again after the spike
 
- Enter to select · ↑/↓ to navigate · n to add notes ·
- Tab to switch questions · Esc to cancel
+ Enter to select · ↑/↓ to navigate · n to add notes · Tab to switch questions ·
+ Esc to cancel
 ```
 
-Until it lands, a multi-question request renders its **first** question only.
-Nothing is lost: the gate fills every question the client didn't answer in as
-`cancelled`, so the tool still receives exactly one answer per question.
+**The tab strip** carries one tab per question plus the final `Submit` tab,
+between two end-affordance arrows. Each tab is `caret · checkbox · label`: the
+label is the question's own `title`, falling back to `Q1`/`Q2`/… when the agent
+gave it none; the checkbox is `✔` once that question has an answer drafted and
+`□` until then, and `Submit`'s own checkbox reports whether *every* question is
+answered. State rides two channels on purpose — the caret and the glyph read in
+a plain Ascii render (this TUI's "selection reads without color" rule), the
+accent on an answered `✔` and on the focused label is the color-only layer the
+styled golden pins. When the full strip doesn't fit it degrades to the focused
+tab plus an `(i/n)` counter rather than truncating, since a truncated strip can
+hide the very tab you're on.
+
+**The side panel** carries the focused question's `context`, the focused
+*option's* `reference`, and the note attached to this question's answer — the
+split the tool's schema defines: context belongs to the decision, a reference
+belongs to one choice within it. It takes about a third of the frame, and it
+degrades in two stages: with nothing to show there is no panel at all, and with
+something to show but no room beside the options it **stacks beneath them**
+instead of squeezing the labels into a two-cell column. A narrow terminal loses
+the geometry, never the text. (It is a divider rule rather than the drawn box
+the original sketch had: this TUI has no other boxes, and a box's borders have
+to be stretched to whichever column is taller, which reads worse than the rule
+as options wrap.)
+
+**Options wrap** onto continuation lines indented under their own label rather
+than being truncated — the normal case once the panel takes its third of the
+frame, and a choice you can't read in full is a choice you can't make.
+
+**Keys** — everything the single-question prompt binds, plus: `Tab` moves to the
+next question (and onto `Submit`), `shift+tab` moves back, `←`/`→` do the same
+(the strip draws those arrows, and a rendered affordance that does nothing when
+pressed would be a lie), and `n` opens a **notes** editor on the focused
+question's answer, landing in `DecisionAnswer.Notes`. Enter saves the note, Esc
+discards it, and an empty save clears the note — the only way to take one back
+off. Tab movement **wraps** where the row cursor clamps: switching tabs commits
+nothing, so the stray-keypress surprise the clamp protects against doesn't exist
+here. Switching tabs leaves both editors (a half-typed answer belongs to the
+question that opened it) and lands the cursor on the answer that question
+already has, so returning to it *shows* your pick rather than inviting you to
+make it twice. The hint line reads
+`Enter to select · ↑/↓ to navigate · n to add notes · Tab to switch questions · Esc to cancel`,
+wrapped to the frame.
+
+**Submit vs `Esc`, spelled out** (the issue's open question). The `Submit` tab
+reviews what is about to be sent — one line per question, with the unanswered
+ones labelled `not answered — cancelled on submit` — and `Enter` on its row
+sends **one** `AnswerDecision` carrying every drafted answer. Questions with no
+answer are simply **omitted**; the gate fills each of them in as `cancelled`
+(`decision.Gate.Answer`'s normalize), which is tested behavior there and is
+deliberately not re-implemented in the TUI. So **submitting two of four commits
+those two and cancels the other two, and `Esc` cancels all four** — `Esc`
+discards the drafts and their notes rather than quietly committing the half that
+happened to be filled in, matching the single-question contract above. The one
+draft a submit can't leave to the gate is a question that was *annotated but
+never answered*: omitting it would drop text the user typed, so it goes out as
+an explicit `cancelled` answer carrying its note.
+
+**Not built with it**: a single question's `context` and its options'
+`reference` have nowhere to render — the side panel is part of the
+multi-question widget, and growing the shipped single-question layout a second
+column is its own change with its own golden.
 
 **Also deferred**: the **daemon-backed path**. `internal/daemonbridge` stubs
 both methods today (`Decisions` returns a closed subscription,
@@ -1001,7 +1071,7 @@ Four layers, each catching what the one below can't:
    catches a styling bug that changes *display width* (the #61 color-scatter: a
    styled pane measured wider than its cells and tore the layout). The color
    tests (`color_layout_test.go`, `dialog_color_test.go`,
-   `decision_golden_test.go`) render the same
+   `decision_golden_test.go`, `decision_multi_test.go`) render the same
    component twice — once plain, once through `testkit.ColorTheme()` — and
    assert that stripping ANSI from the colored render reproduces the plain one
    exactly, and that no line exceeds its width. Every render change here ships

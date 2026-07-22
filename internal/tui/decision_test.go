@@ -76,6 +76,13 @@ func attachForDecisionTest(t *testing.T, sup *internalFakeSup) App {
 // assert on the answers the agent's turn actually received.
 func openDecision(t *testing.T, sup *internalFakeSup, a App) (App, blockedRequest) {
 	t.Helper()
+	return openDecisionWith(t, sup, a, decisionQuestions())
+}
+
+// openDecisionWith is openDecision over an arbitrary question set — what the
+// multi-question tests (decision_multi_test.go) open their batches through.
+func openDecisionWith(t *testing.T, sup *internalFakeSup, a App, questions []acp.DecisionQuestion) (App, blockedRequest) {
+	t.Helper()
 	gate := sup.gate(a.sessID)
 
 	answers := make(chan []acp.DecisionAnswer, 1)
@@ -83,7 +90,7 @@ func openDecision(t *testing.T, sup *internalFakeSup, a App) (App, blockedReques
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go func() {
-		got, err := gate.Request(ctx, decisionQuestions())
+		got, err := gate.Request(ctx, questions)
 		if err != nil {
 			errs <- err
 			return
@@ -443,10 +450,11 @@ func TestDecisionEscCancelsTheRequest(t *testing.T) {
 	}
 }
 
-// TestDecisionEscCancelsEveryQuestion pins the multi-question half of esc: PR 1
-// renders only the first question, but the agent is blocked on all of them, so
-// the cancel names every question id in the request rather than relying on the
-// gate's fill-in.
+// TestDecisionEscCancelsEveryQuestion pins the multi-question half of esc: the
+// agent is blocked on every question in the batch, so the cancel names every
+// question id in the request explicitly rather than leaning on the gate's
+// cancelled fill-in. (decision_multi_test.go asserts the same contract against
+// a batch the user has already drafted answers into — esc discards those too.)
 func TestDecisionEscCancelsEveryQuestion(t *testing.T) {
 	sup := newInternalFakeSup(GoldenRoster())
 	a := attachForDecisionTest(t, sup)
