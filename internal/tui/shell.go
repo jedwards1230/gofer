@@ -412,7 +412,10 @@ func (r shellRun) shellRunStatus() (statusSeverity, string) {
 	disp := " — " + r.shellDispositionLabel()
 	switch {
 	case r.note != "":
-		return sevDanger, fmt.Sprintf("%s: %s", r.line, r.note)
+		// A timed-out / failed-to-start `!` run still folds whatever partial
+		// output it collected (composePrompt does not gate on note), so the
+		// disposition is as relevant here as on the other branches.
+		return sevDanger, fmt.Sprintf("%s: %s%s", r.line, r.note, disp)
 	case r.exitCode != 0:
 		return sevWarn, fmt.Sprintf("%s exited %d%s", r.line, r.exitCode, disp)
 	default:

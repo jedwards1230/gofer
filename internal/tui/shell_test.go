@@ -416,6 +416,21 @@ func TestWithShellRunsNoVisibleRunsLeavesModelUntouched(t *testing.T) {
 	}
 }
 
+// TestWithShellRunsDegenerateSizes is the first-frame guard this repo's panic
+// history demands: composing a shell block and rendering it must survive the
+// zero/negative sizes App renders at before WindowSizeMsg arrives. (The pinned
+// footer legitimately exceeds a 1-row height — that is Model.view's own
+// bottom-anchoring, unrelated to the block — so this asserts no panic and a
+// non-empty frame, not a row budget.)
+func TestWithShellRunsDegenerateSizes(t *testing.T) {
+	m := shellRunModel(theme.Test())
+	for _, size := range []struct{ w, h int }{{0, 0}, {-1, -1}, {1, 1}, {testkit.Width, 1}, {1, testkit.Height}} {
+		if got := m.View(size.w, size.h); got == "" && size.h >= 1 && size.w >= 1 {
+			t.Fatalf("View(%d,%d) rendered nothing", size.w, size.h)
+		}
+	}
+}
+
 // TestShellModeLabel pins the mode-indicator chip the input surfaces show
 // while a shell escape is being typed — the affordance ask #1 asked for, and
 // the `!!`/`!` split that makes the disposition legible before the run.

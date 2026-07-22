@@ -524,18 +524,25 @@ func (m Model) WithBackgroundAgents(children []SessionInfo) Model {
 // composePrompt), and appending leaves every existing item index untouched,
 // which the pending approval's badgeIdx depends on.
 func (m Model) WithShellRuns(runs []shellRun) Model {
-	items := make([]item, 0, len(m.items)+len(runs))
+	// Count first so the common steady state — no runs, or every run already
+	// folded into a prompt (consumed) — returns untouched without cloning the
+	// transcript, mirroring WithBackgroundAgents' len(children)==0 short circuit.
+	visible := 0
+	for _, r := range runs {
+		if !r.consumed {
+			visible++
+		}
+	}
+	if visible == 0 {
+		return m
+	}
+	items := make([]item, 0, len(m.items)+visible)
 	items = append(items, m.items...)
-	appended := false
 	for _, r := range runs {
 		if r.consumed {
 			continue
 		}
 		items = append(items, item{kind: itemShellRun, done: r.done, shell: r})
-		appended = true
-	}
-	if !appended {
-		return m
 	}
 	m.items = items
 	return m
@@ -1431,11 +1438,13 @@ func (m Model) renderShellRunLines(r shellRun) []string {
 		return append(lines, m.theme.MutedStyle().Render("  running…"))
 	}
 
-	for _, l := range strings.Split(strings.TrimRight(r.output, "\n"), "\n") {
-		if l == "" && r.output == "" {
-			continue // a command that printed nothing adds no blank output row
+	// A command that printed nothing (or only trailing newlines) adds no blank
+	// output row — TrimRight collapses that to "" so the loop is skipped
+	// entirely, rather than emitting a lone indented empty line.
+	if body := strings.TrimRight(r.output, "\n"); body != "" {
+		for _, l := range strings.Split(body, "\n") {
+			lines = append(lines, "  "+l)
 		}
-		lines = append(lines, "  "+l)
 	}
 	switch {
 	case r.note != "":
