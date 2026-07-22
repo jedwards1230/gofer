@@ -8,6 +8,8 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/acp"
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/provider"
+
+	"github.com/jedwards1230/gofer/internal/decision"
 )
 
 // The TUI is a client of the daemon's supervisor, never a privileged peer: it
@@ -264,4 +266,25 @@ type Supervisor interface {
 	// rationale: "no longer pending" and "gated for no stated reason" are
 	// different answers and a client must be able to tell them apart.
 	ExplainPermission(ctx context.Context, sessionID, callID string) (acp.PermissionRationale, error)
+
+	// Decisions subscribes to sessionID's open structured-decision requests —
+	// the questions an agent asked with the ask_user tool and is blocked on
+	// (see internal/decision). It is a SECOND stream alongside Subscribe, not
+	// part of the event stream: the SDK's Event union carries no decision
+	// kind, so the request travels gofer's own transport (the package doc in
+	// internal/decision has the why). Every request already open is replayed
+	// first, so attaching mid-turn still shows the prompt.
+	//
+	// The caller owns the returned subscription and must Close it — the app
+	// tears it down with the session subscription it sits beside.
+	Decisions(ctx context.Context, sessionID string) (*decision.Subscription, error)
+
+	// AnswerDecision resolves the outstanding decision request identified by
+	// requestID with one answer per question. Unanswered questions may be
+	// omitted — the gate fills them in as cancelled — but an answer naming a
+	// question or option the request does not carry is rejected, as is a
+	// request that is no longer open (another peer answered it, or the turn
+	// was interrupted). Unlike a permission call id, requestID is unique only
+	// within its session, so sessionID is what disambiguates it.
+	AnswerDecision(ctx context.Context, sessionID, requestID string, answers []acp.DecisionAnswer) error
 }

@@ -378,14 +378,14 @@ func (a App) syncMenu() (App, tea.Cmd) {
 }
 
 // handleMenuKey applies one key press to the open menu, ahead of the
-// per-screen handlers (dispatch precedence: panel > approval > menu > active
-// screen > global — see App.Update): ↓/↑ move the highlight, Tab completes
-// the highlighted row into whichever buffer is live, Enter accepts it, and
-// Esc closes the menu but keeps the typed text. Any other key isn't the
-// menu's to consume — handled reports false and [App.Update] falls through to
-// the normal per-screen handler, which (for a text/backspace key) mutates the
-// buffer and the caller resyncs the menu via [App.syncMenu] on its own return
-// path.
+// per-screen handlers (dispatch precedence: panel > approval > decision >
+// menu > active screen > global — see App.Update): ↓/↑ move the highlight, Tab
+// completes the highlighted row into whichever buffer is live, Enter accepts
+// it, and Esc closes the menu but keeps the typed text. Any other key isn't
+// the menu's to consume — handled reports false and [App.Update] falls through
+// to the normal per-screen handler, which (for a text/backspace key) mutates
+// the buffer and the caller resyncs the menu via [App.syncMenu] on its own
+// return path.
 func (a App) handleMenuKey(msg tea.KeyPressMsg) (next tea.Model, cmd tea.Cmd, handled bool) {
 	switch msg.Key().Code {
 	case tea.KeyDown:

@@ -33,6 +33,7 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
 	"github.com/jedwards1230/gofer/internal/config"
+	"github.com/jedwards1230/gofer/internal/decision"
 	"github.com/jedwards1230/gofer/internal/tui"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
@@ -307,8 +308,8 @@ func daemonRefreshCommandEnv() tui.CommandEnv {
 // broker so attaching into a session doesn't error — nothing publishes to it,
 // so the transcript underneath the panel stays empty, which is fine: these
 // scenes are about the command panel, not the transcript. The write ops
-// (Create/Send/Interrupt/Kill/Archive/SetModel/SetEffort/Reply) are no-ops; none of
-// these tapes exercises them.
+// (Create/Send/Interrupt/Kill/Archive/SetModel/SetEffort/Reply/AnswerDecision)
+// are no-ops; none of these tapes exercises them.
 type vhsSupervisor struct {
 	sessions []tui.SessionInfo
 	broker   *event.Broker
@@ -361,4 +362,16 @@ func (s *vhsSupervisor) ExplainPermission(context.Context, string, string) (acp.
 		Policy: "unmatched",
 		Trace:  []string{"rule: unmatched"},
 	}, nil
+}
+
+// Decisions hands back an already-closed subscription — no tape drives a
+// structured decision, and a closed stream keeps the app's decision pump idle.
+func (s *vhsSupervisor) Decisions(context.Context, string) (*decision.Subscription, error) {
+	sub := decision.NewGate("").Subscribe(0)
+	sub.Close()
+	return sub, nil
+}
+
+func (s *vhsSupervisor) AnswerDecision(context.Context, string, string, []acp.DecisionAnswer) error {
+	return nil
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/session"
 
 	"github.com/jedwards1230/gofer/internal/config"
+	"github.com/jedwards1230/gofer/internal/decision"
 	"github.com/jedwards1230/gofer/internal/permrationale"
 	"github.com/jedwards1230/gofer/internal/sandbox"
 )
@@ -201,16 +202,23 @@ func New(cfg Config) (*Supervisor, error) {
 }
 
 // sessionGuard builds the per-session permission plumbing: a fresh reply Gate
-// (reply routing is per-session — see [Supervisor.Reply]), a sandbox Container
-// shared between the RuleGuard's containability check and the sandbox-wrapping
-// tool registry, and the compiled RuleGuard over the shared engine. It returns
-// the three runner.Options fields to inject plus the Gate to store on the
-// managed session.
-func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.Gate, tools loop.ToolRegistry) {
+// (reply routing is per-session — see [Supervisor.Reply]), a fresh decision Gate
+// backing the session's own ask_user tool (routing is per-session for the same
+// reason — see [Supervisor.AnswerDecision]), a sandbox Container shared between
+// the RuleGuard's containability check and the sandbox-wrapping tool registry,
+// and the compiled RuleGuard over the shared engine. It returns the three
+// runner.Options fields to inject plus the two Gates to store on the managed
+// session.
+//
+// The decision gate is built with an empty session id and bound in [register]:
+// the tool registry closes over the gate and must be handed to runner.New, and
+// only that call mints a created session's id (see [decision.Gate.Bind]).
+func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.Gate, decisions *decision.Gate, tools loop.ToolRegistry) {
 	gate := loop.NewGate()
+	dgate := decision.NewGate("")
 	container := sandbox.New()
 	rg := loop.RuleGuard{Engine: s.newEngine(), Container: container, Target: sandbox.ToolTarget}
-	return rg, gate, sandbox.WrapRegistry(cwd, container)
+	return rg, gate, dgate, sandbox.WrapRegistry(cwd, container, decision.NewAskUser(dgate))
 }
 
 // ResolveRoot is gofer's single source of the ~/.gofer default — the SDK
@@ -294,7 +302,7 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts CreateOptio
 		return SessionInfo{}, err
 	}
 
-	guard, gate, tools := s.sessionGuard(opts.Cwd)
+	guard, gate, decisions, tools := s.sessionGuard(opts.Cwd)
 	sess, err := s.newSession(ctx, runner.Options{
 		Root: s.root, Cwd: opts.Cwd, Model: opts.Model, System: opts.System,
 		Params: opts.Params, MaxIters: opts.MaxIters, Agent: opts.Agent,
@@ -321,7 +329,7 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts CreateOptio
 		}
 	}
 
-	m, err := s.register(sess, opts.Model, opts.Params.Thinking.Effort, opts.Cwd, gate, meta)
+	m, err := s.register(sess, opts.Model, opts.Params.Thinking.Effort, opts.Cwd, gate, decisions, meta)
 	if err != nil {
 		// Lost a race with Close between the isClosed check above and here:
 		// tear down the just-built session so it does not leak. Its store is
@@ -426,7 +434,7 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 	// exactly when a client reopened it from somewhere else.
 	meta, _ := lookupDiskSession(s.root, id)
 
-	guard, gate, tools := s.sessionGuard(opts.Cwd)
+	guard, gate, decisions, tools := s.sessionGuard(opts.Cwd)
 	sess, err := s.resumeSession(ctx, id, runner.Options{
 		Root: s.root, Cwd: opts.Cwd, Model: opts.Model, System: opts.System,
 		Params: opts.Params, MaxIters: opts.MaxIters, Agent: meta.Agent,
@@ -436,7 +444,7 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 		return SessionInfo{}, fmt.Errorf("supervisor: resume %s: %w", id, err)
 	}
 
-	m, err := s.register(sess, opts.Model, opts.Params.Thinking.Effort, opts.Cwd, gate, meta)
+	m, err := s.register(sess, opts.Model, opts.Params.Thinking.Effort, opts.Cwd, gate, decisions, meta)
 	if err != nil {
 		_ = sess.Close()
 		return SessionInfo{}, fmt.Errorf("supervisor: resume %s: %w", id, err)
@@ -456,13 +464,21 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 // is published into the roster below — so a concurrent Kill can never
 // observe a session whose teardown hasn't been stashed yet (see
 // Config.OnRegister's doc).
-func (s *Supervisor) register(sess Session, model, effort, cwd string, gate *loop.Gate, meta sessionMeta) (*managed, error) {
+func (s *Supervisor) register(sess Session, model, effort, cwd string, gate *loop.Gate, decisions *decision.Gate, meta sessionMeta) (*managed, error) {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		return nil, ErrClosed
 	}
-	m := newManaged(sess, model, effort, s.clock(), s.clock, s.notify, cwd, gate, meta, s.onRegister)
+	m := newManaged(sess, model, effort, s.clock(), s.clock, s.notify, cwd, gate, decisions, meta, s.onRegister)
+	// Stamp the session id onto the decision gate the moment it is knowable —
+	// before m is published anywhere and before anything can run a turn against
+	// it, so no request can ever open with an empty session id (see
+	// [decision.Gate.Bind]). Deliberately not "somewhere before go m.pump()":
+	// binding right here means no later statement can be moved above it and
+	// silently start minting requests the TUI would have to guess the session
+	// of.
+	decisions.Bind(m.id)
 	s.roster[m.id] = m
 	s.mu.Unlock()
 
@@ -701,6 +717,50 @@ func (s *Supervisor) Reply(sessionID string, op event.PermissionReply) error {
 	}
 	m.gate.Reply(op)
 	return nil
+}
+
+// AnswerDecision routes a human's answers to sessionID's structured-decision
+// gate, unblocking the ask_user tool call waiting on requestID (see
+// [decision.Gate]). It is the decision-side counterpart of [Supervisor.Reply],
+// and errors the same way for an unknown session ([ErrNotLive]).
+//
+// Unlike Reply — a fire-and-forget op whose gate call cannot fail — this one
+// propagates the gate's validation error: a request that is no longer open
+// ([decision.ErrUnknownRequest], e.g. another peer answered first or the turn
+// was interrupted) or an answer that does not fit its question. The caller is a
+// UI that can act on that, and silently swallowing it would leave a prompt on
+// screen with nothing behind it.
+//
+// requestID is scoped to the session, so unlike a permission call id it is NOT
+// globally unique — sessionID is what disambiguates it.
+func (s *Supervisor) AnswerDecision(sessionID, requestID string, answers []acp.DecisionAnswer) error {
+	m, err := s.lookup(sessionID)
+	if err != nil {
+		return fmt.Errorf("supervisor: answer decision %s: %w", sessionID, err)
+	}
+	if err := m.decisions.Answer(requestID, answers); err != nil {
+		return fmt.Errorf("supervisor: answer decision %s: %w", sessionID, err)
+	}
+	return nil
+}
+
+// SubscribeDecisions returns a stream of sessionID's structured-decision
+// updates, buffered to hold buffer of them, replaying every request already
+// open so a client attaching mid-turn still sees the prompt the agent is
+// blocked on (see [decision.Gate.Subscribe]). It returns [ErrNotLive] for an
+// unknown session.
+//
+// The caller owns the returned subscription and must Close it when it stops
+// reading. It does NOT have to poll for the session ending: killing/archiving/
+// closing a session closes its gate (managed.stop), which closes every live
+// subscription — so a consumer learns the session is gone the same way it
+// learns its event subscription ended, by the channel closing.
+func (s *Supervisor) SubscribeDecisions(sessionID string, buffer int) (*decision.Subscription, error) {
+	m, err := s.lookup(sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("supervisor: subscribe decisions %s: %w", sessionID, err)
+	}
+	return m.decisions.Subscribe(buffer), nil
 }
 
 // ExplainPermission answers why sessionID's still-pending callID was gated,

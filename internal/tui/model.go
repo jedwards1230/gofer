@@ -29,6 +29,7 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
 	"github.com/jedwards1230/gofer/internal/config"
+	"github.com/jedwards1230/gofer/internal/decision"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
 
@@ -147,6 +148,18 @@ type Model struct {
 	// discipline the pointer is never mutated in place — every mutator
 	// reallocates and repoints.
 	pending *pendingApproval
+
+	// pendingDec is the session's current unresolved structured-decision
+	// request, if any (nil = none) — the backing state for the inline decision
+	// prompt (decision.go). It is `pending`'s sibling in every respect that
+	// matters here: transient client-side state, not a transcript item, and
+	// while set it commandeers the whole footer the same way. It arrives on a
+	// SEPARATE stream ([Model.IngestDecision], not [Model.Ingest]) because the
+	// SDK's Event union carries no decision kind — see internal/decision's
+	// package doc. An approval outranks it when both are somehow pending (see
+	// promptLines): a permission gate blocks a tool call already in flight,
+	// which is the more urgent of the two.
+	pendingDec *pendingDecision
 
 	usage *provider.Usage
 	cost  *provider.Cost
@@ -540,6 +553,138 @@ func (m Model) DismissApproval() Model {
 	return m
 }
 
+// IngestDecision applies one [decision.Update] to the prompt state and returns
+// the updated Model. It is [Model.Ingest]'s twin for the decision stream: the
+// SDK's Event union carries no decision kind (internal/decision's package doc
+// has the why), so a structured question arrives on its own subscription and
+// lands here rather than in Ingest's event switch. It adds no transcript
+// items, which is why the app root ingests it directly instead of through
+// [App.ingestAttach]'s autoscroll accounting — there are no new transcript
+// lines for a scrolled-back reader's window to be pulled off by.
+//
+// An [decision.UpdateRequested] opens the prompt, superseding whatever was
+// showing — last one shown wins, exactly like a second PermissionRequested;
+// the superseded request stays open server-side and its own UpdateResolved
+// simply finds m.pendingDec pointed elsewhere. A request carrying no questions
+// is ignored rather than opening an empty prompt (decision.Gate.Request
+// already rejects one, so this is belt-and-braces against a future transport).
+// An [decision.UpdateResolved] clears the prompt only when the ids match: the
+// request this client was showing has been answered by another peer, or its
+// turn was interrupted and the agent is no longer waiting.
+func (m Model) IngestDecision(u decision.Update) Model {
+	switch u.Kind {
+	case decision.UpdateRequested:
+		if len(u.Request.Questions) == 0 {
+			return m
+		}
+		ids := make([]string, len(u.Request.Questions))
+		for i, q := range u.Request.Questions {
+			ids[i] = q.QuestionID
+		}
+		m.pendingDec = &pendingDecision{
+			id:          u.Request.ID,
+			session:     u.Request.SessionID,
+			question:    u.Request.Questions[0],
+			questionIDs: ids,
+		}
+	case decision.UpdateResolved:
+		if m.pendingDec != nil && m.pendingDec.id == u.Request.ID {
+			m.pendingDec = nil
+		}
+	}
+	return m
+}
+
+// HasPendingDecision reports whether an unresolved structured-decision request
+// is awaiting an answer on this session — the app root consults it to route
+// keys to the decision prompt (see App.Update), one rung below the approval
+// prompt.
+func (m Model) HasPendingDecision() bool { return m.pendingDec != nil }
+
+// PendingDecision returns the id of the pending decision request, for the app
+// root to build the [Supervisor.AnswerDecision] call. ok is false when nothing
+// is pending.
+func (m Model) PendingDecision() (id string, ok bool) {
+	if m.pendingDec == nil {
+		return "", false
+	}
+	return m.pendingDec.id, true
+}
+
+// DismissDecision clears the pending decision locally. It is ONLY the
+// optimistic local clear every resolution makes before its
+// [Supervisor.AnswerDecision] call lands — an answer, or esc's cancel (see
+// App.cancelDecision). There is deliberately no "dismiss without resolving"
+// path: unlike a permission request, which a re-attach re-surfaces off the
+// event stream's replay, a decision left open here would leave the agent's turn
+// blocked with no prompt on screen and no transcript badge to find it by.
+func (m Model) DismissDecision() Model {
+	m.pendingDec = nil
+	return m
+}
+
+// moveDecisionCursor moves the focused row by delta, CLAMPED to the row list
+// rather than wrapping: the list is short and ordered, and wrapping from the
+// last escape hatch back onto option 1 is precisely the surprise that gets the
+// wrong answer sent. A no-op when nothing is pending, or when the question
+// offers no rows at all. Reallocates rather than mutating in place (Model's
+// copy-on-write discipline), like every mutator here.
+func (m Model) moveDecisionCursor(delta int) Model {
+	if m.pendingDec == nil {
+		return m
+	}
+	p := *m.pendingDec
+	rows := len(p.rows())
+	if rows == 0 {
+		return m
+	}
+	p.cursor = clampCursor(p.cursor+delta, rows-1)
+	m.pendingDec = &p
+	return m
+}
+
+// startDecisionTyping activates the free-text row's editor — the first Enter
+// on "Type something.". A no-op when nothing is pending or typing is already
+// active, so the buffer a user has half-typed is never cleared by a stray
+// repeat.
+func (m Model) startDecisionTyping() Model {
+	if m.pendingDec == nil || m.pendingDec.typing {
+		return m
+	}
+	p := *m.pendingDec
+	p.typing = true
+	m.pendingDec = &p
+	return m
+}
+
+// stopDecisionTyping leaves typing mode, discarding the half-typed answer —
+// esc's FIRST press while the free-text row is active. A second esc then
+// dismisses the whole prompt (see App.handleDecisionKey), so escape never
+// throws away more than one thing at a time.
+func (m Model) stopDecisionTyping() Model {
+	if m.pendingDec == nil {
+		return m
+	}
+	p := *m.pendingDec
+	p.typing = false
+	p.input = inputBuffer{}
+	m.pendingDec = &p
+	return m
+}
+
+// withDecisionInput replaces the free-text answer's buffer with buf — the
+// write-back half of routing a key press through the shared input keymap
+// (input_keymap.go), which returns an updated buffer rather than mutating one.
+func (m Model) withDecisionInput(buf inputBuffer) Model {
+	if m.pendingDec == nil {
+		return m
+	}
+	p := *m.pendingDec
+	p.input = buf
+	m.pendingDec = &p
+	return m
+}
+
 // compactJSON renders raw JSON as a single-line, whitespace-collapsed
 // string for compact tool-block display. Invalid or empty input renders as
 // an empty string rather than failing.
@@ -767,9 +912,9 @@ func (m Model) view(width, height int, menuLines, headerLines []string, scroll i
 	}
 
 	// The input box is framed by full-width rules above and below, with the
-	// status line beneath it. A pending approval commandeers the whole
-	// footer: the rules, input box, and status line are suppressed so the
-	// prompt block stands alone — whichever footer shows, the transcript
+	// status line beneath it. A pending approval or structured decision
+	// commandeers the whole footer: the rules, input box, and status line are
+	// suppressed so the prompt block stands alone — whichever footer shows, the transcript
 	// above tails to fit so the footer stays anchored to the bottom however
 	// long the conversation grows.
 	var footer []string
@@ -809,15 +954,21 @@ func (m Model) view(width, height int, menuLines, headerLines []string, scroll i
 	return strings.Join(lines, "\n")
 }
 
-// promptLines renders the pending approval as the bottom-anchored, input-
-// replacing prompt's lines, each truncated to width. Empty when nothing is
-// pending. Used by View to anchor the inline approval prompt to the bottom.
+// promptLines renders whichever inline prompt is pending as the bottom-
+// anchored, input-replacing block's lines, each truncated to width. Empty when
+// nothing is pending. Used by View to anchor the prompt to the bottom.
+//
+// An approval outranks a decision when both are somehow pending: a permission
+// gate blocks a tool call the agent has ALREADY started, while a decision
+// blocks it before it has chosen what to do — the in-flight one is the more
+// urgent, and the decision prompt is still there once the approval clears
+// (its request stays open on the gate regardless of what this client renders).
 //
 // height is the frame the prompt has to share with the transcript, and is what
-// makes the block adaptive: the full prompt runs ~22 rows, so on an 80x24
-// terminal it would leave a two-line transcript and scroll the identity header
-// out — the conversation that LED to the gated call disappearing exactly when
-// a human needs it to decide. When the full block would leave fewer than
+// makes the APPROVAL block adaptive: the full prompt runs ~22 rows, so on an
+// 80x24 terminal it would leave a two-line transcript and scroll the identity
+// header out — the conversation that LED to the gated call disappearing exactly
+// when a human needs it to decide. When the full block would leave fewer than
 // [Model.approvalTranscriptFloor] rows, the rationale collapses to its opening
 // paragraph plus a ctrl+e pointer (see renderApprovalPrompt); everything a
 // decision requires — the header, the gated call, the question, the action row
@@ -827,13 +978,23 @@ func (m Model) view(width, height int, menuLines, headerLines []string, scroll i
 // The collapsed block is rendered fresh rather than sliced out of the full
 // one: the paragraphs it drops are wrapped text, so cutting rows off a
 // rendered block would leave a half-sentence dangling.
+//
+// The decision prompt has no collapsed form to fall back to — it is already
+// only its question plus one row per answer, and every one of those rows is
+// load-bearing (a hidden option is an answer the human cannot give) — so it
+// ignores height and relies on the same View-level floor.
 func (m Model) promptLines(width, height int) []string {
-	if m.pending == nil {
+	var raw []string
+	switch {
+	case m.pending != nil:
+		raw = renderApprovalPrompt(m.theme, *m.pending, width, m.approvalBodyLimit(), false)
+		if height-len(raw) < m.approvalTranscriptFloor() {
+			raw = renderApprovalPrompt(m.theme, *m.pending, width, m.approvalBodyLimit(), true)
+		}
+	case m.pendingDec != nil:
+		raw = renderDecisionPrompt(m.theme, *m.pendingDec, width)
+	default:
 		return nil
-	}
-	raw := renderApprovalPrompt(m.theme, *m.pending, width, m.approvalBodyLimit(), false)
-	if height-len(raw) < m.approvalTranscriptFloor() {
-		raw = renderApprovalPrompt(m.theme, *m.pending, width, m.approvalBodyLimit(), true)
 	}
 	out := make([]string, len(raw))
 	for i, l := range raw {

@@ -239,17 +239,64 @@ affordances now ship: `Tab` amends (SDK `PermissionOutcomeAmended`) and
 exact / prefix / broad patterns, but dangerous commands are force-downgraded
 to exact-match regardless, scoped (agent/global) and TTL'd.
 
-## Structured question / decision tool (M7, not yet built)
+## Structured question / decision prompt
 
-Design intent only. An agent that needs a **decision** — not a tool approval,
-but "which of these should I do?" — deserves a first-class prompt distinct from
-the permission dialog above. Like an approval it renders inline in the footer,
-commandeering it while unresolved; unlike one it carries the agent's own
-question and options rather than a tool call.
+An agent that needs a **decision** — not a tool approval, but "which of these
+should I do?" — gets a first-class prompt distinct from the permission dialog
+above. Like an approval it renders inline in the footer, commandeering it while
+unresolved; unlike one it carries the agent's own question and options rather
+than a tool call. Dispatch precedence is `panel > approval > decision > menu >
+active screen`: a permission gate blocks a tool call already in flight, so it
+outranks a decision if both are somehow pending.
 
-**Single question** — a title chip, the bold question, numbered options each
-with a dim rationale sub-line, a free-text row to answer off-menu, and an escape
-row that hands the turn back to the conversation:
+The request originates in gofer, from the `ask_user` tool
+(`internal/decision`), and travels its own stream — `Supervisor.Decisions` /
+`Supervisor.AnswerDecision`, not the Event/Op stream — because the SDK's
+`event.Event` union carries no decision kind. See `internal/decision`'s package
+doc for the full rationale.
+
+### The `ask_user` tool
+
+Input schema (snake_case, matching the SDK builtins):
+
+```
+{ "questions": [ {
+    "title":           string   // short chip label, e.g. "Fix rebuilds"
+    "question":        string   // required
+    "context":         string   // optional supporting context (side panel, later)
+    "options": [ {
+        "label":       string   // required, short — the choice itself
+        "rationale":   string   // the indented reasoning/risk body
+        "reference":   string   // optional locator for supporting material
+        "recommended": bool     // renders "(Recommended)"
+    } ]
+    "allow_free_text": bool     // DEFAULT TRUE when omitted
+    "allow_chat":      bool     // DEFAULT TRUE when omitted
+} ] }
+```
+
+**Ids are gofer's, never the model's**: `q1, q2, …` for questions and
+`q1o1, q1o2, …` for options, assigned by position (`decision.AssignIDs`). An
+answer therefore can't reference an id the model hallucinated, and the id space
+is stable across runs — which is what makes the tool's result text and this
+package's goldens deterministic.
+
+**The escape hatches are opt-out, not opt-in.** `allow_free_text` and
+`allow_chat` default to **true**; the model must set them explicitly to `false`
+to remove a row. A forced-choice prompt with no way out is a trap, so the agent
+has to ask for that trap deliberately.
+
+**Four answer shapes** come back, one per question, in question order:
+`selected` (an option id), `text` (the free-text answer), `chat` (the user
+wants to talk it through instead of choosing), and `cancelled` (left
+unanswered — the gate fills these in). Only a genuinely malformed call is an
+error; `chat` and `cancelled` are legitimate outcomes.
+
+### Single question (shipped)
+
+A title chip, the question, numbered options each with a dim rationale sub-line,
+a free-text row to answer off-menu, and an escape row that hands the turn back
+to the conversation:
 
 ```
  ────────────────────────────────────────────────
@@ -259,7 +306,7 @@ row that hands the turn back to the conversation:
 
    1  In-place ALTER
         fastest, but locks the table for the duration
-   2  Shadow table + backfill
+   2  Shadow table + backfill  (Recommended)
         online, but doubles disk until cutover
 
    › Type something.
@@ -268,9 +315,44 @@ row that hands the turn back to the conversation:
  Enter to select · ↑/↓ to navigate · Esc to cancel
 ```
 
-**Multi question** — a tabbed stepper strips across the top; `Tab` switches
-between questions, each with its own option list, and a right-side reference box
-shows the focused option's detail. `n` opens a notes field on that option:
+The focused row carries the same `▸` caret every other list in this TUI uses,
+in the gutter, so focusing a row never shifts the columns beneath it. Only the
+state-bearing tokens are colored (marker-only styling): the `decision` chip
+takes the approval header's warn style, the caret and `(Recommended)` take the
+accent, the rationale and the key hint are muted. A rationale-less option
+renders no sub-line at all, and a row the question opted out of is simply
+absent.
+
+**Keys** — `↑`/`↓` move the focused row (clamped, never wrapping: wrapping from
+the last row onto option 1 is how a stray press sends the wrong answer);
+`1`-`9` answer with that option directly; `Enter` resolves the focused row (an
+option answers with it, `Type something.` opens its editor and a **second**
+`Enter` submits, `Chat about this` answers with the chat hatch); `Esc` leaves
+typing mode, or — when not typing — **cancels the request**, answering every
+question in it (including the ones the single-question prompt doesn't render)
+with `cancelled`; `ctrl+c` quits. While typing, the hint reads
+`Enter to submit · Esc to cancel` and every unclaimed key goes to the shared
+input keymap, so digits type digits. `j`/`k` are deliberately unbound — every
+list here is arrow-only, and vi keys would fight the free-text row.
+
+`Esc` cancels rather than merely closing the prompt because there is nothing to
+come back to: unlike a permission request — which leaves a transcript badge and
+replays off the event stream on re-attach — a decision has neither, so a prompt
+closed without resolving would leave the agent's turn blocked forever with
+nothing on screen pointing at it. `cancelled` is a first-class outcome the model
+is told about and can act on, not an error.
+
+Resolving (an answer or a cancel) is an optimistic local dismiss, exactly like
+an approval: the matching `UpdateResolved` arriving a moment later finds nothing
+pending. A request another peer answers, or one an interrupted turn drops,
+clears the prompt the same way with no answer sent from here — as does the
+session ending, which closes its gate (and with it every decision subscription).
+
+### Multi question (not yet built)
+
+Design intent. A tabbed stepper strips across the top; `Tab` switches between
+questions, each with its own option list, and a right-side reference box shows
+the focused option's detail. `n` opens a notes field on that option:
 
 ```
  ────────────────────────────────────────────────
@@ -289,11 +371,24 @@ shows the focused option's detail. `n` opens a notes field on that option:
  Tab to switch questions · Esc to cancel
 ```
 
-Both forms need a **structured-question ACP message type** the daemon can relay
-and the client can render — a decision request distinct from
-`permission.requested`, carrying the question(s), their options, and per-option
-rationale/reference — so this stays deferred until that lands; see the
-agent-sdk-go design backlog.
+Until it lands, a multi-question request renders its **first** question only.
+Nothing is lost: the gate fills every question the client didn't answer in as
+`cancelled`, so the tool still receives exactly one answer per question.
+
+**Also deferred**: the **daemon-backed path**. `internal/daemonbridge` stubs
+both methods today (`Decisions` returns a closed subscription,
+`AnswerDecision` an explicit "not yet" error) — relaying a decision out of the
+daemon and an answer back in needs the `gofer/permission_requested` +
+`permission.reply` treatment, which is the follow-up PR for #173. Against the
+in-process supervisor the round trip is live.
+
+**And deferred with it**: decisions from **background sessions**. The App
+subscribes decisions only for the session it is *attached* to (`app.go`,
+alongside the event subscription), so an unattached session calling `ask_user`
+gets `ErrNoClient` and is told to continue in prose — even with the TUI open on
+another session. Fixing that is the same daemon-relay work: once a decision
+travels the wire as its own message, every connected peer sees it, and the
+roster can surface "needs a decision" the way it surfaces a pending approval.
 
 ## Roster & navigation (M2)
 
@@ -905,7 +1000,8 @@ Four layers, each catching what the one below can't:
 3. **`ansi.Strip(colored) == plain` = ANSI-width.** Neither golden layer above
    catches a styling bug that changes *display width* (the #61 color-scatter: a
    styled pane measured wider than its cells and tore the layout). The color
-   tests (`color_layout_test.go`, `dialog_color_test.go`) render the same
+   tests (`color_layout_test.go`, `dialog_color_test.go`,
+   `decision_golden_test.go`) render the same
    component twice — once plain, once through `testkit.ColorTheme()` — and
    assert that stripping ANSI from the colored render reproduces the plain one
    exactly, and that no line exceeds its width. Every render change here ships

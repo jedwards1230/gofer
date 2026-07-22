@@ -17,6 +17,7 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/acp"
 	"github.com/jedwards1230/agent-sdk-go/event"
 
+	"github.com/jedwards1230/gofer/internal/decision"
 	"github.com/jedwards1230/gofer/internal/tui"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
@@ -198,6 +199,21 @@ func (f *fakeSup) Reply(_ context.Context, _, _ string, _ tui.PermissionDecision
 // app_internal_test.go covers against a recording fake).
 func (f *fakeSup) ExplainPermission(_ context.Context, _, _ string) (acp.PermissionRationale, error) {
 	return acp.PermissionRationale{}, nil
+}
+
+// Decisions hands back an already-closed subscription: the decision prompt's
+// behavioral tests need a real gate and the unexported decision messages, so
+// they live in app_internal_test.go (package tui) like the approval ones. A
+// closed stream keeps App's decision pump a no-op here.
+func (f *fakeSup) Decisions(context.Context, string) (*decision.Subscription, error) {
+	sub := decision.NewGate("").Subscribe(0)
+	sub.Close()
+	return sub, nil
+}
+
+// AnswerDecision is a no-op here for the same reason as Reply above.
+func (f *fakeSup) AnswerDecision(context.Context, string, string, []acp.DecisionAnswer) error {
+	return nil
 }
 
 // content renders m the way a real frame would, returning just the string

@@ -12,6 +12,7 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/event"
 
 	"github.com/jedwards1230/gofer/internal/config"
+	"github.com/jedwards1230/gofer/internal/decision"
 	"github.com/jedwards1230/gofer/internal/tui/layout"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
@@ -108,7 +109,7 @@ type App struct {
 	// scr currently shows rather than being a fourth [screen] — a stub tab
 	// bar for M4 step 1, with the real /status, /config, and /model bodies
 	// landing in follow-up PRs. Dispatch precedence: panel > approval >
-	// active screen > global (see Update).
+	// decision > menu > active screen > global (see Update).
 	panel *commandPanel
 
 	// registry resolves a submitted "/name arg…" buffer's command token to
@@ -161,6 +162,15 @@ type App struct {
 
 	sessID string // id `sess` is subscribed to ("" = none)
 	sub    *event.Subscription
+
+	// decSub is the SECOND stream an attach holds for the same session: its
+	// open structured-decision requests (see [Supervisor.Decisions] and
+	// internal/decision). It is separate from sub because the SDK's Event
+	// union carries no decision kind, not because a decision is a different
+	// KIND of thing to a client — so it is established, pumped, and torn down
+	// in lockstep with sub (see the subReadyMsg case in Update, and
+	// switchSession).
+	decSub *decision.Subscription
 
 	// peekReply is the peek card's reply-input buffer. Peek carries no
 	// transcript to own it, so the app root holds it and clears it on entering
@@ -280,6 +290,29 @@ type sessEventMsg struct {
 // sessClosedMsg reports a session's event.Subscription channel closing.
 type sessClosedMsg struct{ id string }
 
+// decisionSubReadyMsg carries the result of subscribing to one session's
+// structured-decision stream — [subReadyMsg]'s twin for the second
+// subscription an attach holds. id guards the same staleness, and for the
+// same reason.
+type decisionSubReadyMsg struct {
+	id  string
+	sub *decision.Subscription
+	err error
+}
+
+// decisionMsg carries one update read from a session's decision
+// subscription — [sessEventMsg]'s twin, carrying sub so [App.Update] can
+// re-arm the read the same way.
+type decisionMsg struct {
+	id  string
+	up  decision.Update
+	sub *decision.Subscription
+}
+
+// decisionClosedMsg reports a session's decision.Subscription channel
+// closing.
+type decisionClosedMsg struct{ id string }
+
 // createdMsg carries the result of [Supervisor.Create].
 type createdMsg struct {
 	info SessionInfo
@@ -331,6 +364,30 @@ func waitForEvent(id string, sub *event.Subscription) tea.Cmd {
 			return sessClosedMsg{id: id}
 		}
 		return sessEventMsg{id: id, ev: ev, sub: sub}
+	}
+}
+
+// subscribeDecisions subscribes to id's open structured-decision requests via
+// the Supervisor. It is armed off [subReadyMsg] rather than beside
+// [App.subscribe] so both of an attach's streams are established from one
+// place — and so a session that cannot be subscribed to at all never leaves a
+// decision subscription dangling in a gate's subscriber set.
+func (a App) subscribeDecisions(id string) tea.Cmd {
+	return func() tea.Msg {
+		sub, err := a.sup.Decisions(context.Background(), id)
+		return decisionSubReadyMsg{id: id, sub: sub, err: err}
+	}
+}
+
+// waitForDecision blocks for the next decision update on sub, or reports the
+// subscription closing — [waitForEvent]'s twin for the decision stream.
+func waitForDecision(id string, sub *decision.Subscription) tea.Cmd {
+	return func() tea.Msg {
+		up, ok := <-sub.C
+		if !ok {
+			return decisionClosedMsg{id: id}
+		}
+		return decisionMsg{id: id, up: up, sub: sub}
 	}
 }
 
@@ -425,9 +482,17 @@ func (a *App) switchSession(id string) tea.Cmd {
 	if a.sub != nil {
 		a.sub.Close()
 	}
+	// The decision stream is torn down with the event stream it sits beside:
+	// a gate publishes to every subscriber it holds, so a forgotten
+	// subscription would keep a buffer alive (and, once full, count drops)
+	// for a session nobody is watching.
+	if a.decSub != nil {
+		a.decSub.Close()
+	}
 	a.sessID = id
-	a.sess = New(a.theme) // a fresh Model has no pending approval either
+	a.sess = New(a.theme) // a fresh Model has no pending approval or decision either
 	a.sub = nil
+	a.decSub = nil
 	a.scroll = 0 // a different session's transcript starts back at the tail
 	return a.subscribe(id)
 }
@@ -648,7 +713,59 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.sub = msg.sub
-		return a, waitForEvent(msg.id, msg.sub)
+		// Arm the decision stream alongside the event stream — see
+		// subscribeDecisions for why it hangs off this message rather than
+		// off switchSession.
+		return a, tea.Batch(waitForEvent(msg.id, msg.sub), a.subscribeDecisions(msg.id))
+
+	case decisionSubReadyMsg:
+		if msg.id != a.sessID {
+			// The user moved on before the subscribe resolved. Close it rather
+			// than drop it: an abandoned subscription stays in the gate's
+			// subscriber set forever, and Gate.Request treats "has a
+			// subscriber" as "a client can see this", so a leaked one would
+			// let a question be asked that nobody is rendering.
+			if msg.sub != nil {
+				msg.sub.Close()
+			}
+			return a, nil
+		}
+		if msg.err != nil {
+			a.setStatus(sevDanger, msg.err.Error())
+			return a, nil
+		}
+		// Close whatever we already hold before adopting: two subscribes for
+		// the same session can be in flight at once (Init subscribes, then an
+		// enter before subReadyMsg lands subscribes again), and an overwritten
+		// subscription would stay in the gate's subscriber set forever with its
+		// waitForDecision goroutine parked on a channel nothing publishes to.
+		// Worse than a plain leak: Gate.Request decides ErrNoClient from
+		// "are there subscribers", so one orphan makes that fail-fast
+		// permanently unreachable for this session — the same reason the stale
+		// branch above closes rather than drops.
+		if a.decSub != nil {
+			a.decSub.Close()
+		}
+		a.decSub = msg.sub
+		return a, waitForDecision(msg.id, msg.sub)
+
+	case decisionMsg:
+		if msg.id != a.sessID {
+			return a, nil // stale: from a session we've since left, drop it
+		}
+		// Straight to the Model, not through ingestAttach: a decision update
+		// adds no transcript lines, so there is no autoscroll accounting to do
+		// (see Model.IngestDecision). Model.IngestDecision owns the
+		// pending-decision bookkeeping — set on UpdateRequested, cleared on a
+		// matching UpdateResolved — see decision.go.
+		a.sess = a.sess.IngestDecision(msg.up)
+		return a, waitForDecision(msg.id, msg.sub)
+
+	case decisionClosedMsg:
+		if msg.id == a.sessID {
+			a.decSub = nil
+		}
+		return a, nil
 
 	case sessEventMsg:
 		if msg.id != a.sessID {
@@ -740,7 +857,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.sel = nil
 		// The command panel takes every key ahead of the approval overlay and
 		// the per-screen handlers (dispatch precedence: panel > approval >
-		// menu > active screen > global) — see handlePanelKey.
+		// decision > menu > active screen > global) — see handlePanelKey.
 		if a.panel != nil {
 			return a.handlePanelKey(msg)
 		}
@@ -750,6 +867,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// stale a.sess approval from a prior attach must not hijack its keys.
 		if a.scr == screenAttach && a.sess.HasPendingApproval() {
 			return a.handleApprovalKey(msg)
+		}
+		// A pending structured decision commandeers the footer the same way,
+		// one rung below the approval (see Model.promptLines for the
+		// ordering's rationale) and scoped to the attach screen for the same
+		// reason: it is the only screen backed by a live a.sess.
+		if a.scr == screenAttach && a.sess.HasPendingDecision() {
+			return a.handleDecisionKey(msg)
 		}
 		// The open command-autocomplete menu (command_menu.go) claims
 		// ↓/↑/Tab/Enter/Esc ahead of the per-screen handlers, same overlay
