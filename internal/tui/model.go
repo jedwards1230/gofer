@@ -1339,12 +1339,86 @@ func attributeHeader(header, agent string) string {
 	return first + clause + "\n" + rest
 }
 
+// blockRow is one gutter body row of a [contentBlock]: its text and the
+// per-row styling to apply to the whole prefixed row (nil = plainRender).
+// Per-row styling is what lets the shell block mix a plain output row with a
+// danger exit row and a muted disposition row inside one body.
+type blockRow struct {
+	text   string
+	render func(string) string
+}
+
+// contentBlock is the shared transcript-block shape: a marker glyph + header,
+// then a └-gutter body with aligned continuation and an optional "… +N lines"
+// collapse. It is the one place the Claude-Code tool-block grammar lives, so
+// the tool call, the background-agents summary, and a `!`/`!!` shell run all
+// read the same — and a future block gets the grammar (and, because every
+// block built through it is a transcript item inside App.transcriptRegion, the
+// drag-selection + OSC 52 copy) for free.
+type contentBlock struct {
+	marker      lipgloss.Style
+	glyph       string // ● (GlyphAgent) or $ (shell)
+	header      string // may contain "\n" (heredoc / multi-statement)
+	rows        []blockRow
+	maxBody     int                 // 0 = show all rows; >0 = show maxBody then collapse
+	collapseRen func(string) string // styling for the "… +N lines" row (nil = plainRender)
+}
+
+const (
+	// blockGutterHead prefixes a content block's FIRST body row (the tree
+	// elbow); blockGutterCont prefixes every continuation row. These are the
+	// exact indents the collapsed tool tree has always used, so the three
+	// unified blocks stay byte-identical to the tool block's original shape.
+	blockGutterHead = "   └ "
+	blockGutterCont = "     "
+)
+
+// renderBlock renders a [contentBlock] to its display lines: the marker+header
+// (split per physical line by [styledMarkerLines], so a heredoc header still
+// counts one slice entry per row for the height accounting), then the └-gutter
+// body. Each shown row is render(prefix+text) — the WHOLE prefixed row is
+// styled, gutter included — reproducing the tool block's original
+// styleBody("   └ "+…). With maxBody>0 the body shows maxBody rows then a
+// single "… +N lines" collapse row; maxBody==0 shows every row (shell output
+// is byte-bounded already, so it is never collapsed — the user needs to
+// select/copy it whole). Empty rows renders the header alone.
+func (m Model) renderBlock(b contentBlock) []string {
+	lines := styledMarkerLines(b.marker, b.glyph, b.header, plainRender)
+
+	shown := b.rows
+	collapsed := b.maxBody > 0 && len(b.rows) > b.maxBody
+	if collapsed {
+		shown = b.rows[:b.maxBody]
+	}
+	for i, row := range shown {
+		prefix := blockGutterCont
+		if i == 0 {
+			prefix = blockGutterHead
+		}
+		render := row.render
+		if render == nil {
+			render = plainRender
+		}
+		lines = append(lines, render(prefix+row.text))
+	}
+	if collapsed {
+		ren := b.collapseRen
+		if ren == nil {
+			ren = plainRender
+		}
+		extra := len(b.rows) - b.maxBody
+		lines = append(lines, ren(blockGutterCont+fmt.Sprintf("… +%d lines", extra)))
+	}
+	return lines
+}
+
 // renderToolLines renders a tool call as a collapsed tree block: a header
 // line, then — once the call has finished with a non-empty result — up to
 // three tree-indented result lines, collapsing any remainder into a single
 // "… +N lines" line. Marker-only styled: running is yellow, done is green, a
 // failed call's marker is red like a session error — the muted body is what
-// de-emphasizes the noisy output, not a softer header color.
+// de-emphasizes the noisy output, not a softer header color. It is one caller
+// of the shared [Model.renderBlock] grammar.
 func (m Model) renderToolLines(it item) []string {
 	style := m.theme.WarnStyle() // running = yellow
 	failed := false
@@ -1361,15 +1435,14 @@ func (m Model) renderToolLines(it item) []string {
 		header = fmt.Sprintf("%s(%s)", it.toolName, summary)
 	}
 	header = attributeHeader(header, it.toolAgent)
-	// A multi-line command (a heredoc, an inline multi-statement script) is a
-	// literal "\n" inside summary, not a rare shape for a bash tool call —
-	// styledMarkerLines splits it the same way the transcript's own text
-	// items are split above, for the same avail/scrollTail height-accounting
-	// reason (see its doc).
-	lines := styledMarkerLines(style, m.theme.GlyphAgent, header, plainRender)
 
+	// A multi-line command (a heredoc, an inline multi-statement script) is a
+	// literal "\n" inside the header — styledMarkerLines (via renderBlock)
+	// splits it the same way the transcript's own text items are split, for
+	// the same avail/scrollTail height-accounting reason (see its doc). Before
+	// the call finishes there is no body to render, so emit the header alone.
 	if !it.done || it.toolResult == "" {
-		return lines
+		return styledMarkerLines(style, m.theme.GlyphAgent, header, plainRender)
 	}
 
 	styleBody := func(s string) string {
@@ -1380,27 +1453,25 @@ func (m Model) renderToolLines(it item) []string {
 	}
 
 	resultLines := strings.Split(it.toolResult, "\n")
-	lines = append(lines, styleBody("   └ "+resultLines[0]))
-	const maxExtra = 2
-	shown := 1
-	for _, l := range resultLines[1:] {
-		if shown >= 1+maxExtra {
-			break
-		}
-		lines = append(lines, styleBody("     "+l))
-		shown++
+	rows := make([]blockRow, len(resultLines))
+	for i, l := range resultLines {
+		rows[i] = blockRow{text: l, render: styleBody}
 	}
-	if extra := len(resultLines) - shown; extra > 0 {
-		lines = append(lines, styleBody(fmt.Sprintf("     … +%d lines", extra)))
-	}
-	return lines
+	return m.renderBlock(contentBlock{
+		marker:      style,
+		glyph:       m.theme.GlyphAgent,
+		header:      header,
+		rows:        rows,
+		maxBody:     3,
+		collapseRen: styleBody,
+	})
 }
 
 // renderBackgroundAgentLines renders the background-agents block: a header
 // counting the sessions this one spawned, then one tree-indented line per
-// child naming it and the agent it runs as. It reuses the tool block's "   └ "
-// / "     " body indent so a reader recognizes the shape without learning a
-// second one.
+// child naming it and the agent it runs as. It goes through the shared
+// [Model.renderBlock] grammar, so it wears the tool block's "   └ " / "     "
+// gutter without re-deriving it.
 //
 // The marker is accent-styled, not one of the state colors: this block reports
 // no state of its own (its children each carry their own, on their own roster
@@ -1411,7 +1482,7 @@ func (m Model) renderBackgroundAgentLines(it item) []string {
 		return nil
 	}
 	header := fmt.Sprintf("%s launched (↓ to manage)", plural(len(it.spawned), "background agent"))
-	lines := []string{markerLine(m.theme.AccentStyle(), m.theme.GlyphAgent, header)}
+	rows := make([]blockRow, len(it.spawned))
 	for i, s := range it.spawned {
 		label := s.name
 		// A child whose name IS its agent id (an untitled session — see
@@ -1419,13 +1490,14 @@ func (m Model) renderBackgroundAgentLines(it item) []string {
 		if s.agent != "" && s.agent != s.name {
 			label += " · " + s.agent
 		}
-		indent := "     "
-		if i == 0 {
-			indent = "   └ "
-		}
-		lines = append(lines, indent+label)
+		rows[i] = blockRow{text: label}
 	}
-	return lines
+	return m.renderBlock(contentBlock{
+		marker: m.theme.AccentStyle(),
+		glyph:  m.theme.GlyphAgent,
+		header: header,
+		rows:   rows,
+	})
 }
 
 // renderShellRunLines renders one `!` / `!!` run (shell.go) as a transcript
@@ -1450,36 +1522,46 @@ func (m Model) renderShellRunLines(r shellRun) []string {
 	if !r.inContext {
 		marker = m.theme.MutedStyle() // a withheld run is de-emphasized
 	}
-	// styledMarkerLines splits a multi-line command (a heredoc, a pasted
-	// multi-statement script) the same way the transcript's text items split,
-	// for the same one-slice-entry-per-row height accounting (see its doc).
-	lines := styledMarkerLines(marker, "$", r.line, plainRender)
+	// The `$` glyph is kept (a meaningful shell affordance); only the └-gutter
+	// grammar is unified with the tool block via renderBlock. A multi-line
+	// command (a heredoc, a pasted multi-statement script) splits the same way
+	// the transcript's text items split, for the same one-slice-entry-per-row
+	// height accounting (see styledMarkerLines' doc).
+	block := contentBlock{marker: marker, glyph: "$", header: r.line}
+
+	muted := func(s string) string { return m.theme.MutedStyle().Render(s) }
+	danger := func(s string) string { return m.theme.DangerStyle().Render(s) }
 
 	if !r.done {
-		return append(lines, m.theme.MutedStyle().Render("  running…"))
+		block.rows = []blockRow{{text: "running…", render: muted}}
+		return m.renderBlock(block)
 	}
 
+	var rows []blockRow
 	// A command that printed nothing (or only trailing newlines) adds no blank
 	// output row — TrimRight collapses that to "" so the loop is skipped
 	// entirely, rather than emitting a lone indented empty line.
 	if body := strings.TrimRight(r.output, "\n"); body != "" {
 		for _, l := range strings.Split(body, "\n") {
-			lines = append(lines, "  "+l)
+			rows = append(rows, blockRow{text: l})
 		}
 	}
 	switch {
 	case r.note != "":
-		lines = append(lines, m.theme.DangerStyle().Render("  "+r.note))
+		rows = append(rows, blockRow{text: r.note, render: danger})
 	case r.exitCode != 0:
-		lines = append(lines, m.theme.DangerStyle().Render(fmt.Sprintf("  exit %d", r.exitCode)))
+		rows = append(rows, blockRow{text: fmt.Sprintf("exit %d", r.exitCode), render: danger})
 	}
 	if r.truncated {
-		lines = append(lines, m.theme.MutedStyle().Render("  … output truncated"))
+		rows = append(rows, blockRow{text: "… output truncated", render: muted})
 	}
 	if disp := r.blockDisposition(); disp != "" {
-		lines = append(lines, m.theme.MutedStyle().Render("  · "+disp))
+		rows = append(rows, blockRow{text: "· " + disp, render: muted})
 	}
-	return lines
+	block.rows = rows
+	// maxBody stays 0: shell output is byte-bounded already, and the user
+	// needs to select/copy it whole — do NOT collapse it.
+	return m.renderBlock(block)
 }
 
 // statusLine reports the turn's token usage and cost once TurnFinished has

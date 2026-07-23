@@ -162,7 +162,7 @@ func TestSelectionCoversShellBlock(t *testing.T) {
 		switch ansi.Strip(l) {
 		case "$ ls -la":
 			cmdRow = i
-		case "  file1.txt":
+		case "   └ file1.txt": // first output row now wears the └-gutter (renderBlock)
 			outRow = i
 		}
 	}
@@ -180,8 +180,9 @@ func TestSelectionCoversShellBlock(t *testing.T) {
 	}
 
 	// (b) selectedText over the output row returns the shell output text.
-	// "  file1.txt": cols 0-1 are the indent, "file1.txt" spans cols 2-10.
-	a.sel = &selectionState{startX: 2, startY: outRow, curX: 10, curY: outRow}
+	// "   └ file1.txt": cols 0-4 are the "   └ " gutter, "file1.txt" spans
+	// cols 5-13.
+	a.sel = &selectionState{startX: 5, startY: outRow, curX: 13, curY: outRow}
 	if got := a.selectedText(); got != "file1.txt" {
 		t.Errorf("selectedText over the shell block = %q, want %q", got, "file1.txt")
 	}

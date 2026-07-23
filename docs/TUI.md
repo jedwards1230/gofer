@@ -829,6 +829,22 @@ three transcript renderers (`View`, `TailView`, `FullTranscript`) share one
 `transcriptLines` helper that flattens every item to its lines — with the gaps
 between — before width-truncating and height-windowing.
 
+**One block renderer.** The tool call, the background-agents summary, and a
+`!`/`!!` shell run all render through a single `Model.renderBlock` (model.go) —
+the one place the Claude-Code tool-block grammar lives: a marker glyph +
+header, then a `└`-gutter body (`   └ ` on the first row, `     ` on every
+continuation) with an optional `… +N lines` collapse. A `contentBlock`
+describes one block (marker style, glyph, header, per-row-styled `blockRow`s,
+and an optional `maxBody` collapse budget); each caller builds one and hands it
+over, so the shell block adopts the same `└` gutter the tool tree always had
+(only its `$` glyph stays, a meaningful shell affordance). Shell output is
+byte-bounded already and the user needs to select/copy it whole, so it sets
+`maxBody = 0` and never collapses; the tool block keeps `maxBody = 3`. Because
+every block built through `renderBlock` is an ordinary transcript item, it lands
+inside `App.transcriptRegion` and is therefore drag-selectable and
+OSC 52-copyable for free — a future tool-style block gets the grammar *and* its
+selection participation with no extra wiring.
+
 ## Two trees, one renderer
 
 The **fan-out tree** (subagents within a session — who is working) and the
