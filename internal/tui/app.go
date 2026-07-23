@@ -645,21 +645,25 @@ func (a App) promptModel() Model {
 }
 
 // attachModel is the FULLY composed attach model — the config-plumbed
-// [App.promptModel] plus the two render-local blocks the attach screen appends
-// to the transcript (the background-agents roster fact and the `!`/`!!` shell
-// runs) and the shell-mode queue label. It is the single definition both
-// [App.render] (to draw the frame) and [App.transcriptRegion] (to measure which
-// rows a mouse selection may paint) go through, so the two can never disagree
-// about how many rows the transcript has: before this helper, render drew the
-// shell/background blocks but transcriptRegion measured the bare a.sess without
-// them, so those tail blocks rendered below the computed selectable region and
-// could not be selected or copied. Measuring and drawing through one model is
-// what closes that gap.
+// [App.promptModel] plus the render-local blocks the attach screen appends to
+// the transcript (the background-agents roster fact, the `!`/`!!` shell runs,
+// and the turn-in-flight thinking indicator) and the shell-mode queue label. It
+// is the single definition both [App.render] (to draw the frame) and
+// [App.transcriptRegion] (to measure which rows a mouse selection may paint) go
+// through, so the two can never disagree about how many rows the transcript has:
+// before this helper, render drew the shell/background blocks but
+// transcriptRegion measured the bare a.sess without them, so those tail blocks
+// rendered below the computed selectable region and could not be selected or
+// copied. Measuring and drawing through one model is what closes that gap.
+//
+// WithThinking is appended LAST so the indicator sits below the shell/background
+// blocks at the very tail, and so both consumers count the same extra row.
 func (a App) attachModel() Model {
 	return a.promptModel().
 		WithBackgroundAgents(a.over.Children(a.sessID)).
 		WithShellRuns(a.shellRuns).
-		WithShellQueue(a.shellQueue)
+		WithShellQueue(a.shellQueue).
+		WithThinking()
 }
 
 // currentSessionInfo returns the roster snapshot for whichever session is

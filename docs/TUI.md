@@ -1786,6 +1786,13 @@ input — and it is **leading-only**, so `that worked!` and
     ack (`shellRun.shellRunStatus`, overview/peek, where a `!` still folds into
     the create/send that follows) keeps saying `sent with your next message` —
     there the fold has not happened yet.
+- **Thinking indicator** (`Model.WithThinking`, model.go). A turn in flight shows
+  a muted `⋯ working…` at the transcript tail; a queued shell command shows
+  nothing — the absence of the indicator means nothing is pending. It is derived
+  from `Model.turnActive` (set on `event.TurnStarted`, cleared on `TurnFinished`
+  / `SessionError`) and suppressed while an approval or decision prompt owns the
+  footer (that is "awaiting you", not "working"). Composed render-local and last
+  in `App.attachModel`, so it never enters the durable transcript.
 - **`@` file mention** (filemention.go). Typing `@` at a token boundary opens
   the same popup the slash commands use, sourced from the paths under the
   session's cwd — `git ls-files` inside a repository (which is what makes it
