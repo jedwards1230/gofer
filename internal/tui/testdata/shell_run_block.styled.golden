@@ -1,13 +1,13 @@
-<accent>$</accent> git status --short
+<accent>!</accent> git status --short
    └  M internal/tui/app.go
      ?? internal/tui/shell.go
 
-<muted>$</muted> cat missing.txt
+<yellow>!!</yellow> cat missing.txt
    └ cat: missing.txt: No such file or directory
 <red>     exit 1</red>
-<muted>     · not sent to the agent</muted>
 
-
+<accent>!</accent> false
+<red>   └ exit 1</red>
 
 
 

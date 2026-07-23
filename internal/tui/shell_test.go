@@ -339,10 +339,11 @@ func TestDispatchInputRoutesBySigil(t *testing.T) {
 }
 
 // TestGoldenShellRunBlock pins the transcript block a completed `!` / `!!` run
-// renders as: a `$ command` header, the output, the outcome, and the muted
-// disposition line — the not-sent marker on the `!!` run being the whole point
-// of the redesign. Rendered through the Model transcript the same way every
-// other block is, so the block reads as part of the conversation.
+// renders as (round-5): the sigil as the marker (`!` / `!!`, distinct colors),
+// the command header, output under the `└` gutter, and an `exit N` line iff the
+// exit was non-zero — no `$`, no `· not sent to the agent` text (the `!!` marker
+// carries that signal now). Rendered through the Model transcript the same way
+// every other block is, so the block reads as part of the conversation.
 func TestGoldenShellRunBlock(t *testing.T) {
 	m := shellRunModel(theme.Test())
 	got := m.View(testkit.Width, testkit.Height)
@@ -362,11 +363,15 @@ func shellRunModel(th theme.Theme) Model {
 	ok := finishedRun(1, "git status --short", " M internal/tui/app.go\n?? internal/tui/shell.go", true)
 	failed := finishedRun(2, "cat missing.txt", "cat: missing.txt: No such file or directory", false)
 	failed.exitCode = 1
-	return New(th).WithShellRuns([]shellRun{ok, failed})
+	// A `!` run that exits non-zero with NO output — covers the bare `└ exit 1`
+	// outcome line (round-5): the exit line renders iff the code is non-zero.
+	exitOnly := finishedRun(3, "false", "", true)
+	exitOnly.exitCode = 1
+	return New(th).WithShellRuns([]shellRun{ok, failed, exitOnly})
 }
 
-// TestGoldenShellRunRunning pins the in-flight render: a `$ command` header and
-// a muted "running…" line, no output or disposition yet.
+// TestGoldenShellRunRunning pins the in-flight render: the sigil marker + command
+// header (`! make test`) and a muted "running…" line, no output or outcome yet.
 func TestGoldenShellRunRunning(t *testing.T) {
 	m := New(theme.Test()).WithShellRuns([]shellRun{{seq: 1, line: "make test", inContext: true}})
 	testkit.AssertGolden(t, "shell_run_running", m.View(testkit.Width, testkit.Height))
@@ -431,104 +436,32 @@ func TestWithShellRunsDegenerateSizes(t *testing.T) {
 	}
 }
 
-// TestShellModeLabel pins the reply-now mode-indicator chip: a `!` buffer
-// ALWAYS spells out its disposition and the ctrl+r toggle (never a bare
-// "shell"), so the mode is discoverable before the run; `!!` keeps its own
-// not-sent chip; a non-shell buffer stays blank.
-func TestShellModeLabel(t *testing.T) {
-	tests := []struct {
-		buf  string
-		want string
-	}{
-		{"", ""},
-		{"do a thing", ""},
-		{"/status", ""},
-		{"!", "shell · enter runs + replies · ctrl+r to queue"},
-		{"!ls -la", "shell · enter runs + replies · ctrl+r to queue"},
-		{"!!", "shell · not sent"},
-		{"!!cat secret.txt", "shell · not sent"},
-	}
-	for _, tt := range tests {
-		if got := shellModeLabel(tt.buf, false); got != tt.want {
-			t.Errorf("shellModeLabel(%q, false) = %q, want %q", tt.buf, got, tt.want)
-		}
-	}
-}
+// TestShellMarkerDistinctAndDisplayOnly is the round-5 SAFETY guard: the sigil
+// is the block marker, and a `!!` (private) run's marker must be visually
+// UNMISTAKABLE apart from a `!` run's — a distinct glyph AND a distinct color —
+// because that marker is now the only at-a-glance "the agent can't see this"
+// signal (the `· not sent to the agent` text line is gone). The glyph is derived
+// from r.inContext only, never from what composePrompt actually sends.
+func TestShellMarkerDistinctAndDisplayOnly(t *testing.T) {
+	m := New(testkit.ColorTheme()) // real colors, so the styles emit distinct SGR
 
-// TestShellModeLabelQueueMode pins the queue-mode chip: a `!` buffer spells out
-// the queue disposition and the ctrl+r toggle back to reply while queue mode is
-// on, `!!` is unaffected (never sent regardless), and a non-shell buffer stays
-// blank.
-func TestShellModeLabelQueueMode(t *testing.T) {
-	tests := []struct {
-		buf  string
-		want string
-	}{
-		{"", ""},
-		{"do a thing", ""},
-		{"!", "shell · queue · enter stacks · ctrl+r to reply"},
-		{"!ls -la", "shell · queue · enter stacks · ctrl+r to reply"},
-		{"!!", "shell · not sent"},
-		{"!!cat secret.txt", "shell · not sent"},
-	}
-	for _, tt := range tests {
-		if got := shellModeLabel(tt.buf, true); got != tt.want {
-			t.Errorf("shellModeLabel(%q, true) = %q, want %q", tt.buf, got, tt.want)
-		}
-	}
-}
+	shared := shellRun{line: "ls", inContext: true}
+	private := shellRun{line: "cat secret", inContext: false}
 
-// TestShellModeLabelSurfacesModeAndToggle is the discoverability mutation guard:
-// each `!` label must NAME its own mode AND the ctrl+r toggle, and the two modes
-// must read differently. Flip the label source (reply-now emitting the queue
-// string or vice versa) and this goes red — the indicator must reflect the
-// ACTUAL mode, not just any non-empty chip.
-func TestShellModeLabelSurfacesModeAndToggle(t *testing.T) {
-	replyNow := shellModeLabel("!ls", false)
-	queue := shellModeLabel("!ls", true)
+	sg, ss := m.shellMarker(shared)
+	pg, ps := m.shellMarker(private)
 
-	if replyNow == queue {
-		t.Fatalf("reply-now and queue labels are identical (%q); the indicator does not reflect the mode", replyNow)
+	if sg != "!" {
+		t.Errorf("`!` run glyph = %q, want %q", sg, "!")
 	}
-	for _, s := range []string{replyNow, queue} {
-		if !strings.Contains(s, "ctrl+r") {
-			t.Errorf("label %q does not surface the ctrl+r toggle", s)
-		}
+	if pg != "!!" {
+		t.Errorf("`!!` run glyph = %q, want %q — the doubled sigil is the private-run marker", pg, "!!")
 	}
-	if !strings.Contains(replyNow, "replies") {
-		t.Errorf("reply-now label %q does not say it replies", replyNow)
-	}
-	if !strings.Contains(queue, "queue") {
-		t.Errorf("queue label %q does not name queue mode", queue)
-	}
-}
-
-// TestShellModeRulePlainOffShellMode is the byte-identity guard: a non-shell
-// buffer draws the exact full-width rule every input box always drew, so the
-// mode indicator adds nothing to the common case and churns no existing golden.
-func TestShellModeRulePlainOffShellMode(t *testing.T) {
-	for _, buf := range []string{"", "hello", "/status"} {
-		if got, want := shellModeRule(theme.Test(), testkit.Width, buf, false), strings.Repeat("─", testkit.Width); got != want {
-			t.Errorf("shellModeRule(%q) = %q, want the plain rule", buf, got)
-		}
-	}
-}
-
-// TestShellModeRuleLabelsShellMode is its twin: a `!` / `!!` buffer produces a
-// LABELED rule (the text signal that survives Ascii), same width as the plain
-// one so the frame arithmetic is unchanged.
-func TestShellModeRuleLabelsShellMode(t *testing.T) {
-	for _, tt := range []struct {
-		buf   string
-		label string
-	}{{"!ls", "shell"}, {"!!ls", "shell · not sent"}} {
-		got := shellModeRule(theme.Test(), testkit.Width, tt.buf, false)
-		if !strings.Contains(got, tt.label) {
-			t.Errorf("shellModeRule(%q) = %q, want it to carry the label %q", tt.buf, got, tt.label)
-		}
-		if w := len([]rune(got)); w != testkit.Width {
-			t.Errorf("shellModeRule(%q) width = %d, want %d — the labeled rule must not resize the frame", tt.buf, w, testkit.Width)
-		}
+	// Distinct color: the two marker styles must render the SAME text differently,
+	// so the private run is unmistakable even where the glyph width alone might be
+	// missed. Render a fixed probe through each style and require they differ.
+	if ss.Render("X") == ps.Render("X") {
+		t.Errorf("`!` and `!!` markers render identically (%q); the private run is not visually distinct", ss.Render("X"))
 	}
 }
 
@@ -670,37 +603,25 @@ func TestGoldenShellModeInputStyledSigil(t *testing.T) {
 	}
 }
 
-// TestShellRunBlockDisposition pins the block-only disposition: NEITHER a
-// reply-now NOR a queued `!` run carries a disposition line (round-4 dropped the
-// `queued` label — a queued run should say nothing). Only a `!!` run keeps "not
-// sent to the agent" — a safety fact, not a mode label.
-func TestShellRunBlockDisposition(t *testing.T) {
-	replyNow := finishedRun(1, "echo hi", "hi", true) // queued == false
-	queued := finishedRun(2, "echo hi", "hi", true)
-	queued.queued = true
-	withheld := finishedRun(3, "cat s", "x", false)
-
-	if got := replyNow.blockDisposition(); got != "" {
-		t.Errorf("reply-now `!` blockDisposition = %q, want empty", got)
+// TestShellRunBlockNoDispositionLine is the round-5 assertion: no shell block
+// prints a `· not sent to the agent` disposition TEXT line anymore — the sigil
+// marker carries the private-run signal now (see TestShellMarkerDistinctAndDisplayOnly).
+// The proof that the signal MOVED rather than vanished: the `!!` run's block
+// leads with the `!!` sigil marker, and the `!` run's with a single `!`.
+func TestShellRunBlockNoDispositionLine(t *testing.T) {
+	private := finishedRun(1, "cat secret", "x", false) // !! run
+	out := New(theme.Test()).WithShellRuns([]shellRun{private}).View(testkit.Width, testkit.Height)
+	if strings.Contains(out, "not sent to the agent") {
+		t.Errorf("round-5 removed the disposition TEXT line, but the block still prints it:\n%s", out)
 	}
-	if got := queued.blockDisposition(); got != "" {
-		t.Errorf("queued `!` blockDisposition = %q, want empty (round-4 dropped the label)", got)
-	}
-	if got := withheld.blockDisposition(); got != "not sent to the agent" {
-		t.Errorf("`!!` blockDisposition = %q, want %q", got, "not sent to the agent")
+	if !strings.Contains(out, "!! cat secret") {
+		t.Errorf("`!!` run block does not lead with the `!!` sigil marker:\n%s", out)
 	}
 
-	// In the rendered transcript: neither reply-now nor queued shows a `·`
-	// disposition line; only `!!` does.
-	for _, r := range []shellRun{replyNow, queued} {
-		out := New(theme.Test()).WithShellRuns([]shellRun{r}).View(testkit.Width, testkit.Height)
-		if strings.Contains(out, "·") {
-			t.Errorf("`!` shell block (queued=%v) rendered a disposition line:\n%s", r.queued, out)
-		}
-	}
-	held := New(theme.Test()).WithShellRuns([]shellRun{withheld}).View(testkit.Width, testkit.Height)
-	if !strings.Contains(held, "· not sent to the agent") {
-		t.Errorf("`!!` shell block missing `· not sent to the agent`:\n%s", held)
+	shared := finishedRun(2, "echo hi", "hi", true)
+	out2 := New(theme.Test()).WithShellRuns([]shellRun{shared}).View(testkit.Width, testkit.Height)
+	if !strings.Contains(out2, "! echo hi") {
+		t.Errorf("`!` run block does not lead with the `!` sigil marker:\n%s", out2)
 	}
 }
 

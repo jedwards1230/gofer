@@ -195,7 +195,7 @@ func TestSelectionCoversShellBlock(t *testing.T) {
 	cmdRow, outRow := -1, -1
 	for i, l := range lines {
 		switch ansi.Strip(l) {
-		case "$ ls -la":
+		case "! ls -la":
 			cmdRow = i
 		case "   └ file1.txt": // first output row now wears the └-gutter (renderBlock)
 			outRow = i

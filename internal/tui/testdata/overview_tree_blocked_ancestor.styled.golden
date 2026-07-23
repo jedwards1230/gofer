@@ -20,5 +20,5 @@
 
 
 ────────────────────────────────────────────────────────────────────────────────
-❯ <muted>describe a task for a new session</muted>
+❯ <muted>describe a task for a new session · ! for shell mode</muted>
 <muted>enter open · space peek · tab toggle view · ctrl-x kill · ctrl-t stop agents</muted>

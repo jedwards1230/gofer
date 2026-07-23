@@ -107,7 +107,7 @@ func TestShellEscapeRendersInTheAttachTranscript(t *testing.T) {
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 
 	got := content(m)
-	for _, want := range []string{"$ cat payload.txt", shellPayload} {
+	for _, want := range []string{"! cat payload.txt", shellPayload} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("attach transcript missing %q:\n%s", want, got)
 		}
@@ -150,8 +150,9 @@ func TestShellEscapeReplyNowFiresATurn(t *testing.T) {
 }
 
 // TestDoubleBangRendersNotSentInTheTranscript: a `!!` run shows in the thread
-// too, but marked as withheld — the reader can tell at a glance the agent
-// cannot see it, which is the legibility half of the `!!` contract.
+// too, led by the `!!` sigil marker — the reader can tell at a glance the agent
+// cannot see it (round-5 moved that signal from a text line to the marker), which
+// is the legibility half of the `!!` contract.
 func TestDoubleBangRendersNotSentInTheTranscript(t *testing.T) {
 	sup := newFakeSup(tui.GoldenRoster())
 	m := shellApp(t, sup)
@@ -164,8 +165,10 @@ func TestDoubleBangRendersNotSentInTheTranscript(t *testing.T) {
 	if !strings.Contains(got, shellWithheld) {
 		t.Fatalf("expected the `!!` output shown to the operator in the transcript:\n%s", got)
 	}
-	if !strings.Contains(got, "not sent to the agent") {
-		t.Fatalf("expected the `!!` run marked not-sent in the transcript:\n%s", got)
+	// The private-run signal is the `!!` sigil marker leading the block, not a
+	// text line (round-5 removed `· not sent to the agent`).
+	if !strings.Contains(got, "!! cat secret.txt") {
+		t.Fatalf("expected the `!!` run led by the `!!` sigil marker in the transcript:\n%s", got)
 	}
 }
 

@@ -1738,54 +1738,45 @@ input — and it is **leading-only**, so `that worked!` and
   permission/approval path — the user typed it themselves, and nothing the
   model emits can reach it.
 
-  **Presentation (the UX rework).** Three things make the escape legible:
-  - **Mode indicator.** While a `!` / `!!` command is being *typed*, both
-    text-entry surfaces flag shell mode — the input box's top framing rule
-    becomes an accented, labeled rule that always spells out the live
-    disposition AND the ctrl+r toggle: `── shell · enter runs + replies · ctrl+r
-    to queue ──` for a reply-now `!`, `── shell · queue · enter stacks · ctrl+r
-    to reply ──` for a `!` in queue mode, `── shell · not sent ──` for `!!`
-    (exempt — never sent, so it carries no reply/queue wording). Spelling the
-    mode and the key in *both* states is the discoverability fix: reply-now used
-    to render a bare `── shell ──` with no hint the mode was a choice or that
-    ctrl+r existed. The prompt glyph goes accent, the leading `!` / `!!` **sigil
-    in the buffer** itself goes accent, and a single **display-only space**
-    separates the sigil from the command (`! ls docs`, not `!ls docs`), so the
-    sigil reads apart from what is being entered (`shellModeRule` /
-    `shellPromptGlyph` / `shellInputLine`, asks #1 + #3). The space is present
-    from the first keystroke — a bare `!` renders `! ▏`, not `!▏` — and is
-    rendering only: `parseShellEscape` reads the buffer, not this line, so `!ls`
-    and `! ls` run byte-identical commands. The label is TEXT, not just color, so it
-    reads under the Ascii golden profile; it clears the instant the `!` prefix
-    stops applying. A non-shell buffer draws the plain rule and the plain input
-    line byte-for-byte as before, so no existing golden churns. (At a terminal
-    too narrow for the full label the rule degrades to a plain accented rule.)
+  **Presentation — the sigil is the signal (round-5).** Three things make the
+  escape legible, all keyed on the `!` / `!!` sigil:
+  - **Input line.** While a `!` / `!!` command is being *typed*, the sigil IS
+    the prompt: the `> ` / `❯ ` glyph is dropped and the line starts with the
+    accented sigil (`!! rm -rf /tmp/scratch▏`), under a plain (unlabeled) framing
+    rule. A single **display-only space** separates the sigil from the command
+    (`! ls docs`, not `!ls docs`), present from the first keystroke — a bare `!`
+    renders `! ▏`. The space is rendering only: `parseShellEscape` reads the
+    buffer, not this line, so `!ls` and `! ls` run byte-identical commands
+    (`shellInputLine`, `inputLine`). A non-shell buffer keeps its `> ` / `❯ `
+    prompt byte-for-byte as before. The reply-now/queue mode has **no rule
+    label** (an earlier verbose `── shell · … ──` label was reverted): ctrl+r
+    still flips it (default `tui.shell_reply_mode`), and the tell is the thinking
+    indicator below — a reply fired vs. its absence (queued). The empty overview
+    dispatch bar carries a subtle `! for shell mode` discoverability hint so a
+    user learns the sigil before typing it.
   - **In the transcript, not a pane.** On the attach screen a run renders as a
     transcript block (`itemShellRun`, composed per frame by
     `Model.WithShellRuns` — the same render-local pattern the background-agents
-    block uses): a `$ command` header, the output, its outcome, and a muted
-    disposition line. It reads as part of the conversation rather than a
-    dismissible overlay below it. **Only unconsumed/running runs render**: once
-    `composePrompt` folds a `!` run into a prompt, its content arrives as the
-    echoed user message, so rendering the run too would duplicate it; a `!!`
-    run clears on consume for the same reason it was never in a prompt. So the
-    only shell blocks on screen are the ones a subsequent prompt will act on —
-    which is exactly why rendering them at the transcript TAIL is correct.
-    Screens with no transcript (the overview dispatch bar, peek) acknowledge a
-    finished run on the status line instead (`shellRun.shellRunStatus`); its
-    output surfaces in the thread the moment a session is created/attached and
-    the fold's user message lands.
-  - **Context disposition is visible.** The block LABELS its disposition only
-    for a `!!` run (`· not sent to the agent`) — a safety fact about where the
-    output went. A `!` run carries no disposition line either way: a reply-now
-    run is sent and answered the instant it finishes, and a queued run says
-    nothing (round-4 dropped the `· queued` label — a queued run needs no per-run
-    status). The label is read off `shellRun.inContext` for DISPLAY only;
-    `composePrompt` remains the SOLE decider of what reaches the model, so no
-    view change can move a byte in or out of context. The transcript-less status
-    ack (`shellRun.shellRunStatus`, overview/peek, where a `!` still folds into
-    the create/send that follows) keeps saying `sent with your next message` —
-    there the fold has not happened yet.
+    block uses): the **sigil as the block marker** (`! command` / `!! command`),
+    the output under the `└` gutter, and its outcome (`exit N` iff non-zero, a
+    timeout/failure note, a truncation marker). It reads as part of the
+    conversation rather than a dismissible overlay below it. **Only
+    unconsumed/running runs render**: once `composePrompt` folds a `!` run into a
+    prompt, its content arrives as the echoed user message, so rendering the run
+    too would duplicate it; a `!!` run clears on consume for the same reason it
+    was never in a prompt. Screens with no transcript (the overview dispatch bar,
+    peek) acknowledge a finished run on the status line instead
+    (`shellRun.shellRunStatus`).
+  - **Private-run signal is the marker.** A `!!` run's marker is a DISTINCT color
+    from a `!` run's — `!` accent, `!!` warn (`Model.shellMarker`) — and that,
+    with the doubled glyph, is the ONLY at-a-glance "the agent can't see this"
+    signal: there is no `· not sent to the agent` text line. Losing it would be a
+    safety regression, so the marker must stay unmistakable. The marker is read
+    off `shellRun.inContext` for DISPLAY only; `composePrompt` remains the SOLE
+    decider of what reaches the model, so no view change can move a byte in or out
+    of context. The transcript-less status ack (`shellRun.shellRunStatus`,
+    overview/peek) still spells `sent with your next message` / `not sent to the
+    agent` in words, since there is no marker there to carry it.
 - **Thinking indicator** (`Model.WithThinking`, model.go). A turn in flight shows
   a muted `⋯ working…` at the transcript tail; a queued shell command shows
   nothing — the absence of the indicator means nothing is pending. It is derived

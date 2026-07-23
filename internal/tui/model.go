@@ -189,13 +189,6 @@ type Model struct {
 	submitted    string
 	hasSubmitted bool
 
-	// shellQueue mirrors [App.shellQueue] for the render — it decides only the
-	// shell-mode rule's label ("shell" reply-now vs "shell · queue"), never any
-	// transcript content or measurement. [App.render] sets it per frame off the
-	// live App state (like approvalBodyLines), so a zero-value Model — every
-	// golden calling View directly — reads reply-now and churns no golden.
-	shellQueue bool
-
 	// turnActive reports whether a turn is in flight — the agent is generating a
 	// response. Set true on [event.TurnStarted], false on [event.TurnFinished]
 	// (and defensively on [event.SessionError], which ends the turn's work). It
@@ -578,17 +571,6 @@ func (m Model) WithShellRuns(runs []shellRun) Model {
 		items = append(items, item{kind: itemShellRun, done: r.done, shell: r})
 	}
 	m.items = items
-	return m
-}
-
-// WithShellQueue sets the reply-now/queue mode the shell-mode rule labels,
-// reallocating rather than mutating in place (Model's copy-on-write discipline).
-// [App.render]/[App.attachModel] call it with the live [App.shellQueue] so the
-// `── shell · queue ──` label tracks a ctrl+r toggle on the very next frame; it
-// touches no transcript content, so it is measurement-neutral (the transcript
-// region math in App.transcriptRegion is unaffected).
-func (m Model) WithShellQueue(queue bool) Model {
-	m.shellQueue = queue
 	return m
 }
 
@@ -1168,15 +1150,12 @@ func (m Model) view(width, height int, menuLines, headerLines []string, scroll i
 	if prompt := m.promptLines(width, height); prompt != nil {
 		footer = prompt
 	} else {
-		// The TOP framing rule doubles as the shell-mode indicator: when the
-		// buffer is a `!` / `!!` escape being typed it becomes an accented,
-		// labeled rule (shellModeRule), clearing the instant the prefix stops.
-		// The bottom rule stays plain — one labeled edge reads as a header for
-		// the box, two would read as a box drawn in the wrong color.
-		topRule := shellModeRule(m.theme, width, m.input.String(), m.shellQueue)
+		// Plain framing rules top and bottom (round-5 reverted the labeled
+		// shell-mode rule): shell mode is now signalled by the sigil leading the
+		// input line itself (see inputLine), not by a rule label.
 		rule := strings.Repeat("─", width)
 		footer = append(footer, menuLines...)
-		footer = append(footer, topRule, truncate(m.inputLine(), width), rule)
+		footer = append(footer, rule, truncate(m.inputLine(), width), rule)
 		// The status line carries only usage/cost now, and only once a turn has
 		// finished — omit it (no blank row) until then, so the box sits flush
 		// against the transcript.
@@ -1418,7 +1397,7 @@ type blockRow struct {
 // drag-selection + OSC 52 copy) for free.
 type contentBlock struct {
 	marker      lipgloss.Style
-	glyph       string // ● (GlyphAgent) or $ (shell)
+	glyph       string // ● (GlyphAgent) or the shell sigil (! / !!)
 	header      string // may contain "\n" (heredoc / multi-statement)
 	rows        []blockRow
 	maxBody     int                 // 0 = show all rows; >0 = show maxBody then collapse
@@ -1561,34 +1540,36 @@ func (m Model) renderBackgroundAgentLines(it item) []string {
 	})
 }
 
-// renderShellRunLines renders one `!` / `!!` run (shell.go) as a transcript
-// block: a `$ command` header, the command's output, its outcome (a non-zero
-// exit, a timeout/failure note, a truncation marker — each shown only when
-// there is something abnormal to say), and — only when there is one to state —
-// a muted disposition line ([shellRun.blockDisposition]). A reply-now `!` run
-// carries NO disposition line: it is sent and answered the instant it finishes,
-// so there is nothing pending to announce. A queued `!` run reads "queued" and
-// a `!!` run "not sent to the agent". Marker-only styled like every other
-// block: the `$` glyph carries the color (accent for a `!` run bound for the
-// model, muted for a withheld `!!` run), the body stays plain, and the
-// disposition is a TEXT line so a reader can tell a not-sent run under the Ascii
-// profile the goldens force, not only by color.
-//
-// The disposition is read off r.inContext/r.queued for DISPLAY only. What
-// reaches the model is [App.composePrompt]'s decision; this block moves no bytes
-// in or out of context, so a mislabeled run would be a cosmetic bug, never a
-// leak — the same structural split shell.go's package doc describes.
-func (m Model) renderShellRunLines(r shellRun) []string {
-	marker := m.theme.AccentStyle()
-	if !r.inContext {
-		marker = m.theme.MutedStyle() // a withheld run is de-emphasized
+// shellMarker is a run's block marker: the SIGIL is the marker (round-5) — `!`
+// for a run the agent will see, `!!` for a private run it never will — and the
+// two wear DISTINCT colors. This is load-bearing for safety: the `· not sent to
+// the agent` text line is gone, so the doubled glyph plus a distinct color is
+// now the ONLY at-a-glance signal that the agent cannot see a `!!` run. `!` is
+// accent (the ordinary "shared" sigil); `!!` is warn — attention-drawing and
+// unmistakably apart from `!`, not de-emphasized, because you do not mute your
+// only safety signal. Derived from r.inContext for DISPLAY only;
+// [App.composePrompt] remains the sole decider of what reaches the model.
+func (m Model) shellMarker(r shellRun) (glyph string, style lipgloss.Style) {
+	if r.inContext {
+		return "!", m.theme.AccentStyle()
 	}
-	// The `$` glyph is kept (a meaningful shell affordance); only the └-gutter
-	// grammar is unified with the tool block via renderBlock. A multi-line
-	// command (a heredoc, a pasted multi-statement script) splits the same way
-	// the transcript's text items split, for the same one-slice-entry-per-row
-	// height accounting (see styledMarkerLines' doc).
-	block := contentBlock{marker: marker, glyph: "$", header: r.line}
+	return "!!", m.theme.WarnStyle()
+}
+
+// renderShellRunLines renders one `!` / `!!` run (shell.go) as a transcript
+// block: the sigil marker + command header, the command's output under the
+// `└` gutter, and its outcome — a non-zero exit (`exit N`), a timeout/failure
+// note, or a truncation marker, each shown only when there is something
+// abnormal to say. A clean exit-0 run shows only its output; there is no
+// disposition line at all (round-5 dropped the `· not sent to the agent` text —
+// the `!!` marker carries that signal now, see [Model.shellMarker]).
+//
+// A multi-line command (a heredoc, a pasted multi-statement script) splits the
+// same way the transcript's text items split, for the same one-slice-entry-per-
+// row height accounting (see styledMarkerLines' doc).
+func (m Model) renderShellRunLines(r shellRun) []string {
+	glyph, marker := m.shellMarker(r)
+	block := contentBlock{marker: marker, glyph: glyph, header: r.line}
 
 	muted := func(s string) string { return m.theme.MutedStyle().Render(s) }
 	danger := func(s string) string { return m.theme.DangerStyle().Render(s) }
@@ -1616,9 +1597,6 @@ func (m Model) renderShellRunLines(r shellRun) []string {
 	if r.truncated {
 		rows = append(rows, blockRow{text: "… output truncated", render: muted})
 	}
-	if disp := r.blockDisposition(); disp != "" {
-		rows = append(rows, blockRow{text: "· " + disp, render: muted})
-	}
 	block.rows = rows
 	// maxBody stays 0: shell output is byte-bounded already, and the user
 	// needs to select/copy it whole — do NOT collapse it.
@@ -1641,13 +1619,16 @@ func (m Model) statusLine() string {
 	return m.theme.MutedStyle().Render(line)
 }
 
-// inputLine renders the input buffer with the cursor marker spliced in at
-// its actual position — mid-text when the cursor sits mid-buffer, not
-// always at the end. The prompt glyph goes accent while the buffer is a shell
-// escape (shellPromptGlyph), so the caret signals shell mode alongside the
-// labeled rule above it.
+// inputLine renders the input buffer with the cursor marker spliced in at its
+// actual position — mid-text when the cursor sits mid-buffer, not always at the
+// end. In shell mode the sigil IS the prompt: the `> ` glyph is dropped and the
+// line starts with the accented `!` / `!!` (round-5), so the sigil that triggers
+// shell mode is the leading signal. An ordinary prompt keeps `> `.
 func (m Model) inputLine() string {
-	return shellPromptGlyph(m.theme, ">", m.input.String()) + " " + shellInputLine(m.theme, m.input, "▏")
+	if strings.HasPrefix(m.input.String(), "!") {
+		return shellInputLine(m.theme, m.input, "▏")
+	}
+	return "> " + shellInputLine(m.theme, m.input, "▏")
 }
 
 // FullTranscript renders every transcript item unclipped by height, followed

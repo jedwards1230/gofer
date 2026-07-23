@@ -662,7 +662,6 @@ func (a App) attachModel() Model {
 	return a.promptModel().
 		WithBackgroundAgents(a.over.Children(a.sessID)).
 		WithShellRuns(a.shellRuns).
-		WithShellQueue(a.shellQueue).
 		WithThinking()
 }
 
@@ -1491,10 +1490,6 @@ func (a App) render() string {
 		body = a.attachModel().
 			ViewWithMenu(a.width, fl.h, fl.menuLines, attachHeaderLines(a.theme, a.over.meta, a.width), a.scroll)
 	default:
-		// The dispatch bar's shell-mode rule labels the live reply-now/queue
-		// mode; a.over is a local copy here (render's value receiver), so this
-		// tracks a ctrl+r toggle without mutating App's own overview state.
-		a.over.shellQueue = a.shellQueue
 		body = a.over.ViewWithMenu(a.width, fl.h, fl.menuLines, a.scroll, a.panel != nil)
 	}
 
