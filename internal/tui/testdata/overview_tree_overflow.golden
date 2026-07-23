@@ -10,5 +10,5 @@ claude-sonnet-5 · ~/orchestration
     worker-1                    Working · working          2m 0s · ↓ 2.0k tokens
 ↓ 4 more
 ────────────────────────────────────────────────────────────────────────────────
-❯ describe a task for a new session
+❯ describe a task for a new session · ! for shell mode
 enter open · space peek · tab toggle view · ctrl-x kill · ctrl-t stop agents

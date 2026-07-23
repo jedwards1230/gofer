@@ -554,16 +554,22 @@ func (o Overview) dispatch(width int, hide bool) []string {
 		return make([]string, dispatchH)
 	}
 
-	// The rule doubles as the shell-mode indicator, exactly as the attach
-	// input's does (shellModeRule): a `!` / `!!` buffer accents and labels it,
-	// anything else draws the plain full-width rule byte-for-byte as before.
-	rule := shellModeRule(o.theme, width, o.input.String(), o.shellQueue)
+	// Plain full-width rule (round-5 reverted the labeled shell-mode rule): shell
+	// mode is signalled by the sigil leading the input line, not a rule label.
+	rule := strings.Repeat("─", width)
 
 	var line string
-	if o.input.Empty() {
-		line = "❯ " + o.theme.MutedStyle().Render("describe a task for a new session")
-	} else {
-		line = shellPromptGlyph(o.theme, "❯", o.input.String()) + " " + shellInputLine(o.theme, o.input, "▏")
+	switch {
+	case o.input.Empty():
+		// The empty dispatch bar is the ordinary prompt where a new session
+		// starts, so it carries the `! for shell mode` discoverability hint (the
+		// only place a user can learn `!` opens shell mode before typing it).
+		line = "❯ " + o.theme.MutedStyle().Render("describe a task for a new session · ! for shell mode")
+	case strings.HasPrefix(o.input.String(), "!"):
+		// Shell mode: the sigil is the prompt — no `❯ ` glyph (round-5).
+		line = shellInputLine(o.theme, o.input, "▏")
+	default:
+		line = "❯ " + shellInputLine(o.theme, o.input, "▏")
 	}
 
 	hint := o.theme.MutedStyle().Render(o.hintText())

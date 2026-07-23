@@ -22,27 +22,25 @@ package tui
 // fixed at dispatch, not re-read later. `!!` ignores the toggle entirely: it is
 // never sent regardless, so reply-now vs queue only governs `!`.
 //
-// Presentation is legibility, never policy. A completed run renders INTO the
-// attach transcript as an [itemShellRun] block (composed per frame by
-// [Model.WithShellRuns], the same render-local pattern the background-agents
-// block uses), so the command and its output read as part of the conversation
-// rather than in a pane below it. The block LABELS its disposition only for a
-// `!!` run ("not sent to the agent") — a safety fact about where the output
-// went. A `!` run carries no line either way: a reply-now run is sent and
-// answered the moment it finishes, and a queued run says nothing (round-4
-// dropped the "queued" label). The label is read off
-// [shellRun.inContext] for display only; [App.composePrompt]
-// remains the SOLE decider of what actually reaches the model, so no view
-// change can move a byte in or out of context. While the buffer is still being
-// typed, both input surfaces flag shell mode ([shellModeRule],
-// [shellPromptGlyph], [shellInputLine]) with an accented, labeled framing rule
-// that clears the instant the `!` prefix stops. A `!` rule always spells out its
-// live reply-now/queue disposition AND the ctrl+r toggle that flips it, in both
-// states, so the mode is never a hidden setting; the startup default is
-// config.TUI.ShellReplyMode (ctrl+r flips it for the session). The `!` / `!!`
-// sigil is accented and a display-only space separates it from the command, so
-// the sigil reads apart from what is being typed — presentation only, never a
-// change to what [parseShellEscape] hands the shell.
+// Presentation is legibility, never policy — and the SIGIL is the signal
+// throughout (round-5). A completed run renders INTO the attach transcript as an
+// [itemShellRun] block (composed per frame by [Model.WithShellRuns], the same
+// render-local pattern the background-agents block uses), with the sigil as the
+// block's marker: `!` for a run the agent will see, `!!` for a private run it
+// never will, in DISTINCT colors ([Model.shellMarker]). That marker is the only
+// at-a-glance private-run signal — there is no `· not sent to the agent` text
+// line — so a `!!` run must read unmistakably apart from a `!`. The marker is
+// derived from [shellRun.inContext] for display only; [App.composePrompt]
+// remains the SOLE decider of what actually reaches the model, so no view change
+// can move a byte in or out of context. While the buffer is still being typed,
+// the sigil leads the input line itself ([shellInputLine]) — no `> ` / `❯ `
+// prompt glyph and a plain (unlabeled) framing rule — with the `!` / `!!`
+// accented and a display-only space separating it from the command, so the sigil
+// reads apart from what is being typed. The reply-now/queue mode has no rule
+// label: ctrl+r still flips it (default config.TUI.ShellReplyMode), and the
+// thinking indicator (a reply fired) vs its absence (queued) is how the effect
+// reads. The sigil framing is presentation only, never a change to what
+// [parseShellEscape] hands the shell.
 //
 // NOT a tool call, and deliberately not routed through anything that resembles
 // one: this is the user running a command in their own terminal, at their own
@@ -64,7 +62,6 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/charmbracelet/x/ansi"
 
 	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
@@ -431,23 +428,6 @@ func (r shellRun) shellDispositionLabel() string {
 	return "not sent to the agent"
 }
 
-// blockDisposition is the transcript block's disposition label
-// ([Model.renderShellRunLines]) — narrower than [shellRun.shellDispositionLabel]
-// because on the attach screen a `!` run needs no line at all: reply-now is sent
-// and answered the instant it finishes, and a queued `!` run needs no per-run
-// status either (round-4 dropped the "queued" label — the user's call that a
-// queued run should say nothing). The ONLY block label that survives is `!!`'s
-// "not sent to the agent": that is a safety fact about where the output went,
-// not a mode label. Like every disposition here it is read off inContext for
-// DISPLAY only; [App.composePrompt] remains the sole decider of what reaches the
-// model.
-func (r shellRun) blockDisposition() string {
-	if !r.inContext {
-		return "not sent to the agent"
-	}
-	return ""
-}
-
 // shellRunStatus is the one-line acknowledgement a finished run posts on the
 // STATUS line — used only on screens with no transcript to render it into (the
 // overview, peek), so a `!` typed at the dispatch bar still gives feedback that
@@ -467,75 +447,6 @@ func (r shellRun) shellRunStatus() (statusSeverity, string) {
 	default:
 		return sevOK, "ran " + r.line + disp
 	}
-}
-
-// shellModeLabel is the chip the input surfaces show while a shell escape is
-// being TYPED (before it is run): "" when the buffer is not a shell escape, so
-// an ordinary prompt's input frame is byte-identical to what it always drew.
-//
-// A `!` buffer ALWAYS spells out its live reply-now/queue disposition and the
-// ctrl+r toggle that flips it, in BOTH states — never a bare "shell". That is
-// the discoverability fix: reply-now used to render an unlabeled "shell" with no
-// hint the mode was a choice or that ctrl+r existed, so a user could not find
-// the setting at all (the `· queue` half only appeared once they had already
-// flipped it). Now reply-now reads "shell · enter runs + replies · ctrl+r to
-// queue" and queue reads "shell · queue · enter stacks · ctrl+r to reply", so
-// both the current mode and the way to change it are visible before the run.
-//
-// `!!` is exempt: it is never sent regardless of the toggle, so it keeps its
-// own "shell · not sent" chip with no reply/queue wording (the toggle would be
-// a lie there). The label is TEXT (it survives the Ascii golden profile); the
-// accent is the color-only layer shellModeRule adds on top.
-func shellModeLabel(buf string, queue bool) string {
-	if !strings.HasPrefix(buf, "!") {
-		return ""
-	}
-	if strings.HasPrefix(buf, "!!") {
-		return "shell · not sent"
-	}
-	if queue {
-		return "shell · queue · enter stacks · ctrl+r to reply"
-	}
-	return "shell · enter runs + replies · ctrl+r to queue"
-}
-
-// shellModeRule renders the input box's top framing rule, labeled and accented
-// when buf is a shell escape and the plain full-width rule otherwise. Both
-// text-entry surfaces (the overview dispatch bar, the attach input) call it in
-// place of their own `strings.Repeat("─", width)`, so shell mode reads the
-// same wherever a command is typed. The label is TEXT, not just color, so it
-// survives the Ascii profile the golden tests force (this TUI's
-// "state reads without color" rule); the accent is the color-only layer a
-// styled golden pins on top.
-func shellModeRule(th theme.Theme, width int, buf string, queue bool) string {
-	if width < 1 {
-		width = 1
-	}
-	label := shellModeLabel(buf, queue)
-	if label == "" {
-		return strings.Repeat("─", width)
-	}
-	// "── <label> " then fill the remainder with rule, to exactly width cells
-	// before styling (styling adds ANSI but no visible width). A width too
-	// narrow for the label degrades to a plain accented rule rather than
-	// overflowing.
-	prefix := "── " + label + " "
-	if ansi.StringWidth(prefix) >= width {
-		return truncate(th.AccentStyle().Render(strings.Repeat("─", width)), width)
-	}
-	rule := prefix + strings.Repeat("─", width-ansi.StringWidth(prefix))
-	return truncate(th.AccentStyle().Render(rule), width)
-}
-
-// shellPromptGlyph renders a text-entry surface's prompt glyph (the overview's
-// "❯", the attach input's ">"), accented while the buffer is a shell escape so
-// the caret itself signals shell mode alongside the labeled rule above it. A
-// non-shell buffer returns the bare glyph, unstyled, exactly as before.
-func shellPromptGlyph(th theme.Theme, glyph, buf string) string {
-	if strings.HasPrefix(buf, "!") {
-		return th.AccentStyle().Render(glyph)
-	}
-	return glyph
 }
 
 // shellInputLine renders buf the way [inputBuffer.Render] does — runes,

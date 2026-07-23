@@ -1,13 +1,13 @@
-$ git status --short
+! git status --short
    └  M internal/tui/app.go
      ?? internal/tui/shell.go
 
-$ cat missing.txt
+!! cat missing.txt
    └ cat: missing.txt: No such file or directory
      exit 1
-     · not sent to the agent
 
-
+! false
+   └ exit 1
 
 
 

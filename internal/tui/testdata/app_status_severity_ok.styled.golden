@@ -19,6 +19,6 @@
 
 
 ────────────────────────────────────────────────────────────────────────────────
-❯ <muted>describe a task for a new session</muted>
+❯ <muted>describe a task for a new session · ! for shell mode</muted>
 <muted>enter open · space peek · tab toggle view · ctrl-x kill · ? shortcuts</muted>
 <green>Default model set to Haiku 4.5.</green>
