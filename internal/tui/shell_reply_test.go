@@ -111,8 +111,9 @@ func TestDispatchShellCapturesQueueMode(t *testing.T) {
 	}
 }
 
-// TestCtrlRTogglesShellQueue proves the global binding flips shellQueue and
-// notes the mode both ways.
+// TestCtrlRTogglesShellQueue proves the global binding flips shellQueue both
+// ways and posts NO status note (round-4 dropped it — the shell-mode rule label
+// flip is the feedback, so a status line here was redundant noise).
 func TestCtrlRTogglesShellQueue(t *testing.T) {
 	a := NewApp(theme.Test(), newInternalFakeSup(GoldenRoster()), GoldenMeta(), GoldenCommandEnv())
 
@@ -124,8 +125,8 @@ func TestCtrlRTogglesShellQueue(t *testing.T) {
 	if !a2.shellQueue {
 		t.Error("ctrl+r did not enable queue mode")
 	}
-	if !strings.Contains(a2.status, "queue mode") {
-		t.Errorf("status = %q, want a queue-mode note", a2.status)
+	if a2.status != "" {
+		t.Errorf("status = %q, want empty — the rule label flip is the feedback, not a status note", a2.status)
 	}
 
 	next, _, _ = dispatchGlobalKey(a2, tea.Key{Code: 'r', Mod: tea.ModCtrl})
@@ -133,8 +134,8 @@ func TestCtrlRTogglesShellQueue(t *testing.T) {
 	if a3.shellQueue {
 		t.Error("a second ctrl+r did not return to reply mode")
 	}
-	if !strings.Contains(a3.status, "reply mode") {
-		t.Errorf("status = %q, want a reply-mode note", a3.status)
+	if a3.status != "" {
+		t.Errorf("status = %q, want empty on the way back too", a3.status)
 	}
 }
 

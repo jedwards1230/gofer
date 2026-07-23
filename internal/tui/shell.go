@@ -26,11 +26,12 @@ package tui
 // attach transcript as an [itemShellRun] block (composed per frame by
 // [Model.WithShellRuns], the same render-local pattern the background-agents
 // block uses), so the command and its output read as part of the conversation
-// rather than in a pane below it. The block LABELS its disposition only when
-// there is something to say — a queued `!` run as "queued", a `!!` run as "not
-// sent to the agent"; a reply-now `!` run carries no line, because it is sent
-// and answered the moment it finishes. But the label is read off
-// [shellRun.inContext]/[shellRun.queued] for display only; [App.composePrompt]
+// rather than in a pane below it. The block LABELS its disposition only for a
+// `!!` run ("not sent to the agent") — a safety fact about where the output
+// went. A `!` run carries no line either way: a reply-now run is sent and
+// answered the moment it finishes, and a queued run says nothing (round-4
+// dropped the "queued" label). The label is read off
+// [shellRun.inContext] for display only; [App.composePrompt]
 // remains the SOLE decider of what actually reaches the model, so no view
 // change can move a byte in or out of context. While the buffer is still being
 // typed, both input surfaces flag shell mode ([shellModeRule],
@@ -432,21 +433,19 @@ func (r shellRun) shellDispositionLabel() string {
 
 // blockDisposition is the transcript block's disposition label
 // ([Model.renderShellRunLines]) — narrower than [shellRun.shellDispositionLabel]
-// because on the attach screen a reply-now `!` run needs no line at all: it is
-// sent and answered the instant it finishes, so "sent with your next message"
-// would be both wrong and noise. Only the two runs that WAIT wear a label — a
-// queued `!` run ("queued") and a `!!` run ("not sent to the agent"). Like
-// every disposition here it is read off inContext/queued for DISPLAY only;
-// [App.composePrompt] remains the sole decider of what reaches the model.
+// because on the attach screen a `!` run needs no line at all: reply-now is sent
+// and answered the instant it finishes, and a queued `!` run needs no per-run
+// status either (round-4 dropped the "queued" label — the user's call that a
+// queued run should say nothing). The ONLY block label that survives is `!!`'s
+// "not sent to the agent": that is a safety fact about where the output went,
+// not a mode label. Like every disposition here it is read off inContext for
+// DISPLAY only; [App.composePrompt] remains the sole decider of what reaches the
+// model.
 func (r shellRun) blockDisposition() string {
-	switch {
-	case !r.inContext:
+	if !r.inContext {
 		return "not sent to the agent"
-	case r.queued:
-		return "queued"
-	default:
-		return ""
 	}
+	return ""
 }
 
 // shellRunStatus is the one-line acknowledgement a finished run posts on the
@@ -552,16 +551,20 @@ func shellPromptGlyph(th theme.Theme, glyph, buf string) string {
 // The gap is pure presentation. It is spliced into this rendered line only; it
 // never enters buf, and the submit path parses buf.String() ([parseShellEscape],
 // not this line), so `!ls` and `! ls` are byte-identical to the shell — the gap
-// changes what the operator SEES, never what runs. It is added only when a
-// command follows the sigil, so a bare `!` / `!!` gets no dangling trailing
-// space.
+// changes what the operator SEES, never what runs. It is ALWAYS present in
+// shell mode, including for a bare `!` / `!!` with no command yet: a freshly
+// typed `!` renders `! ▏`, so the space that separates the sigil from what comes
+// next is visible from the first keystroke rather than only appearing once a
+// command char is added (round-4 ask).
 //
 // The cursor glyph is spliced at its actual rune position and is never itself
-// accented — it is a separate caret, not part of the sigil — so a cursor
-// sitting before the `!`, between the two `!` of `!!`, or out in the command
-// text all render correctly: the sigil runes on either side of it keep the
-// accent, the caret does not, and the gap sits between the sigil (with its
-// caret, if any) and the command (with its caret, if any).
+// accented — it is a separate caret, not part of the sigil. The gap always sits
+// immediately after the sigil, and the caret at (or past) the sigil/command
+// boundary renders AFTER the gap, so `!` at the buffer end is `! ▏` and `!ls`
+// with the caret before `l` is `! ▏ls` — the caret marks the start of the
+// command, past the separator. A caret strictly inside the sigil (only reachable
+// between the two `!` of `!!`) keeps the sigil runes accented on either side of
+// it, with the gap still trailing the sigil.
 func shellInputLine(th theme.Theme, buf inputBuffer, cursorGlyph string) string {
 	s := buf.String()
 	if !strings.HasPrefix(s, "!") {
@@ -582,18 +585,18 @@ func shellInputLine(th theme.Theme, buf inputBuffer, cursorGlyph string) string 
 	}
 	plain := func(runes []rune) string { return displaySafe(string(runes)) }
 
-	// The display gap, present only when a command follows the sigil.
-	gap := ""
-	if len(r) > sigilLen {
-		gap = " "
-	}
+	// The display gap is always present in shell mode (round-4 ask): the bare
+	// `!` / `!!` case gets it too, so the separator shows before any command.
+	const gap = " "
 
-	// The cursor falls inside (or at an edge of) the sigil: accent the sigil
-	// runes on either side of the caret, then the gap, then the plain command.
-	if cur <= sigilLen {
+	// The caret is strictly inside the sigil (only reachable between the two `!`
+	// of `!!`): accent the sigil runes on either side of it, then the gap, then
+	// the plain command.
+	if cur < sigilLen {
 		return accent(r[:cur]) + cursorGlyph + accent(r[cur:sigilLen]) + gap + plain(r[sigilLen:])
 	}
-	// The cursor is out in the command text: the whole sigil is accented, the
-	// gap follows it, and the caret splices into the plain tail.
+	// The caret is at the sigil/command boundary or out in the command: the whole
+	// sigil is accented, the gap follows it, and the caret splices into the plain
+	// command tail — so a boundary caret lands after the gap (`! ▏`, `! ▏ls`).
 	return accent(r[:sigilLen]) + gap + plain(r[sigilLen:cur]) + cursorGlyph + plain(r[cur:])
 }

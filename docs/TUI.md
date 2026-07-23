@@ -1752,9 +1752,10 @@ input — and it is **leading-only**, so `that worked!` and
     in the buffer** itself goes accent, and a single **display-only space**
     separates the sigil from the command (`! ls docs`, not `!ls docs`), so the
     sigil reads apart from what is being entered (`shellModeRule` /
-    `shellPromptGlyph` / `shellInputLine`, asks #1 + #3). The space is rendering
-    only — `parseShellEscape` reads the buffer, not this line, so `!ls` and
-    `! ls` run byte-identical commands. The label is TEXT, not just color, so it
+    `shellPromptGlyph` / `shellInputLine`, asks #1 + #3). The space is present
+    from the first keystroke — a bare `!` renders `! ▏`, not `!▏` — and is
+    rendering only: `parseShellEscape` reads the buffer, not this line, so `!ls`
+    and `! ls` run byte-identical commands. The label is TEXT, not just color, so it
     reads under the Ascii golden profile; it clears the instant the `!` prefix
     stops applying. A non-shell buffer draws the plain rule and the plain input
     line byte-for-byte as before, so no existing golden churns. (At a terminal
@@ -1775,16 +1776,16 @@ input — and it is **leading-only**, so `that worked!` and
     output surfaces in the thread the moment a session is created/attached and
     the fold's user message lands.
   - **Context disposition is visible.** The block LABELS its disposition only
-    when there is something pending to say — `· queued` for a queued `!` run,
-    `· not sent to the agent` for a `!!` run. A reply-now `!` run carries no
-    disposition line at all: it is sent and answered the instant it finishes, so
-    there is nothing waiting to announce (its content then arrives as the echoed
-    user message). The label is read off `shellRun.inContext`/`shellRun.queued`
-    for DISPLAY only; `composePrompt` remains the SOLE decider of what reaches
-    the model, so no view change can move a byte in or out of context. The
-    transcript-less status ack (`shellRun.shellRunStatus`, overview/peek, where
-    a `!` still folds into the create/send that follows) keeps saying
-    `sent with your next message` — there the fold has not happened yet.
+    for a `!!` run (`· not sent to the agent`) — a safety fact about where the
+    output went. A `!` run carries no disposition line either way: a reply-now
+    run is sent and answered the instant it finishes, and a queued run says
+    nothing (round-4 dropped the `· queued` label — a queued run needs no per-run
+    status). The label is read off `shellRun.inContext` for DISPLAY only;
+    `composePrompt` remains the SOLE decider of what reaches the model, so no
+    view change can move a byte in or out of context. The transcript-less status
+    ack (`shellRun.shellRunStatus`, overview/peek, where a `!` still folds into
+    the create/send that follows) keeps saying `sent with your next message` —
+    there the fold has not happened yet.
 - **`@` file mention** (filemention.go). Typing `@` at a token boundary opens
   the same popup the slash commands use, sourced from the paths under the
   session's cwd — `git ls-files` inside a repository (which is what makes it
