@@ -57,6 +57,12 @@ const (
 	// transient — it stops rendering the moment [App.composePrompt] folds it
 	// into a prompt (see [Model.WithShellRuns]).
 	itemShellRun
+	// itemThinking is the transient "a turn is in flight" indicator at the
+	// transcript tail. Like the two above it is composed onto a render-local copy
+	// ([Model.WithThinking]), never ingested — it is derived from [Model.turnActive]
+	// and vanishes the instant the turn finishes, so it never belongs to the
+	// durable item list or the exit-flushed transcript.
+	itemThinking
 )
 
 // spawnedAgent is one child session named by an [itemBackgroundAgents] block:
@@ -189,6 +195,16 @@ type Model struct {
 	// live App state (like approvalBodyLines), so a zero-value Model — every
 	// golden calling View directly — reads reply-now and churns no golden.
 	shellQueue bool
+
+	// turnActive reports whether a turn is in flight — the agent is generating a
+	// response. Set true on [event.TurnStarted], false on [event.TurnFinished]
+	// (and defensively on [event.SessionError], which ends the turn's work). It
+	// is the backing state for the transcript's thinking indicator
+	// ([Model.WithThinking]); the broker retains TurnStarted as must-deliver, so
+	// attaching mid-turn replays it and the indicator shows correctly. A
+	// zero-value Model (every golden calling View directly) is idle, so no
+	// indicator renders and no existing golden churns.
+	turnActive bool
 }
 
 // New returns an empty Model rendering through th.
@@ -221,7 +237,13 @@ func (m Model) Ingest(e event.Event) Model {
 	m.toolAgents = toolAgents
 
 	switch ev := e.(type) {
+	case event.TurnStarted:
+		// A turn is now in flight — the agent is generating. Drives the thinking
+		// indicator ([Model.WithThinking]); no transcript item, just the flag.
+		m.turnActive = true
+
 	case event.TurnFinished:
+		m.turnActive = false
 		usage := ev.Usage
 		m.usage = &usage
 		m.cost = ev.Cost
@@ -307,6 +329,10 @@ func (m Model) Ingest(e event.Event) Model {
 		delete(m.toolAgents, ev.ID)
 
 	case event.SessionError:
+		// A turn that errors is no longer working: clear the thinking indicator
+		// so it can't stick "working…" on after a failure that emits no
+		// TurnFinished.
+		m.turnActive = false
 		m.items = append(m.items, item{kind: itemError, text: ev.Err, done: true})
 
 	case event.PermissionRequested:
@@ -563,6 +589,32 @@ func (m Model) WithShellRuns(runs []shellRun) Model {
 // region math in App.transcriptRegion is unaffected).
 func (m Model) WithShellQueue(queue bool) Model {
 	m.shellQueue = queue
+	return m
+}
+
+// WithThinking returns a copy of the model whose transcript ends with a muted
+// "⋯ working…" indicator when a turn is in flight ([Model.turnActive]) — the
+// "something is happening" signal for the gaps where nothing streams (before the
+// first token, while a tool runs). It renders IFF the turn is active AND no
+// approval/decision is pending: an approval commandeers the footer as "awaiting
+// YOU," which is the opposite of "working," so the indicator would be a lie
+// there (this is the load-bearing gate). Idle or pending returns the model
+// untouched, byte-for-byte, so a session between turns looks exactly as it did
+// before this indicator existed.
+//
+// Like [Model.WithShellRuns] it is a per-render composition appended LAST (below
+// the shell/background blocks), never an Ingest: the indicator is derived state
+// that must vanish the instant the turn finishes and must never enter the
+// durable item list or the exit-flushed transcript. Called last in
+// [App.attachModel] so both the frame draw and the mouse-selection measurement
+// account for the same tail row.
+func (m Model) WithThinking() Model {
+	if !m.turnActive || m.pending != nil || m.pendingDec != nil {
+		return m
+	}
+	items := make([]item, 0, len(m.items)+1)
+	items = append(items, m.items...)
+	m.items = append(items, item{kind: itemThinking, done: false})
 	return m
 }
 
@@ -1299,6 +1351,15 @@ func (m Model) renderItemLines(it item) []string {
 
 	case itemShellRun:
 		return m.renderShellRunLines(it.shell)
+
+	case itemThinking:
+		// Transient turn-in-flight indicator: a muted `⋯ working…`. Marker-only
+		// styling like every other block, but the text is muted too so the whole
+		// line reads as subdued chrome, not a message. "working" (not "thinking")
+		// because the turn may be running a tool, not only reasoning — a
+		// one-token swap if that preference changes.
+		muted := m.theme.MutedStyle()
+		return []string{markerLine(muted, "⋯", muted.Render("working…"))}
 
 	default: // itemAssistantText
 		// Same empty-guard as itemAssistantReasoning above: an assistant-text

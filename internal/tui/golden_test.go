@@ -89,6 +89,30 @@ func TestGoldenPlainTextTurn(t *testing.T) {
 	)
 }
 
+// TestGoldenThinkingIndicator locks the turn-in-flight indicator: a user
+// message, then TurnStarted with no reply yet (the pre-first-token gap), renders
+// a muted `⋯ working…` at the transcript tail. Composed through WithThinking the
+// way App.attachModel does, since the plain render path does not.
+func TestGoldenThinkingIndicator(t *testing.T) {
+	m := ingest(
+		event.NewMessageStarted(sid, event.MessageUser),
+		event.NewMessageFinished(sid, event.MessageUser, "Say hello."),
+		event.NewTurnStarted(sid),
+	).WithThinking()
+	testkit.AssertGolden(t, "thinking_indicator", testkit.Render(m, testkit.Width, testkit.Height))
+}
+
+// TestGoldenThinkingIndicatorStyled is its styled counterpart: the muted color
+// the Ascii golden can't distinguish from ordinary text.
+func TestGoldenThinkingIndicatorStyled(t *testing.T) {
+	m := ingestColor(
+		event.NewMessageStarted(sid, event.MessageUser),
+		event.NewMessageFinished(sid, event.MessageUser, "Say hello."),
+		event.NewTurnStarted(sid),
+	).WithThinking()
+	testkit.AssertGoldenStyled(t, "thinking_indicator", testkit.Render(m, testkit.Width, testkit.Height))
+}
+
 // TestGoldenUserAndAssistantTurn covers a full turn including the user's own
 // prompt: runner.Prompt publishes it as a MessageStarted/MessageFinished
 // {MessageUser} pair with no deltas (see event.MessageUser's doc), which
