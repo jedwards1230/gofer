@@ -104,6 +104,36 @@ func TestConsumedShellRunWithTypedText(t *testing.T) {
 	}
 }
 
+// TestIngestFoldQueueCopyOnWrite locks the copy-on-write invariant flagged in
+// review: Ingest pops the head fold for a stripped echo, and because Model is
+// value-copied per frame that pop must NOT reach through to a prior Model's
+// queue. Two children derived from one prior each see the pop; the prior sees
+// neither. Runs under `-race` in CI alongside the rest.
+func TestIngestFoldQueueCopyOnWrite(t *testing.T) {
+	const s = "sess-x"
+	prior := New(theme.Test()).
+		CommitShellRuns(nil, "$ a\n\n").
+		CommitShellRuns(nil, "$ b\n\n")
+	if len(prior.pendingEchoFolds) != 2 {
+		t.Fatalf("precondition: prior queue = %v, want 2 folds", prior.pendingEchoFolds)
+	}
+
+	childA := prior.Ingest(event.NewMessageFinished(s, event.MessageUser, "$ a\n\ntyped A"))
+	childB := prior.Ingest(event.NewMessageFinished(s, event.MessageUser, "$ a\n\ntyped B"))
+
+	if len(prior.pendingEchoFolds) != 2 {
+		t.Errorf("prior queue mutated by a child Ingest: %v, want it left at 2 folds", prior.pendingEchoFolds)
+	}
+	for _, c := range []struct {
+		name string
+		m    Model
+	}{{"A", childA}, {"B", childB}} {
+		if len(c.m.pendingEchoFolds) != 1 || c.m.pendingEchoFolds[0] != "$ b\n\n" {
+			t.Errorf("child %s queue = %v, want the head popped leaving [\"$ b\\n\\n\"]", c.name, c.m.pendingEchoFolds)
+		}
+	}
+}
+
 // TestEchoStripOnlyMatchesHeadFold guards the byte-exact discipline: an ordinary
 // user message that merely starts with a `$` (a user typing shell-looking text)
 // is NOT stripped when no fold is queued — the strip is a byte-exact match

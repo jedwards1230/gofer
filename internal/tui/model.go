@@ -241,6 +241,11 @@ func (m Model) Ingest(e event.Event) Model {
 		toolAgents[k] = v
 	}
 	m.toolAgents = toolAgents
+	// Clone the fold queue up front, alongside items/maps: Model is value-copied
+	// per frame, so the MessageFinished{User} case below reslicing this to pop the
+	// head must not write through to a prior Model's shared backing array. Same
+	// nil-when-empty idiom as m.items above.
+	m.pendingEchoFolds = append([]string(nil), m.pendingEchoFolds...)
 
 	switch ev := e.(type) {
 	case event.TurnStarted:
@@ -290,7 +295,7 @@ func (m Model) Ingest(e event.Event) Model {
 			content := ev.Content
 			if len(m.pendingEchoFolds) > 0 && strings.HasPrefix(content, m.pendingEchoFolds[0]) {
 				content = strings.TrimPrefix(content, m.pendingEchoFolds[0])
-				m.pendingEchoFolds = append([]string(nil), m.pendingEchoFolds[1:]...)
+				m.pendingEchoFolds = m.pendingEchoFolds[1:] // safe: the queue was cloned at the top of Ingest
 			}
 			// A pure `!` turn (no typed text) strips to nothing: the sigil block is
 			// the whole user turn, so add no empty user message.
