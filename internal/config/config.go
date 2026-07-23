@@ -290,6 +290,19 @@ type TUI struct {
 	// [TUI.MaxPasteBytes]. See [TUI.ShellOutputLimitBytes].
 	ShellMaxOutputBytes *int `json:"shell_max_output_bytes,omitempty"`
 
+	// ShellReplyMode is the STARTUP default for the `!` shell escape's sticky
+	// reply-now/queue disposition (internal/tui's shell.go): "reply" (the
+	// default) fires an agent turn the instant a `!` command finishes, "queue"
+	// holds its output for the user's next Enter so they can stack more before
+	// the agent responds. It seeds [App.shellQueue] at TUI startup; the in-session
+	// ctrl+r toggle flips that for the running session WITHOUT rewriting config,
+	// so this is the "which mode do I launch in" opinion, not a live mirror of the
+	// toggle. A plain string (not a *bool) because it mirrors [TUI.RosterView]'s
+	// enum shape and reads self-documenting in config.json; empty (unset) and any
+	// unrecognized value resolve to reply-now. It governs `!` alone — `!!` is
+	// never sent regardless. See [TUI.ShellQueueDefault].
+	ShellReplyMode string `json:"shell_reply_mode,omitempty"`
+
 	// FileMentionMaxEntries bounds how many paths the `@` file-mention
 	// completion's directory walk collects before it stops: nil (unset) or a
 	// non-positive value resolves to [DefaultFileMentionMaxEntries]. The
@@ -405,6 +418,16 @@ func (t TUI) ShellOutputLimitBytes() int {
 		return DefaultShellMaxOutputBytes
 	}
 	return *t.ShellMaxOutputBytes
+}
+
+// ShellQueueDefault resolves [TUI.ShellReplyMode] to the boolean
+// [App.shellQueue] seeds from at TUI startup: true only for the explicit
+// "queue" spelling, false for reply-now — the default, unset, and any
+// unrecognized value. Reply-now is the safe default because it is the
+// discoverable one (a `!` run visibly fires a reply), and an unknown value
+// falling through to it never silently withholds a run the user meant to send.
+func (t TUI) ShellQueueDefault() bool {
+	return t.ShellReplyMode == "queue"
 }
 
 // DefaultFileMentionMaxEntries is [TUI.FileMentionMaxEntries]'s default:

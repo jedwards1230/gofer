@@ -140,6 +140,29 @@ func settingsRegistry() []Setting {
 			},
 		},
 		{
+			// The persisted startup default for the `!` shell escape's
+			// reply-now/queue disposition; the ctrl+r toggle flips it per
+			// session. "reply" fires an agent turn the instant a `!` command
+			// finishes, "queue" holds its output for the next Enter. Unset and
+			// any unrecognized value read back as "reply" (see
+			// config.TUI.ShellQueueDefault), so the enum only ever shows the two
+			// live options.
+			Key:     "tui.shell_reply_mode",
+			Label:   "Shell reply mode",
+			Kind:    SettingEnum,
+			Options: []string{"reply", "queue"},
+			Get: func(c config.Config) string {
+				if c.TUI.ShellQueueDefault() {
+					return "queue"
+				}
+				return "reply"
+			},
+			Set: func(c config.Config, v string) config.Config {
+				c.TUI.ShellReplyMode = v
+				return c
+			},
+		},
+		{
 			Key:   "telemetry.enabled",
 			Label: "Telemetry enabled",
 			Kind:  SettingBool,

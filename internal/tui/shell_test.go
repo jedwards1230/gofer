@@ -431,9 +431,10 @@ func TestWithShellRunsDegenerateSizes(t *testing.T) {
 	}
 }
 
-// TestShellModeLabel pins the mode-indicator chip the input surfaces show
-// while a shell escape is being typed — the affordance ask #1 asked for, and
-// the `!!`/`!` split that makes the disposition legible before the run.
+// TestShellModeLabel pins the reply-now mode-indicator chip: a `!` buffer
+// ALWAYS spells out its disposition and the ctrl+r toggle (never a bare
+// "shell"), so the mode is discoverable before the run; `!!` keeps its own
+// not-sent chip; a non-shell buffer stays blank.
 func TestShellModeLabel(t *testing.T) {
 	tests := []struct {
 		buf  string
@@ -442,8 +443,8 @@ func TestShellModeLabel(t *testing.T) {
 		{"", ""},
 		{"do a thing", ""},
 		{"/status", ""},
-		{"!", "shell"},
-		{"!ls -la", "shell"},
+		{"!", "shell · enter runs + replies · ctrl+r to queue"},
+		{"!ls -la", "shell · enter runs + replies · ctrl+r to queue"},
 		{"!!", "shell · not sent"},
 		{"!!cat secret.txt", "shell · not sent"},
 	}
@@ -454,9 +455,10 @@ func TestShellModeLabel(t *testing.T) {
 	}
 }
 
-// TestShellModeLabelQueueMode pins the queue-mode chip: a `!` buffer labels
-// "shell · queue" while queue mode is on, `!!` is unaffected (never sent
-// regardless), and a non-shell buffer stays blank.
+// TestShellModeLabelQueueMode pins the queue-mode chip: a `!` buffer spells out
+// the queue disposition and the ctrl+r toggle back to reply while queue mode is
+// on, `!!` is unaffected (never sent regardless), and a non-shell buffer stays
+// blank.
 func TestShellModeLabelQueueMode(t *testing.T) {
 	tests := []struct {
 		buf  string
@@ -464,8 +466,8 @@ func TestShellModeLabelQueueMode(t *testing.T) {
 	}{
 		{"", ""},
 		{"do a thing", ""},
-		{"!", "shell · queue"},
-		{"!ls -la", "shell · queue"},
+		{"!", "shell · queue · enter stacks · ctrl+r to reply"},
+		{"!ls -la", "shell · queue · enter stacks · ctrl+r to reply"},
 		{"!!", "shell · not sent"},
 		{"!!cat secret.txt", "shell · not sent"},
 	}
@@ -473,6 +475,31 @@ func TestShellModeLabelQueueMode(t *testing.T) {
 		if got := shellModeLabel(tt.buf, true); got != tt.want {
 			t.Errorf("shellModeLabel(%q, true) = %q, want %q", tt.buf, got, tt.want)
 		}
+	}
+}
+
+// TestShellModeLabelSurfacesModeAndToggle is the discoverability mutation guard:
+// each `!` label must NAME its own mode AND the ctrl+r toggle, and the two modes
+// must read differently. Flip the label source (reply-now emitting the queue
+// string or vice versa) and this goes red — the indicator must reflect the
+// ACTUAL mode, not just any non-empty chip.
+func TestShellModeLabelSurfacesModeAndToggle(t *testing.T) {
+	replyNow := shellModeLabel("!ls", false)
+	queue := shellModeLabel("!ls", true)
+
+	if replyNow == queue {
+		t.Fatalf("reply-now and queue labels are identical (%q); the indicator does not reflect the mode", replyNow)
+	}
+	for _, s := range []string{replyNow, queue} {
+		if !strings.Contains(s, "ctrl+r") {
+			t.Errorf("label %q does not surface the ctrl+r toggle", s)
+		}
+	}
+	if !strings.Contains(replyNow, "replies") {
+		t.Errorf("reply-now label %q does not say it replies", replyNow)
+	}
+	if !strings.Contains(queue, "queue") {
+		t.Errorf("queue label %q does not name queue mode", queue)
 	}
 }
 
@@ -541,20 +568,67 @@ func TestShellInputLineAccentsSigil(t *testing.T) {
 	}
 }
 
-// TestShellInputLineAsciiMatchesRender pins the splice: under the Ascii profile
-// the accent is a no-op, so shellInputLine must equal [inputBuffer.Render] at
-// EVERY cursor position — before the `!`, between the two `!` of `!!`, and out
-// in the command text. Byte-identity across all positions is the exactness
-// proof the cursor-inside-sigil handling needs.
-func TestShellInputLineAsciiMatchesRender(t *testing.T) {
+// TestShellInputLineAsciiSpacesSigilAndKeepsCursor pins the splice under the
+// Ascii profile (accent is a no-op): shellInputLine must render the sigil, then
+// a single DISPLAY-ONLY space before the command (ask #3), with the caret at its
+// exact rune position — before the `!`, between the two `!` of `!!`, or out in
+// the command text. A bare `!` / `!!` (no command) gets NO trailing space. The
+// expected string is reconstructed from the spec so a mis-splice at any cursor
+// position — a dropped space, a doubled one, a caret off by a rune — goes red.
+func TestShellInputLineAsciiSpacesSigilAndKeepsCursor(t *testing.T) {
 	th := theme.Test()
 	for _, s := range []string{"!ls", "!!rm -rf", "!", "!!"} {
+		sigilLen := 1
+		if strings.HasPrefix(s, "!!") {
+			sigilLen = 2
+		}
+		gap := ""
+		if len([]rune(s)) > sigilLen {
+			gap = " "
+		}
 		for cur := 0; cur <= len([]rune(s)); cur++ {
 			buf := inputBuffer{}.SetTextCursor(s, cur)
-			if got, want := shellInputLine(th, buf, "▏"), buf.Render("▏"); got != want {
-				t.Errorf("shellInputLine(%q, cur=%d) = %q, want == Render %q under Ascii", s, cur, got, want)
+			var want string
+			if cur <= sigilLen {
+				want = s[:cur] + "▏" + s[cur:sigilLen] + gap + s[sigilLen:]
+			} else {
+				want = s[:sigilLen] + gap + s[sigilLen:cur] + "▏" + s[cur:]
+			}
+			if got := shellInputLine(th, buf, "▏"); got != want {
+				t.Errorf("shellInputLine(%q, cur=%d) = %q, want %q", s, cur, got, want)
 			}
 		}
+	}
+}
+
+// TestShellInputLineSpaceIsDisplayOnly is the ask-#3 invariant: the gap is a
+// rendering concern only. Rendering the line neither mutates buf nor changes
+// what [parseShellEscape] hands the shell, so a user who typed `!ls docs` still
+// runs exactly `ls docs` — the single internal space, no leading space from the
+// gap. Neutralizing the display-only property (routing the gap back through buf,
+// or letting it into the parsed command) turns the parse assertions red.
+func TestShellInputLineSpaceIsDisplayOnly(t *testing.T) {
+	const typed = "!ls docs"
+	buf := inputBuffer{}.SetText(typed)
+
+	// The rendered line carries the display gap (Ascii: `! ls docs` + caret).
+	got := shellInputLine(theme.Test(), buf, "▏")
+	if !strings.Contains(got, "! ls docs") {
+		t.Errorf("shellInputLine(%q) = %q, want the display gap `! ls docs`", typed, got)
+	}
+
+	// Rendering did not mutate the buffer…
+	if buf.String() != typed {
+		t.Errorf("buf mutated by render: %q, want %q", buf.String(), typed)
+	}
+	// …and the parse of the buffer carries no injected space: exactly `ls docs`.
+	if line, _, ok := parseShellEscape(buf.String()); !ok || line != "ls docs" {
+		t.Errorf("parseShellEscape(%q) = (%q, ok=%v), want (\"ls docs\", true) — the display gap must not reach the command", buf.String(), line, ok)
+	}
+	// The explicit-space spelling parses identically: `!ls docs` and `! ls docs`
+	// run the same command, which is what "display-only" has to mean downstream.
+	if line, _, ok := parseShellEscape("! ls docs"); !ok || line != "ls docs" {
+		t.Errorf("parseShellEscape(%q) = (%q, ok=%v), want (\"ls docs\", true)", "! ls docs", line, ok)
 	}
 }
 

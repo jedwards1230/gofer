@@ -239,6 +239,17 @@ func NewApp(th theme.Theme, sup Supervisor, meta OverviewMeta, env CommandEnv) A
 		registry:   newBuiltinRegistry(),
 		commandEnv: env,
 	}
+	// Seed the sticky shell reply-now/queue mode from config so a user who
+	// always wants queue mode launches in it instead of re-pressing ctrl+r every
+	// session (config.TUI.ShellReplyMode, default reply-now). A one-shot read at
+	// construction, not a per-frame resolve like autoscroll: the ctrl+r toggle
+	// owns the value for the rest of the session, so re-reading config would
+	// fight it. A nil closure or a read error leaves the reply-now default.
+	if env.Config != nil {
+		if cfg, err := env.Config(); err == nil {
+			a.shellQueue = cfg.TUI.ShellQueueDefault()
+		}
+	}
 	// Markdown commands are a registry LAYER above the builtins (command.go's
 	// CommandSource). This first load is synchronous BECAUSE it runs before
 	// tea.NewProgram: there is no event loop to block and no frame to drop
