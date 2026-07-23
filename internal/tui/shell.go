@@ -34,8 +34,14 @@ package tui
 // remains the SOLE decider of what actually reaches the model, so no view
 // change can move a byte in or out of context. While the buffer is still being
 // typed, both input surfaces flag shell mode ([shellModeRule],
-// [shellPromptGlyph]) with an accented, labeled framing rule that clears the
-// instant the `!` prefix stops.
+// [shellPromptGlyph], [shellInputLine]) with an accented, labeled framing rule
+// that clears the instant the `!` prefix stops. A `!` rule always spells out its
+// live reply-now/queue disposition AND the ctrl+r toggle that flips it, in both
+// states, so the mode is never a hidden setting; the startup default is
+// config.TUI.ShellReplyMode (ctrl+r flips it for the session). The `!` / `!!`
+// sigil is accented and a display-only space separates it from the command, so
+// the sigil reads apart from what is being typed — presentation only, never a
+// change to what [parseShellEscape] hands the shell.
 //
 // NOT a tool call, and deliberately not routed through anything that resembles
 // one: this is the user running a command in their own terminal, at their own
@@ -467,12 +473,20 @@ func (r shellRun) shellRunStatus() (statusSeverity, string) {
 // shellModeLabel is the chip the input surfaces show while a shell escape is
 // being TYPED (before it is run): "" when the buffer is not a shell escape, so
 // an ordinary prompt's input frame is byte-identical to what it always drew.
-// `!!` announces up front that the run will be withheld, so the disposition is
-// legible before the command even executes — not only afterward.
-// queue reflects the sticky reply-now/queue mode ([App.shellQueue]): a `!`
-// buffer labels as "shell · queue" while queue mode is on so the disposition is
-// legible before the run. It does not apply to `!!` (never sent regardless) and
-// leaves reply-now `!` as the byte-identical "shell".
+//
+// A `!` buffer ALWAYS spells out its live reply-now/queue disposition and the
+// ctrl+r toggle that flips it, in BOTH states — never a bare "shell". That is
+// the discoverability fix: reply-now used to render an unlabeled "shell" with no
+// hint the mode was a choice or that ctrl+r existed, so a user could not find
+// the setting at all (the `· queue` half only appeared once they had already
+// flipped it). Now reply-now reads "shell · enter runs + replies · ctrl+r to
+// queue" and queue reads "shell · queue · enter stacks · ctrl+r to reply", so
+// both the current mode and the way to change it are visible before the run.
+//
+// `!!` is exempt: it is never sent regardless of the toggle, so it keeps its
+// own "shell · not sent" chip with no reply/queue wording (the toggle would be
+// a lie there). The label is TEXT (it survives the Ascii golden profile); the
+// accent is the color-only layer shellModeRule adds on top.
 func shellModeLabel(buf string, queue bool) string {
 	if !strings.HasPrefix(buf, "!") {
 		return ""
@@ -481,9 +495,9 @@ func shellModeLabel(buf string, queue bool) string {
 		return "shell · not sent"
 	}
 	if queue {
-		return "shell · queue"
+		return "shell · queue · enter stacks · ctrl+r to reply"
 	}
-	return "shell"
+	return "shell · enter runs + replies · ctrl+r to queue"
 }
 
 // shellModeRule renders the input box's top framing rule, labeled and accented
@@ -528,17 +542,26 @@ func shellPromptGlyph(th theme.Theme, glyph, buf string) string {
 // shellInputLine renders buf the way [inputBuffer.Render] does — runes,
 // clampCursor, [displaySafe]'d pre/cursor/post halves — but with the leading
 // `!` / `!!` sigil accented so the sigil that TRIGGERS shell mode is visually
-// distinct from the command the user is entering (ask #1). The rest of the
-// buffer stays plain. A non-shell buffer returns [inputBuffer.Render] verbatim,
-// so an ordinary prompt's input line is byte-for-byte what it always drew (zero
-// golden churn) and the accent is exactly the color-only layer a styled golden
-// pins on top.
+// distinct from the command the user is entering (ask #1), and a single
+// DISPLAY-ONLY space between the sigil and the command so the two read apart
+// (`! ls docs`, not `!ls docs` — ask #3). A non-shell buffer returns
+// [inputBuffer.Render] verbatim, so an ordinary prompt's input line is
+// byte-for-byte what it always drew (zero golden churn) and the accent is
+// exactly the color-only layer a styled golden pins on top.
+//
+// The gap is pure presentation. It is spliced into this rendered line only; it
+// never enters buf, and the submit path parses buf.String() ([parseShellEscape],
+// not this line), so `!ls` and `! ls` are byte-identical to the shell — the gap
+// changes what the operator SEES, never what runs. It is added only when a
+// command follows the sigil, so a bare `!` / `!!` gets no dangling trailing
+// space.
 //
 // The cursor glyph is spliced at its actual rune position and is never itself
 // accented — it is a separate caret, not part of the sigil — so a cursor
 // sitting before the `!`, between the two `!` of `!!`, or out in the command
 // text all render correctly: the sigil runes on either side of it keep the
-// accent, the caret does not.
+// accent, the caret does not, and the gap sits between the sigil (with its
+// caret, if any) and the command (with its caret, if any).
 func shellInputLine(th theme.Theme, buf inputBuffer, cursorGlyph string) string {
 	s := buf.String()
 	if !strings.HasPrefix(s, "!") {
@@ -559,12 +582,18 @@ func shellInputLine(th theme.Theme, buf inputBuffer, cursorGlyph string) string 
 	}
 	plain := func(runes []rune) string { return displaySafe(string(runes)) }
 
+	// The display gap, present only when a command follows the sigil.
+	gap := ""
+	if len(r) > sigilLen {
+		gap = " "
+	}
+
 	// The cursor falls inside (or at an edge of) the sigil: accent the sigil
-	// runes on either side of the caret, then the plain command tail.
+	// runes on either side of the caret, then the gap, then the plain command.
 	if cur <= sigilLen {
-		return accent(r[:cur]) + cursorGlyph + accent(r[cur:sigilLen]) + plain(r[sigilLen:])
+		return accent(r[:cur]) + cursorGlyph + accent(r[cur:sigilLen]) + gap + plain(r[sigilLen:])
 	}
 	// The cursor is out in the command text: the whole sigil is accented, the
-	// caret splices into the plain tail.
-	return accent(r[:sigilLen]) + plain(r[sigilLen:cur]) + cursorGlyph + plain(r[cur:])
+	// gap follows it, and the caret splices into the plain tail.
+	return accent(r[:sigilLen]) + gap + plain(r[sigilLen:cur]) + cursorGlyph + plain(r[cur:])
 }

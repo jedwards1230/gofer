@@ -19,6 +19,6 @@
 
 
 
-<accent>── shell ───────────────────────────────────────────────────────────────────────</accent>
-<accent>></accent> <accent>!</accent>grep -r TODO .▏
+<accent>── shell · enter runs + replies · ctrl+r to queue ──────────────────────────────</accent>
+<accent>></accent> <accent>!</accent> grep -r TODO .▏
 ────────────────────────────────────────────────────────────────────────────────

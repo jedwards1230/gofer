@@ -20,6 +20,7 @@ func TestSettingsRegistryDefaults(t *testing.T) {
 		"tui.roster_view":         "flat",
 		"tui.autoscroll":          "true",
 		"tui.mouse":               "true",
+		"tui.shell_reply_mode":    "reply",
 		"telemetry.enabled":       "false",
 		"telemetry.endpoint":      "",
 	}
@@ -76,6 +77,7 @@ func TestSettingsRegistryKinds(t *testing.T) {
 		"tui.roster_view":         {SettingEnum, []string{"flat", "grouped"}},
 		"tui.autoscroll":          {SettingBool, nil},
 		"tui.mouse":               {SettingBool, nil},
+		"tui.shell_reply_mode":    {SettingEnum, []string{"reply", "queue"}},
 		"telemetry.enabled":       {SettingBool, nil},
 		"telemetry.endpoint":      {SettingString, nil},
 	}

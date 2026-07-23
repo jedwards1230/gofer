@@ -14,6 +14,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/tui/testkit"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
@@ -134,6 +135,39 @@ func TestCtrlRTogglesShellQueue(t *testing.T) {
 	}
 	if !strings.Contains(a3.status, "reply mode") {
 		t.Errorf("status = %q, want a reply-mode note", a3.status)
+	}
+}
+
+// TestNewAppSeedsShellQueueFromConfig proves the persisted startup default
+// (config.TUI.ShellReplyMode) reaches App.shellQueue at construction, so a user
+// who always wants queue mode launches in it without pressing ctrl+r. The
+// reply-now default is verified two ways — an explicit "reply" and the empty
+// GoldenCommandEnv — so the queue case is the seed doing work, not the zero
+// value coinciding with it.
+func TestNewAppSeedsShellQueueFromConfig(t *testing.T) {
+	envWith := func(mode string) CommandEnv {
+		env := GoldenCommandEnv()
+		env.Config = func() (config.Config, error) {
+			return config.Config{TUI: config.TUI{ShellReplyMode: mode}}, nil
+		}
+		return env
+	}
+	tests := []struct {
+		name string
+		env  CommandEnv
+		want bool
+	}{
+		{"queue mode seeds queue", envWith("queue"), true},
+		{"reply mode seeds reply-now", envWith("reply"), false},
+		{"empty config seeds reply-now", GoldenCommandEnv(), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := NewApp(theme.Test(), newInternalFakeSup(GoldenRoster()), GoldenMeta(), tt.env)
+			if a.shellQueue != tt.want {
+				t.Fatalf("NewApp shellQueue = %v, want %v", a.shellQueue, tt.want)
+			}
+		})
 	}
 }
 

@@ -1718,8 +1718,13 @@ input — and it is **leading-only**, so `that worked!` and
   as a message" without a separate typed prompt. **ctrl+r** toggles a sticky
   *queue* mode where a `!` run instead waits for the user's next Enter, so they
   can stack more commands (or a plain-text message) before the agent responds —
-  the old fold-into-your-next-prompt behavior, now opt-in. The mode is captured
-  per-run at dispatch (`shellRun.queued`), so a later toggle never rewrites a
+  the old fold-into-your-next-prompt behavior, now opt-in. The startup default
+  is persisted in `tui.shell_reply_mode` (`reply` — the default — or `queue`;
+  seeded into `App.shellQueue` at construction), so a user who always wants queue
+  mode isn't re-pressing ctrl+r every session; ctrl+r flips it for the running
+  session without rewriting config, and `/config` edits the persisted default.
+  The mode is captured per-run at dispatch (`shellRun.queued`), so a later
+  toggle never rewrites a
   run already in flight, and it governs `!` alone: `!!` is never sent regardless
   of the mode, so the reconciliation is that the toggle only ever moves a `!`
   run between "reply now" and "wait", never in or out of context. The `!`
@@ -1736,15 +1741,24 @@ input — and it is **leading-only**, so `that worked!` and
   **Presentation (the UX rework).** Three things make the escape legible:
   - **Mode indicator.** While a `!` / `!!` command is being *typed*, both
     text-entry surfaces flag shell mode — the input box's top framing rule
-    becomes an accented, labeled rule (`── shell ──` for a reply-now `!`,
-    `── shell · queue ──` for a `!` in queue mode, `── shell · not sent ──` for
-    `!!`), the prompt glyph goes accent, and the leading `!` / `!!` **sigil in
-    the buffer** itself goes accent too, so the sigil that triggers shell mode
-    reads apart from the command being entered (`shellModeRule` /
-    `shellPromptGlyph` / `shellInputLine`, ask #1). The label is TEXT, not just
-    color, so it reads under the Ascii golden profile; it clears the instant the
-    `!` prefix stops applying. A non-shell buffer draws the plain rule and the
-    plain input line byte-for-byte as before, so no existing golden churns.
+    becomes an accented, labeled rule that always spells out the live
+    disposition AND the ctrl+r toggle: `── shell · enter runs + replies · ctrl+r
+    to queue ──` for a reply-now `!`, `── shell · queue · enter stacks · ctrl+r
+    to reply ──` for a `!` in queue mode, `── shell · not sent ──` for `!!`
+    (exempt — never sent, so it carries no reply/queue wording). Spelling the
+    mode and the key in *both* states is the discoverability fix: reply-now used
+    to render a bare `── shell ──` with no hint the mode was a choice or that
+    ctrl+r existed. The prompt glyph goes accent, the leading `!` / `!!` **sigil
+    in the buffer** itself goes accent, and a single **display-only space**
+    separates the sigil from the command (`! ls docs`, not `!ls docs`), so the
+    sigil reads apart from what is being entered (`shellModeRule` /
+    `shellPromptGlyph` / `shellInputLine`, asks #1 + #3). The space is rendering
+    only — `parseShellEscape` reads the buffer, not this line, so `!ls` and
+    `! ls` run byte-identical commands. The label is TEXT, not just color, so it
+    reads under the Ascii golden profile; it clears the instant the `!` prefix
+    stops applying. A non-shell buffer draws the plain rule and the plain input
+    line byte-for-byte as before, so no existing golden churns. (At a terminal
+    too narrow for the full label the rule degrades to a plain accented rule.)
   - **In the transcript, not a pane.** On the attach screen a run renders as a
     transcript block (`itemShellRun`, composed per frame by
     `Model.WithShellRuns` — the same render-local pattern the background-agents

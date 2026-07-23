@@ -326,6 +326,45 @@ func TestSessionLoadSettleTimeout(t *testing.T) {
 // 0 is "no limit" (matching tui.max_paste_bytes, unlike the approval row caps
 // where 0 would hide the thing being capped), and any positive value is the
 // cap. The round trip pins that an explicit value survives on disk.
+// TestTUIShellQueueDefault covers the resolver seeding App.shellQueue at TUI
+// startup: only the explicit "queue" spelling is queue mode; unset, "reply", and
+// any unrecognized value fall through to reply-now (false), so a stray value
+// never silently launches in the withholding mode. The Save/Load round trip
+// pins that an explicit "queue" survives on disk.
+func TestTUIShellQueueDefault(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"unset resolves to reply-now", "", false},
+		{"reply is reply-now", "reply", false},
+		{"queue is queue mode", "queue", true},
+		{"unrecognized falls through to reply-now", "banana", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tui := config.TUI{ShellReplyMode: tt.in}
+			if got := tui.ShellQueueDefault(); got != tt.want {
+				t.Fatalf("ShellQueueDefault() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+
+	dir := t.TempDir()
+	path := config.DefaultPath(dir)
+	if err := config.Save(path, config.Config{TUI: config.TUI{ShellReplyMode: "queue"}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !got.TUI.ShellQueueDefault() {
+		t.Fatalf("ShellQueueDefault() after Save/Load = false, want true")
+	}
+}
+
 func TestTUICommandFileLimitBytes(t *testing.T) {
 	n := func(v int) *int { return &v }
 	tests := []struct {
