@@ -182,6 +182,13 @@ type Model struct {
 
 	submitted    string
 	hasSubmitted bool
+
+	// shellQueue mirrors [App.shellQueue] for the render — it decides only the
+	// shell-mode rule's label ("shell" reply-now vs "shell · queue"), never any
+	// transcript content or measurement. [App.render] sets it per frame off the
+	// live App state (like approvalBodyLines), so a zero-value Model — every
+	// golden calling View directly — reads reply-now and churns no golden.
+	shellQueue bool
 }
 
 // New returns an empty Model rendering through th.
@@ -545,6 +552,17 @@ func (m Model) WithShellRuns(runs []shellRun) Model {
 		items = append(items, item{kind: itemShellRun, done: r.done, shell: r})
 	}
 	m.items = items
+	return m
+}
+
+// WithShellQueue sets the reply-now/queue mode the shell-mode rule labels,
+// reallocating rather than mutating in place (Model's copy-on-write discipline).
+// [App.render]/[App.attachModel] call it with the live [App.shellQueue] so the
+// `── shell · queue ──` label tracks a ctrl+r toggle on the very next frame; it
+// touches no transcript content, so it is measurement-neutral (the transcript
+// region math in App.transcriptRegion is unaffected).
+func (m Model) WithShellQueue(queue bool) Model {
+	m.shellQueue = queue
 	return m
 }
 
@@ -1103,7 +1121,7 @@ func (m Model) view(width, height int, menuLines, headerLines []string, scroll i
 		// labeled rule (shellModeRule), clearing the instant the prefix stops.
 		// The bottom rule stays plain — one labeled edge reads as a header for
 		// the box, two would read as a box drawn in the wrong color.
-		topRule := shellModeRule(m.theme, width, m.input.String())
+		topRule := shellModeRule(m.theme, width, m.input.String(), m.shellQueue)
 		rule := strings.Repeat("─", width)
 		footer = append(footer, menuLines...)
 		footer = append(footer, topRule, truncate(m.inputLine(), width), rule)
@@ -1413,17 +1431,20 @@ func (m Model) renderBackgroundAgentLines(it item) []string {
 // renderShellRunLines renders one `!` / `!!` run (shell.go) as a transcript
 // block: a `$ command` header, the command's output, its outcome (a non-zero
 // exit, a timeout/failure note, a truncation marker — each shown only when
-// there is something abnormal to say), and a muted disposition line stating
-// whether the output is the model's to see. Marker-only styled like every
-// other block: the `$` glyph carries the color (accent for a `!` run bound for
-// the model, muted for a withheld `!!` run), the body stays plain, and the
-// disposition is a TEXT line so a reader can tell a not-sent run from a sent
-// one under the Ascii profile the goldens force, not only by color.
+// there is something abnormal to say), and — only when there is one to state —
+// a muted disposition line ([shellRun.blockDisposition]). A reply-now `!` run
+// carries NO disposition line: it is sent and answered the instant it finishes,
+// so there is nothing pending to announce. A queued `!` run reads "queued" and
+// a `!!` run "not sent to the agent". Marker-only styled like every other
+// block: the `$` glyph carries the color (accent for a `!` run bound for the
+// model, muted for a withheld `!!` run), the body stays plain, and the
+// disposition is a TEXT line so a reader can tell a not-sent run under the Ascii
+// profile the goldens force, not only by color.
 //
-// The disposition is read off r.inContext for DISPLAY only. What reaches the
-// model is [App.composePrompt]'s decision; this block moves no bytes in or out
-// of context, so a mislabeled run would be a cosmetic bug, never a leak — the
-// same structural split shell.go's package doc describes.
+// The disposition is read off r.inContext/r.queued for DISPLAY only. What
+// reaches the model is [App.composePrompt]'s decision; this block moves no bytes
+// in or out of context, so a mislabeled run would be a cosmetic bug, never a
+// leak — the same structural split shell.go's package doc describes.
 func (m Model) renderShellRunLines(r shellRun) []string {
 	marker := m.theme.AccentStyle()
 	if !r.inContext {
@@ -1455,7 +1476,10 @@ func (m Model) renderShellRunLines(r shellRun) []string {
 	if r.truncated {
 		lines = append(lines, m.theme.MutedStyle().Render("  … output truncated"))
 	}
-	return append(lines, m.theme.MutedStyle().Render("  · "+r.shellDispositionLabel()))
+	if disp := r.blockDisposition(); disp != "" {
+		lines = append(lines, m.theme.MutedStyle().Render("  · "+disp))
+	}
+	return lines
 }
 
 // statusLine reports the turn's token usage and cost once TurnFinished has
@@ -1480,7 +1504,7 @@ func (m Model) statusLine() string {
 // escape (shellPromptGlyph), so the caret signals shell mode alongside the
 // labeled rule above it.
 func (m Model) inputLine() string {
-	return shellPromptGlyph(m.theme, ">", m.input.String()) + " " + m.input.Render("▏")
+	return shellPromptGlyph(m.theme, ">", m.input.String()) + " " + shellInputLine(m.theme, m.input, "▏")
 }
 
 // FullTranscript renders every transcript item unclipped by height, followed

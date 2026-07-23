@@ -122,6 +122,21 @@ func globalKeymap() []keyBinding {
 				return next, cmd
 			},
 		},
+		{
+			Keys:  "ctrl+r",
+			Scope: scopeGlobal,
+			Desc:  "Toggle reply-on-run for shell commands (reply now / queue)",
+			match: func(k tea.Key) bool { return k.Mod.Contains(tea.ModCtrl) && k.Code == 'r' },
+			run: func(a App) (tea.Model, tea.Cmd) {
+				a.shellQueue = !a.shellQueue
+				if a.shellQueue {
+					a.setStatus(sevOK, "shell: queue mode — `!` commands wait for your next message")
+				} else {
+					a.setStatus(sevOK, "shell: reply mode — a `!` command sends and gets a reply")
+				}
+				return a, nil
+			},
+		},
 	}
 }
 

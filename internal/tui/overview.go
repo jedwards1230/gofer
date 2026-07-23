@@ -32,6 +32,13 @@ type Overview struct {
 	input        inputBuffer
 	submitted    string
 	hasSubmitted bool
+
+	// shellQueue mirrors [App.shellQueue] for the dispatch bar's shell-mode
+	// rule label ("shell" reply-now vs "shell · queue"), set per frame by
+	// [App.render] off the live App state. It affects only the rule's label —
+	// no roster content and no measurement — so a zero value (every overview
+	// golden) reads reply-now and churns nothing.
+	shellQueue bool
 }
 
 // OverviewMeta is the static header context: the app identity plus the current

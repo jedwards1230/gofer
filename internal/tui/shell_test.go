@@ -448,8 +448,30 @@ func TestShellModeLabel(t *testing.T) {
 		{"!!cat secret.txt", "shell · not sent"},
 	}
 	for _, tt := range tests {
-		if got := shellModeLabel(tt.buf); got != tt.want {
-			t.Errorf("shellModeLabel(%q) = %q, want %q", tt.buf, got, tt.want)
+		if got := shellModeLabel(tt.buf, false); got != tt.want {
+			t.Errorf("shellModeLabel(%q, false) = %q, want %q", tt.buf, got, tt.want)
+		}
+	}
+}
+
+// TestShellModeLabelQueueMode pins the queue-mode chip: a `!` buffer labels
+// "shell · queue" while queue mode is on, `!!` is unaffected (never sent
+// regardless), and a non-shell buffer stays blank.
+func TestShellModeLabelQueueMode(t *testing.T) {
+	tests := []struct {
+		buf  string
+		want string
+	}{
+		{"", ""},
+		{"do a thing", ""},
+		{"!", "shell · queue"},
+		{"!ls -la", "shell · queue"},
+		{"!!", "shell · not sent"},
+		{"!!cat secret.txt", "shell · not sent"},
+	}
+	for _, tt := range tests {
+		if got := shellModeLabel(tt.buf, true); got != tt.want {
+			t.Errorf("shellModeLabel(%q, true) = %q, want %q", tt.buf, got, tt.want)
 		}
 	}
 }
@@ -459,7 +481,7 @@ func TestShellModeLabel(t *testing.T) {
 // mode indicator adds nothing to the common case and churns no existing golden.
 func TestShellModeRulePlainOffShellMode(t *testing.T) {
 	for _, buf := range []string{"", "hello", "/status"} {
-		if got, want := shellModeRule(theme.Test(), testkit.Width, buf), strings.Repeat("─", testkit.Width); got != want {
+		if got, want := shellModeRule(theme.Test(), testkit.Width, buf, false), strings.Repeat("─", testkit.Width); got != want {
 			t.Errorf("shellModeRule(%q) = %q, want the plain rule", buf, got)
 		}
 	}
@@ -473,7 +495,7 @@ func TestShellModeRuleLabelsShellMode(t *testing.T) {
 		buf   string
 		label string
 	}{{"!ls", "shell"}, {"!!ls", "shell · not sent"}} {
-		got := shellModeRule(theme.Test(), testkit.Width, tt.buf)
+		got := shellModeRule(theme.Test(), testkit.Width, tt.buf, false)
 		if !strings.Contains(got, tt.label) {
 			t.Errorf("shellModeRule(%q) = %q, want it to carry the label %q", tt.buf, got, tt.label)
 		}
@@ -494,6 +516,90 @@ func TestGoldenShellModeInput(t *testing.T) {
 func TestGoldenShellModeInputStyled(t *testing.T) {
 	m := New(testkit.ColorTheme()).SetInput("!grep -r TODO .")
 	testkit.AssertGoldenStyled(t, "shell_mode_input", m.View(testkit.Width, testkit.Height))
+}
+
+// TestShellInputLineAccentsSigil is the ask-#1 assertion: the leading `!` /
+// `!!` sigil in the input buffer carries the accent SGR so it reads apart from
+// the command being typed, while a non-shell buffer is byte-for-byte
+// [inputBuffer.Render] (zero accent, zero golden churn).
+func TestShellInputLineAccentsSigil(t *testing.T) {
+	th := testkit.ColorTheme() // TrueColor, so AccentStyle actually emits SGR
+
+	buf := inputBuffer{}.SetText("!ls -la")
+	if got, want := shellInputLine(th, buf, "▏"), th.AccentStyle().Render("!"); !strings.Contains(got, want) {
+		t.Errorf("shellInputLine(%q) = %q, want it to accent the `!` sigil (%q)", buf.String(), got, want)
+	}
+
+	buf2 := inputBuffer{}.SetText("!!rm -rf /tmp")
+	if got, want := shellInputLine(th, buf2, "▏"), th.AccentStyle().Render("!!"); !strings.Contains(got, want) {
+		t.Errorf("shellInputLine(%q) = %q, want it to accent the `!!` sigil (%q)", buf2.String(), got, want)
+	}
+
+	plain := inputBuffer{}.SetText("hello world")
+	if got, want := shellInputLine(th, plain, "▏"), plain.Render("▏"); got != want {
+		t.Errorf("shellInputLine(non-shell) = %q, want inputBuffer.Render verbatim %q", got, want)
+	}
+}
+
+// TestShellInputLineAsciiMatchesRender pins the splice: under the Ascii profile
+// the accent is a no-op, so shellInputLine must equal [inputBuffer.Render] at
+// EVERY cursor position — before the `!`, between the two `!` of `!!`, and out
+// in the command text. Byte-identity across all positions is the exactness
+// proof the cursor-inside-sigil handling needs.
+func TestShellInputLineAsciiMatchesRender(t *testing.T) {
+	th := theme.Test()
+	for _, s := range []string{"!ls", "!!rm -rf", "!", "!!"} {
+		for cur := 0; cur <= len([]rune(s)); cur++ {
+			buf := inputBuffer{}.SetTextCursor(s, cur)
+			if got, want := shellInputLine(th, buf, "▏"), buf.Render("▏"); got != want {
+				t.Errorf("shellInputLine(%q, cur=%d) = %q, want == Render %q under Ascii", s, cur, got, want)
+			}
+		}
+	}
+}
+
+// TestGoldenShellModeInputStyledSigil is the styled golden's assertion twin: the
+// whole attach input box in shell mode carries the accent SGR on the sigil, not
+// only on the prompt glyph.
+func TestGoldenShellModeInputStyledSigil(t *testing.T) {
+	th := testkit.ColorTheme()
+	m := New(th).SetInput("!grep -r TODO .")
+	got := m.View(testkit.Width, testkit.Height)
+	if want := th.AccentStyle().Render("!"); !strings.Contains(got, want) {
+		t.Errorf("styled shell-mode input did not accent the `!` sigil (want %q):\n%s", want, got)
+	}
+}
+
+// TestShellRunBlockDisposition pins the block-only disposition (Part B): a
+// reply-now `!` run carries NO disposition line (it is sent and answered at
+// once), a queued `!` run reads "queued", and a `!!` run "not sent to the
+// agent".
+func TestShellRunBlockDisposition(t *testing.T) {
+	replyNow := finishedRun(1, "echo hi", "hi", true) // queued == false
+	queued := finishedRun(2, "echo hi", "hi", true)
+	queued.queued = true
+	withheld := finishedRun(3, "cat s", "x", false)
+
+	if got := replyNow.blockDisposition(); got != "" {
+		t.Errorf("reply-now `!` blockDisposition = %q, want empty", got)
+	}
+	if got := queued.blockDisposition(); got != "queued" {
+		t.Errorf("queued `!` blockDisposition = %q, want %q", got, "queued")
+	}
+	if got := withheld.blockDisposition(); got != "not sent to the agent" {
+		t.Errorf("`!!` blockDisposition = %q, want %q", got, "not sent to the agent")
+	}
+
+	// In the rendered transcript: reply-now shows no `·` disposition line;
+	// queued shows `· queued`.
+	reply := New(theme.Test()).WithShellRuns([]shellRun{replyNow}).View(testkit.Width, testkit.Height)
+	if strings.Contains(reply, "·") {
+		t.Errorf("reply-now shell block rendered a disposition line:\n%s", reply)
+	}
+	q := New(theme.Test()).WithShellRuns([]shellRun{queued}).View(testkit.Width, testkit.Height)
+	if !strings.Contains(q, "· queued") {
+		t.Errorf("queued shell block missing `· queued`:\n%s", q)
+	}
 }
 
 // TestShellRunStatusDisposition pins the transcript-less acknowledgement

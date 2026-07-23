@@ -51,6 +51,17 @@ func shellApp(t *testing.T, sup tui.Supervisor) tea.Model {
 	return m
 }
 
+// enableQueueMode presses ctrl+r to switch shell escapes into QUEUE mode, where
+// a `!` run's output waits for the user's next message (create/send) instead of
+// firing a reply the instant it finishes — the behavior the "folds into the
+// next prompt" tests below assert. The reply-now DEFAULT is covered by
+// TestShellEscapeReplyNowFiresATurn here and the handler tests in
+// shell_reply_test.go.
+func enableQueueMode(t *testing.T, m tea.Model) tea.Model {
+	t.Helper()
+	return press(t, m, tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl})
+}
+
 // testCommandEnv is GoldenCommandEnv with a real cwd substituted in.
 func testCommandEnv(cwd string) tui.CommandEnv {
 	return tui.CommandEnv{
@@ -81,20 +92,54 @@ func TestShellEscapeIsNotSubmittedAsAPrompt(t *testing.T) {
 
 // TestShellEscapeRendersInTheAttachTranscript is ask #2 end to end: on the
 // attach screen the command and its output read as part of the conversation —
-// in the transcript, not a pane below it — with the disposition marked.
+// in the transcript, not a pane below it — with the disposition marked. In
+// QUEUE mode a `!` run stays in the transcript (marked "queued") rather than
+// firing a reply on completion; reply-now's transient block is covered by the
+// handler tests in shell_reply_test.go.
 func TestShellEscapeRendersInTheAttachTranscript(t *testing.T) {
 	sup := newFakeSup(tui.GoldenRoster())
 	m := shellApp(t, sup)
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the selected session
+	m = enableQueueMode(t, m)
 
 	m = type_(t, m, "!cat payload.txt")
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 
 	got := content(m)
-	for _, want := range []string{"$ cat payload.txt", shellPayload, "sent with your next message"} {
+	for _, want := range []string{"$ cat payload.txt", shellPayload, "queued"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("attach transcript missing %q:\n%s", want, got)
 		}
+	}
+}
+
+// TestShellEscapeReplyNowFiresATurn is the reply-now DEFAULT end to end: a `!`
+// run typed into the attach input, with no queue-mode toggle, fires a turn the
+// instant it finishes — Supervisor.Send receives the composed shell output with
+// no separate typed prompt. This drives the shellDoneMsg → doSend chain the
+// single-level `press` helper does not chase, so it pumps the follow-on Cmd
+// itself.
+func TestShellEscapeReplyNowFiresATurn(t *testing.T) {
+	sup := newFakeSup(tui.GoldenRoster())
+	m := shellApp(t, sup)
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the selected session
+
+	m = type_(t, m, "!cat payload.txt")
+	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter}) // → runShellCmd
+	if cmd == nil {
+		t.Fatal("Enter on a `!` escape returned no Cmd")
+	}
+	m, cmd = m.Update(cmd()) // shellDoneMsg → reply-now doSend
+	if cmd == nil {
+		t.Fatal("a reply-now `!` run did not fire a turn on completion")
+	}
+	m.Update(cmd()) // doSend → Supervisor.Send
+
+	if len(sup.sent) != 1 {
+		t.Fatalf("expected exactly one Send from the reply-now run, got %v", sup.sent)
+	}
+	if !strings.Contains(sup.sent[0], shellPayload) || !strings.Contains(sup.sent[0], "cat payload.txt") {
+		t.Fatalf("sent = %q, want the composed shell output fired immediately", sup.sent[0])
 	}
 }
 
@@ -172,12 +217,13 @@ func TestDoubleBangOutputNeverReachesThePrompt(t *testing.T) {
 }
 
 // TestShellEscapeFromAttachInputBehavesIdentically is the "same wherever it
-// is typed" rule: the attach input runs the escape and folds it into the
-// SEND, exactly as the dispatch bar does for the CREATE.
+// is typed" rule: in QUEUE mode the attach input runs the escape and folds it
+// into the SEND, exactly as the dispatch bar does for the CREATE.
 func TestShellEscapeFromAttachInputBehavesIdentically(t *testing.T) {
 	sup := newFakeSup(tui.GoldenRoster())
 	m := shellApp(t, sup)
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the selected session
+	m = enableQueueMode(t, m)
 
 	m = type_(t, m, "!cat payload.txt")
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -385,6 +431,7 @@ func TestUserCommandFoldsPendingShellOutput(t *testing.T) {
 	sup := newFakeSup(tui.GoldenRoster())
 	m := newUserCmdModel(t, sup, env)
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach
+	m = enableQueueMode(t, m)                            // queue so the `!` output waits for /review
 
 	m = dispatchSlash(t, m, "!cat payload.txt")
 	m = dispatchSlash(t, m, "!!cat secret.txt")
@@ -415,6 +462,7 @@ func TestShellOutputIsFoldedIntoOnlyOnePrompt(t *testing.T) {
 	sup := newFakeSup(tui.GoldenRoster())
 	m := shellApp(t, sup)
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach
+	m = enableQueueMode(t, m)                            // queue so the `!` output waits for the typed prompts
 
 	m = dispatchSlash(t, m, "!cat payload.txt")
 	m = dispatchSlash(t, m, "first")

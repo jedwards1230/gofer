@@ -3,9 +3,9 @@
 Global
   ctrl+c  Quit gofer
   ctrl+y  Toggle guardrails for new sessions (same as /yolo)
+  ctrl+r  Toggle reply-on-run for shell commands (reply now / queue)
 Roster
   ↑/↓        Move the roster selection
   enter      Open the selected session, or run what's typed
   space      Peek the selected session (empty dispatch bar)
-  tab        Switch flat / grouped roster view
-↑ 10 more · ↓ 59 more
+↑ 10 more · ↓ 60 more
