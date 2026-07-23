@@ -283,7 +283,7 @@ func TestOverviewHideDispatchBlanksBar(t *testing.T) {
 	if !strings.Contains(shown, "describe a task for a new session") {
 		t.Fatal("precondition failed: expected the dispatch placeholder with hideDispatch=false")
 	}
-	if strings.Contains(hidden, "describe a task for a new session") || strings.Contains(hidden, "enter peek") {
+	if strings.Contains(hidden, "describe a task for a new session") || strings.Contains(hidden, "space peek") {
 		t.Errorf("hideDispatch=true still shows the dispatch bar/hint:\n%s", hidden)
 	}
 }

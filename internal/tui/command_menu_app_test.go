@@ -42,7 +42,7 @@ func TestGoldenMenuOverviewFilteredStyled(t *testing.T) {
 // attach input's rule.
 func TestGoldenMenuAttachFiltered(t *testing.T) {
 	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected session
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the selected session
 	m = type_(t, m, "/c")
 	testkit.AssertGolden(t, "app_menu_attach_filtered", content(m))
 }
@@ -52,7 +52,7 @@ func TestGoldenMenuAttachFilteredStyled(t *testing.T) {
 	var m tea.Model = tui.NewApp(testkit.ColorTheme(), sup, tui.GoldenMeta(), tui.GoldenCommandEnv())
 	m, _ = m.Update(tea.WindowSizeMsg{Width: testkit.Width, Height: testkit.Height})
 	m, _ = m.Update(m.Init()())
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = type_(t, m, "/c")
 	testkit.AssertGoldenStyled(t, "app_menu_attach_filtered", content(m))
 }
@@ -288,7 +288,7 @@ func TestColorMenuMatchesLayoutAcrossWidths(t *testing.T) {
 // text-entry surfaces the trigger rule covers (docs/TUI.md).
 func TestMenuAppliesToBothInputPaths(t *testing.T) {
 	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach
 	m = type_(t, m, "/mo")
 
 	if got := content(m); !strings.Contains(got, "▸ /model") {

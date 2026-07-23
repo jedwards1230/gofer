@@ -42,7 +42,7 @@ func TestGoldenPanelStatus(t *testing.T) {
 // statusView-level goldens for the field mapping itself).
 func TestStatusReflectsAttachedSession(t *testing.T) {
 	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected (recency-first) session
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the selected (recency-first) session
 
 	m = dispatchSlash(t, m, "/status")
 
@@ -70,7 +70,7 @@ func TestGoldenPanelUsage(t *testing.T) {
 // (the GoldenRoster's first row carries a populated Usage fixture).
 func TestUsageReflectsAttachedSession(t *testing.T) {
 	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected session
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the selected session
 	m = dispatchSlash(t, m, "/usage")
 
 	got := content(m)
@@ -162,7 +162,7 @@ func TestSlashUnknownCommandSetsStatus(t *testing.T) {
 func TestSlashFromAttachOpensPanel(t *testing.T) {
 	sup := newFakeSup(tui.GoldenRoster())
 	m := newTestApp(t, sup)
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected session
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the selected session
 
 	m = type_(t, m, "/config")
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})

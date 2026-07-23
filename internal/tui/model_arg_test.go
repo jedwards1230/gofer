@@ -29,7 +29,7 @@ func TestModelArgAttachedSameProviderHotSwaps(t *testing.T) {
 	sup := newFakeSup(modelSelectRoster())
 	m := newModelSelectApp(t, sup, modelSelectEnv(&saved))
 
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected (sonnet) session
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the selected (sonnet) session
 	m = dispatchSlash(t, m, "/model claude-haiku-4-5")
 
 	if len(saved) != 1 || saved[0].Session.Model != "claude-haiku-4-5" {
@@ -55,7 +55,7 @@ func TestModelArgAttachedCrossProviderWarnsOnly(t *testing.T) {
 	sup := newFakeSup(modelSelectRoster())
 	m := newModelSelectApp(t, sup, modelSelectEnv(&saved))
 
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected (sonnet) session
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the selected (sonnet) session
 	m = dispatchSlash(t, m, "/model gpt-5")
 
 	if len(saved) != 1 || saved[0].Session.Model != "gpt-5" {
@@ -114,7 +114,7 @@ func TestModelArgAppliesIdAbsentFromCatalog(t *testing.T) {
 	var saved []config.Config
 	sup := newFakeSup(modelSelectRoster())
 	m := newModelSelectApp(t, sup, modelSelectEnv(&saved))
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected (sonnet) session
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the selected (sonnet) session
 	m = dispatchSlash(t, m, "/model "+unlisted)
 
 	if len(saved) != 1 || saved[0].Session.Model != unlisted {

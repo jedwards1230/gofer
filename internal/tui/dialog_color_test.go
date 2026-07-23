@@ -49,7 +49,7 @@ func newColorAppWithApproval(t *testing.T, th theme.Theme) App {
 	mdl, _ = a.Update(rosterMsg{sessions: GoldenRoster()})
 	a = mdl.(App)
 
-	mdl, cmd := a.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	mdl, cmd := a.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	a = mdl.(App)
 	if cmd == nil {
 		t.Fatal("expected a subscribe cmd after entering attach")

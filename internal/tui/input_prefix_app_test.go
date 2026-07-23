@@ -85,7 +85,7 @@ func TestShellEscapeIsNotSubmittedAsAPrompt(t *testing.T) {
 func TestShellEscapeRendersInTheAttachTranscript(t *testing.T) {
 	sup := newFakeSup(tui.GoldenRoster())
 	m := shellApp(t, sup)
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected session
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the selected session
 
 	m = type_(t, m, "!cat payload.txt")
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -104,7 +104,7 @@ func TestShellEscapeRendersInTheAttachTranscript(t *testing.T) {
 func TestDoubleBangRendersNotSentInTheTranscript(t *testing.T) {
 	sup := newFakeSup(tui.GoldenRoster())
 	m := shellApp(t, sup)
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 
 	m = type_(t, m, "!!cat secret.txt")
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -177,7 +177,7 @@ func TestDoubleBangOutputNeverReachesThePrompt(t *testing.T) {
 func TestShellEscapeFromAttachInputBehavesIdentically(t *testing.T) {
 	sup := newFakeSup(tui.GoldenRoster())
 	m := shellApp(t, sup)
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected session
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the selected session
 
 	m = type_(t, m, "!cat payload.txt")
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -320,7 +320,7 @@ func TestMentionTokenDoesNotReloadTheMarkdownLayer(t *testing.T) {
 	}
 
 	m := newUserCmdModel(t, newFakeSup(tui.GoldenRoster()), env)
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach; also clears the startup note
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach; also clears the startup note
 
 	// Asserted after ONE key press, not a typed run: Update clears the status
 	// line at the top of every key press, so the note a reload raises lives
@@ -358,7 +358,7 @@ func TestPasteFromMentionIntoCommandStillReloads(t *testing.T) {
 	}
 
 	m := newUserCmdModel(t, newFakeSup(tui.GoldenRoster()), env)
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach; clears the startup note
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach; clears the startup note
 	m = press(t, m, tea.KeyPressMsg{Text: "@"})
 	m = press(t, m, tea.KeyPressMsg{Text: "m"})
 
@@ -384,7 +384,7 @@ func TestUserCommandFoldsPendingShellOutput(t *testing.T) {
 
 	sup := newFakeSup(tui.GoldenRoster())
 	m := newUserCmdModel(t, sup, env)
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach
 
 	m = dispatchSlash(t, m, "!cat payload.txt")
 	m = dispatchSlash(t, m, "!!cat secret.txt")
@@ -414,7 +414,7 @@ func TestUserCommandFoldsPendingShellOutput(t *testing.T) {
 func TestShellOutputIsFoldedIntoOnlyOnePrompt(t *testing.T) {
 	sup := newFakeSup(tui.GoldenRoster())
 	m := shellApp(t, sup)
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach
 
 	m = dispatchSlash(t, m, "!cat payload.txt")
 	m = dispatchSlash(t, m, "first")

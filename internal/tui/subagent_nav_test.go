@@ -80,21 +80,17 @@ func attachedTo(t *testing.T, sup *fakeSup, m tea.Model) string {
 	return id
 }
 
-// TestNavEnterDrillsIntoChildSession is the drill-in contract PR 2's tree
+// TestNavEnterDrillsIntoChildSession is the drill-in contract the tree
 // ordering already delivers, pinned so it can't regress: ↓ selects a child row
-// and enter → enter opens THAT child's own session, not its parent's. A child
-// is an ordinary roster row, so this needed no new navigation model — which is
+// and enter opens THAT child's own session, not its parent's. A child is an
+// ordinary roster row, so this needed no new navigation model — which is
 // exactly the claim worth a test.
 func TestNavEnterDrillsIntoChildSession(t *testing.T) {
 	sup := newFakeSup(navTree())
 	m := newTestApp(t, sup)
 
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyDown}) // the child, depth-first under its root
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
-	if got := content(m); !strings.Contains(got, "space to close") {
-		t.Fatalf("expected the peek card after enter, got:\n%s", got)
-	}
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyDown})  // the child, depth-first under its root
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // open the child's own session
 
 	if got := attachedTo(t, sup, m); got != navChildID {
 		t.Errorf("attached session = %q; want the child %q", got, navChildID)
@@ -112,13 +108,13 @@ func TestNavAttachLeftReturnsToParent(t *testing.T) {
 
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyDown}) // child
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyDown}) // grandchild
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if got := attachedTo(t, sup, m); got != navGrandchildID {
 		t.Fatalf("attached session = %q; want the grandchild %q", got, navGrandchildID)
 	}
 
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyLeft})
-	if got := content(m); strings.Contains(got, "enter peek") {
+	if got := content(m); strings.Contains(got, "space peek") {
 		t.Fatalf("← from a child fell through to the overview; want its parent's session:\n%s", got)
 	}
 	if got := attachedTo(t, sup, m); got != navChildID {
@@ -152,13 +148,13 @@ func TestNavAttachLeftFromRootReturnsToOverview(t *testing.T) {
 			sup := newFakeSup(tc.roster)
 			m := newTestApp(t, sup)
 
-			m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
+			m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 			if got := attachedTo(t, sup, m); got != tc.attachs {
 				t.Fatalf("attached session = %q; want %q", got, tc.attachs)
 			}
 
 			m = press(t, m, tea.KeyPressMsg{Code: tea.KeyLeft})
-			if got := content(m); !strings.Contains(got, "enter peek") {
+			if got := content(m); !strings.Contains(got, "space peek") {
 				t.Errorf("expected ← to back out to the overview, got:\n%s", got)
 			}
 		})
@@ -192,7 +188,7 @@ func TestNavAttachDownSelectsFirstChild(t *testing.T) {
 	sup := newFakeSup(navTree())
 	m := newTestApp(t, sup)
 
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the root
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the root
 	if got := content(m); !strings.Contains(got, "1 background agent launched") {
 		t.Fatalf("expected the attached root to advertise its child:\n%s", got)
 	}
@@ -200,7 +196,7 @@ func TestNavAttachDownSelectsFirstChild(t *testing.T) {
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
 
 	got := content(m)
-	if !strings.Contains(got, "enter peek") {
+	if !strings.Contains(got, "space peek") {
 		t.Fatalf("expected ↓ to return to the overview, got:\n%s", got)
 	}
 	// The child row is labelled by its agent identity (see Overview.rowLabel).
@@ -217,10 +213,10 @@ func TestNavAttachDownWithoutChildrenIsNoOp(t *testing.T) {
 	sup := newFakeSup(tui.GoldenRoster())
 	m := newTestApp(t, sup)
 
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach a childless session
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach a childless session
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
 
-	if got := content(m); strings.Contains(got, "enter peek") {
+	if got := content(m); strings.Contains(got, "space peek") {
 		t.Errorf("↓ on a childless session left the attach screen:\n%s", got)
 	}
 }
@@ -235,12 +231,12 @@ func TestNavAttachDownWithTextDoesNotNavigate(t *testing.T) {
 	sup := newFakeSup(navTree())
 	m := newTestApp(t, sup)
 
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the root (has a child)
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the root (has a child)
 	m = type_(t, m, "half a prompt")
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
 
 	got := content(m)
-	if strings.Contains(got, "enter peek") {
+	if strings.Contains(got, "space peek") {
 		t.Fatalf("↓ with text in the input navigated to the overview:\n%s", got)
 	}
 	if !strings.Contains(got, "> half a prompt▏") {
@@ -294,7 +290,7 @@ func TestRosterHintNamesStopBindingWithinWidth(t *testing.T) {
 	hintOf := func(t *testing.T, o tui.Overview) string {
 		t.Helper()
 		for _, line := range strings.Split(testkit.Render(o, testkit.Width, testkit.Height), "\n") {
-			if strings.Contains(line, "enter peek") {
+			if strings.Contains(line, "space peek") {
 				return line
 			}
 		}
@@ -303,8 +299,8 @@ func TestRosterHintNamesStopBindingWithinWidth(t *testing.T) {
 	}
 
 	flat := hintOf(t, newOverview().WithSessions(tui.GoldenRoster()))
-	if want := "enter peek · → attach · tab toggle view · ctrl-x kill · ? shortcuts"; flat != want {
-		t.Errorf("flat-roster hint = %q; want the unchanged %q", flat, want)
+	if want := "enter open · space peek · tab toggle view · ctrl-x kill · ? shortcuts"; flat != want {
+		t.Errorf("flat-roster hint = %q; want %q", flat, want)
 	}
 
 	tree := hintOf(t, newOverview().WithSessions(navTree()))
@@ -450,13 +446,13 @@ func TestAttachRendersSpawnedChildrenFromTheRoster(t *testing.T) {
 	sup := newFakeSup(navTree())
 	m := newTestApp(t, sup)
 
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the root
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the root
 	if got := content(m); !strings.Contains(got, "1 background agent launched") {
 		t.Errorf("attached parent did not list its spawned child:\n%s", got)
 	}
 
 	leaf := newTestApp(t, newFakeSup(tui.GoldenRoster()))
-	leaf = press(t, leaf, tea.KeyPressMsg{Code: tea.KeyRight})
+	leaf = press(t, leaf, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if got := content(leaf); strings.Contains(got, "background agent") {
 		t.Errorf("attached leaf session rendered a background-agents block:\n%s", got)
 	}

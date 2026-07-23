@@ -151,7 +151,7 @@ func TestPasteCarriageReturnsNormalized(t *testing.T) {
 func TestPasteIntoAttachInput(t *testing.T) {
 	sup := newFakeSup(tui.GoldenRoster())
 	m := newTestApp(t, sup)
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach
 	rowsBefore := frameRows(m)
 
 	m = paste(t, m, "line one\nline two")
@@ -178,13 +178,13 @@ func TestPasteIntoAttachInput(t *testing.T) {
 func TestPasteIntoPeekReply(t *testing.T) {
 	sup := newFakeSup(tui.GoldenRoster())
 	m := newTestApp(t, sup)
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // peek
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeySpace}) // peek
 	rowsBefore := frameRows(m)
 
 	m = paste(t, m, " reply one\nreply two")
 
 	got := content(m)
-	if !strings.Contains(got, "space to close") {
+	if !strings.Contains(got, "space/esc to close") {
 		t.Fatalf("expected to stay on peek (a pasted leading space must not close it), got:\n%s", got)
 	}
 	if !strings.Contains(got, "❯  reply one␊reply two▏") {
@@ -277,7 +277,7 @@ func TestPasteIgnoredWhileCommandPanelOpen(t *testing.T) {
 	// paste would have landed in was never touched.
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
 	got := content(m)
-	if !strings.Contains(got, "enter peek") {
+	if !strings.Contains(got, "space peek") {
 		t.Fatalf("expected the panel closed back to the overview, got:\n%s", got)
 	}
 	if strings.Contains(got, "leaked") {
