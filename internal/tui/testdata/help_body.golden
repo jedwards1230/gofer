@@ -8,4 +8,4 @@ Commands
   /stats                           Show session lifecycle and roster-wide totals
   /status                          Show session, cwd, and provider status
   /thinking [low|medium|high|off]  Set the reasoning effort for this session (/…
-↓ 68 more
+↓ 69 more

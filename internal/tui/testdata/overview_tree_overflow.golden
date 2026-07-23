@@ -11,4 +11,4 @@ claude-sonnet-5 · ~/orchestration
 ↓ 4 more
 ────────────────────────────────────────────────────────────────────────────────
 ❯ describe a task for a new session
-enter peek · → attach · tab toggle view · ctrl-x kill · ctrl-t stop agents
+enter open · space peek · tab toggle view · ctrl-x kill · ctrl-t stop agents

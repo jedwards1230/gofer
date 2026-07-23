@@ -992,26 +992,19 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		a.over = a.over.ToggleView()
 		return a, nil
 
-	case key.Code == tea.KeyRight && key.Mod == 0:
-		// Bare (unmodified) Right only — a modified Right (Alt+Right, the
-		// input keymap's word-move) falls through to applyInputKey below like
-		// any other editing key. → in an EMPTY dispatch bar attaches the
-		// selected session (the navigation contract); with text, it edits —
-		// moves the cursor right one rune, the same as everywhere else Right
-		// means "move right" — rather than claiming the key outright and
-		// leaving the dispatch-bar cursor able to move only left. Exactly the
-		// mirror of handleAttachKey's bare-Left case.
-		if a.over.InputEmpty() {
-			id := a.over.SelectedID()
-			if id == "" {
-				return a, nil
-			}
-			a.scr = screenAttach
-			a.scroll = 0
-			cmd := a.enter(id)
-			return a, cmd
+	case (key.Code == tea.KeySpace || key.Text == " ") && a.over.InputEmpty():
+		// Peek the selected session: a roster-only card that does NOT
+		// subscribe (enter opens the full, subscribed session). Conditional on
+		// an EMPTY dispatch bar — with text, space is an ordinary character and
+		// falls through to the shared input keymap below, exactly like the bare
+		// "?" help key. Peek closes back here with space or esc.
+		id := a.over.SelectedID()
+		if id == "" {
+			return a, nil
 		}
-		a.over = a.over.MoveRight()
+		a.scr = screenPeek
+		a.scroll = 0
+		a.peekReply = ""
 		return a, nil
 
 	case key.Code == tea.KeyPgUp:
@@ -1031,12 +1024,13 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if id == "" {
 				return a, nil
 			}
-			// Peek renders a roster-only card — it does not subscribe. The
-			// subscription is established only if the user attaches from peek.
-			a.scr = screenPeek
+			// Open the whole session: attach and subscribe now. `space` is the
+			// lighter verb — it peeks the roster-only card that does NOT
+			// subscribe (see the KeySpace case below).
+			a.scr = screenAttach
 			a.scroll = 0
-			a.peekReply = ""
-			return a, nil
+			cmd := a.enter(id)
+			return a, cmd
 		}
 		// A leading sigil is a command or a shell escape, not a prompt —
 		// dispatch it instead of creating a session from the literal text.
@@ -1113,10 +1107,9 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Every key not already claimed by the navigation contract above falls
 	// through to the shared input keymap (input_keymap.go) — movement,
 	// insertion at the cursor, and deletion, the same keymap the attach
-	// input uses. Bare Right never reaches here: it is already claimed by the
-	// tea.KeyRight case above (conditionally — attach the selected session
-	// from an empty dispatch bar, else move the cursor right — see its own
-	// comment).
+	// input uses. Bare Right is a plain cursor-move here (it reaches
+	// applyInputKey's KeyRight case); space reaches applyInputKey only with
+	// text in the bar — an empty bar's space peeks (the KeySpace case above).
 	if buf, ok := applyInputKey(a.over.input, key); ok {
 		a.over.input = buf
 	}
@@ -1127,12 +1120,22 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // roster selection (the card follows; no subscription). The ❯ reply input owns
 // text: enter with an empty reply opens/attaches the selected session, enter
 // with text sends it as a reply (via the same Send path attach uses) and stays;
-// space with an empty reply closes peek back to the overview, space with text
-// types a space; ctrl+x deletes (kills a running session, archives a finished
-// one); backspace edits the reply.
+// esc closes peek back to the overview, and so does space with an empty reply
+// (space is the toggle partner of the overview's space-to-peek); space with
+// text types a space; ctrl+x deletes (kills a running session, archives a
+// finished one); backspace edits the reply.
 func (a App) handlePeekKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.Key()
 	switch {
+	case key.Code == tea.KeyEscape:
+		// The universal back-out: esc always closes peek, whatever the reply
+		// buffer holds (an in-progress reply is discarded — the overview's own
+		// esc likewise clears its dispatch bar). space does the same, but only
+		// with an empty reply, since it also types a space.
+		a.scr = screenOverview
+		a.scroll = 0
+		return a, nil
+
 	case key.Code == tea.KeyUp:
 		a.over = a.over.MoveUp()
 		return a, nil

@@ -64,7 +64,7 @@ func statusSeverityCases() []statusSeverityCase {
 			note:   "Live model swap needs the same provider",
 			drive: func(t *testing.T, sup *fakeSup, saved *[]config.Config) tea.Model {
 				m := newModelSelectAppWithTheme(t, testkit.ColorTheme(), sup, modelSelectEnv(saved))
-				m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach
+				m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach
 				m = dispatchSlash(t, m, "/model")
 				m = pressDown(t, m, pressesToGPT5)
 				return press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -80,7 +80,7 @@ func statusSeverityCases() []statusSeverityCase {
 				// ONLY route to danger for an op result.
 				sup.setModelErr = errors.New("gofer/set_model: session busy")
 				m := newModelSelectAppWithTheme(t, testkit.ColorTheme(), sup, modelSelectEnv(saved))
-				m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach
+				m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach
 				m = dispatchSlash(t, m, "/model")
 				m = pressDown(t, m, pressesToHaiku)
 				return press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -211,7 +211,7 @@ func TestDaemonProbeNotesFitTheWidthFloor(t *testing.T) {
 			m := newModelSelectApp(t, sup, probingDaemonEnv(&saved, tt.daemonDefault, &probes))
 
 			if tt.attach {
-				m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
+				m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 			}
 			m = dispatchSlash(t, m, "/model")
 			m = pressDown(t, m, tt.presses)
@@ -283,7 +283,7 @@ func TestDaemonProbeNoteSeverities(t *testing.T) {
 				probingDaemonEnv(&saved, tt.daemonDefault, &probes))
 
 			if tt.attach {
-				m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
+				m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 			}
 			m = dispatchSlash(t, m, "/model")
 			m = pressDown(t, m, tt.presses)

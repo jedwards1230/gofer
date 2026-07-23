@@ -160,7 +160,7 @@ func TestModelSelectDaemonHotSwapProbesAfterTheSwap(t *testing.T) {
 	sup := newFakeSup(modelSelectRoster())
 	m := newModelSelectApp(t, sup, probingDaemonEnv(&saved, "claude-haiku-4-5", &probes))
 
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected (sonnet) session
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the selected (sonnet) session
 	m = dispatchSlash(t, m, "/model")
 	m = pressDown(t, m, pressesToHaiku)
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -192,7 +192,7 @@ func TestModelSelectDaemonHotSwapFailureSkipsTheProbe(t *testing.T) {
 	sup.setModelErr = errors.New("gofer/set_model: session busy")
 	m := newModelSelectApp(t, sup, probingDaemonEnv(&saved, "claude-haiku-4-5", &probes))
 
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = dispatchSlash(t, m, "/model")
 	m = pressDown(t, m, pressesToHaiku)
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})

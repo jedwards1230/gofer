@@ -117,7 +117,7 @@ func TestNewCommandCreatesSession(t *testing.T) {
 func TestNewLeavesPriorSessionAlone(t *testing.T) {
 	sup := newFakeSup(tui.GoldenRoster())
 	m := newTestApp(t, sup)
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected session
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the selected session
 
 	m, cmd := dispatchSlashCmd(t, m, "/new")
 	_ = runCmd(t, m, cmd)

@@ -51,7 +51,7 @@ func TestThinkingArgAttachedHotSwaps(t *testing.T) {
 	sup := newFakeSup(modelSelectRoster())
 	m := newModelSelectApp(t, sup, modelSelectEnv(&saved))
 
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected session
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the selected session
 	m = dispatchSlash(t, m, "/thinking high")
 
 	if len(saved) != 1 || saved[0].Session.Effort != "high" {
@@ -81,7 +81,7 @@ func TestThinkingArgCrossProviderStillSwaps(t *testing.T) {
 	sup := newFakeSup(modelSelectRoster()) // row 0 runs claude-sonnet-5
 	m := newModelSelectApp(t, sup, modelSelectEnv(&saved))
 
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = dispatchSlash(t, m, "/thinking medium")
 
 	wantOp := "set-effort:" + attachedSessionID + ":medium"
@@ -105,7 +105,7 @@ func TestThinkingArgOffClearsTheLevel(t *testing.T) {
 			sup := newFakeSup(modelSelectRoster())
 			m := newModelSelectApp(t, sup, modelSelectEnv(&saved))
 
-			m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
+			m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 			m = dispatchSlash(t, m, "/thinking "+spelling)
 
 			if len(saved) != 1 || saved[0].Session.Effort != "" {
@@ -257,7 +257,7 @@ func TestThinkingSelectAttachedCommits(t *testing.T) {
 	sup := newFakeSup(modelSelectRoster())
 	m := newModelSelectApp(t, sup, modelSelectEnv(&saved))
 
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach
 	m = dispatchSlash(t, m, "/thinking")
 	// The highlight opens on the active level (off, row 0), so two ↓ presses
 	// land on medium.
@@ -289,7 +289,7 @@ func TestThinkingSelectSaveConfigErrorStopsBeforeSetEffort(t *testing.T) {
 	env.SaveConfig = func(config.Config) error { return errTestSaveFailed }
 
 	m := newModelSelectApp(t, sup, env)
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = dispatchSlash(t, m, "/thinking")
 	m = pressDown(t, m, 2)
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -313,7 +313,7 @@ func TestThinkingSelectConfigReadErrorAbortsBeforeSave(t *testing.T) {
 	env.Config = func() (config.Config, error) { return config.Config{}, errTestReadFailed }
 
 	m := newModelSelectApp(t, sup, env)
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = dispatchSlash(t, m, "/thinking")
 	m = pressDown(t, m, 2)
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -339,7 +339,7 @@ func TestThinkingSetEffortErrorSurfacesAsDanger(t *testing.T) {
 	sup.setEffortErr = errTestSetEffortFailed
 	m := newModelSelectApp(t, sup, modelSelectEnv(&saved))
 
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	m, cmd := dispatchSlashCmd(t, m, "/thinking high")
 	m = runCmd(t, m, cmd)
 

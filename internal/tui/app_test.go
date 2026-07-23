@@ -268,14 +268,27 @@ func type_(t *testing.T, m tea.Model, s string) tea.Model {
 
 const ctrl = tea.ModCtrl
 
-// TestNavEnterPeeksSelected verifies enter, with an empty dispatch input,
-// peeks the selected session rather than dispatching a new one.
-func TestNavEnterPeeksSelected(t *testing.T) {
+// TestNavEnterAttachesSelected verifies enter, with an empty dispatch input,
+// opens (attaches) the selected session rather than dispatching a new one or
+// peeking. This is the mutation anchor for the enter→attach branch: neutralize
+// it and this test goes red.
+func TestNavEnterAttachesSelected(t *testing.T) {
 	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 
-	if got := content(m); !strings.Contains(got, "space to close") {
-		t.Fatalf("expected the peek screen after enter, got:\n%s", got)
+	if got := content(m); !strings.Contains(got, "> ▏") {
+		t.Fatalf("expected the attach screen (empty input line) after enter, got:\n%s", got)
+	}
+}
+
+// TestNavSpacePeeksSelected verifies space, with an empty dispatch input,
+// peeks the selected session (the roster-only card that does not subscribe).
+func TestNavSpacePeeksSelected(t *testing.T) {
+	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeySpace})
+
+	if got := content(m); !strings.Contains(got, "space/esc to close") {
+		t.Fatalf("expected the peek screen after space, got:\n%s", got)
 	}
 }
 
@@ -283,11 +296,38 @@ func TestNavEnterPeeksSelected(t *testing.T) {
 // buffer, closes peek back to the overview.
 func TestNavPeekSpaceClosesToOverview(t *testing.T) {
 	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // enter peek
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeySpace}) // peek
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeySpace}) // empty reply: close
 
-	if got := content(m); !strings.Contains(got, "enter peek") {
+	if got := content(m); !strings.Contains(got, "space peek") {
 		t.Fatalf("expected space with an empty reply to back out to the overview, got:\n%s", got)
+	}
+}
+
+// TestNavPeekEscClosesToOverview verifies esc closes peek back to the overview
+// — the primary close key (space is the toggle partner). Mutation anchor for
+// the peek-esc branch.
+func TestNavPeekEscClosesToOverview(t *testing.T) {
+	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeySpace})  // peek
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEscape}) // close
+
+	if got := content(m); !strings.Contains(got, "space peek") {
+		t.Fatalf("expected esc to back out of peek to the overview, got:\n%s", got)
+	}
+}
+
+// TestNavPeekEscClosesWithReplyText verifies esc closes peek even with an
+// in-progress reply (esc, unlike space, is unconditional — the reply is
+// discarded, mirroring the overview's esc-clears-the-bar).
+func TestNavPeekEscClosesWithReplyText(t *testing.T) {
+	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeySpace}) // peek
+	m = type_(t, m, "half a reply")
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEscape}) // close, discarding the reply
+
+	if got := content(m); !strings.Contains(got, "space peek") {
+		t.Fatalf("expected esc to close peek even with reply text, got:\n%s", got)
 	}
 }
 
@@ -295,7 +335,7 @@ func TestNavPeekSpaceClosesToOverview(t *testing.T) {
 // attaches the peeked session.
 func TestNavPeekEnterAttaches(t *testing.T) {
 	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // enter peek
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeySpace}) // peek
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // empty reply: attach
 
 	if got := content(m); !strings.Contains(got, "> ▏") {
@@ -309,7 +349,7 @@ func TestNavPeekReplySends(t *testing.T) {
 	sup := newFakeSup(tui.GoldenRoster())
 	m := newTestApp(t, sup)
 
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // enter peek
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeySpace}) // peek
 	m = type_(t, m, "status?")
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // send the reply
 
@@ -317,7 +357,7 @@ func TestNavPeekReplySends(t *testing.T) {
 	if len(sup.sent) != 1 || sup.sent[0] != want {
 		t.Fatalf("sup.sent = %v; want one entry %q", sup.sent, want)
 	}
-	if got := content(m); !strings.Contains(got, "space to close") {
+	if got := content(m); !strings.Contains(got, "space/esc to close") {
 		t.Fatalf("expected to stay on the peek screen after sending a reply, got:\n%s", got)
 	}
 }
@@ -328,23 +368,12 @@ func TestNavPeekKillsSelected(t *testing.T) {
 	sup := newFakeSup(tui.GoldenRoster())
 	m := newTestApp(t, sup)
 
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // enter peek
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeySpace}) // peek
 	press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl})
 
 	want := "kill:0192a1b2-app0-7000-8000-000000000001"
 	if len(sup.ops) != 1 || sup.ops[0] != want {
 		t.Fatalf("sup.ops = %v; want one entry %q", sup.ops, want)
-	}
-}
-
-// TestNavRightAttachesSelected verifies → attaches the selected session
-// directly, skipping peek.
-func TestNavRightAttachesSelected(t *testing.T) {
-	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
-
-	if got := content(m); !strings.Contains(got, "> ▏") {
-		t.Fatalf("expected the attach screen (empty input line) after →, got:\n%s", got)
 	}
 }
 
@@ -387,7 +416,7 @@ func TestNavAttachSendsPrompt(t *testing.T) {
 	sup := newFakeSup(tui.GoldenRoster())
 	m := newTestApp(t, sup)
 
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected (working) session
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the selected (working) session
 	m = type_(t, m, "status?")
 	press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 
@@ -422,7 +451,7 @@ func TestAttachOpenStartsOnAttach(t *testing.T) {
 	var m tea.Model = tui.NewApp(theme.Test(), sup, meta, tui.GoldenCommandEnv())
 	m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 
-	if got := content(m); !strings.Contains(got, "> ▏") || strings.Contains(got, "enter peek") {
+	if got := content(m); !strings.Contains(got, "> ▏") || strings.Contains(got, "space peek") {
 		t.Fatalf("expected the attach screen on open, got:\n%s", got)
 	}
 	if cmd := tui.NewApp(theme.Test(), sup, meta, tui.GoldenCommandEnv()).Init(); cmd == nil {
@@ -430,7 +459,7 @@ func TestAttachOpenStartsOnAttach(t *testing.T) {
 	}
 
 	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
-	if got := content(m); !strings.Contains(got, "enter peek") {
+	if got := content(m); !strings.Contains(got, "space peek") {
 		t.Fatalf("expected ← to back out to the overview, got:\n%s", got)
 	}
 }
@@ -439,7 +468,7 @@ func TestAttachOpenStartsOnAttach(t *testing.T) {
 // out to the overview only when the input buffer is empty.
 func TestNavAttachLeftBacksOutWhenEmpty(t *testing.T) {
 	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach
 
 	if got := content(m); !strings.Contains(got, "> ▏") {
 		t.Fatalf("expected the attach screen before ←, got:\n%s", got)
@@ -447,7 +476,7 @@ func TestNavAttachLeftBacksOutWhenEmpty(t *testing.T) {
 
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyLeft})
 
-	if got := content(m); !strings.Contains(got, "enter peek") {
+	if got := content(m); !strings.Contains(got, "space peek") {
 		t.Fatalf("expected ← with an empty input to back out to the overview, got:\n%s", got)
 	}
 }

@@ -163,7 +163,7 @@ func TestYoloKeyWorksOnEveryScreen(t *testing.T) {
 	var saved []config.Config
 	m := newYoloApp(t, yoloEnv(&cfg, &saved))
 
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected session
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the selected session
 	m = press(t, m, tea.KeyPressMsg{Code: 'y', Mod: ctrl})
 	if got := content(m); !strings.Contains(got, yoloOnNote) {
 		t.Fatalf("expected the guardrails-off note on the attach screen, got:\n%s", got)

@@ -130,8 +130,8 @@ func globalKeymap() []keyBinding {
 func screenKeymap() []keyBinding {
 	return []keyBinding{
 		{Keys: "↑/↓", Scope: scopeOverview, Desc: "Move the roster selection"},
-		{Keys: "→", Scope: scopeOverview, Desc: "Attach the selected session (empty dispatch bar)"},
-		{Keys: "enter", Scope: scopeOverview, Desc: "Peek the selected session, or run what's typed"},
+		{Keys: "enter", Scope: scopeOverview, Desc: "Open the selected session, or run what's typed"},
+		{Keys: "space", Scope: scopeOverview, Desc: "Peek the selected session (empty dispatch bar)"},
 		{Keys: "tab", Scope: scopeOverview, Desc: "Switch flat / grouped roster view"},
 		{Keys: "esc", Scope: scopeOverview, Desc: "Clear the dispatch bar"},
 		{Keys: "ctrl+x", Scope: scopeOverview, Desc: "Kill a running session, archive a finished one"},
@@ -139,8 +139,9 @@ func screenKeymap() []keyBinding {
 		{Keys: "pgup/pgdn", Scope: scopeOverview, Desc: "Scroll the roster"},
 		{Keys: "?", Scope: scopeOverview, Desc: "Open this help (empty dispatch bar)"},
 
-		{Keys: "enter", Scope: scopePeek, Desc: "Attach, or send the typed reply"},
+		{Keys: "enter", Scope: scopePeek, Desc: "Open the session, or send the typed reply"},
 		{Keys: "space", Scope: scopePeek, Desc: "Close back to the roster (empty reply)"},
+		{Keys: "esc", Scope: scopePeek, Desc: "Close back to the roster"},
 		{Keys: "↑/↓", Scope: scopePeek, Desc: "Move the roster selection"},
 		{Keys: "ctrl+x", Scope: scopePeek, Desc: "Kill a running session, archive a finished one"},
 

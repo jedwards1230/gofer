@@ -62,7 +62,7 @@ func TestUserCommandSendsExpandedBody(t *testing.T) {
 
 	sup := newFakeSup(tui.GoldenRoster())
 	m := newUserCmdModel(t, sup, env)
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected session
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the selected session
 	dispatchSlash(t, m, "/review 42 urgently")
 
 	want := attachedSessionID + ":Review PR 42 urgently — all args: 42 urgently"
@@ -79,7 +79,7 @@ func TestUserCommandUsesDefaultForMissingArg(t *testing.T) {
 
 	sup := newFakeSup(tui.GoldenRoster())
 	m := newUserCmdModel(t, sup, env)
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	dispatchSlash(t, m, "/review 42")
 
 	want := attachedSessionID + ":Review PR 42 carefully"
@@ -97,7 +97,7 @@ func TestUserCommandMatchesTypedPromptExactly(t *testing.T) {
 
 	sup := newFakeSup(tui.GoldenRoster())
 	m := newUserCmdModel(t, sup, env)
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = dispatchSlash(t, m, "/review 42")
 	dispatchSlash(t, m, "Review PR 42") // not a slash command: a plain prompt
 
@@ -142,7 +142,7 @@ func TestUserCommandEmptyExpansionReports(t *testing.T) {
 
 	sup := newFakeSup(tui.GoldenRoster())
 	m := newUserCmdModel(t, sup, env)
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = dispatchSlash(t, m, "/blank")
 
 	if len(sup.sent) != 0 {
@@ -252,7 +252,7 @@ func TestUserCommandFileWrittenWhileRunningIsPickedUp(t *testing.T) {
 
 	sup := newFakeSup(tui.GoldenRoster())
 	m := newUserCmdModel(t, sup, env)
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 
 	seedUserCmd(t, userDir, "late.md", "written after startup")
 

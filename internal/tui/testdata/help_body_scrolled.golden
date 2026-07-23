@@ -5,7 +5,7 @@ Global
   ctrl+y  Toggle guardrails for new sessions (same as /yolo)
 Roster
   ↑/↓        Move the roster selection
-  →          Attach the selected session (empty dispatch bar)
-  enter      Peek the selected session, or run what's typed
+  enter      Open the selected session, or run what's typed
+  space      Peek the selected session (empty dispatch bar)
   tab        Switch flat / grouped roster view
-↑ 10 more · ↓ 58 more
+↑ 10 more · ↓ 59 more

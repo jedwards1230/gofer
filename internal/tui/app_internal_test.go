@@ -209,13 +209,13 @@ func TestGoldenAppOverview(t *testing.T) {
 	testkit.AssertGolden(t, "app_overview", a.render())
 }
 
-// TestGoldenAppPeek reaches the peek screen by pressing enter on the
+// TestGoldenAppPeek reaches the peek screen by pressing space on the
 // (recency-first) selected session. Peek no longer subscribes — this is a
 // pure Update/render round trip, unlike TestGoldenAppAttach below.
 func TestGoldenAppPeek(t *testing.T) {
 	a := newAppForGolden(t, newInternalFakeSup(GoldenRoster()))
 
-	mdl, _ := a.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	mdl, _ := a.Update(tea.KeyPressMsg{Code: tea.KeySpace})
 	a = mdl.(App)
 	if a.scr != screenPeek {
 		t.Fatalf("scr = %v; want screenPeek", a.scr)
@@ -224,14 +224,14 @@ func TestGoldenAppPeek(t *testing.T) {
 	testkit.AssertGolden(t, "app_peek", a.render())
 }
 
-// TestGoldenAppAttach reaches the attach screen by pressing → on the
+// TestGoldenAppAttach reaches the attach screen by pressing enter on the
 // selected session, resolves the subscribe round trip, feeds the same
 // transcript, and types a pending reply into the input line before
 // rendering.
 func TestGoldenAppAttach(t *testing.T) {
 	a := newAppForGolden(t, newInternalFakeSup(GoldenRoster()))
 
-	mdl, cmd := a.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	mdl, cmd := a.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	a = mdl.(App)
 	if a.scr != screenAttach {
 		t.Fatalf("scr = %v; want screenAttach", a.scr)
@@ -389,7 +389,7 @@ func TestRenderNoPanicAtTinyHeightsWithContent(t *testing.T) {
 
 	t.Run("attach", func(t *testing.T) {
 		a := newAppForGolden(t, newInternalFakeSup(GoldenRoster()))
-		mdl, cmd := a.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+		mdl, cmd := a.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 		a = mdl.(App)
 		mdl, _ = a.Update(cmd())
 		a = mdl.(App)
@@ -504,7 +504,7 @@ func attachForDialogTestEnv(t *testing.T, sup *internalFakeSup, env CommandEnv) 
 	a = mdl.(App)
 	mdl, _ = a.Update(rosterMsg{sessions: GoldenRoster()})
 	a = mdl.(App)
-	mdl, cmd := a.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	mdl, cmd := a.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	a = mdl.(App)
 	if cmd == nil {
 		t.Fatal("expected a subscribe cmd after entering attach")
@@ -1238,7 +1238,7 @@ func TestScrollResetsOnScreenAndSessionSwitch(t *testing.T) {
 		t.Fatal("expected a nonzero scroll after PgUp, precondition for this test")
 	}
 
-	mdl, _ = a.Update(tea.KeyPressMsg{Code: tea.KeyRight}) // attach: a different scrollable region
+	mdl, _ = a.Update(tea.KeyPressMsg{Code: tea.KeyEnter}) // attach: a different scrollable region
 	a = mdl.(App)
 	if a.scroll != 0 {
 		t.Errorf("scroll not reset entering attach: got %d, want 0", a.scroll)

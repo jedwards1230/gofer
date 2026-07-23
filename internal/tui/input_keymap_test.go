@@ -3,10 +3,10 @@ package tui_test
 // input_keymap_test.go covers the native editing keymap (input_keymap.go)
 // wired end to end through App's exported surface — both text-entry paths
 // it applies to (the overview dispatch bar and the attach input), and the
-// navigation-contract interplay with Left/Right (each screen's own arrow is
-// conditional on its input being empty: a bare Right on the overview
-// attaches only from an empty dispatch bar, a bare Left on the attach screen
-// backs out only from an empty input). [inputBuffer]'s own edit operations
+// navigation-contract interplay with Left (the attach screen's bare Left is
+// conditional on its input being empty: it backs out only from an empty input,
+// else it moves the cursor; the overview's open/peek verbs live on enter/space,
+// so its arrows are plain cursor-moves). [inputBuffer]'s own edit operations
 // are hard-unit-tested in isolation in inputbuf_test.go.
 
 import (
@@ -32,8 +32,8 @@ func altBackspace() tea.KeyPressMsg {
 func ctrlKey(r rune) tea.KeyPressMsg { return tea.KeyPressMsg{Code: r, Mod: tea.ModCtrl} }
 
 // TestOverviewDispatchLeftMovesCursorMidText covers Left moving the
-// dispatch-bar cursor — free of the navigation contract's Right binding,
-// which only bare Right claims (see TestOverviewDispatchBareRightAttaches).
+// dispatch-bar cursor. Both arrows are plain cursor-moves on the overview now
+// (see TestOverviewDispatchBareRightNoOpWhenEmpty).
 func TestOverviewDispatchLeftMovesCursorMidText(t *testing.T) {
 	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
 	m = type_(t, m, "abc")
@@ -45,12 +45,11 @@ func TestOverviewDispatchLeftMovesCursorMidText(t *testing.T) {
 	}
 }
 
-// TestOverviewDispatchBareRightMovesCursorWithText pins the overview's half
-// of the conditional-nav contract: with dispatch-bar text, a bare
-// (unmodified) Right EDITS — it moves the cursor right one rune rather than
-// attaching, the exact mirror of bare Left on the attach screen
-// (TestAttachInputLeftBacksOutOnlyWhenEmpty). Before this the case claimed
-// bare Right outright, so the dispatch-bar cursor could only ever move left.
+// TestOverviewDispatchBareRightMovesCursorWithText pins the overview's bare
+// Right: with dispatch-bar text it EDITS — moves the cursor right one rune.
+// Since folding the overview's open/peek verbs onto enter/space, bare Right no
+// longer attaches at all (see TestOverviewDispatchBareRightNoOpWhenEmpty); it
+// is a plain cursor-move whether the bar has text or not.
 func TestOverviewDispatchBareRightMovesCursorWithText(t *testing.T) {
 	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
 	m = type_(t, m, "abc")
@@ -67,15 +66,19 @@ func TestOverviewDispatchBareRightMovesCursorWithText(t *testing.T) {
 	}
 }
 
-// TestOverviewDispatchBareRightAttachesWhenEmpty pins the other half: with an
-// EMPTY dispatch bar, bare Right stays the navigation contract's "attach the
-// selected session".
-func TestOverviewDispatchBareRightAttachesWhenEmpty(t *testing.T) {
+// TestOverviewDispatchBareRightNoOpWhenEmpty pins the change: with an EMPTY
+// dispatch bar and a session selected, bare Right no longer attaches — opening
+// a session is enter's job now (space peeks). Right is a plain cursor-move,
+// which on an empty bar is a no-op, so the overview stays put.
+func TestOverviewDispatchBareRightNoOpWhenEmpty(t *testing.T) {
 	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
 
-	if got := content(m); !strings.Contains(got, "> ▏") {
-		t.Fatalf("expected bare Right to attach the selected session (empty attach input), got:\n%s", got)
+	if got := content(m); strings.Contains(got, "> ▏") {
+		t.Fatalf("expected bare Right on an empty bar to stay on the overview, not attach, got:\n%s", got)
+	}
+	if got := content(m); !strings.Contains(got, "space peek") {
+		t.Fatalf("expected to remain on the overview (its footer) after bare Right, got:\n%s", got)
 	}
 }
 
@@ -116,7 +119,7 @@ func TestOverviewDispatchAltRightMovesWordCursor(t *testing.T) {
 // dispatch bar).
 func TestAttachInputAltLeftMovesWordCursor(t *testing.T) {
 	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach
 	m = type_(t, m, "foo bar")
 	m = press(t, m, altLeft())
 	m = press(t, m, tea.KeyPressMsg{Text: "X"})
@@ -130,7 +133,7 @@ func TestAttachInputAltLeftMovesWordCursor(t *testing.T) {
 // equivalents on the attach input.
 func TestAttachInputHomeEndCtrlAE(t *testing.T) {
 	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach
 	m = type_(t, m, "hello")
 
 	// Each check includes the "▏" cursor glyph at its actual post-insert
@@ -166,7 +169,7 @@ func TestAttachInputHomeEndCtrlAE(t *testing.T) {
 // cursor), and only an EMPTY input's Left backs out to the overview.
 func TestAttachInputLeftBacksOutOnlyWhenEmpty(t *testing.T) {
 	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach
 	m = type_(t, m, "ab")
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyLeft})
 	m = press(t, m, tea.KeyPressMsg{Text: "X"})
@@ -183,7 +186,7 @@ func TestAttachInputLeftBacksOutOnlyWhenEmpty(t *testing.T) {
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyBackspace})
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyBackspace})
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyLeft})
-	if got := content(m); !strings.Contains(got, "enter peek") {
+	if got := content(m); !strings.Contains(got, "space peek") {
 		t.Fatalf("expected Left with an empty input to back out to the overview, got:\n%s", got)
 	}
 }
@@ -192,7 +195,7 @@ func TestAttachInputLeftBacksOutOnlyWhenEmpty(t *testing.T) {
 // both deleting the word before the cursor.
 func TestAttachInputAltBackspaceCtrlWDeleteWord(t *testing.T) {
 	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach
 	m = type_(t, m, "foo bar")
 	m = press(t, m, altBackspace())
 
@@ -210,7 +213,7 @@ func TestAttachInputAltBackspaceCtrlWDeleteWord(t *testing.T) {
 // (delete to line end).
 func TestAttachInputCtrlUCtrlK(t *testing.T) {
 	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach
 	m = type_(t, m, "hello world")
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyHome})
 	m = press(t, m, ctrlKey('e'))
