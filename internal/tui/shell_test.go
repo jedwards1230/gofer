@@ -545,6 +545,15 @@ func TestGoldenShellModeInputStyled(t *testing.T) {
 	testkit.AssertGoldenStyled(t, "shell_mode_input", m.View(testkit.Width, testkit.Height))
 }
 
+// TestGoldenShellModeInputBare locks the round-4 fix at the whole-box level: a
+// freshly typed `!` with no command yet still shows the separator space before
+// the caret (`> ! ▏`), so the space is visible from the first keystroke rather
+// than only once a command char is added.
+func TestGoldenShellModeInputBare(t *testing.T) {
+	m := New(theme.Test()).SetInput("!")
+	testkit.AssertGolden(t, "shell_mode_input_bare", m.View(testkit.Width, testkit.Height))
+}
+
 // TestShellInputLineAccentsSigil is the ask-#1 assertion: the leading `!` /
 // `!!` sigil in the input buffer carries the accent SGR so it reads apart from
 // the command being typed, while a non-shell buffer is byte-for-byte
@@ -569,12 +578,14 @@ func TestShellInputLineAccentsSigil(t *testing.T) {
 }
 
 // TestShellInputLineAsciiSpacesSigilAndKeepsCursor pins the splice under the
-// Ascii profile (accent is a no-op): shellInputLine must render the sigil, then
-// a single DISPLAY-ONLY space before the command (ask #3), with the caret at its
-// exact rune position — before the `!`, between the two `!` of `!!`, or out in
-// the command text. A bare `!` / `!!` (no command) gets NO trailing space. The
-// expected string is reconstructed from the spec so a mis-splice at any cursor
-// position — a dropped space, a doubled one, a caret off by a rune — goes red.
+// Ascii profile (accent is a no-op): shellInputLine renders the sigil, then a
+// single ALWAYS-PRESENT DISPLAY-ONLY space (ask #3 + round-4: the gap shows for
+// a bare `!` / `!!` too), with the caret at its exact rune position. A caret at
+// or past the sigil/command boundary lands AFTER the gap (`!`→`! ▏`, `!ls` caret
+// before `l`→`! ▏ls`); a caret strictly inside `!!` keeps the gap trailing the
+// sigil (`!▏! rm`). The expected string is reconstructed from the spec so a
+// mis-splice at any cursor position — a dropped/doubled space, a caret off by a
+// rune, or the boundary caret landing before the gap — goes red.
 func TestShellInputLineAsciiSpacesSigilAndKeepsCursor(t *testing.T) {
 	th := theme.Test()
 	for _, s := range []string{"!ls", "!!rm -rf", "!", "!!"} {
@@ -582,14 +593,11 @@ func TestShellInputLineAsciiSpacesSigilAndKeepsCursor(t *testing.T) {
 		if strings.HasPrefix(s, "!!") {
 			sigilLen = 2
 		}
-		gap := ""
-		if len([]rune(s)) > sigilLen {
-			gap = " "
-		}
+		const gap = " " // always present, even with no command yet
 		for cur := 0; cur <= len([]rune(s)); cur++ {
 			buf := inputBuffer{}.SetTextCursor(s, cur)
 			var want string
-			if cur <= sigilLen {
+			if cur < sigilLen {
 				want = s[:cur] + "▏" + s[cur:sigilLen] + gap + s[sigilLen:]
 			} else {
 				want = s[:sigilLen] + gap + s[sigilLen:cur] + "▏" + s[cur:]
@@ -597,6 +605,24 @@ func TestShellInputLineAsciiSpacesSigilAndKeepsCursor(t *testing.T) {
 			if got := shellInputLine(th, buf, "▏"); got != want {
 				t.Errorf("shellInputLine(%q, cur=%d) = %q, want %q", s, cur, got, want)
 			}
+		}
+	}
+}
+
+// TestShellInputLineBareSigilShowsGap is the round-4 assertion, isolated: a
+// freshly typed `!` (cursor at the end, no command yet) renders `! ▏` — the
+// separator space visible before any command char — and `!!` renders `!! ▏`.
+// Neutralizing the always-gap (only spacing once a command follows) turns this
+// red.
+func TestShellInputLineBareSigilShowsGap(t *testing.T) {
+	th := theme.Test()
+	for _, tc := range []struct{ in, want string }{
+		{"!", "! ▏"},
+		{"!!", "!! ▏"},
+	} {
+		buf := inputBuffer{}.SetText(tc.in)
+		if got := shellInputLine(th, buf, "▏"); got != tc.want {
+			t.Errorf("shellInputLine(%q) = %q, want %q — the gap must show before any command", tc.in, got, tc.want)
 		}
 	}
 }
@@ -644,10 +670,10 @@ func TestGoldenShellModeInputStyledSigil(t *testing.T) {
 	}
 }
 
-// TestShellRunBlockDisposition pins the block-only disposition (Part B): a
-// reply-now `!` run carries NO disposition line (it is sent and answered at
-// once), a queued `!` run reads "queued", and a `!!` run "not sent to the
-// agent".
+// TestShellRunBlockDisposition pins the block-only disposition: NEITHER a
+// reply-now NOR a queued `!` run carries a disposition line (round-4 dropped the
+// `queued` label — a queued run should say nothing). Only a `!!` run keeps "not
+// sent to the agent" — a safety fact, not a mode label.
 func TestShellRunBlockDisposition(t *testing.T) {
 	replyNow := finishedRun(1, "echo hi", "hi", true) // queued == false
 	queued := finishedRun(2, "echo hi", "hi", true)
@@ -657,22 +683,24 @@ func TestShellRunBlockDisposition(t *testing.T) {
 	if got := replyNow.blockDisposition(); got != "" {
 		t.Errorf("reply-now `!` blockDisposition = %q, want empty", got)
 	}
-	if got := queued.blockDisposition(); got != "queued" {
-		t.Errorf("queued `!` blockDisposition = %q, want %q", got, "queued")
+	if got := queued.blockDisposition(); got != "" {
+		t.Errorf("queued `!` blockDisposition = %q, want empty (round-4 dropped the label)", got)
 	}
 	if got := withheld.blockDisposition(); got != "not sent to the agent" {
 		t.Errorf("`!!` blockDisposition = %q, want %q", got, "not sent to the agent")
 	}
 
-	// In the rendered transcript: reply-now shows no `·` disposition line;
-	// queued shows `· queued`.
-	reply := New(theme.Test()).WithShellRuns([]shellRun{replyNow}).View(testkit.Width, testkit.Height)
-	if strings.Contains(reply, "·") {
-		t.Errorf("reply-now shell block rendered a disposition line:\n%s", reply)
+	// In the rendered transcript: neither reply-now nor queued shows a `·`
+	// disposition line; only `!!` does.
+	for _, r := range []shellRun{replyNow, queued} {
+		out := New(theme.Test()).WithShellRuns([]shellRun{r}).View(testkit.Width, testkit.Height)
+		if strings.Contains(out, "·") {
+			t.Errorf("`!` shell block (queued=%v) rendered a disposition line:\n%s", r.queued, out)
+		}
 	}
-	q := New(theme.Test()).WithShellRuns([]shellRun{queued}).View(testkit.Width, testkit.Height)
-	if !strings.Contains(q, "· queued") {
-		t.Errorf("queued shell block missing `· queued`:\n%s", q)
+	held := New(theme.Test()).WithShellRuns([]shellRun{withheld}).View(testkit.Width, testkit.Height)
+	if !strings.Contains(held, "· not sent to the agent") {
+		t.Errorf("`!!` shell block missing `· not sent to the agent`:\n%s", held)
 	}
 }
 

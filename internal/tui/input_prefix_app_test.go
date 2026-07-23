@@ -92,10 +92,11 @@ func TestShellEscapeIsNotSubmittedAsAPrompt(t *testing.T) {
 
 // TestShellEscapeRendersInTheAttachTranscript is ask #2 end to end: on the
 // attach screen the command and its output read as part of the conversation —
-// in the transcript, not a pane below it — with the disposition marked. In
-// QUEUE mode a `!` run stays in the transcript (marked "queued") rather than
-// firing a reply on completion; reply-now's transient block is covered by the
-// handler tests in shell_reply_test.go.
+// in the transcript, not a pane below it. In QUEUE mode a `!` run stays in the
+// transcript rather than firing a reply on completion; round-4 dropped the
+// "queued" label, so the block carries the command and output but NO disposition
+// line. Reply-now's transient block is covered by the handler tests in
+// shell_reply_test.go.
 func TestShellEscapeRendersInTheAttachTranscript(t *testing.T) {
 	sup := newFakeSup(tui.GoldenRoster())
 	m := shellApp(t, sup)
@@ -106,10 +107,15 @@ func TestShellEscapeRendersInTheAttachTranscript(t *testing.T) {
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 
 	got := content(m)
-	for _, want := range []string{"$ cat payload.txt", shellPayload, "queued"} {
+	for _, want := range []string{"$ cat payload.txt", shellPayload} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("attach transcript missing %q:\n%s", want, got)
 		}
+	}
+	// The queued run shows no disposition line (round-4 removed the "queued"
+	// label); the only `·` line a shell block may carry now is `!!`'s not-sent.
+	if strings.Contains(got, "queued") {
+		t.Fatalf("attach transcript still shows the removed \"queued\" label:\n%s", got)
 	}
 }
 
