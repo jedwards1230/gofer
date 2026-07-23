@@ -22,13 +22,12 @@ import tea "charm.land/bubbletea/v2"
 //
 // Callers run their own nav-specific switch FIRST and only fall through to
 // this for keys it doesn't already bind to navigation: Enter/Escape/Ctrl-C
-// are always screen-level, and each screen's one conditional-nav arrow is
-// handled by the caller rather than here — a bare (unmodified) Right on the
-// overview (attach the selected session when the dispatch bar is empty, else
-// move the cursor right — see handleOverviewKey) and a bare Left on attach
-// (back out to the overview when the input is empty, else move the cursor
-// left — see handleAttachKey). Both branches of both arrows are the caller's;
-// this function is never reached for either.
+// are always screen-level. The one conditional-nav arrow still handled by a
+// caller rather than here is a bare (unmodified) Left on attach (back out to
+// the overview when the input is empty, else move the cursor left — see
+// handleAttachKey); this function is never reached for that key. Bare Right on
+// the overview reaches this keymap's KeyRight case as a plain cursor-move —
+// the overview's open/peek verbs live on enter/space, not the arrows.
 func applyInputKey(buf inputBuffer, key tea.Key) (inputBuffer, bool) {
 	switch {
 	case key.Code == tea.KeyLeft && key.Mod.Contains(tea.ModAlt):

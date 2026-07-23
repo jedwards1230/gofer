@@ -41,20 +41,21 @@ UI.
 A row may be a whole fan-out hierarchy; it collapses to aggregate state,
 agent count, and whether approvals are pending, and expands inline to the
 subagent tree. `↑`/`↓` move the selection · `tab` switches view · `enter`
-peek · `→` attach · `ctrl-x` kill (running; subtree interrupted) or archive
-(finished) · `ctrl-t` stop every subagent **below** the selected row, acting
-immediately on the selected row. `enter`, `→`, `ctrl-x` and `ctrl-t`
-take these meanings only while the dispatch bar is empty; every
-other key types into it, and `enter` on non-empty text starts a new session
-— or dispatches a `/` command. Journals are never deleted — `gofer ps --all`
-lists archived sessions.
+open (attach the full session) · `space` peek · `ctrl-x` kill (running; subtree
+interrupted) or archive (finished) · `ctrl-t` stop every subagent **below** the
+selected row, acting immediately on the selected row. `enter`, `space`, `ctrl-x`
+and `ctrl-t` take these meanings only while the dispatch bar is empty; every
+other key types into it — so `space` on non-empty text is an ordinary space —
+and `enter` on non-empty text starts a new session, or dispatches a `/` command.
+Journals are never deleted — `gofer ps --all` lists archived sessions.
 
 **Peek** — a summary card for one session: its title, a one-line
 waiting/status line, and a `❯ reply` input. `up`/`down` move the roster
 selection (the card follows); `enter` opens (attaches) or, with reply text,
-sends the reply; `space` closes back to the overview; `ctrl+x` kills a
-running session or archives a finished one, as on the overview. Peek
-carries no transcript tail — it is a roster-only projection.
+sends the reply; `esc` closes back to the overview, and so does `space` with an
+empty reply (`space` is the toggle partner of the overview's `space`-to-peek);
+`ctrl+x` kills a running session or archives a finished one, as on the overview.
+Peek carries no transcript tail — it is a roster-only projection.
 
 **Attach** — full transcript + input. `esc` interrupts the in-flight turn;
 `←` on an empty input backs out — to the **parent session** when the attached
@@ -557,10 +558,13 @@ read-along transcript tail and its side-by-side split; the `layout` package now
 holds only frame padding.)
 
 **Navigation contract** — enforced by the app root (`App` in `app.go`, the
-bubbletea root that composes overview/peek/attach): `enter` peeks the selected
-session (with dispatch-bar text, it instead creates a session from that text
-and attaches into it); `→` in an **empty** dispatch bar attaches the selected
-session (with text, it edits); `esc`
+bubbletea root that composes overview/peek/attach): `enter` in an **empty**
+dispatch bar opens the selected session — attaches into the full, subscribed
+transcript (with dispatch-bar text, it instead creates a session from that text
+and attaches into it); `space` in an **empty** dispatch bar peeks the selected
+session — the roster-only card that does not subscribe (with text, it is an
+ordinary space); the arrows carry no open/peek verb on the overview — a bare `→`
+is a plain cursor-move; `esc`
 interrupts/acts on the *active* session (never "go back"); `←` in an **empty**
 input backs out to the attached session's parent, or to the overview when it has
 none (with text, it edits); `↓` in an **empty** attach input returns to the
@@ -570,7 +574,8 @@ not to navigation); `ctrl-x` kills a running
 session or archives a finished one; `ctrl-t` stops the selected row's subagents;
 `ctrl-c` quits. In peek, `up`/`down` move
 the selection, `enter` opens the session (or sends the reply when the `❯` input
-has text), `space` closes to the overview, and `ctrl+x` deletes.
+has text), `esc` closes to the overview (and `space` does too with an empty
+reply), and `ctrl+x` deletes.
 
 The app root is a **client** like any other (repo invariant): it reads the
 roster by polling `Supervisor.Roster` on a timer (the supervisor's roster is
