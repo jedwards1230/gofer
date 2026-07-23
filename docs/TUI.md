@@ -695,7 +695,15 @@ Both the highlight and the copy are clamped to `App.transcriptRegion` —
 the active screen's own scrollable content, computed via the same
 `frameLayout` row-budget arithmetic `render` uses (so the two can't drift
 apart): the attach transcript (plus whatever of its identity header is
-still scrolled into view) or the overview roster body. A drag that runs off
+still scrolled into view) or the overview roster body. On the attach screen
+that measurement now goes through the *same* `App.attachModel` helper `render`
+draws from — the fully composed model with the background-agents and `!`/`!!`
+shell-run blocks appended to the transcript — so those tail blocks are inside
+the selectable region and a `$ ls` shell block (or a background-agents line)
+can be selected and copied like any other transcript row. Before that shared
+helper, `render` drew the composed blocks but `transcriptRegion` measured the
+bare `a.sess` without them, so the tail blocks fell below the computed region
+and could not be selected. A drag that runs off
 the transcript into the input box and its framing rules, off the bottom
 into the usage/status footer, past the top into the identity header, or
 over a command panel/menu never paints or copies those rows — a row the
@@ -1681,12 +1689,26 @@ input — and it is **leading-only**, so `that worked!` and
 
 - **`!` / `!!` shell escape** (shell.go). `!cmd` runs cmd under `$SHELL -c`
   (falling back to `/bin/sh`) in the session's cwd, off the Update loop.
-  **`!` output is folded into the next prompt this client submits; `!!` output
-  never is.** That exclusion is structural, not cosmetic: `App.composePrompt`
-  — the one place local content becomes model input — walks the run list and
-  skips any run flagged not-in-context, so no rendering, copy, or re-submit
-  path can leak it. A `!!` run is marked consumed without contributing, so a
-  later prompt can't pick it up either. Output is bounded
+  **`!!` output never reaches the model; `!` output does.** That exclusion is
+  structural, not cosmetic: `App.composePrompt` — the one place local content
+  becomes model input — walks the run list and skips any run flagged
+  not-in-context, so no rendering, copy, or re-submit path can leak it. A `!!`
+  run is marked consumed without contributing, so a later prompt can't pick it
+  up either.
+
+  **Reply-now vs queue (ask #2).** A `!` run's DEFAULT on the attach screen is
+  *reply-now*: the instant it finishes it flushes everything pending through
+  `composePrompt` and fires a turn, so the agent replies immediately — "add it
+  as a message" without a separate typed prompt. **ctrl+r** toggles a sticky
+  *queue* mode where a `!` run instead waits for the user's next Enter, so they
+  can stack more commands (or a plain-text message) before the agent responds —
+  the old fold-into-your-next-prompt behavior, now opt-in. The mode is captured
+  per-run at dispatch (`shellRun.queued`), so a later toggle never rewrites a
+  run already in flight, and it governs `!` alone: `!!` is never sent regardless
+  of the mode, so the reconciliation is that the toggle only ever moves a `!`
+  run between "reply now" and "wait", never in or out of context. The `!`
+  auto-send is gated on `inContext` exactly as `composePrompt`'s exclusion is,
+  so a `!!` run fires no turn even in reply-now mode. Output is bounded
   (`tui.shell_max_output_bytes`, default 64 KiB, with a visible truncation
   marker) and so is runtime (`tui.shell_timeout_ms`, default 30s); a non-zero
   exit is reported as an exit code with the command's own stderr retained,
@@ -1698,12 +1720,15 @@ input — and it is **leading-only**, so `that worked!` and
   **Presentation (the UX rework).** Three things make the escape legible:
   - **Mode indicator.** While a `!` / `!!` command is being *typed*, both
     text-entry surfaces flag shell mode — the input box's top framing rule
-    becomes an accented, labeled rule (`── shell ──` for `!`,
-    `── shell · not sent ──` for `!!`) and the prompt glyph goes accent
-    (`shellModeRule` / `shellPromptGlyph`). The label is TEXT, not just color,
-    so it reads under the Ascii golden profile; it clears the instant the `!`
-    prefix stops applying. A non-shell buffer draws the plain rule byte-for-byte
-    as before, so no existing golden churns.
+    becomes an accented, labeled rule (`── shell ──` for a reply-now `!`,
+    `── shell · queue ──` for a `!` in queue mode, `── shell · not sent ──` for
+    `!!`), the prompt glyph goes accent, and the leading `!` / `!!` **sigil in
+    the buffer** itself goes accent too, so the sigil that triggers shell mode
+    reads apart from the command being entered (`shellModeRule` /
+    `shellPromptGlyph` / `shellInputLine`, ask #1). The label is TEXT, not just
+    color, so it reads under the Ascii golden profile; it clears the instant the
+    `!` prefix stops applying. A non-shell buffer draws the plain rule and the
+    plain input line byte-for-byte as before, so no existing golden churns.
   - **In the transcript, not a pane.** On the attach screen a run renders as a
     transcript block (`itemShellRun`, composed per frame by
     `Model.WithShellRuns` — the same render-local pattern the background-agents
@@ -1719,12 +1744,17 @@ input — and it is **leading-only**, so `that worked!` and
     finished run on the status line instead (`shellRun.shellRunStatus`); its
     output surfaces in the thread the moment a session is created/attached and
     the fold's user message lands.
-  - **Context disposition is visible.** The block LABELS its disposition —
-    `· sent with your next message` for a `!` run, `· not sent to the agent`
-    for a `!!` run — so a reader can tell at a glance what the model can see.
-    But the label is read off `shellRun.inContext` for DISPLAY only;
-    `composePrompt` remains the SOLE decider of what reaches the model, so no
-    view change can move a byte in or out of context.
+  - **Context disposition is visible.** The block LABELS its disposition only
+    when there is something pending to say — `· queued` for a queued `!` run,
+    `· not sent to the agent` for a `!!` run. A reply-now `!` run carries no
+    disposition line at all: it is sent and answered the instant it finishes, so
+    there is nothing waiting to announce (its content then arrives as the echoed
+    user message). The label is read off `shellRun.inContext`/`shellRun.queued`
+    for DISPLAY only; `composePrompt` remains the SOLE decider of what reaches
+    the model, so no view change can move a byte in or out of context. The
+    transcript-less status ack (`shellRun.shellRunStatus`, overview/peek, where
+    a `!` still folds into the create/send that follows) keeps saying
+    `sent with your next message` — there the fold has not happened yet.
 - **`@` file mention** (filemention.go). Typing `@` at a token boundary opens
   the same popup the slash commands use, sourced from the paths under the
   session's cwd — `git ls-files` inside a repository (which is what makes it

@@ -47,6 +47,10 @@ type internalFakeSup struct {
 	// source list, seeded per test.
 	sessionRefs []SessionRef
 
+	// sends records every Supervisor.Send invocation (session id + prompt), so
+	// a test can assert what the reply-now shell flush actually submitted.
+	sends []sendCall
+
 	// explains records every Supervisor.ExplainPermission call, and
 	// explainRationale/explainErr are what the next one answers with — both
 	// paths are needed, since ctrl+e's contract is as much about what a FAILED
@@ -76,6 +80,13 @@ type replyCall struct {
 	allow     bool
 	remember  bool
 	input     string
+}
+
+// sendCall records one Supervisor.Send invocation — the reply-now shell flush's
+// oracle: a test asserts the composed shell output landed here as a prompt.
+type sendCall struct {
+	id     string
+	prompt string
 }
 
 // explainCall records one Supervisor.ExplainPermission invocation — the
@@ -140,8 +151,13 @@ func (f *internalFakeSup) ListSessions(context.Context) ([]SessionRef, error) {
 	return append([]SessionRef(nil), f.sessionRefs...), nil
 }
 
-func (f *internalFakeSup) Resume(context.Context, string, string) error    { return nil }
-func (f *internalFakeSup) Send(context.Context, string, string) error      { return nil }
+func (f *internalFakeSup) Resume(context.Context, string, string) error { return nil }
+func (f *internalFakeSup) Send(_ context.Context, id, prompt string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sends = append(f.sends, sendCall{id: id, prompt: prompt})
+	return nil
+}
 func (f *internalFakeSup) Interrupt(context.Context, string) error         { return nil }
 func (f *internalFakeSup) Kill(context.Context, string) error              { return nil }
 func (f *internalFakeSup) Archive(context.Context, string) error           { return nil }

@@ -557,13 +557,13 @@ func (o Overview) dispatch(width int, hide bool) []string {
 	// The rule doubles as the shell-mode indicator, exactly as the attach
 	// input's does (shellModeRule): a `!` / `!!` buffer accents and labels it,
 	// anything else draws the plain full-width rule byte-for-byte as before.
-	rule := shellModeRule(o.theme, width, o.input.String())
+	rule := shellModeRule(o.theme, width, o.input.String(), o.shellQueue)
 
 	var line string
 	if o.input.Empty() {
 		line = "❯ " + o.theme.MutedStyle().Render("describe a task for a new session")
 	} else {
-		line = shellPromptGlyph(o.theme, "❯", o.input.String()) + " " + o.input.Render("▏")
+		line = shellPromptGlyph(o.theme, "❯", o.input.String()) + " " + shellInputLine(o.theme, o.input, "▏")
 	}
 
 	hint := o.theme.MutedStyle().Render(o.hintText())

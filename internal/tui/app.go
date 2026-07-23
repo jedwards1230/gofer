@@ -129,6 +129,16 @@ type App struct {
 	shellRuns []shellRun
 	shellSeq  int
 
+	// shellQueue is the sticky reply-now/queue mode ctrl+r toggles (keymap.go).
+	// false (the default) is reply-now: a finished `!` run on the attach screen
+	// flushes everything pending through composePrompt and fires a turn at once
+	// (see the shellDoneMsg handler). true is queue: a `!` run waits for the
+	// user's next Enter, so they can stack more commands or a typed message
+	// first. It is captured onto each run at dispatch ([shellRun.queued]) so a
+	// later toggle never rewrites a run already in flight, and it governs `!`
+	// only — `!!` is never sent regardless of the mode.
+	shellQueue bool
+
 	// files is the `@` file-mention completion's cached candidate list
 	// (filemention.go), refreshed once per mention off the Update loop.
 	files fileCandidates
@@ -623,6 +633,24 @@ func (a App) promptModel() Model {
 		WithApprovalMinTranscriptRows(a.approvalMinTranscriptRows())
 }
 
+// attachModel is the FULLY composed attach model — the config-plumbed
+// [App.promptModel] plus the two render-local blocks the attach screen appends
+// to the transcript (the background-agents roster fact and the `!`/`!!` shell
+// runs) and the shell-mode queue label. It is the single definition both
+// [App.render] (to draw the frame) and [App.transcriptRegion] (to measure which
+// rows a mouse selection may paint) go through, so the two can never disagree
+// about how many rows the transcript has: before this helper, render drew the
+// shell/background blocks but transcriptRegion measured the bare a.sess without
+// them, so those tail blocks rendered below the computed selectable region and
+// could not be selected or copied. Measuring and drawing through one model is
+// what closes that gap.
+func (a App) attachModel() Model {
+	return a.promptModel().
+		WithBackgroundAgents(a.over.Children(a.sessID)).
+		WithShellRuns(a.shellRuns).
+		WithShellQueue(a.shellQueue)
+}
+
 // currentSessionInfo returns the roster snapshot for whichever session is
 // currently peeked or attached, or nil on the overview — there is no active
 // session for a command-panel view (e.g. /status's Session name/ID/Model
@@ -832,7 +860,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// A `!` / `!!` escape finishing (shell.go). On the attach screen the
 		// run renders as a transcript block (Model.WithShellRuns) carrying its
 		// exit code, note, and truncation marker, so a status line there would
-		// only talk over what the reader is looking at. On a screen with no
+		// only talk over what the reader is looking at — and a reply-now `!` run
+		// additionally fires a turn immediately (see below). On a screen with no
 		// transcript (the overview's dispatch bar, peek) there is nowhere for
 		// the block to land, so post a one-line acknowledgement instead — a `!`
 		// typed at the roster still needs to show it ran and where its output
@@ -841,6 +870,28 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.scr != screenAttach {
 			if r, ok := a.shellRunBySeq(msg.seq); ok {
 				a.setStatus(r.shellRunStatus())
+			}
+			return a, nil
+		}
+		// On the attach screen a reply-now `!` run (inContext && !queued) means
+		// "go now": flush everything pending through composePrompt and fire a
+		// turn so the agent replies immediately. A queued `!` run and any `!!`
+		// run do NOT — the queued one waits for the user's next Enter (the
+		// existing composePrompt-on-submit path), and a `!!` run is never sent
+		// regardless (inContext gates it out here exactly as composePrompt does).
+		// composePrompt sweeps ALL finished-unconsumed inContext runs, so a
+		// queued run that finished earlier rides along on this flush — that is
+		// what reply-now means. composePrompt is on its own statement because it
+		// has a pointer receiver and marks the folded runs consumed; a statement
+		// orders that mutation before doSend rather than resting on operand
+		// evaluation order (matching the Enter handlers).
+		if a.sessID != "" {
+			if r, ok := a.shellRunBySeq(msg.seq); ok && r.inContext && !r.queued {
+				prompt := a.composePrompt("")
+				if prompt != "" {
+					a.scroll = 0
+					return a, a.doSend(a.sessID, prompt)
+				}
 			}
 		}
 		return a, nil
@@ -1412,35 +1463,23 @@ func (a App) render() string {
 		// (a.scroll), so it tails off the top for a long enough conversation
 		// exactly like the oldest messages do.
 		//
-		// promptModel plumbs the approval prompt's tui.approval_body_lines cap
-		// and tui.approval_min_transcript_rows floor into the render on a
-		// LOCAL copy of the model (render has a value receiver, so nothing
-		// here reaches App's own state): both are read fresh on every frame,
-		// so a /config edit applies to the next render rather than the next
-		// process start, and a.sess never carries a stale snapshot of either.
-		// [App.transcriptRegion] measures through the SAME helper — see its
-		// doc for why they must not diverge.
-		//
-		// WithBackgroundAgents rides the same local copy for the same reason,
-		// but for a different kind of freshness: the sessions this one spawned
-		// are ROSTER facts, not events on this session's stream (a subagent is a
-		// separate session with its own journal — see docs/TUI.md), so the block
-		// is composed per frame off the latest poll instead of being ingested
-		// once and going stale as children come and go.
-		//
-		// WithShellRuns rides it too: a `!` / `!!` run is App state (shell.go),
-		// not an event on this session's stream, and an unconsumed run is
-		// transient — it clears the frame it is folded into the next prompt (a
-		// `!` run's content then arrives as the echoed user message; a `!!`
-		// run's was never sent). Composing per frame off the live run list is
-		// what keeps the transcript block and App.composePrompt reading the same
-		// truth about what is pending. It is chained AFTER background agents so
-		// the most recent operator action sits closest to the input.
-		body = a.promptModel().
-			WithBackgroundAgents(a.over.Children(a.sessID)).
-			WithShellRuns(a.shellRuns).
+		// attachModel is the fully composed attach model: the config-plumbed
+		// prompt model (tui.approval_body_lines / approval_min_transcript_rows,
+		// read fresh every frame so a /config edit applies to the next render),
+		// plus the two render-local transcript blocks — the background-agents
+		// roster fact and the `!`/`!!` shell runs, each composed per frame off
+		// live App state rather than ingested once and left to go stale — plus
+		// the shell-mode queue label. render has a value receiver, so all of
+		// this lands on a LOCAL copy and never touches a.sess. [App.transcriptRegion]
+		// measures through the SAME helper so the frame it draws and the rows it
+		// lets a selection paint can never drift apart — see attachModel's doc.
+		body = a.attachModel().
 			ViewWithMenu(a.width, fl.h, fl.menuLines, attachHeaderLines(a.theme, a.over.meta, a.width), a.scroll)
 	default:
+		// The dispatch bar's shell-mode rule labels the live reply-now/queue
+		// mode; a.over is a local copy here (render's value receiver), so this
+		// tracks a ctrl+r toggle without mutating App's own overview state.
+		a.over.shellQueue = a.shellQueue
 		body = a.over.ViewWithMenu(a.width, fl.h, fl.menuLines, a.scroll, a.panel != nil)
 	}
 

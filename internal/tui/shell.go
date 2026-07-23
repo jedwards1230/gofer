@@ -13,18 +13,29 @@ package tui
 // model input ([App.composePrompt] below), by a flag on the run — not by
 // rendering it differently.
 //
+// A `!` run's DEFAULT is reply-now: on the attach screen it flushes everything
+// pending through [App.composePrompt] and fires a turn the instant it finishes,
+// so the agent replies immediately. ctrl+r toggles a sticky QUEUE mode
+// ([App.shellQueue]) where a `!` run instead waits for the user's next Enter —
+// stacking with more commands or a typed message before the agent responds.
+// The mode is captured per-run ([shellRun.queued]) so a run's disposition is
+// fixed at dispatch, not re-read later. `!!` ignores the toggle entirely: it is
+// never sent regardless, so reply-now vs queue only governs `!`.
+//
 // Presentation is legibility, never policy. A completed run renders INTO the
 // attach transcript as an [itemShellRun] block (composed per frame by
 // [Model.WithShellRuns], the same render-local pattern the background-agents
 // block uses), so the command and its output read as part of the conversation
-// rather than in a pane below it. The block LABELS its disposition — a `!` run
-// as "sent with your next message", a `!!` run as "not sent to the agent" — so
-// a reader can tell at a glance what the model can see. But the label is read
-// off [shellRun.inContext] for display only; [App.composePrompt] remains the
-// SOLE decider of what actually reaches the model, so no view change can move
-// a byte in or out of context. While the buffer is still being typed, both
-// input surfaces flag shell mode ([shellModeRule], [shellPromptGlyph]) with an
-// accented, labeled framing rule that clears the instant the `!` prefix stops.
+// rather than in a pane below it. The block LABELS its disposition only when
+// there is something to say — a queued `!` run as "queued", a `!!` run as "not
+// sent to the agent"; a reply-now `!` run carries no line, because it is sent
+// and answered the moment it finishes. But the label is read off
+// [shellRun.inContext]/[shellRun.queued] for display only; [App.composePrompt]
+// remains the SOLE decider of what actually reaches the model, so no view
+// change can move a byte in or out of context. While the buffer is still being
+// typed, both input surfaces flag shell mode ([shellModeRule],
+// [shellPromptGlyph]) with an accented, labeled framing rule that clears the
+// instant the `!` prefix stops.
 //
 // NOT a tool call, and deliberately not routed through anything that resembles
 // one: this is the user running a command in their own terminal, at their own
@@ -89,6 +100,13 @@ type shellRun struct {
 	// inContext is the `!` vs `!!` decision, and the ONLY thing that decides
 	// whether this run's output reaches the model — see [App.composePrompt].
 	inContext bool
+
+	// queued captures [App.shellQueue] at dispatch: a queued `!` run waits for
+	// the user's next Enter rather than firing a turn on completion (see the
+	// [shellDoneMsg] handler in app.go). It governs the auto-send and the
+	// block's disposition label ONLY — never context membership, which is
+	// inContext's alone. A `!!` run ignores it (it is never sent regardless).
+	queued bool
 
 	done      bool // the process exited (or failed to start / timed out)
 	output    string
@@ -170,6 +188,10 @@ func (a App) dispatchShell(buf string) (App, tea.Cmd) {
 		seq:       a.shellSeq,
 		line:      line,
 		inContext: inContext,
+		// Freeze the reply-now/queue mode as it stands NOW, so a later toggle
+		// can't retroactively change what a dispatched run does. `!!` runs carry
+		// it too but never act on it — they are never sent.
+		queued: a.shellQueue,
 	})
 	return a, runShellCmd(a.commandEnv.Cwd, a.shellSeq, line, a.shellTimeout(), a.shellOutputLimit())
 }
@@ -402,6 +424,25 @@ func (r shellRun) shellDispositionLabel() string {
 	return "not sent to the agent"
 }
 
+// blockDisposition is the transcript block's disposition label
+// ([Model.renderShellRunLines]) — narrower than [shellRun.shellDispositionLabel]
+// because on the attach screen a reply-now `!` run needs no line at all: it is
+// sent and answered the instant it finishes, so "sent with your next message"
+// would be both wrong and noise. Only the two runs that WAIT wear a label — a
+// queued `!` run ("queued") and a `!!` run ("not sent to the agent"). Like
+// every disposition here it is read off inContext/queued for DISPLAY only;
+// [App.composePrompt] remains the sole decider of what reaches the model.
+func (r shellRun) blockDisposition() string {
+	switch {
+	case !r.inContext:
+		return "not sent to the agent"
+	case r.queued:
+		return "queued"
+	default:
+		return ""
+	}
+}
+
 // shellRunStatus is the one-line acknowledgement a finished run posts on the
 // STATUS line — used only on screens with no transcript to render it into (the
 // overview, peek), so a `!` typed at the dispatch bar still gives feedback that
@@ -428,12 +469,19 @@ func (r shellRun) shellRunStatus() (statusSeverity, string) {
 // an ordinary prompt's input frame is byte-identical to what it always drew.
 // `!!` announces up front that the run will be withheld, so the disposition is
 // legible before the command even executes — not only afterward.
-func shellModeLabel(buf string) string {
+// queue reflects the sticky reply-now/queue mode ([App.shellQueue]): a `!`
+// buffer labels as "shell · queue" while queue mode is on so the disposition is
+// legible before the run. It does not apply to `!!` (never sent regardless) and
+// leaves reply-now `!` as the byte-identical "shell".
+func shellModeLabel(buf string, queue bool) string {
 	if !strings.HasPrefix(buf, "!") {
 		return ""
 	}
 	if strings.HasPrefix(buf, "!!") {
 		return "shell · not sent"
+	}
+	if queue {
+		return "shell · queue"
 	}
 	return "shell"
 }
@@ -446,11 +494,11 @@ func shellModeLabel(buf string) string {
 // survives the Ascii profile the golden tests force (this TUI's
 // "state reads without color" rule); the accent is the color-only layer a
 // styled golden pins on top.
-func shellModeRule(th theme.Theme, width int, buf string) string {
+func shellModeRule(th theme.Theme, width int, buf string, queue bool) string {
 	if width < 1 {
 		width = 1
 	}
-	label := shellModeLabel(buf)
+	label := shellModeLabel(buf, queue)
 	if label == "" {
 		return strings.Repeat("─", width)
 	}
@@ -475,4 +523,48 @@ func shellPromptGlyph(th theme.Theme, glyph, buf string) string {
 		return th.AccentStyle().Render(glyph)
 	}
 	return glyph
+}
+
+// shellInputLine renders buf the way [inputBuffer.Render] does — runes,
+// clampCursor, [displaySafe]'d pre/cursor/post halves — but with the leading
+// `!` / `!!` sigil accented so the sigil that TRIGGERS shell mode is visually
+// distinct from the command the user is entering (ask #1). The rest of the
+// buffer stays plain. A non-shell buffer returns [inputBuffer.Render] verbatim,
+// so an ordinary prompt's input line is byte-for-byte what it always drew (zero
+// golden churn) and the accent is exactly the color-only layer a styled golden
+// pins on top.
+//
+// The cursor glyph is spliced at its actual rune position and is never itself
+// accented — it is a separate caret, not part of the sigil — so a cursor
+// sitting before the `!`, between the two `!` of `!!`, or out in the command
+// text all render correctly: the sigil runes on either side of it keep the
+// accent, the caret does not.
+func shellInputLine(th theme.Theme, buf inputBuffer, cursorGlyph string) string {
+	s := buf.String()
+	if !strings.HasPrefix(s, "!") {
+		return buf.Render(cursorGlyph)
+	}
+	sigilLen := 1
+	if strings.HasPrefix(s, "!!") {
+		sigilLen = 2
+	}
+	r := buf.runes()
+	cur := clampCursor(buf.Cursor(), len(r))
+
+	accent := func(runes []rune) string {
+		if len(runes) == 0 {
+			return ""
+		}
+		return th.AccentStyle().Render(displaySafe(string(runes)))
+	}
+	plain := func(runes []rune) string { return displaySafe(string(runes)) }
+
+	// The cursor falls inside (or at an edge of) the sigil: accent the sigil
+	// runes on either side of the caret, then the plain command tail.
+	if cur <= sigilLen {
+		return accent(r[:cur]) + cursorGlyph + accent(r[cur:sigilLen]) + plain(r[sigilLen:])
+	}
+	// The cursor is out in the command text: the whole sigil is accented, the
+	// caret splices into the plain tail.
+	return accent(r[:sigilLen]) + plain(r[sigilLen:cur]) + cursorGlyph + plain(r[cur:])
 }

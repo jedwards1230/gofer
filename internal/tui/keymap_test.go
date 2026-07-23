@@ -56,7 +56,7 @@ func keyProbes() []struct {
 	name string
 	key  tea.Key
 } {
-	ctrlLetters := []rune{'a', 'c', 'd', 'e', 'k', 'u', 'w', 'x'}
+	ctrlLetters := []rune{'a', 'c', 'd', 'e', 'k', 'r', 'u', 'w', 'x'}
 	probes := []struct {
 		name string
 		key  tea.Key
@@ -104,6 +104,7 @@ func TestGlobalBindingsDoNotCollide(t *testing.T) {
 	expectedGlobals := map[string]string{
 		"ctrl+c": "ctrl+c",
 		"ctrl+y": "ctrl+y",
+		"ctrl+r": "ctrl+r",
 	}
 	for _, probe := range keyProbes() {
 		var matched []string
