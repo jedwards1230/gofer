@@ -374,17 +374,27 @@ func (w *boundedWriter) String() string { return w.buf.String() }
 func (a *App) composePrompt(prompt string) string {
 	runs := append([]shellRun(nil), a.shellRuns...)
 	var b strings.Builder
+	var committed []shellRun
 	for i := range runs {
 		if !runs[i].done || runs[i].consumed {
 			continue
 		}
 		runs[i].consumed = true
+		committed = append(committed, runs[i])
 		if !runs[i].inContext {
 			continue
 		}
 		b.WriteString(runs[i].contextBlock())
 	}
 	a.shellRuns = runs
+	// Pin the just-consumed runs into the transcript as persistent sigil blocks
+	// at this position, and queue the model-facing fold so its user-message echo
+	// is stripped of the `$ cmd` text — the run shows once, as a `!`/`!!` block,
+	// never as the fold the model reads (see [Model.CommitShellRuns]). This
+	// lands on the attached session's model; a submit that switches sessions
+	// (overview create) resets it, so that path keeps today's echo — see the
+	// resume/create note in docs/TUI.md.
+	a.sess = a.sess.CommitShellRuns(committed, b.String())
 	if b.Len() == 0 {
 		return prompt
 	}

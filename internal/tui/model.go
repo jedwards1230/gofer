@@ -189,6 +189,19 @@ type Model struct {
 	submitted    string
 	hasSubmitted bool
 
+	// pendingEchoFolds is the FIFO queue of model-facing shell folds
+	// ([shellRun.contextBlock] output) that [App.composePrompt] submitted and
+	// whose user-message echo has not yet arrived. When a MessageFinished{User}
+	// echo begins with the head fold, that prefix is stripped from the displayed
+	// message (the shell runs already render as sigil blocks, committed by
+	// [Model.CommitShellRuns] at submit time) and the head is popped — so the
+	// `$ cmd` fold the MODEL reads is never shown on screen, only the `!` sigil
+	// block. A byte-exact prefix match, not parsing: on any miss it degrades to
+	// today's behavior (the echo renders verbatim) rather than guessing. Empty on
+	// resume — a session attached mid-conversation has no record of past folds, so
+	// historical `$` echoes render as-is (see docs/TUI.md).
+	pendingEchoFolds []string
+
 	// turnActive reports whether a turn is in flight — the agent is generating a
 	// response. Set true on [event.TurnStarted], false on [event.TurnFinished]
 	// (and defensively on [event.SessionError], which ends the turn's work). It
@@ -228,6 +241,11 @@ func (m Model) Ingest(e event.Event) Model {
 		toolAgents[k] = v
 	}
 	m.toolAgents = toolAgents
+	// Clone the fold queue up front, alongside items/maps: Model is value-copied
+	// per frame, so the MessageFinished{User} case below reslicing this to pop the
+	// head must not write through to a prior Model's shared backing array. Same
+	// nil-when-empty idiom as m.items above.
+	m.pendingEchoFolds = append([]string(nil), m.pendingEchoFolds...)
 
 	switch ev := e.(type) {
 	case event.TurnStarted:
@@ -267,7 +285,23 @@ func (m Model) Ingest(e event.Event) Model {
 
 	case event.MessageFinished:
 		if ev.MessageKind == event.MessageUser {
-			m.items = append(m.items, item{kind: itemUser, text: ev.Content, done: true})
+			// Strip the model-facing shell fold from the echo: a reply-now `!` run
+			// (or a `!`+typed submit) reaches the model as `$ cmd\n<output>\n\n` +
+			// the typed text, and the daemon echoes that verbatim. The shell runs
+			// already render as sigil blocks (CommitShellRuns at submit); showing
+			// the `$` fold here too would duplicate them in the model's format. A
+			// byte-exact prefix match against the head pending fold — never
+			// parsing `$`, so a miss just renders verbatim (today's behavior).
+			content := ev.Content
+			if len(m.pendingEchoFolds) > 0 && strings.HasPrefix(content, m.pendingEchoFolds[0]) {
+				content = strings.TrimPrefix(content, m.pendingEchoFolds[0])
+				m.pendingEchoFolds = m.pendingEchoFolds[1:] // safe: the queue was cloned at the top of Ingest
+			}
+			// A pure `!` turn (no typed text) strips to nothing: the sigil block is
+			// the whole user turn, so add no empty user message.
+			if content != "" {
+				m.items = append(m.items, item{kind: itemUser, text: content, done: true})
+			}
 			break
 		}
 		if idx, ok := m.openIndex(ev.MessageKind); ok {
@@ -571,6 +605,38 @@ func (m Model) WithShellRuns(runs []shellRun) Model {
 		items = append(items, item{kind: itemShellRun, done: r.done, shell: r})
 	}
 	m.items = items
+	return m
+}
+
+// CommitShellRuns pins consumed shell runs into the transcript as PERSISTENT
+// sigil blocks at the current tail — the point in the conversation where they
+// were folded into a submit, just before that submit's user-message echo. It is
+// how a consumed `!` run keeps showing as `! cmd` after it fires its turn
+// (WithShellRuns render-local blocks vanish on consume, and would tail-misorder
+// after the reply anyway): once committed here they are ordinary ingested items,
+// correctly placed and stable across later events. Both `!` and `!!` runs commit
+// (each renders with its own sigil marker); fold is the concatenated model-facing
+// [shellRun.contextBlock] output of the `!` runs only (a `!!` run contributes
+// none — it is never sent), queued so the matching MessageUser echo can be
+// stripped of it (see the MessageFinished{User} case in [Model.Ingest]).
+//
+// Called by [App.composePrompt] at submit time. Copy-on-write like every mutator
+// here. An empty runs slice with an empty fold is a no-op.
+func (m Model) CommitShellRuns(runs []shellRun, fold string) Model {
+	if len(runs) == 0 && fold == "" {
+		return m
+	}
+	if len(runs) > 0 {
+		items := make([]item, 0, len(m.items)+len(runs))
+		items = append(items, m.items...)
+		for _, r := range runs {
+			items = append(items, item{kind: itemShellRun, done: r.done, shell: r})
+		}
+		m.items = items
+	}
+	if fold != "" {
+		m.pendingEchoFolds = append(append([]string(nil), m.pendingEchoFolds...), fold)
+	}
 	return m
 }
 

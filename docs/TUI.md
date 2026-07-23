@@ -1755,18 +1755,31 @@ input — and it is **leading-only**, so `that worked!` and
     dispatch bar carries a subtle `! for shell mode` discoverability hint so a
     user learns the sigil before typing it.
   - **In the transcript, not a pane.** On the attach screen a run renders as a
-    transcript block (`itemShellRun`, composed per frame by
-    `Model.WithShellRuns` — the same render-local pattern the background-agents
-    block uses): the **sigil as the block marker** (`! command` / `!! command`),
-    the output under the `└` gutter, and its outcome (`exit N` iff non-zero, a
-    timeout/failure note, a truncation marker). It reads as part of the
-    conversation rather than a dismissible overlay below it. **Only
-    unconsumed/running runs render**: once `composePrompt` folds a `!` run into a
-    prompt, its content arrives as the echoed user message, so rendering the run
-    too would duplicate it; a `!!` run clears on consume for the same reason it
-    was never in a prompt. Screens with no transcript (the overview dispatch bar,
-    peek) acknowledge a finished run on the status line instead
+    transcript block: the **sigil as the block marker** (`! command` /
+    `!! command`), the output under the `└` gutter, and its outcome (`exit N` iff
+    non-zero, a timeout/failure note, a truncation marker). It reads as part of
+    the conversation rather than a dismissible overlay below it. A **pending**
+    run (running, or finished but not yet folded) renders render-local at the
+    tail (`Model.WithShellRuns`, the background-agents pattern). When it is
+    **consumed** — folded into a submitted prompt (which the reply-now default
+    does the instant it fires) — it is pinned into the transcript as a persistent
+    `itemShellRun` at that position (`Model.CommitShellRuns`, from
+    `App.composePrompt`), so it keeps showing as `! command` rather than vanishing
+    or re-appearing as the echoed prompt. **The `$ cmd` fold is ONLY the model's
+    copy, never on screen**: the daemon echoes the folded prompt verbatim as the
+    user message, so the matching `MessageFinished{User}` echo is stripped of the
+    fold (a byte-exact prefix match against the queued fold — never `$`-parsing;
+    a miss degrades to rendering the echo verbatim). A pure `!` turn strips to
+    nothing (the sigil block IS the turn); a `!`+typed submit shows the sigil
+    block(s) plus the typed message. Screens with no transcript (the overview
+    dispatch bar, peek) acknowledge a finished run on the status line instead
     (`shellRun.shellRunStatus`).
+    - **Limitation:** the strip needs the fold this process recorded at submit,
+      so a run consumed on a submit that **switches sessions** (typing `!cmd` at
+      the overview to create a new session) and any run in a session **resumed**
+      from the journal (no in-memory fold record) still show the `$` fold in the
+      echo. The clean long-term fix is persisting shell-run structure in the
+      journal; tracked as a follow-up.
   - **Private-run signal is the marker.** A `!!` run's marker is a DISTINCT color
     from a `!` run's — `!` accent, `!!` warn (`Model.shellMarker`) — and that,
     with the doubled glyph, is the ONLY at-a-glance "the agent can't see this"
