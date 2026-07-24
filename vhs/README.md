@@ -22,6 +22,10 @@ Tape/scenario names follow one slug schema, `<area>-<view>[-<state>]`
 - `roster-overview.tape` — the roster screen with mixed session states,
   capturing the ● status markers in color (yellow working / awaiting input
   incl. the ●2 pending count vs green finished).
+- `roster-peek.tape` — the peek card: the roster-only session summary opened
+  with **space** on an empty dispatch bar (enter/→ *attach* instead). Peek does
+  not subscribe to the session's event stream, so the card renders purely from
+  the roster snapshot. Reuses the `panel-status-overview` scenario.
 - `panel-status-overview.tape` — the command panel opened over the roster
   overview via `/status`, no session attached (Session rows read "—").
 - `panel-status.tape` — the Status tab attached to a session, showing real
