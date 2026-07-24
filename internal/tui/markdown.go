@@ -1,8 +1,20 @@
 package tui
 
-// markdown.go renders a SETTLED assistant-text item's markdown to styled
-// terminal rows via Charm's glamour (the library behind `glow`) — bold/italic,
-// headings, lists, blockquotes, inline code, links, and fenced code blocks.
+// markdown.go renders an assistant-text item's markdown to styled terminal rows
+// via Charm's glamour (the library behind `glow`) — bold/italic, headings,
+// lists, blockquotes, inline code, links, and fenced code blocks.
+//
+// Two render paths share the renderer and its cache:
+//
+//   - [markdownRenderer.render] renders a SETTLED message's whole text at once,
+//     so glamour's cross-block layout is exactly what a finished reply shows.
+//   - [markdownRenderer.renderStreaming] renders a STILL-STREAMING message
+//     incrementally: its COMPLETE markdown blocks are glamoured (each memoized
+//     by its own text, so a keystroke that only grows the tail re-renders
+//     nothing already complete) while the trailing INCOMPLETE block — a
+//     half-arrived fence or a paragraph not yet closed by a blank line — stays
+//     raw, because glamouring a half-block renders garbage. [splitMarkdownBlocks]
+//     is the complete-vs-incomplete oracle.
 //
 // Three properties the rest of the TUI depends on shape this file:
 //
@@ -19,13 +31,10 @@ package tui
 //     profile keeps the ANSI (color + attributes).
 //   - Cheap re-render. glamour re-parses on every Render call (~80µs even with
 //     a reused renderer), and View re-renders the whole transcript on every
-//     keystroke, so a settled message is rendered once and memoized by
+//     keystroke, so each distinct text (a settled message, or a streaming
+//     message's every complete block) is rendered once and memoized by
 //     (width, text). The cache is cleared whenever the width changes (a
 //     resize), which also bounds its growth.
-//
-// Only settled text is rendered here — a streaming (still-open) item renders
-// its raw deltas plainly (see renderItemLines), because re-running glamour on
-// every delta would flicker and lag.
 
 import (
 	"strings"
@@ -114,6 +123,142 @@ func (r *markdownRenderer) render(text string, width int) []string {
 // skipped or fails.
 func fallbackLines(text string) []string {
 	return strings.Split(text, "\n")
+}
+
+// renderStreaming lays out a STILL-STREAMING assistant message incrementally:
+// its COMPLETE markdown blocks are rendered through glamour (each memoized by
+// its own text, exactly like render — so a keystroke that only grows the tail
+// re-renders nothing already complete), and the trailing INCOMPLETE block — a
+// half-arrived fence or a paragraph not yet closed by a blank line — is kept as
+// raw physical lines. Glamouring a half-block is garbage (a lone "```go" reads
+// as an unterminated fence, a mid-typed "**bo" as literal asterisks), which is
+// why the tail waits until it completes.
+//
+// A block is COMPLETE when it is a paragraph followed by a blank line (or ended
+// by the fence that follows it) or a fence closed by its "```", per
+// [splitMarkdownBlocks]. One blank row separates adjacent rendered blocks,
+// matching render's settled whole-document rhythm; the raw tail is fronted by
+// the same one-blank separator. width is the CONTENT width (already less the
+// marker glyph + its trailing space), the same value render is handed.
+//
+// A message with no complete block yet (a single still-typing paragraph — the
+// common short-reply case) returns exactly render's raw fallback shape for that
+// text, so the marker block the caller wraps it in is byte-identical to the old
+// "stream raw until settled" path.
+func (r *markdownRenderer) renderStreaming(text string, width int) []string {
+	complete, trailing := splitMarkdownBlocks(text)
+	var rows []string
+	for _, blk := range complete {
+		if len(rows) > 0 {
+			rows = append(rows, "")
+		}
+		rows = append(rows, r.render(blk, width)...)
+	}
+	if strings.TrimSpace(trailing) != "" {
+		if len(rows) > 0 {
+			rows = append(rows, "")
+		}
+		rows = append(rows, fallbackLines(trailing)...)
+	}
+	return rows
+}
+
+// splitMarkdownBlocks partitions a streaming markdown string into its COMPLETE
+// blocks and the single trailing INCOMPLETE block (which may be ""). It is
+// fence-aware: a blank line inside a fenced code block does not split it, and a
+// fence is a block in its own right, complete only once its closing delimiter
+// arrives.
+//
+// Completeness follows one rule per block kind:
+//
+//   - A paragraph is complete once a blank line follows it (or a fence opens
+//     immediately after it — a fence interrupts a paragraph, so no more text can
+//     join it). A paragraph with no terminating blank yet is the incomplete
+//     tail: more deltas may still extend it, and reflowing it every keystroke
+//     would churn.
+//   - A fence is complete once a line of >= its opening run of the same fence
+//     char, carrying no info string, closes it. An unclosed fence is the
+//     incomplete tail.
+//
+// A single trailing newline is the current line's terminator, NOT a blank
+// separator: "para\n" leaves "para" incomplete, while "para\n\n" completes it.
+// That one distinction is what keeps a just-finished line from glamouring a beat
+// early only to reflow when the next word of the same paragraph streams in.
+func splitMarkdownBlocks(text string) (complete []string, trailing string) {
+	lines := strings.Split(text, "\n")
+	// Drop the lone "" a single trailing "\n" produces — it is the current
+	// line's terminator, not a blank line. ("\n\n" keeps one "", a real blank.)
+	if n := len(lines); n >= 2 && lines[n-1] == "" {
+		lines = lines[:n-1]
+	}
+
+	var cur []string // the block under construction
+	inFence := false
+	var fenceChar byte
+	var fenceLen int
+
+	flush := func() {
+		if len(cur) > 0 {
+			complete = append(complete, strings.Join(cur, "\n"))
+			cur = nil
+		}
+	}
+
+	for _, ln := range lines {
+		if inFence {
+			cur = append(cur, ln)
+			if c, n, info := fenceLine(ln); c == fenceChar && n >= fenceLen && !info {
+				inFence = false
+				flush() // a closed fence is a complete block
+			}
+			continue
+		}
+		if c, n, _ := fenceLine(ln); n > 0 {
+			flush() // a fence opening ends any paragraph it interrupts
+			inFence, fenceChar, fenceLen = true, c, n
+			cur = append(cur, ln)
+			continue
+		}
+		if strings.TrimSpace(ln) == "" {
+			flush() // a blank line terminates the current paragraph
+			continue
+		}
+		cur = append(cur, ln)
+	}
+	// Whatever remains is the incomplete tail: an unclosed fence, or a paragraph
+	// that no blank line has terminated. (It was never flushed, so it is exactly
+	// the raw text after the last complete block.)
+	return complete, strings.Join(cur, "\n")
+}
+
+// fenceLine reports whether ln is a fenced-code-block delimiter: the fence char
+// (a backtick or tilde), the length of its opening run (>= 3, else 0), and
+// whether an info string trails it. Up to three leading spaces are allowed (four
+// is an indented code line, not a fence). info matters only for a CLOSING fence,
+// which must carry none — an opening fence's info string (```go) is its
+// language. A run under three, or a first non-space char that is neither fence
+// char, is not a fence (length 0).
+func fenceLine(ln string) (char byte, length int, info bool) {
+	i := 0
+	for i < len(ln) && i < 4 && ln[i] == ' ' {
+		i++
+	}
+	if i >= 4 {
+		return 0, 0, false // 4+ leading spaces is an indented code line
+	}
+	s := ln[i:]
+	if len(s) < 3 || (s[0] != '`' && s[0] != '~') {
+		return 0, 0, false
+	}
+	c := s[0]
+	n := 0
+	for n < len(s) && s[n] == c {
+		n++
+	}
+	if n < 3 {
+		return 0, 0, false
+	}
+	return c, n, strings.TrimSpace(s[n:]) != ""
 }
 
 // postProcessMarkdown turns glamour's single rendered string into transcript

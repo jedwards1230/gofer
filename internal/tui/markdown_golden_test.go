@@ -26,3 +26,21 @@ func TestGoldenMarkdownRendered(t *testing.T) {
 		event.NewTurnFinished(sid, "end_turn", provider.Usage{InputTokens: 20, OutputTokens: 40}),
 	)
 }
+
+// TestGoldenMarkdownStreamingProgressive locks the incremental mid-stream frame:
+// the message is STILL streaming (a MessageDelta with no MessageFinished), its
+// two complete blocks (heading + bold paragraph) already glamoured — no "**"
+// markers, the emphasis reflowed — while the trailing UNCLOSED ```go fence is
+// held raw, delimiter and body verbatim, until it closes. Ascii-only, like the
+// settled markdown_rendered golden: glamour's element colors aren't in the
+// theme's marker palette, so a styled golden can't tag them (the streaming
+// marker's warn color is pinned separately by mid_stream.styled).
+func TestGoldenMarkdownStreamingProgressive(t *testing.T) {
+	const streamed = "# Release plan\n\n" +
+		"Ship in **two** stages, *carefully*.\n\n" +
+		"```go\nfunc main() {\n    run()"
+	render(t, "markdown_streaming_progressive",
+		event.NewMessageStarted(sid, event.MessageText),
+		event.NewMessageDelta(sid, event.MessageText, streamed),
+	)
+}
