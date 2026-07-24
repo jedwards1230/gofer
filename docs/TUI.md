@@ -109,8 +109,10 @@ prompt uses), keyed `↑`/`↓` to move the focused row and `enter` to take it,
 `a`/`d` as quick keys (shown as each row's `[a]`/`[d]` leader; `y`/`n` and the
 un-advertised `1`/`2` alias them), `r` toggles remember, `tab` amends the call
 before allowing and `ctrl+e` explains why it was gated (read-only — both below),
-`esc` dismisses without answering (the request stays pending; a re-attach
-re-surfaces it):
+`esc` resolves the prompt per [`session.prompt_esc_scope`](#esc-on-a-prompt)
+— by default interrupting the whole turn, or (opt-in) denying the call and
+letting the turn continue; either way the request never stays pending
+server-side with no prompt on screen:
 
 ```
  ────────────────────────────────────────────────
@@ -373,24 +375,53 @@ the last row onto option 1 is how a stray press sends the wrong answer);
 `1`-`9` answer with that option directly; `Enter` resolves the focused row (an
 option answers with it, `Type something.` opens its editor and a **second**
 `Enter` submits, `Chat about this` answers with the chat hatch); `Esc` leaves
-typing mode, or — when not typing — **cancels the request**, answering every
-question in it with `cancelled`; `ctrl+c` quits. While typing, the hint reads
-`Enter to submit · Esc to cancel` and every unclaimed key goes to the shared
-input keymap, so digits type digits. `j`/`k` are deliberately unbound — every
-list here is arrow-only, and vi keys would fight the free-text row.
+typing mode, or — when not typing — resolves the prompt per
+[`session.prompt_esc_scope`](#esc-on-a-prompt) (by default stopping the whole
+turn; opt-in, cancelling just this decision); `ctrl+c` quits. While typing, the
+hint reads `Enter to submit · Esc to cancel` and every unclaimed key goes to the
+shared input keymap, so digits type digits. `j`/`k` are deliberately unbound —
+every list here is arrow-only, and vi keys would fight the free-text row.
 
-`Esc` cancels rather than merely closing the prompt because there is nothing to
-come back to: unlike a permission request — which leaves a transcript badge and
-replays off the event stream on re-attach — a decision has neither, so a prompt
-closed without resolving would leave the agent's turn blocked forever with
-nothing on screen pointing at it. `cancelled` is a first-class outcome the model
-is told about and can act on, not an error.
+**Selecting the option a question is already drafted to toggles it back off** —
+the draft clears to unanswered (the tab checkbox flips `✔`→`□`), so a choice
+ticked by mistake on a multi-question batch can be un-ticked rather than only
+overwritten. A single-question prompt never sees this: its first pick submits
+and clears the prompt. The toggle is scoped to option rows — the free-text and
+chat escape hatches are not a multi-select list.
+
+When `Esc` DOES cancel (the opt-in scope), it resolves rather than merely
+closing the prompt because there is nothing to come back to: unlike a permission
+request — which leaves a transcript badge and replays off the event stream on
+re-attach — a decision has neither, so a prompt closed without resolving would
+leave the agent's turn blocked forever with nothing on screen pointing at it.
+The cancel **preserves whatever was drafted**: each question the user picked is
+sent as that choice, only untouched questions normalize to `cancelled`, so
+backing out with a partial selection commits it rather than throwing it away.
+`cancelled` is a first-class outcome the model is told about and can act on, not
+an error.
 
 Resolving (an answer or a cancel) is an optimistic local dismiss, exactly like
 an approval: the matching `UpdateResolved` arriving a moment later finds nothing
 pending. A request another peer answers, or one an interrupted turn drops,
 clears the prompt the same way with no answer sent from here — as does the
 session ending, which closes its gate (and with it every decision subscription).
+
+### Esc on a prompt
+
+`Esc` while an interactive prompt (a permission approval or an `ask_user`
+decision) commandeers the footer is governed by **`session.prompt_esc_scope`**
+in `config.json` — `"turn"` (the default) or `"prompt"`:
+
+| Scope | `ask_user` decision | Approval |
+| --- | --- | --- |
+| `"turn"` (default) | **Interrupt the whole turn** → the muted `⏹ stopped`, the same clean stop `Esc` gives a running turn with no prompt open. | Same — interrupt the whole turn. |
+| `"prompt"` (opt-in) | **Cancel just this decision** — the model is told the user declined (drafted picks preserved) and continues in prose. | **Deny the call** (`Allow:false`) and let the turn continue. |
+
+The default is the conservative stop-everything: an unset or unrecognized value
+resolves to `"turn"`, and no scope ever leaves the prompt merely hidden with the
+request still blocked server-side (the silent hang that would strand a turn
+behind a prompt no longer on screen). Set `"prompt"` to answer prompts one at a
+time without tearing down the turn. See `config.Session.EscScope`.
 
 ### Multi question (shipped)
 

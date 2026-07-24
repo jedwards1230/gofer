@@ -639,6 +639,24 @@ func (a App) approvalMinTranscriptRows() int {
 	return cfg.TUI.ApprovalMinTranscriptRowFloor()
 }
 
+// promptEscScope reports the effective session.prompt_esc_scope setting
+// (config.Session.EscScope — default config.PromptEscScopeTurn), read off
+// a.commandEnv.Config() on every call, the same "always current, never a stale
+// snapshot" contract approvalBodyLines follows. It governs what Esc does while
+// an approval or ask_user prompt owns the footer (see dialog.go's
+// escapeApproval/escapeDecision). A nil Config closure or a read error both
+// fall through to the conservative turn-scope default.
+func (a App) promptEscScope() config.PromptEscScope {
+	if a.commandEnv.Config == nil {
+		return config.PromptEscScopeTurn
+	}
+	cfg, err := a.commandEnv.Config()
+	if err != nil {
+		return config.PromptEscScopeTurn
+	}
+	return cfg.Session.EscScope()
+}
+
 // promptModel is a.sess with the approval prompt's two config knobs plumbed
 // in from the always-current config read — the model BOTH row-arithmetic
 // consumers must use.

@@ -89,8 +89,9 @@ func (d Daemon) DrainTimeout() time.Duration {
 
 // Session holds the defaults a new session is created with. The zero value
 // means "unset" — Model resolves to the credential-driven default
-// ([runner.DefaultModel]) and PermissionMode to "ask", the same contain-or-ask
-// posture [Config.Engine] already defaults to.
+// ([runner.DefaultModel]), PermissionMode to "ask", the same contain-or-ask
+// posture [Config.Engine] already defaults to, and PromptEscScope to "turn"
+// (Esc on a prompt interrupts the whole turn — see [Session.EscScope]).
 type Session struct {
 	// Model is the default model id for new sessions. Empty means
 	// credential-driven (see runner.DefaultModel) rather than a fixed model.
@@ -140,6 +141,23 @@ type Session struct {
 	// [Session.SubagentDepthLimit].
 	MaxSubagentDepth int `json:"max_subagent_depth,omitempty"`
 
+	// PromptEscScope selects what the Esc key does while an interactive prompt
+	// (a permission approval or an `ask_user` decision) commandeers the attach
+	// footer: "turn" (the default) interrupts the WHOLE turn — the same clean
+	// stop Esc gives a running turn with no prompt open, which the transcript
+	// renders as the muted "⏹ stopped" — while "prompt" cancels only THAT
+	// prompt and lets the agent continue. Under "prompt" an `ask_user` decision
+	// resolves as cancelled (the model is told the user declined and carries on
+	// in prose) and an approval is denied (the gated tool call is refused and
+	// the turn continues); neither leaves the prompt merely dismissed with the
+	// request still blocked server-side. Empty (unset) and any value this binary
+	// does not recognize resolve to "turn" via [Session.EscScope] — a
+	// guardrail-adjacent knob fails toward the conservative stop-everything,
+	// never toward silently running a turn on past a prompt the user tried to
+	// back out of. Read through [Session.EscScope]; see docs/TUI.md's "Esc on a
+	// prompt" note.
+	PromptEscScope string `json:"prompt_esc_scope,omitempty"`
+
 	// LoadSettleTimeoutMS bounds, in milliseconds, how long session/load waits
 	// for a live session's in-flight turn to finish journaling before it folds
 	// and replays history (see the daemon's handleSessionLoad and issue #137). A
@@ -180,6 +198,33 @@ func (s Session) Mode() PermissionMode {
 		return PermissionModeYolo
 	}
 	return PermissionModeAsk
+}
+
+// PromptEscScope is what the Esc key resolves to while an interactive prompt
+// owns the attach footer — the resolved form of [Session.PromptEscScope]'s
+// free-text config value.
+type PromptEscScope string
+
+const (
+	// PromptEscScopeTurn interrupts the whole turn on Esc — gofer's default,
+	// the same clean stop Esc gives a running turn with no prompt open.
+	PromptEscScopeTurn PromptEscScope = "turn"
+	// PromptEscScopePrompt cancels only the focused prompt on Esc and lets the
+	// agent continue: an ask_user decision resolves cancelled, an approval is
+	// denied. It is the opt-in "cancel one prompt at a time" posture.
+	PromptEscScopePrompt PromptEscScope = "prompt"
+)
+
+// EscScope resolves [Session.PromptEscScope] to a [PromptEscScope]. Unset — and
+// any value this binary doesn't recognize, e.g. a scope written by a newer
+// gofer or a typo — resolves to [PromptEscScopeTurn]: a guardrail-adjacent knob
+// must fail toward stopping the whole turn, never toward silently letting it
+// run on past a prompt the user tried to back out of.
+func (s Session) EscScope() PromptEscScope {
+	if PromptEscScope(s.PromptEscScope) == PromptEscScopePrompt {
+		return PromptEscScopePrompt
+	}
+	return PromptEscScopeTurn
 }
 
 // DefaultLoadSettleTimeout is [Session.LoadSettleTimeoutMS]'s default: 2s. The

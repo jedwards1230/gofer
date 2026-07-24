@@ -232,8 +232,16 @@ func TestDecisionMultiDegenerateShapes(t *testing.T) {
 // the attached session's real gate and pumps the prompt into the App.
 func openMultiDecision(t *testing.T) (*internalFakeSup, App, blockedRequest) {
 	t.Helper()
+	return openMultiDecisionEnv(t, GoldenCommandEnv())
+}
+
+// openMultiDecisionEnv is [openMultiDecision] with a caller-supplied
+// [CommandEnv] — what the Esc-scope tests open their batch through to drive the
+// "prompt" prompt-esc-scope (see promptScopeEnv).
+func openMultiDecisionEnv(t *testing.T, env CommandEnv) (*internalFakeSup, App, blockedRequest) {
+	t.Helper()
 	sup := newInternalFakeSup(GoldenRoster())
-	a := attachForDecisionTest(t, sup)
+	a := attachForDecisionTestEnv(t, sup, env)
 	a, req := openDecisionWith(t, sup, a, multiDecisionQuestions())
 	return sup, a, req
 }
@@ -523,12 +531,11 @@ func TestDecisionMultiPartialSubmitCancelsTheRest(t *testing.T) {
 	}
 }
 
-// TestDecisionMultiEscCancelsEverything pins esc against the drafts: it
-// cancels EVERY question — including the ones already answered and annotated —
-// rather than quietly committing the half of the batch that happened to be
-// filled in. Esc means "I am not answering this", and it has meant that since
-// the single-question prompt shipped.
-func TestDecisionMultiEscCancelsEverything(t *testing.T) {
+// TestDecisionMultiEscStopsTurnByDefault pins esc under the DEFAULT ("turn")
+// scope against a batch the user has already drafted answers into: it stops the
+// whole turn (one Interrupt, no AnswerDecision) rather than resolving the
+// request, exactly as it does on a single question.
+func TestDecisionMultiEscStopsTurnByDefault(t *testing.T) {
 	sup, a, req := openMultiDecision(t)
 
 	a = pressDecision(t, a, tea.KeyPressMsg{Text: "1"})
@@ -539,17 +546,100 @@ func TestDecisionMultiEscCancelsEverything(t *testing.T) {
 	if a.sess.HasPendingDecision() {
 		t.Fatal("expected the prompt cleared by esc")
 	}
+	if len(sup.answers) != 0 {
+		t.Errorf("sup.answers = %+v; want none — turn-scope Esc interrupts, it does not answer", sup.answers)
+	}
+	if len(sup.interrupts) != 1 || sup.interrupts[0] != a.sessID {
+		t.Errorf("sup.interrupts = %+v; want exactly one Interrupt for %q", sup.interrupts, a.sessID)
+	}
+	req.stillBlocked(t)
+}
+
+// TestDecisionMultiEscPreservesDraftsWhenScoped is the selection-preservation
+// contract (change #3) under the opt-in ("prompt") scope: esc no longer throws
+// a drafted answer away. The one question the user picked reaches the agent as
+// the option they chose; only the untouched question is left for the gate to
+// fill in as cancelled. So backing out with a partial selection commits that
+// selection rather than discarding it.
+func TestDecisionMultiEscPreservesDraftsWhenScoped(t *testing.T) {
+	sup, a, req := openMultiDecisionEnv(t, promptScopeEnv())
+
+	a = pressDecision(t, a, tea.KeyPressMsg{Text: "1"}) // draft q1 → option 1; leave q2 untouched
+	a = pressDecision(t, a, tea.KeyPressMsg{Code: tea.KeyEscape})
+
+	if a.sess.HasPendingDecision() {
+		t.Fatal("expected the prompt cleared by esc")
+	}
+	if len(sup.interrupts) != 0 {
+		t.Errorf("sup.interrupts = %+v; want none — prompt-scope Esc cancels, it does not interrupt", sup.interrupts)
+	}
 	if len(sup.answers) != 1 {
 		t.Fatalf("sup.answers = %+v; want exactly one AnswerDecision call from esc", sup.answers)
 	}
-	cancelledAnswers(t, sup.answers[0].answers, "q1", "q2")
-	cancelledAnswers(t, req.await(t), "q1", "q2")
+	// Only the drafted q1 is sent; the gate fills the untouched q2 in.
+	if sent := sup.answers[0].answers; len(sent) != 1 || sent[0].QuestionID != "q1" {
+		t.Fatalf("esc sent %+v; want only the drafted q1 preserved — not every question blanked", sent)
+	}
+	answers := req.await(t)
+	if sel, ok := answers[0].Outcome.(acp.DecisionOutcomeSelected); !ok || sel.OptionID != "q1o1" {
+		t.Errorf("answers[0].Outcome = %#v; want the drafted q1o1 preserved through esc", answers[0].Outcome)
+	}
+	if _, ok := answers[1].Outcome.(acp.DecisionOutcomeCancelled); !ok {
+		t.Errorf("answers[1].Outcome = %#v; want the gate's cancelled fill-in for the untouched question", answers[1].Outcome)
+	}
+}
+
+// TestDecisionMultiSelectingSameOptionDeselects pins the toggle (change #2): on
+// a multi-question request, selecting the option a question is already drafted
+// to un-picks it — both through the digit key and through Enter on the focused
+// row — leaving the question unanswered rather than re-selecting the same
+// option. A single-question request never reaches this, having submitted and
+// cleared on the first press.
+func TestDecisionMultiSelectingSameOptionDeselects(t *testing.T) {
+	sup, a, req := openMultiDecision(t)
+	defer req.stillBlocked(t) // toggling a draft never resolves the request
+
+	// Digit path: press 2 to draft option 2, press 2 again to clear it.
+	a = pressDecision(t, a, tea.KeyPressMsg{Text: "2"})
+	if !a.sess.pendingDec.chosenOption(1) {
+		t.Fatal("expected option 2 drafted after the first press")
+	}
+	if got := a.render(); !strings.Contains(got, "✔ M4 slicing") {
+		t.Errorf("expected the answered tab to show ✔ after selecting:\n%s", got)
+	}
+
+	a = pressDecision(t, a, tea.KeyPressMsg{Text: "2"})
+	if a.sess.pendingDec.chosenOption(1) {
+		t.Error("expected option 2 deselected after pressing it a second time")
+	}
+	if o := a.sess.pendingDec.draft().outcome; o != nil {
+		t.Errorf("expected the draft cleared to unanswered, got %#v", o)
+	}
+	if got := a.render(); !strings.Contains(got, "□ M4 slicing") {
+		t.Errorf("expected the tab back to □ after deselect:\n%s", got)
+	}
+
+	// Enter path: draft option 1, move the cursor onto it, Enter to toggle off.
+	a = pressDecision(t, a, tea.KeyPressMsg{Text: "1"})
+	if !a.sess.pendingDec.chosenOption(0) {
+		t.Fatal("expected option 1 drafted")
+	}
+	a = pressDecision(t, a, tea.KeyPressMsg{Code: tea.KeyUp}) // cursor → option 1 row (index 0)
+	a = pressDecision(t, a, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if a.sess.pendingDec.chosenOption(0) {
+		t.Error("expected Enter on the already-drafted focused option to deselect it")
+	}
+
+	if len(sup.answers) != 0 {
+		t.Errorf("sup.answers = %+v; want none — toggling a draft on a multi-question request sends nothing", sup.answers)
+	}
 }
 
 // TestDecisionMultiTabRestoresTheAnsweredRow covers the small navigation
 // contract that keeps a batch reviewable: coming back to an answered question
 // puts the cursor on the answer you gave it, not back on option 1 — so a
-// second Enter re-confirms rather than silently overwriting.
+// second Enter toggles that answer off (see the deselect contract) rather than
+// silently answering a different option.
 func TestDecisionMultiTabRestoresTheAnsweredRow(t *testing.T) {
 	_, a, req := openMultiDecision(t)
 	defer req.stillBlocked(t)

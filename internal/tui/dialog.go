@@ -17,6 +17,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/jedwards1230/agent-sdk-go/acp"
+
+	"github.com/jedwards1230/gofer/internal/config"
 )
 
 // handleApprovalKey handles key presses while the peeked/attached session
@@ -88,10 +90,34 @@ func (a App) handleApprovalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return a.beginAmend()
 
 	case key.Code == tea.KeyEscape:
-		a.sess = a.sess.DismissApproval()
-		return a, nil
+		return a.escapeApproval()
 	}
 	return a, nil
+}
+
+// escapeApproval resolves the pending approval on Esc according to the
+// session.prompt_esc_scope setting. It NEVER just hides the prompt with the
+// permission left pending server-side — that path silently hung the turn behind
+// a prompt no longer on screen, which is a bug in either scope:
+//
+//   - "turn" (the default): interrupt the whole turn. The prompt clears and the
+//     turn's context is cancelled, so the transcript shows the muted
+//     "⏹ stopped" — the same clean stop Esc gives a running turn with no prompt.
+//   - "prompt": deny the gated call (Allow:false) and let the turn continue.
+//     The agent is told the tool was refused and carries on — the approval
+//     analog of cancelling an ask_user decision.
+//
+// A session-less attach (no a.sessID to interrupt, which the attach screen's
+// own Esc guards the same way) falls back to a local dismiss.
+func (a App) escapeApproval() (tea.Model, tea.Cmd) {
+	if a.promptEscScope() == config.PromptEscScopePrompt {
+		return a.resolveApproval(false)
+	}
+	a.sess = a.sess.DismissApproval()
+	if a.sessID == "" {
+		return a, nil
+	}
+	return a, a.doInterrupt(a.sessID)
 }
 
 // beginAmend opens the inline editor over the gated call's command body.
@@ -246,7 +272,7 @@ func (a App) handleDecisionKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			a.sess = a.sess.stopDecisionTyping()
 			return a, nil
 		}
-		return a.cancelDecision()
+		return a.escapeDecision()
 
 	case key.Code == tea.KeyEnter:
 		return a.resolveDecision()
@@ -362,10 +388,29 @@ func (a App) selectDecisionOption(i int) (tea.Model, tea.Cmd) {
 // draft the tab strip marks ✔, and nothing is sent until the Submit row
 // (see [App.submitDecision]) commits them together — an agent that needed four
 // sign-offs gets one round trip, not four.
+//
+// Selecting the option a question is ALREADY drafted to TOGGLES it back off:
+// the draft clears to unanswered (the tab checkbox flips ✔→□ and the ✔ beside
+// the row disappears) rather than re-selecting the same option, so a choice
+// ticked by mistake on a multi-question request can be un-ticked. The toggle
+// only reaches a second press on a multi-question request — a single-question
+// answer submits and clears the prompt on the first press, so there is nothing
+// left on screen to toggle — and it is scoped to option rows: the free-text and
+// chat escape hatches are not a multi-select list.
 func (a App) answerDecision(outcome acp.DecisionOutcome) (tea.Model, tea.Cmd) {
 	p := a.sess.pendingDec
 	if p == nil || p.onSubmitTab() {
 		return a, nil
+	}
+	if sel, ok := outcome.(acp.DecisionOutcomeSelected); ok {
+		if cur, ok := p.draft().outcome.(acp.DecisionOutcomeSelected); ok && cur.OptionID == sel.OptionID {
+			// Deselect: re-recording nil leaves the question unanswered (the same
+			// state a never-answered draft carries), which the gate normalizes to
+			// cancelled on submit. Never reached on a single-question request,
+			// which has already submitted and dismissed by the second press.
+			a.sess = a.sess.recordDecisionAnswer(nil)
+			return a, nil
+		}
 	}
 	a.sess = a.sess.recordDecisionAnswer(outcome)
 	if p.multi() {
@@ -390,32 +435,56 @@ func (a App) submitDecision() (tea.Model, tea.Cmd) {
 	return a.sendDecision(p.submitAnswers())
 }
 
-// cancelDecision resolves the pending decision by answering EVERY question in
-// the request — drafted or not, rendered or not — with
-// [acp.DecisionOutcomeCancelled]. That is what esc means here, and what the
-// prompt's hint line has always said it means. It deliberately discards the
-// drafts and their notes: esc is "I am not answering this", and quietly
-// committing half of it because the user had already ticked a box would be a
-// different, more surprising thing than the key advertises.
+// escapeDecision handles Esc on a decision prompt when neither editor is open,
+// per the session.prompt_esc_scope setting:
 //
-// Cancelling rather than dismissing locally is the whole point: a decision has
-// no transcript badge and no event-stream replay to find it by again, so a
-// prompt cleared without resolving would leave the agent's turn blocked forever
-// with nothing on screen. Cancelled is a first-class outcome all the way down —
-// the gate normalizes unanswered questions to it and the tool reports it to the
-// model without IsError — so the model gets told "the user declined to choose"
+//   - "turn" (the default): interrupt the whole turn. The prompt clears and the
+//     turn's context is cancelled, so the transcript shows the muted
+//     "⏹ stopped" — the same clean stop Esc gives a running turn with no prompt.
+//     The gate's own Request unblocks on that cancellation (settling to a
+//     resolved update), so nothing is left parked.
+//   - "prompt": cancel just this decision and let the agent continue (see
+//     [App.cancelDecision]), preserving whatever partial selection was drafted.
+//
+// The local DismissDecision on the turn-scope path is safe precisely because
+// the turn is being interrupted: unlike a bare dismiss, which would strand the
+// agent blocked on an unanswered gate, the interrupt tears the turn down, so
+// there is no waiter left to answer. A session-less attach falls back to that
+// local dismiss (there is no a.sessID to interrupt).
+func (a App) escapeDecision() (tea.Model, tea.Cmd) {
+	if a.promptEscScope() == config.PromptEscScopePrompt {
+		return a.cancelDecision()
+	}
+	a.sess = a.sess.DismissDecision()
+	if a.sessID == "" {
+		return a, nil
+	}
+	return a, a.doInterrupt(a.sessID)
+}
+
+// cancelDecision resolves the pending decision WITHOUT interrupting the turn —
+// the "prompt"-scope Esc path (see [App.escapeDecision]) — preserving whatever
+// the user had drafted rather than throwing it away. Each question carrying a
+// chosen outcome (or a note) sends it; each untouched question is omitted and
+// normalized to [acp.DecisionOutcomeCancelled] by the gate. So a user who ticked
+// two of four options and then backed out has those two selections reach the
+// agent, not four blanks — the selection is not lost just because the prompt was
+// dismissed. (This is the same payload [App.submitDecision] builds; the two
+// differ only in their trigger, and neither discards drafted work.)
+//
+// Resolving rather than dismissing locally is the whole point: a decision has no
+// transcript badge and no event-stream replay to find it by again, so a prompt
+// cleared without resolving would leave the agent's turn blocked forever with
+// nothing on screen. Cancelled is a first-class outcome all the way down — the
+// gate normalizes unanswered questions to it and the tool reports it to the
+// model without IsError — so the model is told which questions the user declined
 // and can carry on in prose.
 func (a App) cancelDecision() (tea.Model, tea.Cmd) {
 	p := a.sess.pendingDec
 	if p == nil {
 		return a, nil
 	}
-	ids := p.questionIDs()
-	answers := make([]acp.DecisionAnswer, 0, len(ids))
-	for _, id := range ids {
-		answers = append(answers, acp.DecisionAnswer{QuestionID: id, Outcome: acp.DecisionOutcomeCancelled{}})
-	}
-	return a.sendDecision(answers)
+	return a.sendDecision(p.submitAnswers())
 }
 
 // sendDecision sends answers via [Supervisor.AnswerDecision] and clears the
