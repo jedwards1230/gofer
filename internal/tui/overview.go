@@ -66,7 +66,7 @@ const (
 	// viewFlat lists every session most-recently-active first, grouped under a
 	// cwd header per working directory.
 	viewFlat rosterView = iota
-	// viewGrouped splits the list into Working / Needs input / Finished
+	// viewGrouped splits the list into Working / Needs input / Idle / Finished
 	// sections, each most-recently-active first.
 	viewGrouped
 )
@@ -382,7 +382,7 @@ func (o Overview) resolveSelection(want string) string {
 // replacement.
 //
 // The grouped view is deliberately NOT nested: it splits the roster into
-// Working / Needs input / Finished, and a child's status is independent of its
+// Working / Needs input / Idle / Finished, and a child's status is independent of its
 // parent's, so nesting there would either put a row in a section whose label
 // contradicts its status or duplicate it across sections. Children stay in
 // their own status section and are identified by their agent label instead (see
@@ -390,7 +390,7 @@ func (o Overview) resolveSelection(want string) string {
 func (o Overview) ordered() []SessionInfo {
 	if o.view == viewGrouped {
 		var rows []SessionInfo
-		for _, st := range []SessionStatus{StatusWorking, StatusNeedsInput, StatusFinished} {
+		for _, st := range []SessionStatus{StatusWorking, StatusNeedsInput, StatusIdle, StatusFinished} {
 			rows = append(rows, byRecency(o.filter(st))...)
 		}
 		return rows
@@ -576,17 +576,22 @@ func effectiveStatus(s SessionInfo) SessionStatus {
 	return s.Status
 }
 
-// counts tallies the roster by effective status for the header line.
-func (o Overview) counts() (working, needsInput, finished int) {
+// counts tallies the roster by effective status for the header line. Idle
+// (at-rest / reloaded-untouched) rows are counted separately so they never
+// inflate the awaiting-input tally — the whole point of the status: opening a
+// reloaded session must not read as "one more awaiting you".
+func (o Overview) counts() (working, needsInput, idle, finished int) {
 	for _, s := range o.sessions {
 		switch effectiveStatus(s) {
 		case StatusWorking:
 			working++
 		case StatusNeedsInput:
 			needsInput++
+		case StatusIdle:
+			idle++
 		case StatusFinished:
 			finished++
 		}
 	}
-	return working, needsInput, finished
+	return working, needsInput, idle, finished
 }

@@ -165,8 +165,8 @@ func (s *Supervisor) RestartDaemon(ctx context.Context) error {
 
 // statusFromWire maps the daemon's roster Status string — literally
 // [supervisor.SessionStatus.String]'s output ("working", "needs-input",
-// "finished", or "unknown" for a future/unrecognized value) — to the TUI's
-// own [tui.SessionStatus] enum. This is an explicit string switch, not an
+// "finished", "idle", or "unknown" for a future/unrecognized value) — to the
+// TUI's own [tui.SessionStatus] enum. This is an explicit string switch, not an
 // ordinal cast: the wire carries the string precisely so the two enums can
 // drift independently (see internal/daemon/wire.go's toSessionInfoDTO).
 // An unrecognized value falls back to StatusNeedsInput rather than the
@@ -180,6 +180,8 @@ func statusFromWire(s string) tui.SessionStatus {
 		return tui.StatusNeedsInput
 	case "finished":
 		return tui.StatusFinished
+	case "idle":
+		return tui.StatusIdle
 	default:
 		return tui.StatusNeedsInput
 	}

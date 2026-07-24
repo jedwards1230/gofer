@@ -108,6 +108,15 @@ type managed struct {
 	// derives SessionStatus) and by Archive to reject archiving a running
 	// session.
 	state runState
+	// resumed marks a session that came back live off disk (Supervisor.Resume)
+	// and has NOT been prompted since. While set, an idle session with an empty
+	// queue derives StatusIdle rather than StatusNeedsInput, so merely opening a
+	// reloaded row does not present it as awaiting the user (see info). Cleared
+	// the moment the first prompt is enqueued (see enqueue) — from then on the
+	// session has really done work and derives status normally. A freshly
+	// CREATED session leaves this false, so a new empty session still reads as
+	// NeedsInput, exactly as before.
+	resumed bool
 	// updated is bumped on every run-state transition (idle⇄running), which
 	// coincides with turn dispatch and turn completion (turn.finished).
 	updated time.Time
@@ -160,7 +169,7 @@ type managed struct {
 // join later. Calling it here, rather than after publish, closes the race
 // where a concurrent Kill/Archive could otherwise observe a live session
 // with no teardown stashed yet (see Config.OnRegister's doc).
-func newManaged(sess Session, model, effort string, now time.Time, clock func() time.Time, notify func(), cwd string, gate *loop.Gate, decisions *decision.Gate, meta sessionMeta, onRegister func(sess Session) (stop func())) *managed {
+func newManaged(sess Session, model, effort string, now time.Time, clock func() time.Time, notify func(), cwd string, gate *loop.Gate, decisions *decision.Gate, meta sessionMeta, resumed bool, onRegister func(sess Session) (stop func())) *managed {
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &managed{
 		sess:         sess,
@@ -185,6 +194,7 @@ func newManaged(sess Session, model, effort string, now time.Time, clock func() 
 		decisionDone: make(chan struct{}),
 		submitCh:     make(chan struct{}, 1),
 		state:        stateIdle,
+		resumed:      resumed,
 
 		pendingPerms: make(map[string]event.PermissionRequested),
 	}
@@ -204,8 +214,16 @@ func (m *managed) info() SessionInfo {
 	defer m.mu.Unlock()
 
 	status := StatusNeedsInput
-	if m.state == stateRunning || len(m.queue) > 0 {
+	switch {
+	case m.state == stateRunning || len(m.queue) > 0:
 		status = StatusWorking
+	case m.resumed && m.pending == 0:
+		// Reloaded off disk and not prompted since, with no pending request: at
+		// rest, not awaiting the user. A genuine pending permission keeps it
+		// awaiting (pending != 0 falls through to StatusNeedsInput), and the
+		// TUI's effectiveStatus applies the same rule for a resumed row that
+		// carries one — so a real prompt is never hidden behind StatusIdle.
+		status = StatusIdle
 	}
 	title := m.title
 	if title == "" {
@@ -264,6 +282,10 @@ func (m *managed) enqueue(text string) error {
 		m.mu.Unlock()
 		return ErrNotLive
 	}
+	// The session is being prompted: it is no longer a resumed-but-untouched
+	// row, so it derives status normally from here on (StatusWorking now, then
+	// StatusNeedsInput once this turn settles with an empty queue).
+	m.resumed = false
 	var newTitle string
 	if m.title == "" {
 		if t := snippet(text); t != "" {

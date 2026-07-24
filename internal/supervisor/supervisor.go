@@ -386,7 +386,7 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts CreateOptio
 		}
 	}
 
-	m, err := s.register(sess, opts.Model, opts.Params.Thinking.Effort, opts.Cwd, gate, decisions, meta)
+	m, err := s.register(sess, opts.Model, opts.Params.Thinking.Effort, opts.Cwd, gate, decisions, meta, false)
 	if err != nil {
 		// Lost a race with Close between the isClosed check above and here:
 		// tear down the just-built session so it does not leak. Its store is
@@ -501,7 +501,7 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 		return SessionInfo{}, fmt.Errorf("supervisor: resume %s: %w", id, err)
 	}
 
-	m, err := s.register(sess, opts.Model, opts.Params.Thinking.Effort, opts.Cwd, gate, decisions, meta)
+	m, err := s.register(sess, opts.Model, opts.Params.Thinking.Effort, opts.Cwd, gate, decisions, meta, true)
 	if err != nil {
 		_ = sess.Close()
 		return SessionInfo{}, fmt.Errorf("supervisor: resume %s: %w", id, err)
@@ -532,7 +532,10 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 }
 
 // register adds sess to the roster as a live, idle session and starts its
-// pump goroutine. It returns ErrClosed — checked under s.mu, atomically with
+// pump goroutine. resumed marks a session brought back off disk (Resume) so it
+// derives StatusIdle until first prompted rather than StatusNeedsInput (see
+// managed.resumed); a freshly created session passes false. It returns
+// ErrClosed — checked under s.mu, atomically with
 // the roster insert — if the supervisor has been closed, so a Create/Resume
 // racing Close can never insert a session (and leak its pump) into a roster
 // Close has already drained. The managed value (and its context) is built
@@ -541,13 +544,13 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 // is published into the roster below — so a concurrent Kill can never
 // observe a session whose teardown hasn't been stashed yet (see
 // Config.OnRegister's doc).
-func (s *Supervisor) register(sess Session, model, effort, cwd string, gate *loop.Gate, decisions *decision.Gate, meta sessionMeta) (*managed, error) {
+func (s *Supervisor) register(sess Session, model, effort, cwd string, gate *loop.Gate, decisions *decision.Gate, meta sessionMeta, resumed bool) (*managed, error) {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		return nil, ErrClosed
 	}
-	m := newManaged(sess, model, effort, s.clock(), s.clock, s.notify, cwd, gate, decisions, meta, s.onRegister)
+	m := newManaged(sess, model, effort, s.clock(), s.clock, s.notify, cwd, gate, decisions, meta, resumed, s.onRegister)
 	// Stamp the session id onto the decision gate the moment it is knowable —
 	// before m is published anywhere and before anything can run a turn against
 	// it, so no request can ever open with an empty session id (see
@@ -1130,10 +1133,17 @@ func diskSessionInfo(id, slug, path string) SessionInfo {
 		Project:     slug,
 		JournalPath: path,
 		Live:        false,
-		ParentID:    meta.ParentID,
-		Agent:       meta.Agent,
-		Depth:       meta.Depth,
-		Archived:    meta.Archived,
+		// An offline row is a session AT REST — the daemon that ran it stopped,
+		// so it is not working and, until it is reopened and prompted, not
+		// awaiting the user either. StatusIdle (not the zero-value StatusWorking)
+		// is the truthful resting state, and it matches what a resumed-untouched
+		// live row derives (see managed.info), so opening an offline row is a
+		// no-op for every roster counter rather than moving it.
+		Status:   StatusIdle,
+		ParentID: meta.ParentID,
+		Agent:    meta.Agent,
+		Depth:    meta.Depth,
+		Archived: meta.Archived,
 	}
 
 	entries, err := session.ReadEntries(path)

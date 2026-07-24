@@ -396,10 +396,16 @@ func (s *Supervisor) resumeOffline(ctx context.Context, id string, opts supervis
 	// as a root until the next roster poll corrected it.
 	parentID, agentID, depth := supervisor.DiskMeta(s.root, id)
 	return supervisor.SessionInfo{
-		ID:            id,
-		Model:         model,
-		Cwd:           opts.Cwd,
-		Status:        supervisor.StatusNeedsInput,
+		ID:    id,
+		Model: model,
+		Cwd:   opts.Cwd,
+		// A just-resumed worker has run no turn and holds no pending request, so
+		// it is at rest, not awaiting the user. StatusIdle (not StatusNeedsInput)
+		// keeps merely reopening an offline row from moving the awaiting-input
+		// counter; the roster cache then seeds the worker's own gofer/roster
+		// status (also StatusIdle) on top, and the first prompt flips it to
+		// StatusWorking. See supervisor.managed.info.
+		Status:        supervisor.StatusIdle,
 		Created:       now,
 		Updated:       now,
 		Live:          true,
@@ -923,6 +929,8 @@ func statusFromWire(s string) supervisor.SessionStatus {
 		return supervisor.StatusWorking
 	case "finished":
 		return supervisor.StatusFinished
+	case "idle":
+		return supervisor.StatusIdle
 	default:
 		return supervisor.StatusNeedsInput
 	}

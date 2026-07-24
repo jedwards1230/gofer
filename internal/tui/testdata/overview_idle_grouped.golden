@@ -1,0 +1,24 @@
+gofer v0.3.0
+claude-sonnet-5 · ~/orchestration
+1 awaiting input · 1 working · 1 idle · 1 completed
+
+Working
+▸ wire the websocket ACP list…  turn in flight                               now
+
+Needs input
+  keycloak path-b groundwork    turn finished — awaiting the next prompt      2m
+
+Idle
+  explore three agent ecosyst…  reloaded from disk — not prompted since       5m
+
+Finished
+  authentik token exchange rf…  Keycloak Path-B foundation complete           1h
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+❯ describe a task for a new session · ! for shell mode
+enter open · space peek · tab toggle view · ctrl-x×2 kill · ? shortcuts

@@ -1,0 +1,24 @@
+<accent>gofer</accent> <muted>v0.3.0</muted>
+<muted>claude-sonnet-5 · ~/orchestration</muted>
+<muted>1 awaiting input · 1 working · 1 idle · 1 completed</muted>
+
+<muted>~/orchestration</muted>
+<highlight>▸ wire the websocket ACP list…  </highlight><yellow>Working</yellow><highlight></highlight><muted> · turn in flight</muted><highlight>                     now</highlight>
+  keycloak path-b groundwork    <yellow>Needs input</yellow><muted> · turn finished — awaiting the…</muted>   2m
+  explore three agent ecosyst…  <muted>Idle</muted><muted> · reloaded from disk — not prompted s…</muted>   5m
+  authentik token exchange rf…  <green>Finished</green><muted> · Keycloak Path-B foundation comp…</muted>   1h
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+❯ <muted>describe a task for a new session · ! for shell mode</muted>
+<muted>enter open · space peek · tab toggle view · ctrl-x×2 kill · ? shortcuts</muted>

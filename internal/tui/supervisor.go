@@ -26,7 +26,7 @@ import (
 // alone, once the shapes have converged with gofer-daemon.
 
 // SessionStatus is the coarse roster grouping a session falls into. It drives
-// both the grouped-view sections (Working / Needs input / Finished) and the
+// both the grouped-view sections (Working / Needs input / Idle / Finished) and the
 // header status counts.
 type SessionStatus int
 
@@ -40,6 +40,15 @@ const (
 	// StatusFinished is a terminal session (completed, killed, or archived);
 	// its journal is retained (repo invariant #4) and it remains listable.
 	StatusFinished
+	// StatusIdle is a session at rest that is NOT awaiting the user: a reloaded
+	// offline row, or one just resumed from disk and not yet prompted. It is
+	// deliberately distinct from StatusNeedsInput so browsing/opening a reloaded
+	// session does not label it "Needs input" or move the header's awaiting-input
+	// count (see counts / effectiveStatus). A pending request on such a row still
+	// reads as StatusNeedsInput via effectiveStatus, so a real prompt is never
+	// hidden. Ordinal-aligned with [supervisor.StatusIdle] because the in-process
+	// path casts one enum to the other (see internal/tuibridge).
+	StatusIdle
 )
 
 // String returns the roster section label for a status.
@@ -51,6 +60,8 @@ func (s SessionStatus) String() string {
 		return "Needs input"
 	case StatusFinished:
 		return "Finished"
+	case StatusIdle:
+		return "Idle"
 	default:
 		return "Unknown"
 	}
