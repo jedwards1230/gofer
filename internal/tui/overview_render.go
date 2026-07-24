@@ -306,16 +306,9 @@ func (o Overview) rows(width int) (lines []string, selLine int) {
 		// Group the recency-ordered roster by cwd, preserving first-appearance
 		// order so the most-recently-active cwd's group comes first. The status
 		// word rides on each row here since the flat view has no status section
-		// to state it.
-		var order []string
-		groups := map[string][]SessionInfo{}
-		for _, s := range o.ordered() {
-			key := o.cwdLabel(s)
-			if _, seen := groups[key]; !seen {
-				order = append(order, key)
-			}
-			groups[key] = append(groups[key], s)
-		}
+		// to state it. [Overview.flatGroups] is the shared grouping so navigation
+		// ([Overview.renderedOrder]) walks exactly these rows in this order.
+		order, groups := o.flatGroups()
 		for i, key := range order {
 			if i > 0 {
 				lines = append(lines, "")
@@ -482,9 +475,41 @@ func (o Overview) row(s SessionInfo, width int, showStatus bool, lay rosterLayou
 	line := prefix + title + strings.Repeat(" ", rowColGap) + summary + padLeft(right, lay.rightW)
 
 	if s.ID == o.selectedID {
-		return o.theme.AccentStyle().Render(line)
+		return o.highlightLine(line, width)
 	}
 	return line
+}
+
+// highlightLine paints the focused row's full-width background bar across line.
+// line is first padded (ANSI-aware, via padTo) to the terminal width so the bar
+// spans every column, not just the assembled row body.
+//
+// line already carries nested styled segments — the state-colored status word,
+// the muted summary, the blocked marker — each of which ENDS in a reset. A
+// naive [lipgloss.Style.Render] wrap would not re-open the background after
+// those interior resets (the same "trailing style ends the run" behavior the
+// caret's accent used to hit), leaving holes in the bar after the first colored
+// segment. So the background open is re-inserted after every interior reset, so
+// the bar survives each nested reset and covers the whole row.
+//
+// It is a no-op under the Ascii golden profile, where [Theme.RowHighlightStyle]
+// emits no escape: the padded plain line is returned unchanged and the Ascii
+// golden pins it, while a styled golden pins the bar.
+func (o Overview) highlightLine(line string, width int) string {
+	line = padTo(line, width)
+	sentinel := o.theme.RowHighlightStyle().Render("\x00")
+	i := strings.IndexByte(sentinel, 0)
+	if i < 0 {
+		// Render should preserve the sentinel byte; if a future lipgloss ever
+		// dropped it, degrade to the plain padded line rather than slice-panic.
+		return line
+	}
+	open, reset := sentinel[:i], sentinel[i+1:]
+	if open == "" {
+		return line
+	}
+	line = strings.ReplaceAll(line, reset, reset+open)
+	return open + line + reset
 }
 
 // rowLabel is the identity text a row's title column carries: a CHILD session's

@@ -105,7 +105,7 @@ func (o Overview) MoveUp() Overview { return o.move(-1) }
 // move shifts selection by delta rows within the current ordering, clamping at
 // the ends.
 func (o Overview) move(delta int) Overview {
-	rows := o.ordered()
+	rows := o.renderedOrder()
 	if len(rows) == 0 {
 		return o
 	}
@@ -361,7 +361,7 @@ func (o *Overview) TakeSubmitted() (string, bool) {
 // resolveSelection returns want if a session with that id is still present,
 // otherwise the first row of the current ordering (or "" when empty).
 func (o Overview) resolveSelection(want string) string {
-	rows := o.ordered()
+	rows := o.renderedOrder()
 	for _, s := range rows {
 		if s.ID == want {
 			return want
@@ -396,6 +396,46 @@ func (o Overview) ordered() []SessionInfo {
 		return rows
 	}
 	return byTree(o.sessions)
+}
+
+// flatGroups buckets the flat view's [Overview.ordered] roster by cwd,
+// preserving first-appearance order so the most-recently-active cwd's group
+// comes first. It is the single source of the flat view's on-screen grouping,
+// shared by the renderer (which draws a cwd header + that group's rows — see
+// [Overview.rows]) and [Overview.renderedOrder] (which flattens it for
+// navigation), so arrow-nav walks exactly the rows the roster draws.
+func (o Overview) flatGroups() (order []string, groups map[string][]SessionInfo) {
+	groups = map[string][]SessionInfo{}
+	for _, s := range o.ordered() {
+		key := o.cwdLabel(s)
+		if _, seen := groups[key]; !seen {
+			order = append(order, key)
+		}
+		groups[key] = append(groups[key], s)
+	}
+	return order, groups
+}
+
+// renderedOrder returns the sessions in the exact top-to-bottom order the
+// roster renders them — headers and blank separators excluded — so selection
+// movement ([Overview.move]) and the default selection
+// ([Overview.resolveSelection]) step through precisely the rows on screen.
+//
+// The grouped view already renders in [Overview.ordered] order (its rows() arm
+// iterates the same Working/Needs input/Finished sections). The flat view
+// re-buckets that order by cwd (see [Overview.flatGroups]) — the order the
+// operator actually sees — which is where navigating the raw [Overview.ordered]
+// sequence diverged from the screen.
+func (o Overview) renderedOrder() []SessionInfo {
+	if o.view == viewGrouped {
+		return o.ordered()
+	}
+	order, groups := o.flatGroups()
+	out := make([]SessionInfo, 0, len(o.sessions))
+	for _, key := range order {
+		out = append(out, groups[key]...)
+	}
+	return out
 }
 
 // filter returns the sessions in effective status st.

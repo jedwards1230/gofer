@@ -32,6 +32,10 @@ type Theme struct {
 	Warn   string
 	Danger string
 
+	// Highlight is the background color of the focused roster row's full-width
+	// selection bar (see [Theme.RowHighlightStyle]).
+	Highlight string
+
 	// State markers. Plain runes, not styled output — color is applied by the
 	// caller (marker-only styling), so the glyph carries state only through the
 	// style it is rendered in.
@@ -54,6 +58,8 @@ func Test() Theme {
 		OK:     "#a6e3a1",
 		Warn:   "#f9e2af",
 		Danger: "#f38ba8",
+
+		Highlight: "#45475a",
 
 		GlyphHuman: "○",
 		GlyphAgent: "●",
@@ -98,6 +104,20 @@ func (t Theme) WarnStyle() lipgloss.Style { return t.colored(t.Warn) }
 
 // DangerStyle styles error/failure states.
 func (t Theme) DangerStyle() lipgloss.Style { return t.colored(t.Danger) }
+
+// RowHighlightStyle styles the focused roster row as a full-width background
+// bar. Like the color tokens it is gated by [Theme.Profile]: under
+// [termenv.Ascii] it returns an unstyled [lipgloss.Style], so no background
+// escape reaches an Ascii golden — the bar is pinned by a styled golden
+// instead. It carries no foreground so the row keeps its own status/summary
+// colors, reading UNDER the bar rather than being recolored by it.
+func (t Theme) RowHighlightStyle() lipgloss.Style {
+	s := lipgloss.NewStyle()
+	if t.Profile == termenv.Ascii {
+		return s
+	}
+	return s.Background(lipgloss.Color(t.Highlight))
+}
 
 // SelectionStyle styles the mouse click-drag selection highlight (reverse
 // video). Unlike the marker-vocabulary colors above, this is NOT gated by
