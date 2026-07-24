@@ -516,6 +516,16 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 			_ = setArchived(dir, id, false, s.clock())
 		}
 	}
+	// Restore the session's title from its journal's first user message — the
+	// same derivation the offline row uses (see firstUserSnippet) — so a reloaded
+	// session shows its real label, not managed.info's project-slug fallback. A
+	// resumed session is idle with no fresh prompt yet, so its title is unset;
+	// seeding it here (before the info snapshot below) means this resume's own
+	// SessionInfo and every later roster read report the real title. Best-effort:
+	// an unreadable journal leaves the slug fallback, exactly as before. Read-only.
+	if entries, rerr := session.ReadEntries(sess.JournalPath()); rerr == nil {
+		m.seedTitle(firstUserSnippet(entries))
+	}
 	info := m.info()
 	s.notify()
 	return info, nil
@@ -1140,21 +1150,31 @@ func diskSessionInfo(id, slug, path string) SessionInfo {
 		}
 	}
 
+	info.Title = firstUserSnippet(entries)
+
+	return info
+}
+
+// firstUserSnippet derives a session's display title from its journal's first
+// user message — the single derivation both an offline row ([diskSessionInfo])
+// and a freshly resumed session's title seed ([Supervisor.Resume]) use, so a
+// reloaded session's label is identical whether shown from disk or after it goes
+// live. Returns "" when no user message carries text (the caller then keeps its
+// project-slug fallback). Read-only over already-read entries.
+func firstUserSnippet(entries []session.Entry) string {
 	for _, e := range entries {
 		if e.Type != session.EntryMessage {
 			continue
 		}
-		msg, msgErr := e.Message()
-		if msgErr != nil || msg.Role != provider.RoleUser {
+		msg, err := e.Message()
+		if err != nil || msg.Role != provider.RoleUser {
 			continue
 		}
 		if text := msg.Text(); text != "" {
-			info.Title = snippet(text)
-			break
+			return snippet(text)
 		}
 	}
-
-	return info
+	return ""
 }
 
 // Subscribe returns a live event subscription for id. Errors with

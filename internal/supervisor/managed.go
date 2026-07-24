@@ -233,6 +233,23 @@ func (m *managed) info() SessionInfo {
 	}
 }
 
+// seedTitle sets the session's title from a resume-time journal derivation (its
+// first user message; see firstUserSnippet), but only when no title is set yet —
+// a resumed session is idle with no fresh prompt, so its title is empty and this
+// restores the label the offline row showed. A no-op for an empty derivation or
+// once a prompt has already captured a title in [managed.enqueue]. Locked like
+// every other m.title access, so it stays race-clean against enqueue and info.
+func (m *managed) seedTitle(title string) {
+	if title == "" {
+		return
+	}
+	m.mu.Lock()
+	if m.title == "" {
+		m.title = title
+	}
+	m.mu.Unlock()
+}
+
 // enqueue appends text to the pump's queue and wakes it. It captures the
 // session title from the first prompt that yields a non-empty snippet, set once
 // and never overwritten thereafter, and — on that first capture only — emits a
