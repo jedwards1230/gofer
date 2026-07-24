@@ -149,6 +149,10 @@ func selectTUIBackend(ctx context.Context, df *daemonFlags, cwd, root string, st
 				Model: daemonDefaultModel(ctx, c),
 				Cwd:   cwd,
 				Now:   time.Now(),
+				// The daemon's own build, so the header can warn when this roster
+				// is served by a stale daemon — the CLI's stderr skew warning is
+				// swallowed by the alt-screen on this path.
+				DaemonVersion: daemonBinaryVersion(ctx, c),
 			},
 			env: env,
 		}, nil
@@ -223,6 +227,21 @@ func selectTUIBackend(ctx context.Context, df *daemonFlags, cwd, root string, st
 func daemonDefaultModel(ctx context.Context, c *daemon.Client) string {
 	model, _ := daemonDefaultModelErr(ctx, c)
 	return model
+}
+
+// daemonBinaryVersion reads the connected daemon's build version off the
+// gofer/hello handshake, best-effort: a daemon predating the handshake (or the
+// field) yields "", which the roster header treats as "unknown" and shows no
+// skew banner for (internal/versionskew). It is the TUI-path source of the same
+// authoritative daemon version dialDaemon compares on the CLI path — read here
+// so the roster header can surface a stale-daemon warning the pre-alt-screen
+// stderr warning can never make visible.
+func daemonBinaryVersion(ctx context.Context, c *daemon.Client) string {
+	hello, err := c.Hello(ctx)
+	if err != nil {
+		return ""
+	}
+	return hello.BinaryVersion
 }
 
 // daemonDefaultModelErr is daemonDefaultModel keeping the error, for

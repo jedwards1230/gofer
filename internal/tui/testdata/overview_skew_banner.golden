@@ -1,0 +1,24 @@
+gofer v0.3.1
+claude-sonnet-5 · ~/orchestration
+2 awaiting input · 1 working · 2 completed
+⚠ daemon is stale (v0.2.1 < v0.3.1) — run: gofer daemon restart
+~/orchestration
+▸ wire the websocket ACP list…  Needs input · blocked: approve Bash(kubect…  now
+  explore three agent ecosyst…  Working · M2 launched; awaiting sketch rev…   2m
+  keycloak path-b groundwork    Needs input · turn finished — awaiting the…   5m
+  authentik token exchange rf…  Finished · Keycloak Path-B foundation comp…   1h
+  openclaw dev setup            Finished · Heartbeat revamp spec'd and han…   1d
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+❯ describe a task for a new session · ! for shell mode
+enter open · space peek · tab toggle view · ctrl-x kill · ? shortcuts

@@ -77,6 +77,18 @@ adds a third status-count line beneath it; the attach screen's copy leaves
 that row blank instead (a global roster tally means nothing once attached to
 one session).
 
+The overview header's fourth line is normally the blank separator, but when the
+roster is served by a daemon whose build is **older than (or a different build
+from) the running CLI** it carries a persistent warn-styled banner —
+`⚠ daemon is stale (<daemon> < <cli>) — run: gofer daemon restart`
+(`Overview.skewSeparator`, overview_render.go). It is the TUI-visible twin of
+the CLI's stderr version-skew warning (`warnVersionSkew`, daemonclient.go),
+which the alt-screen swallows on the roster path; both share one classifier
+(`internal/versionskew`), so an unknown, matching, or *newer* daemon stays
+silent on both. Reusing the separator slot keeps the header a fixed
+`headerLines` tall, so the banner costs no body rows and a non-skewed roster
+renders byte-identically.
+
 A pending permission request is **not** a centered modal — it renders inline in
 the conversation's bottom UI. The transcript records a permanent `● <tool>`
 badge the moment the request arrives, but while it's unresolved the live
