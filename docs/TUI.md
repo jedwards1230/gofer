@@ -40,7 +40,7 @@ UI.
 **Overview** — one row per session (a session = a task, titled by the work).
 A row may be a whole fan-out hierarchy; it collapses to aggregate state,
 agent count, and whether approvals are pending, and expands inline to the
-subagent tree. `↑`/`↓` move the selection · `tab` switches view · `enter`
+subagent tree. `↑`/`↓` move the selection · `tab` switches view · `enter`/`→`
 open (attach the full session) · `space` peek · `ctrl-x` kill (running; subtree
 interrupted) or archive (finished) — a **two-press confirm**: the first `ctrl-x`
 arms the action and shows a status line naming the verb for that row's state
@@ -607,8 +607,9 @@ dispatch bar opens the selected session — attaches into the full, subscribed
 transcript (with dispatch-bar text, it instead creates a session from that text
 and attaches into it); `space` in an **empty** dispatch bar peeks the selected
 session — the roster-only card that does not subscribe (with text, it is an
-ordinary space); the arrows carry no open/peek verb on the overview — a bare `→`
-is a plain cursor-move; `esc`
+ordinary space); a bare `→` in an **empty** dispatch bar opens the selected
+session too — the roster half of the attach screen's `←`/`→` drill pair, the
+same as `enter` (with text, it is a plain cursor-move); `esc`
 interrupts/acts on the *active* session (never "go back"); `←` in an **empty**
 input backs out to the attached session's parent, or to the overview when it has
 none (with text, it edits); `↓` in an **empty** attach input returns to the

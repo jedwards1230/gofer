@@ -1193,6 +1193,24 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return a, cmd
 
+	case key.Code == tea.KeyRight && key.Mod == 0 && a.over.InputEmpty():
+		// Drill into the selected session — attach and subscribe, exactly like
+		// Enter on an empty dispatch bar (the KeyEnter case above). → reads as
+		// "go deeper" and mirrors the attach screen's navigation contract, where
+		// ← backs out of a session; it's the roster half of that pair. Gated on
+		// an EMPTY dispatch bar, the same empty-vs-typed split space and "?" use:
+		// with text in the bar a bare Right is an ordinary cursor-move and falls
+		// through to the shared input keymap below (applyInputKey's KeyRight
+		// case). key.Mod == 0 keeps Alt+Right (the word-move) falling through too.
+		id := a.over.SelectedID()
+		if id == "" {
+			return a, nil
+		}
+		a.scr = screenAttach
+		a.scroll = 0
+		cmd := a.enter(id)
+		return a, cmd
+
 	case key.Code == tea.KeyEscape:
 		// Clears the WHOLE buffer regardless of the cursor's position — a
 		// repeated Backspace loop would only clear the text before the
@@ -1232,9 +1250,11 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Every key not already claimed by the navigation contract above falls
 	// through to the shared input keymap (input_keymap.go) — movement,
 	// insertion at the cursor, and deletion, the same keymap the attach
-	// input uses. Bare Right is a plain cursor-move here (it reaches
-	// applyInputKey's KeyRight case); space reaches applyInputKey only with
-	// text in the bar — an empty bar's space peeks (the KeySpace case above).
+	// input uses. Bare Right reaches applyInputKey's KeyRight case (a plain
+	// cursor-move) only with text in the bar — an empty bar's Right attaches
+	// the selected session (the KeyRight case above); space is the same
+	// split: an empty bar's space peeks (the KeySpace case above), a typed
+	// bar's space is an ordinary character here.
 	if buf, ok := applyInputKey(a.over.input, key); ok {
 		a.over.input = buf
 	}
