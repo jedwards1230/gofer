@@ -9,9 +9,8 @@ import (
 	"os"
 	"time"
 
-	"golang.org/x/mod/semver"
-
 	"github.com/jedwards1230/gofer/internal/daemon"
+	"github.com/jedwards1230/gofer/internal/versionskew"
 )
 
 // daemonDialTimeout bounds how long a command waits to find out whether a
@@ -188,67 +187,18 @@ func dialDaemon(ctx context.Context, f *daemonFlags, root string, stderr io.Writ
 		daemonVersion = hello.BinaryVersion
 	}
 	if cliVersion := effectiveVersion(); daemonVersion != "" {
-		switch classifyClientDaemonSkew(cliVersion, daemonVersion) {
-		case skewDaemonOlder:
+		switch versionskew.Classify(cliVersion, daemonVersion) {
+		case versionskew.Older:
 			warnVersionSkew(stderr, cliVersion, daemonVersion, true)
-		case skewDaemonDiffers:
+		case versionskew.Differs:
 			warnVersionSkew(stderr, cliVersion, daemonVersion, false)
-		case skewNoWarn:
+		case versionskew.None:
 			// Equal, indeterminate, or the daemon is NEWER than this CLI — in the
 			// last case restarting the daemon is the wrong advice (the CLI is the
 			// stale side), so stay silent rather than nag with a misdirected fix.
 		}
 	}
 	return c, nil
-}
-
-// clientDaemonSkew is how this CLI's build relates to the daemon it connected
-// to, reduced to the cases dialDaemon warns (or stays silent) on. It is the
-// client↔daemon analogue of internal/router's skewClass, minus the wire axis
-// the router also tracks (the client speaks the daemon's wire or the dial would
-// have failed).
-type clientDaemonSkew int
-
-const (
-	// skewNoWarn: nothing actionable — the versions are equal, exactly one side
-	// identified itself (unknown, never a false positive), or the daemon is
-	// NEWER than this CLI (the CLI is the stale side, so "restart the daemon" is
-	// the wrong fix).
-	skewNoWarn clientDaemonSkew = iota
-	// skewDaemonOlder: both versions are comparable semver and the daemon's is
-	// strictly older — the stale-daemon case a restart fixes.
-	skewDaemonOlder
-	// skewDaemonDiffers: the versions differ but their order can't be
-	// established (one or both are non-semver dev builds like "dev-<sha>"), so
-	// the direction is unknown but the daemon is definitely a different build.
-	skewDaemonDiffers
-)
-
-// classifyClientDaemonSkew decides whether — and how — to warn about the gap
-// between this CLI's build (cliVersion) and the daemon's (daemonVersion). It is
-// pure so the decision is table-tested without a daemon.
-//
-// It never false-positives on an unknown: an empty version on either side, or
-// two equal versions, is [skewNoWarn]. When BOTH are valid semver it uses
-// [semver.Compare] for an authoritative direction (release tags AND Go
-// pseudo-versions like v0.3.1-0.YYYY…-<sha> are valid semver and order
-// correctly); only a strictly-older daemon warns as [skewDaemonOlder], a newer
-// or equal-precedence daemon is [skewNoWarn]. Versions that differ but aren't
-// both semver (local "dev-<sha>" builds) are [skewDaemonDiffers] — a real but
-// undirected skew.
-func classifyClientDaemonSkew(cliVersion, daemonVersion string) clientDaemonSkew {
-	if cliVersion == "" || daemonVersion == "" || cliVersion == daemonVersion {
-		return skewNoWarn
-	}
-	if semver.IsValid(cliVersion) && semver.IsValid(daemonVersion) {
-		if semver.Compare(daemonVersion, cliVersion) < 0 {
-			return skewDaemonOlder
-		}
-		// Daemon newer than, or equal precedence to, the CLI: nothing a daemon
-		// restart fixes.
-		return skewNoWarn
-	}
-	return skewDaemonDiffers
 }
 
 // warnVersionSkew prints a loud, unmistakable stderr warning when this CLI's

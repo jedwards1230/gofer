@@ -44,41 +44,10 @@ func TestWarnVersionSkew(t *testing.T) {
 	}
 }
 
-// TestClassifyClientDaemonSkew is the pure core: which (cli, daemon) pairs warn,
-// and how. It is the unit that must never false-positive on an unknown.
-func TestClassifyClientDaemonSkew(t *testing.T) {
-	cases := []struct {
-		name        string
-		cli, daemon string
-		want        clientDaemonSkew
-	}{
-		{"equal releases are silent", "v0.3.1", "v0.3.1", skewNoWarn},
-		{"equal pseudo-versions are silent", "v0.3.1-0.20260721163650-6661a1dcb818", "v0.3.1-0.20260721163650-6661a1dcb818", skewNoWarn},
-		{"empty cli is silent (unknown)", "", "v0.3.1", skewNoWarn},
-		{"empty daemon is silent (unknown)", "v0.3.1", "", skewNoWarn},
-		{"both empty is silent", "", "", skewNoWarn},
-		{"older release daemon warns as older", "v0.3.1", "v0.2.1", skewDaemonOlder},
-		{"newer release daemon is silent (CLI is the stale side)", "v0.2.1", "v0.3.1", skewNoWarn},
-		{
-			// The exact scenario that triggered this feature: a client built from
-			// a later commit than the long-running daemon, both Go pseudo-versions.
-			"older pseudo-version daemon warns as older",
-			"v0.3.1-0.20260721163650-6661a1dcb818",
-			"v0.2.1-0.20260719230853-2aa711248af7",
-			skewDaemonOlder,
-		},
-		{"newer pseudo-version daemon is silent", "v0.2.1-0.20260719230853-2aa711248af7", "v0.3.1-0.20260721163650-6661a1dcb818", skewNoWarn},
-		{"differing dev builds warn as differs (order unknown)", "dev-6661a1dcb818", "dev-2aa711248af7", skewDaemonDiffers},
-		{"release cli vs dev daemon warns as differs", "v0.3.1", "dev-2aa711248af7", skewDaemonDiffers},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := classifyClientDaemonSkew(c.cli, c.daemon); got != c.want {
-				t.Errorf("classifyClientDaemonSkew(%q, %q) = %d, want %d", c.cli, c.daemon, got, c.want)
-			}
-		})
-	}
-}
+// The pure classification core moved to internal/versionskew (shared with the
+// TUI roster banner); its table test lives there now
+// (versionskew.TestClassify). The tests below cover cmd/gofer's own wiring: the
+// stderr copy and the dial-path warning.
 
 // TestDialDaemonWarnsFromHelloVersion covers the AUTHORITATIVE path: the daemon
 // advertises its build via gofer/hello (no endpoint-file version at all), and
