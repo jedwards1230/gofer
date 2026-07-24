@@ -1456,18 +1456,24 @@ func (m Model) renderItemLines(it item, width int) []string {
 		if strings.TrimSpace(it.text) == "" {
 			return nil
 		}
-		if !it.done {
-			// Streaming: render the raw deltas plainly. Markdown rendering waits
-			// for the message to settle (see markdown.go) — re-running glamour on
-			// every delta would flicker and lag, and a half-arrived fence or list
-			// renders as garbage anyway.
-			return styledMarkerLines(m.theme.WarnStyle(), m.theme.GlyphAgent, it.text, plainRender)
-		}
-		// Settled: render the message's markdown, wrapped to leave room for the
-		// "● " marker glyph and the matching continuation indent so a wrapped
-		// row still lands within width.
 		glyph := m.theme.GlyphAgent
-		rows := m.md.render(it.text, width-(ansi.StringWidth(glyph)+1))
+		contentWidth := width - (ansi.StringWidth(glyph) + 1)
+		if !it.done {
+			// Streaming: render block-by-block. Every COMPLETE markdown block (a
+			// paragraph closed by a blank line, or a closed ``` fence) is glamoured
+			// and memoized; only the trailing INCOMPLETE block — a half-arrived
+			// fence or a paragraph with no terminating blank yet — stays raw, since
+			// glamouring a half-block is garbage. The marker is warn (yellow) while
+			// the turn is in flight; it goes green (below) once the message settles.
+			rows := m.md.renderStreaming(it.text, contentWidth)
+			return markerBlockLines(m.theme.WarnStyle(), glyph, rows)
+		}
+		// Settled: render the whole message's markdown at once — byte-identical to
+		// the pre-incremental settle path — wrapped to leave room for the "● "
+		// marker glyph and the matching continuation indent so a wrapped row still
+		// lands within width. Whole-document (not per-block) so glamour's
+		// cross-block layout is exactly what a finished reply always rendered.
+		rows := m.md.render(it.text, contentWidth)
 		return markerBlockLines(m.theme.OKStyle(), glyph, rows)
 	}
 }

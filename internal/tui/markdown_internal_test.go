@@ -8,6 +8,7 @@ package tui
 // reflows to the transcript width.
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -38,23 +39,41 @@ const markdownSample = "# Title\n\n" +
 	"```\n\n" +
 	"See [docs](https://example.com).\n"
 
-// TestMarkdownRendersOnlyWhenSettled is the load-bearing render-on-settle
-// assertion: while the message is still streaming its raw markdown shows
-// through literally (a half-arrived fence must never be fed to glamour), and
-// only once it settles is the markdown rendered — the asterisks and fence
-// markers gone, the content kept.
-func TestMarkdownRendersOnlyWhenSettled(t *testing.T) {
+// TestMarkdownRendersCompleteBlocksProgressively is the load-bearing
+// incremental-render assertion. Mid-stream, a message's COMPLETE blocks (a
+// paragraph closed by a blank line, or a closed fence) are glamoured while the
+// message streams — but the trailing INCOMPLETE block (here a half-arrived
+// fence) stays raw, because glamouring a half-block is garbage. The mid-stream
+// text below has two complete blocks (a heading, a bold paragraph) and an
+// incomplete tail (an unclosed ```go fence):
+//
+//   - the complete bold paragraph is rendered — its "**bold**" markers are gone;
+//   - the incomplete fence is NOT — its raw "```go" and typed body show through.
+//
+// Both directions are mutation-checks: were the tail glamoured too, "```go"
+// would vanish; were nothing split into blocks (all treated as the raw tail),
+// "**bold**" would reappear. On settle the whole message — closed fence and all —
+// renders, so neither the asterisks nor any fence marker survives.
+func TestMarkdownRendersCompleteBlocksProgressively(t *testing.T) {
+	const streamed = "# Title\n\n" +
+		"Some **bold** text.\n\n" +
+		"```go\nfunc main() {" // unclosed fence: the incomplete tail
+
 	streaming := New(theme.Test()).
 		Ingest(event.NewMessageStarted(sidMD, event.MessageText)).
-		Ingest(event.NewMessageDelta(sidMD, event.MessageText, markdownSample))
+		Ingest(event.NewMessageDelta(sidMD, event.MessageText, streamed))
 	streamOut := ansi.Strip(streaming.View(testkit.Width, testkit.Height))
-	if !strings.Contains(streamOut, "**bold**") {
-		t.Errorf("streaming render should show raw markdown verbatim, got:\n%s", streamOut)
+	if strings.Contains(streamOut, "**bold**") {
+		t.Errorf("a COMPLETE block mid-stream should be glamoured (no raw **bold**), got:\n%s", streamOut)
 	}
-	if !strings.Contains(streamOut, "```go") {
-		t.Errorf("streaming render should show the raw code fence, got:\n%s", streamOut)
+	if !strings.Contains(streamOut, "bold") {
+		t.Errorf("the glamoured complete block dropped its content ('bold'):\n%s", streamOut)
+	}
+	if !strings.Contains(streamOut, "```go") || !strings.Contains(streamOut, "func main() {") {
+		t.Errorf("the INCOMPLETE trailing fence should stay raw (```go + body), got:\n%s", streamOut)
 	}
 
+	// On settle the whole message renders (fence now closed): no raw markers left.
 	settled := streaming.Ingest(event.NewMessageFinished(sidMD, event.MessageText, markdownSample))
 	out := ansi.Strip(settled.View(testkit.Width, testkit.Height))
 	if strings.Contains(out, "**bold**") {
@@ -65,6 +84,73 @@ func TestMarkdownRendersOnlyWhenSettled(t *testing.T) {
 	}
 	if !strings.Contains(out, "bold") || !strings.Contains(out, "func main() {") {
 		t.Errorf("settled render dropped rendered content (expected 'bold' and the code body):\n%s", out)
+	}
+}
+
+// TestStreamingHalfFenceNeverGlamoured pins the safety edge the incremental
+// path must never violate: a fence that has opened but not closed is the
+// incomplete tail and is rendered RAW, verbatim — feeding a half-fence to
+// glamour renders broken. It also confirms a preceding complete paragraph IS
+// glamoured, so the two coexist in one streaming frame.
+func TestStreamingHalfFenceNeverGlamoured(t *testing.T) {
+	// One complete paragraph, then an unclosed fence whose body is literal
+	// markdown that MUST NOT be interpreted while raw.
+	const streamed = "Intro paragraph.\n\n```\n**not bold** inside a fence"
+	m := New(theme.Test()).
+		Ingest(event.NewMessageStarted(sidMD, event.MessageText)).
+		Ingest(event.NewMessageDelta(sidMD, event.MessageText, streamed))
+	out := ansi.Strip(m.View(testkit.Width, testkit.Height))
+	if !strings.Contains(out, "```") {
+		t.Errorf("the unclosed fence delimiter must show raw, got:\n%s", out)
+	}
+	if !strings.Contains(out, "**not bold** inside a fence") {
+		t.Errorf("the half-fence body must show raw and verbatim, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Intro paragraph.") {
+		t.Errorf("the preceding complete paragraph is missing:\n%s", out)
+	}
+}
+
+// TestSplitMarkdownBlocks is the table-driven oracle for the block splitter
+// that decides complete-vs-incomplete — the load-bearing half of incremental
+// rendering. The completeness rules it pins: a paragraph completes on a blank
+// line (not a lone trailing newline); a fence completes on its close and a blank
+// line inside it never splits it; a closing fence must carry no info string (so
+// a "```python" line inside a fence is body, not a close); tilde fences and a
+// fence interrupting a paragraph both behave.
+func TestSplitMarkdownBlocks(t *testing.T) {
+	tests := []struct {
+		name         string
+		in           string
+		wantComplete []string
+		wantTrailing string
+	}{
+		{"empty", "", nil, ""},
+		{"single incomplete paragraph", "hello world", nil, "hello world"},
+		{"lone trailing newline does not complete", "para\n", nil, "para"},
+		{"blank line completes the paragraph", "para\n\n", []string{"para"}, ""},
+		{"soft break stays one paragraph", "a\nb", nil, "a\nb"},
+		{"one complete + incomplete tail", "a\n\nb", []string{"a"}, "b"},
+		{"two complete blocks", "a\n\nb\n\n", []string{"a", "b"}, ""},
+		{"closed fence is complete", "```go\nx\n```", []string{"```go\nx\n```"}, ""},
+		{"open fence is the incomplete tail", "```go\nfunc() {", nil, "```go\nfunc() {"},
+		{"blank inside fence does not split", "```\n\nx\n```", []string{"```\n\nx\n```"}, ""},
+		{"info-string line inside fence is body, not close", "```\n```python\ncode\n```", []string{"```\n```python\ncode\n```"}, ""},
+		{"tilde fence", "~~~\nx\n~~~", []string{"~~~\nx\n~~~"}, ""},
+		{"fence interrupts a paragraph with no blank between", "a\n```\nx\n```", []string{"a", "```\nx\n```"}, ""},
+		{"paragraph then still-open fence", "a\n\n```go\nx", []string{"a"}, "```go\nx"},
+		{"complete blocks then open fence", "# T\n\npara\n\n```go\nf()", []string{"# T", "para"}, "```go\nf()"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			complete, trailing := splitMarkdownBlocks(tc.in)
+			if !slices.Equal(complete, tc.wantComplete) {
+				t.Errorf("complete = %#v, want %#v", complete, tc.wantComplete)
+			}
+			if trailing != tc.wantTrailing {
+				t.Errorf("trailing = %q, want %q", trailing, tc.wantTrailing)
+			}
+		})
 	}
 }
 

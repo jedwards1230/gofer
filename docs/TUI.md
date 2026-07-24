@@ -652,14 +652,27 @@ reproduces it end to end via incremental `MessageStarted`/`MessageDelta`
 events, the same shape a live daemon attach streams, before asserting the
 fix).
 
-**Markdown rendering (settled assistant text)**: once an assistant message
-*settles* (`MessageFinished`), its text is rendered as markdown — bold/italic,
-headings, lists, blockquotes, inline code, links, and fenced code blocks — via
-Charm's [glamour](https://github.com/charmbracelet/glamour) (the library behind
-`glow`), in `markdown.go`. A *streaming* (still-open) item keeps rendering its
-raw deltas plainly: re-running glamour on every delta flickers and lags, and a
-half-arrived fence renders as garbage — so the swap to rendered markdown happens
-exactly at settle. glamour emits one multi-line string that `markdownRenderer`
+**Markdown rendering (incremental, block-by-block)**: an assistant message's
+text is rendered as markdown — bold/italic, headings, lists, blockquotes, inline
+code, links, and fenced code blocks — via Charm's
+[glamour](https://github.com/charmbracelet/glamour) (the library behind `glow`),
+in `markdown.go`. A *settled* message (`MessageFinished`) renders its **whole
+text at once** (`markdownRenderer.render`), so glamour's cross-block layout is
+exactly what a finished reply shows. A *streaming* (still-open) message renders
+**block by block** (`markdownRenderer.renderStreaming`): its COMPLETE markdown
+blocks are glamoured while the trailing INCOMPLETE block stays raw. A block is
+complete when it is a paragraph closed by a blank line (a lone trailing newline
+doesn't count — the line is still being typed) or a `` ``` `` fence closed by its
+delimiter; the trailing block — a half-arrived fence, or a paragraph no blank
+line has terminated yet — is held raw because glamouring a half-block renders
+garbage (a lone `` ```go `` reads as an unterminated fence, a mid-typed `**bo` as
+literal asterisks). `splitMarkdownBlocks` is that complete-vs-incomplete oracle
+(fence-aware: a blank line inside a fence never splits it, and a closing fence
+must carry no info string, so a `` ```python `` line *inside* a fence is body,
+not a close). Because each complete block is memoized by its own text, a
+keystroke that only grows the tail re-renders nothing already complete; on settle
+the whole message renders once more (byte-identical to the finished reply it has
+always shown). glamour emits one multi-line string that `markdownRenderer`
 splits into one entry per physical row (upholding the one-entry-one-row
 invariant above), each already wrapped to the transcript width (so it reflows on
 resize) and stripped of glamour's right-pad (so a selection copy — and a code
@@ -673,11 +686,14 @@ The document/paragraph base color is cleared so plain prose emits no ANSI at all
 (only genuine elements — headings, code — are colored), which keeps the
 styled-golden `TagANSI` harness — it recognizes only the marker palette — valid
 for prose fixtures. (3) **cost** — glamour re-parses on every `Render` (~80µs)
-and the transcript re-renders on every keystroke, so a settled message is
-rendered once and memoized by `(width, text)`; the memo lives on a pointer field
-shared across `Model`'s copy-on-write copies and is cleared on a width change.
-`internal/tui/markdown_internal_test.go` covers all three plus code-block
-verbatim selection; the `markdown_rendered` golden locks the plain layout.
+and the transcript re-renders on every keystroke, so each distinct text (a
+settled message, or a streaming message's every complete block) is rendered once
+and memoized by `(width, text)`; the memo lives on a pointer field shared across
+`Model`'s copy-on-write copies and is cleared on a width change.
+`internal/tui/markdown_internal_test.go` covers all three plus the block splitter
+(`TestSplitMarkdownBlocks`), the progressive complete-vs-raw contract, and
+code-block verbatim selection; the `markdown_rendered` golden locks the settled
+plain layout and `markdown_streaming_progressive` the mid-stream frame.
 
 **`tui.autoscroll`** (settings.go, default true/unset) controls whether new
 streaming events pull the attach view down toward the tail: enabled (the
@@ -1143,8 +1159,11 @@ tui/
 - **Virtualized transcript with a frozen-item cache**: items expose
   `Version()` + `Finished()`; finished items render from cache verbatim,
   only the streaming tail re-renders.
-- **Streaming-markdown stable-prefix cache**: render the settled prefix
-  once; re-render only past the last safe markdown boundary.
+- **Streaming-markdown block cache** (shipped): a streaming message glamours
+  each COMPLETE markdown block once (memoized by its text) and re-renders only
+  the incomplete tail block — the block-level realization of "render the settled
+  prefix once, re-render only past the last safe markdown boundary". See
+  `renderStreaming`/`splitMarkdownBlocks` in `markdown.go`.
 - **Dialog grace-period absorption**: async-opened dialogs swallow in-flight
   keystrokes (200ms-quiet / 1500ms-max window) — the approval-pops-mid-
   keystroke race.
