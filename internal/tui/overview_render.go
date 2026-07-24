@@ -499,6 +499,11 @@ func (o Overview) highlightLine(line string, width int) string {
 	line = padTo(line, width)
 	sentinel := o.theme.RowHighlightStyle().Render("\x00")
 	i := strings.IndexByte(sentinel, 0)
+	if i < 0 {
+		// Render should preserve the sentinel byte; if a future lipgloss ever
+		// dropped it, degrade to the plain padded line rather than slice-panic.
+		return line
+	}
 	open, reset := sentinel[:i], sentinel[i+1:]
 	if open == "" {
 		return line
