@@ -86,10 +86,29 @@ type item struct {
 	text string // settled/streaming content for text, reasoning, user, error, approval
 	done bool   // MessageFinished / ToolCallFinished has been seen
 
+	// interrupted marks an item that was IN-FLIGHT when the user cancelled the
+	// turn (Esc / session/cancel). It exists because the SDK flushes the open
+	// streaming message to a MessageFinished on cancel (loop.flush →
+	// closeMessage), which would otherwise mark a cut-off message done=true and
+	// render it GREEN as if it had completed. An interrupted item freezes its
+	// status dot amber (in-progress) and never flips green, so the color keeps
+	// meaning "completed successfully" — see [Model.dotStyle] and the isUserCancel
+	// branch in Ingest. The separate muted "⏹ stopped" marker still renders below.
+	interrupted bool
+
 	toolName   string
 	toolInput  string
 	toolResult string
 	toolErr    bool
+
+	// toolInputStream accumulates the raw streaming tool-argument fragments a
+	// provider sends as event.ToolCallDelta (partial JSON) while the call is
+	// running. ToolCallStarted often carries only an empty `{}` seed for a
+	// streaming provider — the real arguments arrive across deltas and settle at
+	// ToolCallFinished. Buffering them here lets a RUNNING tool render its full
+	// invocation `name(args)` (once the accumulated JSON parses cleanly) instead
+	// of a bare `name` the user can't act on. See [Model.runningToolInput].
+	toolInputStream string
 
 	// toolAgent is itemTool-only: the agent id that ISSUED the call, carried by
 	// event.ToolCallStarted.Agent (SDK v0.17.0) and stamped by the supervisor
@@ -223,6 +242,14 @@ type Model struct {
 	// zero-value Model (every golden calling View directly) is idle, so no
 	// indicator renders and no existing golden churns.
 	turnActive bool
+
+	// turnStartIdx is len(items) captured at the current turn's TurnStarted — the
+	// index the turn's own items begin at. The isUserCancel branch uses it to
+	// freeze ONLY the trailing in-flight item of the current turn (the message
+	// the SDK just flushed to done=true on cancel), never a completed message
+	// from a prior turn: when a cancel arrives with no items added this turn
+	// (turnStartIdx == len(items)) nothing is frozen.
+	turnStartIdx int
 }
 
 // New returns an empty Model rendering through th.
@@ -265,6 +292,9 @@ func (m Model) Ingest(e event.Event) Model {
 		// A turn is now in flight — the agent is generating. Drives the thinking
 		// indicator ([Model.WithThinking]); no transcript item, just the flag.
 		m.turnActive = true
+		// Remember where this turn's items begin so a later user-cancel freezes
+		// only THIS turn's trailing in-flight message, never a prior turn's.
+		m.turnStartIdx = len(m.items)
 
 	case event.TurnFinished:
 		m.turnActive = false
@@ -342,12 +372,19 @@ func (m Model) Ingest(e event.Event) Model {
 		}
 
 	case event.ToolCallDelta:
-		// ToolCallDelta carries a fragment of the streaming INPUT (partial
-		// JSON arguments as the provider assembles them), not the result —
-		// see event.ToolCallDelta's doc. The authoritative input and result
-		// both arrive together on ToolCallFinished (below), so this is
-		// deliberately a no-op; the toolIndex bookkeeping above still
-		// applies to it.
+		// ToolCallDelta carries a fragment of the streaming INPUT (partial JSON
+		// arguments as the provider assembles them), not the result — see
+		// event.ToolCallDelta's doc. Accumulate the fragments so a RUNNING tool
+		// can render its full invocation `name(args)` before ToolCallFinished
+		// settles the authoritative input: a streaming provider seeds
+		// ToolCallStarted with an empty `{}` and streams the real arguments here,
+		// so without this the transcript shows a bare `bash` the user can't act
+		// on for the whole duration of the call. [Model.runningToolInput] only
+		// surfaces the buffer once it parses as complete JSON, so a mid-stream
+		// partial fragment never renders as garbage.
+		if idx, ok := m.toolIndex[ev.ID]; ok {
+			m.items[idx].toolInputStream += ev.Delta
+		}
 
 	case event.ToolCallFinished:
 		if idx, ok := m.toolIndex[ev.ID]; ok {
@@ -381,6 +418,22 @@ func (m Model) Ingest(e event.Event) Model {
 		// stop, not a failure, so reclassify it to a muted "stopped" indicator
 		// rather than a red error. Anything else stays an error.
 		if isUserCancel(ev.Err) {
+			// Freeze the message the SDK just flushed on cancel. loop.flush →
+			// closeMessage emits a MessageFinished for the still-OPEN streaming
+			// message BEFORE this error, marking a cut-off message done=true — which
+			// would render it GREEN as if it had completed. The flushed message is
+			// necessarily the trailing item of the current turn (a message that
+			// finished naturally is followed by more turn activity, so it isn't
+			// last), so mark that item interrupted to freeze its dot amber. Guarded
+			// on turnStartIdx so an empty-turn cancel never touches a prior turn's
+			// genuinely-completed (green) message. In-flight tools need no handling:
+			// flush emits no ToolCallFinished for them, so they stay done=false
+			// (already amber).
+			if n := len(m.items); n > m.turnStartIdx {
+				if k := m.items[n-1].kind; k == itemAssistantText || k == itemAssistantReasoning {
+					m.items[n-1].interrupted = true
+				}
+			}
 			m.items = append(m.items, item{kind: itemInterrupted, done: true})
 		} else {
 			m.items = append(m.items, item{kind: itemError, text: ev.Err, done: true})
@@ -1582,18 +1635,21 @@ func (m Model) renderItemLines(it item, width int) []string {
 			// paragraph closed by a blank line, or a closed ``` fence) is glamoured
 			// and memoized; only the trailing INCOMPLETE block — a half-arrived
 			// fence or a paragraph with no terminating blank yet — stays raw, since
-			// glamouring a half-block is garbage. The marker is warn (yellow) while
-			// the turn is in flight; it goes green (below) once the message settles.
+			// glamouring a half-block is garbage. The marker is amber (via dotStyle)
+			// while the turn is in flight; it goes green once the message settles —
+			// unless the turn was interrupted, in which case dotStyle freezes it amber.
 			rows := m.md.renderStreaming(it.text, contentWidth)
-			return markerBlockLines(m.theme.WarnStyle(), glyph, rows)
+			return markerBlockLines(m.dotStyle(it), glyph, rows)
 		}
 		// Settled: render the whole message's markdown at once — byte-identical to
 		// the pre-incremental settle path — wrapped to leave room for the "● "
 		// marker glyph and the matching continuation indent so a wrapped row still
 		// lands within width. Whole-document (not per-block) so glamour's
-		// cross-block layout is exactly what a finished reply always rendered.
+		// cross-block layout is exactly what a finished reply always rendered. The
+		// marker is green once settled, but dotStyle freezes it amber when the
+		// message was the one the SDK flushed on a user cancel (it.interrupted).
 		rows := m.md.render(it.text, contentWidth)
-		return markerBlockLines(m.theme.OKStyle(), glyph, rows)
+		return markerBlockLines(m.dotStyle(it), glyph, rows)
 	}
 }
 
@@ -1694,31 +1750,79 @@ func (m Model) renderBlock(b contentBlock) []string {
 	return lines
 }
 
+// dotStyle maps a transcript item's lifecycle state to its status-dot (marker)
+// color — the single source of the transcript's color grammar (documented as a
+// contract in docs/TUI.md), uniform across assistant messages AND tool calls:
+//
+//   - interrupted → Warn (amber): the item was in-flight when the user cancelled
+//     the turn. Its dot FREEZES amber and never flips green — it never genuinely
+//     completed, and green must mean "completed successfully". (The SDK flushes
+//     the open message to a MessageFinished on cancel, so done can be true here;
+//     the interrupted flag is what keeps it amber regardless.)
+//   - !done        → Warn (amber): still in progress — a message streaming, a
+//     tool still running.
+//   - done + toolErr → Danger (pink/red): a tool call that failed / was denied.
+//   - done         → OK (green): completed successfully.
+func (m Model) dotStyle(it item) lipgloss.Style {
+	switch {
+	case it.interrupted || !it.done:
+		return m.theme.WarnStyle()
+	case it.toolErr:
+		return m.theme.DangerStyle()
+	default:
+		return m.theme.OKStyle()
+	}
+}
+
+// runningToolInput returns the best-available compact tool input to summarize
+// for a RUNNING call's header. A streaming provider seeds ToolCallStarted with
+// an empty `{}` and streams the real arguments as event.ToolCallDelta fragments
+// (accumulated in it.toolInputStream by Ingest); this prefers the settled seed
+// when it already carries arguments, otherwise surfaces the accumulated stream
+// ONCE it parses as complete JSON — a mid-stream partial fragment falls back to
+// the seed (a name-only header) rather than rendering half-JSON. A finished call
+// uses the authoritative it.toolInput and never reaches here.
+func runningToolInput(it item) string {
+	if it.toolInput != "" && it.toolInput != "{}" {
+		return it.toolInput
+	}
+	if s := strings.TrimSpace(it.toolInputStream); s != "" && json.Valid([]byte(s)) {
+		return compactJSON(json.RawMessage(s))
+	}
+	return it.toolInput
+}
+
 // renderToolLines renders a tool call as a collapsed tree block: a header
 // line, then — once the call has finished with a non-empty result — up to
 // three tree-indented result lines, collapsing any remainder into a single
-// "… +N lines" line. Marker-only styled: running is yellow, done is green, a
-// failed call's marker is red like a session error — the muted body is what
-// de-emphasizes the noisy output, not a softer header color. It is one caller
-// of the shared [Model.renderBlock] grammar.
+// "… +N lines" line. Marker-only styled via [Model.dotStyle]: running is amber,
+// done is green, a failed call's marker is red like a session error — the muted
+// body is what de-emphasizes the noisy output, not a softer header color. While
+// running it shows the full invocation `name(args)` from the accumulated
+// streaming input. It is one caller of the shared [Model.renderBlock] grammar.
 func (m Model) renderToolLines(it item) []string {
-	style := m.theme.WarnStyle() // running = yellow
-	failed := false
-	if it.done {
-		style = m.theme.OKStyle() // done ok = green
-		if it.toolErr {
-			style = m.theme.DangerStyle() // tool failure = red
-			failed = true
-		}
-	}
+	// The marker color is the shared transcript grammar: amber running, green
+	// done-ok, red done-failed, and amber-frozen if the call was in flight at a
+	// user cancel (see [Model.dotStyle]).
+	style := m.dotStyle(it)
+	failed := it.done && it.toolErr
 
+	// While the call is still running, prefer the best-available streaming input
+	// so the header shows the full invocation `name(args)` rather than a bare
+	// `name` — a streaming provider only seeds ToolCallStarted with `{}` and
+	// streams the real arguments as deltas (see [Model.runningToolInput]). A
+	// finished call always uses its authoritative input.
+	input := it.toolInput
+	if !it.done {
+		input = runningToolInput(it)
+	}
 	header := it.toolName
-	summary := summarizeToolInput(it.toolInput)
+	summary := summarizeToolInput(input)
 	if it.toolName == decision.ToolName {
 		// ask_user's input is a questions payload, not a command — render its
 		// question(s) cleanly instead of the raw JSON blob summarizeToolInput
 		// would otherwise fall through to (see summarizeAskUser).
-		summary = summarizeAskUser(it.toolInput)
+		summary = summarizeAskUser(input)
 	}
 	if summary != "" {
 		header = fmt.Sprintf("%s(%s)", it.toolName, summary)

@@ -982,6 +982,40 @@ compaction entries, HEAD) share a single row renderer. Fork/branch/compact
 are first-class: the session is an append-only tree and context is
 fold(root→head), so a "what if" fork costs nothing.
 
+## Status-dot color grammar (contract)
+
+Every transcript item's leading marker (`●`, and the `!`/`!!` shell sigil) is
+**marker-only styled**: the glyph carries the item's lifecycle state as a
+color, the text after it keeps its own styling. The color is a single
+documented contract, uniform across assistant messages **and** tool calls, and
+lives in one place — `Model.dotStyle` (`internal/tui/model.go`):
+
+| Color | Meaning |
+|-------|---------|
+| **Amber / yellow** | **In progress** — a message still streaming, a tool still running. |
+| **Green** | **Completed successfully.** |
+| **Pink / red** | **Denied / error** — a failed or denied tool call. |
+
+**Green means completed, and only completed.** The one subtlety is a user
+**interrupt** (Esc / `session/cancel`): the SDK cancels the turn context and, on
+the way out, *flushes* the still-open streaming message as a `MessageFinished`
+before surfacing the cancel error — so gofer would otherwise mark a cut-off
+message `done` and paint it green. It didn't complete, so its dot **freezes
+amber** (`item.interrupted`, set on the trailing in-flight item of the cancelled
+turn) and never flips green. The separate muted **`⏹ stopped`** marker still
+renders below as the record of the stop. In-flight tools need no special
+handling — the cancel flush emits no `ToolCallFinished` for them, so they stay
+`done=false` (already amber).
+
+A **running tool** shows its **full invocation** `name(args)` (e.g.
+`bash(sleep 15 && echo 'Waited 15 seconds.')`), not a bare `name`. Streaming
+providers seed `ToolCallStarted` with an empty `{}` and stream the real
+arguments as `ToolCallDelta` fragments; gofer accumulates them
+(`item.toolInputStream`) and surfaces the reconstructed invocation as soon as
+the accumulated JSON parses cleanly (`Model.runningToolInput`) — a mid-stream
+partial fragment stays name-only rather than rendering half-JSON. The
+authoritative input still settles on `ToolCallFinished`.
+
 ## Checkpoint / rewind + versioned changes (open design question)
 
 Exploratory — not committed. gofer sessions are **already event-sourced
