@@ -53,6 +53,12 @@ bar is empty; every other key types into it — so `space` on non-empty text is 
 ordinary space, and `R` on non-empty text is an ordinary character — and `enter`
 on non-empty text starts a new session, or dispatches a `/` command.
 
+In the flat view the rows are grouped by working directory (a cwd header per
+group, most-recently-active dir first); `↑`/`↓` and the default selection follow
+that exact on-screen order rather than the raw recency order, and the focused
+row is drawn as a full-width themed highlight bar (a background, not a caret-only
+recolor — the `▸` caret still leads it).
+
 The overview roster is the projection of the **non-archived** on-disk journals,
 rebuilt from them on every poll (`Supervisor.OverviewRoster` / the daemon's
 `gofer/overview`), so restarting the daemon no longer loses the sessions that

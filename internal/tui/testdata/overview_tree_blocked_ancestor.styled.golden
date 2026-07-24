@@ -3,7 +3,7 @@
 <muted>1 awaiting input · 3 working · 0 completed</muted>
 
 <muted>~/orchestration</muted>
-<accent>▸</accent><yellow>!</yellow>ship the subagent roster      <yellow>Working</yellow><muted> · two workers…</muted>     41m · ↓ 214.7k tokens
+<highlight>▸</highlight><yellow>!</yellow><highlight>ship the subagent roster      </highlight><yellow>Working</yellow><highlight></highlight><muted> · two workers…</muted><highlight>     41m · ↓ 214.7k tokens</highlight>
  <yellow>!</yellow>  tui-inline-perm-owner       <yellow>Working</yellow><muted> · editing ove…</muted>   5m 9s · ↓ 214.7k tokens
  <yellow>!</yellow>    go-reviewer               <yellow>Needs input</yellow><muted> · reviewi…</muted>       42s · ↓ 8.4k tokens
     go-developer                <yellow>Working</yellow><muted> · running the…</muted>  6m 47s · ↓ 128.0k tokens

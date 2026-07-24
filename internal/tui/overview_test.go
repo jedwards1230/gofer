@@ -87,6 +87,21 @@ func TestGoldenStyledOverviewFlat(t *testing.T) {
 	testkit.AssertGoldenStyled(t, "overview_flat", testkit.Render(o, testkit.Width, testkit.Height))
 }
 
+// TestGoldenStyledOverviewFocusHighlight pins Bug 2's contract: the focused
+// roster row is a FULL-WIDTH themed background bar, not a foreground recolor
+// that dies at the first interior reset. Selection is moved off the first row so
+// the bar is asserted on a row whose status word / summary carry their own
+// colors — the styled golden shows the <highlight> tag re-opening after each
+// colored segment and covering the trailing age column, proving the bar spans
+// every column. Ascii goldens can't show this (the background is a no-op under
+// termenv.Ascii), which is why it lives only as a styled golden.
+func TestGoldenStyledOverviewFocusHighlight(t *testing.T) {
+	o := tui.NewOverview(testkit.ColorTheme(), tui.GoldenMeta()).
+		WithSessions(rosterFixture()).
+		MoveDown().MoveDown()
+	testkit.AssertGoldenStyled(t, "overview_focus_highlight", testkit.Render(o, testkit.Width, testkit.Height))
+}
+
 // TestGoldenOverviewGrouped renders the grouped view: Working / Needs input /
 // Finished sections, each recency-sorted, with per-section counts in the
 // header.
