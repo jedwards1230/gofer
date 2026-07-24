@@ -175,8 +175,20 @@ func identityHeaderLines(th theme.Theme, meta OverviewMeta, width int) []string 
 // [headerLines] tall — the banner costs no body rows and hit-testing/layout math
 // is unchanged — and a non-skewed roster renders byte-identically.
 func (o Overview) header(width int) []string {
-	working, needsInput, finished := o.counts()
-	counts := fmt.Sprintf("%d awaiting input · %d working · %d completed", needsInput, working, finished)
+	working, needsInput, idle, finished := o.counts()
+	segs := []string{
+		fmt.Sprintf("%d awaiting input", needsInput),
+		fmt.Sprintf("%d working", working),
+	}
+	// Idle rows (reloaded/at-rest) are a less-common state — surface the segment
+	// only when there is one, so an ordinary roster's header is byte-identical to
+	// what it has always been while a roster that HAS idle rows accounts for them
+	// instead of dropping them from the tally entirely.
+	if idle > 0 {
+		segs = append(segs, fmt.Sprintf("%d idle", idle))
+	}
+	segs = append(segs, fmt.Sprintf("%d completed", finished))
+	counts := strings.Join(segs, " · ")
 	return append(identityHeaderLines(o.theme, o.meta, width), truncate(o.theme.MutedStyle().Render(counts), width), o.skewSeparator(width))
 }
 
@@ -289,7 +301,7 @@ func (o Overview) overflowNote(lines []string, below, width int) []string {
 // rows renders the roster into display lines and reports the line index of the
 // selected row (-1 when nothing is selected). The flat view groups rows under a
 // cwd header per working directory (recency within each group); the grouped
-// view interleaves Working / Needs input / Finished section headers. Both
+// view interleaves Working / Needs input / Idle / Finished section headers. Both
 // interleave a blank line between groups.
 func (o Overview) rows(width int) (lines []string, selLine int) {
 	selLine = -1
@@ -322,7 +334,7 @@ func (o Overview) rows(width int) (lines []string, selLine int) {
 	}
 
 	first := true
-	for _, st := range []SessionStatus{StatusWorking, StatusNeedsInput, StatusFinished} {
+	for _, st := range []SessionStatus{StatusWorking, StatusNeedsInput, StatusIdle, StatusFinished} {
 		group := byRecency(o.filter(st))
 		if len(group) == 0 {
 			continue
@@ -619,14 +631,21 @@ func (o Overview) binaryMark(s SessionInfo) string {
 
 // statusColorFor returns the state color a session's effective status renders
 // in: yellow while working or awaiting input (a pending request keeps it
-// yellow — see effectiveStatus), green once finished. Pending is a boolean
-// folded into the status, not a count — one or many pending approvals both
-// read as a plain "Needs input".
+// yellow — see effectiveStatus), green once finished, muted at rest (idle).
+// Pending is a boolean folded into the status, not a count — one or many
+// pending approvals both read as a plain "Needs input".
 func (o Overview) statusColorFor(st SessionStatus) lipgloss.Style {
-	if st == StatusFinished {
+	switch st {
+	case StatusFinished:
 		return o.theme.OKStyle()
+	case StatusIdle:
+		// A reloaded/at-rest row is not a call to action, so it must not carry
+		// the same yellow as a session that is genuinely working or awaiting
+		// you — muted reads as "dormant, nothing needed", which is what it is.
+		return o.theme.MutedStyle()
+	default:
+		return o.theme.WarnStyle()
 	}
-	return o.theme.WarnStyle()
 }
 
 // age renders the right-aligned compact relative age for a row.

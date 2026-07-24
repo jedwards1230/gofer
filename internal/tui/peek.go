@@ -116,13 +116,15 @@ func (p Peek) View(width, height int) string {
 
 // statusVerb is the peek card's waiting-line verb for an effective status:
 // "waiting" while it needs input, "working" while a turn is in flight,
-// "finished" once terminal.
+// "finished" once terminal, "idle" while at rest (reloaded/untouched).
 func statusVerb(st SessionStatus) string {
 	switch st {
 	case StatusWorking:
 		return "working"
 	case StatusFinished:
 		return "finished"
+	case StatusIdle:
+		return "idle"
 	default:
 		return "waiting"
 	}

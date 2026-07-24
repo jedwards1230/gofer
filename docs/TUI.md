@@ -618,18 +618,24 @@ path.
 Layout, top to bottom:
 
 - **Header** — app name + version, then `model · cwd`, then a status-count line
-  `N awaiting input · M working · K completed`. The counts are the roster
-  tallied by status; the wording mirrors the group labels.
+  `N awaiting input · M working · K completed` (a `· J idle` segment appears
+  between _working_ and _completed_ only when the roster holds an at-rest row).
+  The counts are the roster tallied by status; the wording mirrors the group
+  labels.
 - **Roster body** — one line per session:
   `‹caret› ‹title› ‹status word · one-line summary› ‹age›`. The caret (`▸`)
   marks selection so it reads without color (golden tests force
   `termenv.Ascii`). There is no status glyph — state rides the **color of the
-  status word**: yellow while working or awaiting input, green once finished. A
-  pending approval simply reclassifies the row to `Needs input` (no count — one
-  or many pending reads the same). The status word (`Working` / `Needs input` /
-  `Finished`) prefixes the summary in the flat view, where no status section
-  states it; the grouped view omits it from the row and colors the section
-  header instead.
+  status word**: yellow while working or awaiting input, green once finished,
+  muted while idle (at rest). A pending approval simply reclassifies the row to
+  `Needs input` (no count — one or many pending reads the same). The status word
+  (`Working` / `Needs input` / `Idle` / `Finished`) prefixes the summary in the
+  flat view, where no status section states it; the grouped view omits it from
+  the row and colors the section header instead. `Idle` is a session at rest —
+  a reloaded offline row, or one just resumed from disk and not yet prompted:
+  merely opening it must not read as "one more awaiting you", so it is neither
+  yellow nor on the awaiting-input count until it is actually prompted (or it
+  carries a genuine pending request, which restores `Needs input`).
   Age is a compact relative string (`now`/`5m`/`3h`/`2d`) computed against an
   injected reference time so tests stay deterministic, right-aligned as the
   sole right-column metadata. The body windows to keep the selected row
@@ -641,7 +647,7 @@ Layout, top to bottom:
 
 **Two roster views**, toggled by `tab`: flat (every session, most-recently-active
 first, grouped under a **cwd header** per working directory) and grouped
-(Working / Needs input / Finished sections, each recency-sorted). The cwd
+(Working / Needs input / Idle / Finished sections, each recency-sorted). The cwd
 header makes the fleet-global working directory visible — one header per
 distinct cwd, sessions beneath. Selection is tracked by session id, not row
 index, so it survives the reorder a toggle causes. (`tab` rather than a letter

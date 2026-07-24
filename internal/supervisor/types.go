@@ -36,6 +36,19 @@ const (
 	// NeedsInput, i.e. ready for another prompt. It exists so the enum's
 	// wire values are stable when a later milestone defines "finished".
 	StatusFinished
+	// StatusIdle is a session AT REST that is not actively awaiting the user:
+	// a reloaded offline row, or a session just resumed from disk that has not
+	// been prompted since (so it has run no turn and holds no pending
+	// decision). It is deliberately distinct from StatusNeedsInput — merely
+	// browsing/opening a reloaded session must not label it "needs input" or
+	// move the overview's awaiting-input counter (which counts a session as
+	// awaiting only when it has really finished a turn or holds a pending
+	// request). The moment the session is prompted it derives StatusWorking
+	// and, once that turn settles with an empty queue, StatusNeedsInput —
+	// normal derivation resumes and this value is never seen again for it.
+	// Appended after StatusFinished so the existing wire values stay stable;
+	// the wire carries the String() form ("idle"), not the int.
+	StatusIdle
 )
 
 // String renders a SessionStatus for logs and debugging.
@@ -47,6 +60,8 @@ func (s SessionStatus) String() string {
 		return "needs-input"
 	case StatusFinished:
 		return "finished"
+	case StatusIdle:
+		return "idle"
 	default:
 		return "unknown"
 	}
