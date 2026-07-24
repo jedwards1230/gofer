@@ -56,6 +56,12 @@ type internalFakeSup struct {
 	// a test can assert what the reply-now shell flush actually submitted.
 	sends []sendCall
 
+	// restarts counts every Supervisor.RestartDaemon invocation, and restartErr
+	// is what each returns — the oracle for the stale-daemon banner's "R" key
+	// test (it must fire a restart when the banner is up and nothing otherwise).
+	restarts   int
+	restartErr error
+
 	// explains records every Supervisor.ExplainPermission call, and
 	// explainRationale/explainErr are what the next one answers with — both
 	// paths are needed, since ctrl+e's contract is as much about what a FAILED
@@ -173,6 +179,13 @@ func (f *internalFakeSup) Kill(context.Context, string) error              { ret
 func (f *internalFakeSup) Archive(context.Context, string) error           { return nil }
 func (f *internalFakeSup) SetModel(context.Context, string, string) error  { return nil }
 func (f *internalFakeSup) SetEffort(context.Context, string, string) error { return nil }
+
+func (f *internalFakeSup) RestartDaemon(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.restarts++
+	return f.restartErr
+}
 
 func (f *internalFakeSup) Reply(_ context.Context, sessionID, id string, d PermissionDecision) error {
 	f.mu.Lock()

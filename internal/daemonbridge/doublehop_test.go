@@ -130,6 +130,12 @@ func (r *routerSupervisor) List(ctx context.Context) ([]supervisor.SessionInfo, 
 	return r.Roster(ctx)
 }
 
+// OverviewRoster mirrors List for this prototype — with no disk view there are
+// no offline or archived rows to filter, so the live set IS the overview set.
+func (r *routerSupervisor) OverviewRoster(ctx context.Context) ([]supervisor.SessionInfo, error) {
+	return r.Roster(ctx)
+}
+
 func (r *routerSupervisor) Resume(context.Context, string, supervisor.ResumeOptions) (supervisor.SessionInfo, error) {
 	return supervisor.SessionInfo{}, errRouterPrototype
 }

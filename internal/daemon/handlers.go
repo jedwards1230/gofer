@@ -48,6 +48,16 @@ const (
 	// total to show".
 	methodGoferFleet = "gofer/fleet"
 
+	// methodGoferOverview is the gofer-native overview roster: every NON-archived
+	// session — live sessions overlaid with their live snapshot, every other as
+	// an offline (Live=false) row rebuilt from its journal — newest-first. It is
+	// the projection of the on-disk journals that makes the overview survive a
+	// daemon restart: unlike gofer/roster (LIVE sessions only, the contract
+	// wire.go depends on), this rebuilds the roster the operator was watching
+	// before the restart. Read-only; takes no params. An older daemon returns
+	// method-not-found; the client falls back to gofer/roster (live-only).
+	methodGoferOverview = "gofer/overview"
+
 	// methodGoferHello is the gofer-native version handshake (design §6): the
 	// authoritative, connection-scoped version exchange a router calls first on
 	// every worker connection to route around binary/wire skew. Returns
@@ -156,6 +166,7 @@ var methodTable = map[string]methodHandler{
 	acp.MethodSessionExplainPermission: handleExplainPermission,
 
 	methodGoferRoster:   handleGoferRoster,
+	methodGoferOverview: handleGoferOverview,
 	methodGoferPS:       handleGoferPS,
 	methodGoferFleet:    handleGoferFleet,
 	methodGoferKill:     handleGoferKill,
@@ -1548,6 +1559,21 @@ func handlePermissionReply(d *Daemon, _ context.Context, _ *peer, params json.Ra
 // handleGoferRoster answers gofer/roster: the live roster, newest-first.
 func handleGoferRoster(d *Daemon, ctx context.Context, _ *peer, _ json.RawMessage) (any, *rpcError) {
 	infos, err := d.sup.Roster(ctx)
+	if err != nil {
+		return nil, appError(err)
+	}
+	return toSessionInfoDTOs(infos), nil
+}
+
+// handleGoferOverview answers gofer/overview: the overview roster — every
+// NON-archived session, live sessions overlaid with their live snapshot and
+// every other as an offline (Live=false) row rebuilt from its journal,
+// newest-first. It is what the TUI overview polls so the roster survives a
+// daemon restart, distinct from gofer/roster's live-only set (see
+// methodGoferOverview). The wire rows are the SAME DTO gofer/ps already sends
+// with Live=false rows, so an offline session round-trips unchanged. Read-only.
+func handleGoferOverview(d *Daemon, ctx context.Context, _ *peer, _ json.RawMessage) (any, *rpcError) {
+	infos, err := d.sup.OverviewRoster(ctx)
 	if err != nil {
 		return nil, appError(err)
 	}

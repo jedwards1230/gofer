@@ -11,6 +11,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/jedwards1230/gofer/internal/daemon"
 	"github.com/jedwards1230/gofer/internal/daemonbridge"
 	"github.com/jedwards1230/gofer/internal/supervisor"
 	"github.com/jedwards1230/gofer/internal/tui"
@@ -63,7 +64,21 @@ func runAttach(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 		// --token / $GOFER_TOKEN), not something to paper over.
 		return daemonDialErr(df.addr, err)
 	}
-	b := daemonbridge.New(c)
+	// The stale-daemon banner's one-key restart (same as bare `gofer`): stop the
+	// daemon, start a replacement on THIS binary, and redial. attach takes no
+	// --root, so the daemon advertises at the default store root, resolved inside
+	// the closure; df still carries the address/token to redial the replacement.
+	reconnect := func(ctx context.Context) (*daemon.Client, error) {
+		root, rerr := supervisor.ResolveRoot("")
+		if rerr != nil {
+			return nil, rerr
+		}
+		if rerr := restartDaemonProcess(ctx, root); rerr != nil {
+			return nil, rerr
+		}
+		return dialDaemon(ctx, df, "", io.Discard)
+	}
+	b := daemonbridge.New(c, daemonbridge.WithReconnect(reconnect))
 	defer func() { _ = b.Close() }()
 
 	var attachID string

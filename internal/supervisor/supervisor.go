@@ -506,6 +506,16 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 		_ = sess.Close()
 		return SessionInfo{}, fmt.Errorf("supervisor: resume %s: %w", id, err)
 	}
+	// A resumed session returns to the overview for good: clear any archive
+	// marker so it is not hidden again after the next restart. Best-effort — the
+	// session is already live and on the roster, so a sidecar-clear failure must
+	// not fail the resume. Only touch the sidecar when it was actually archived,
+	// to avoid needless churn on the common (never-archived) resume.
+	if meta.Archived {
+		if dir := filepath.Dir(sess.JournalPath()); dir != "" {
+			_ = setArchived(dir, id, false, s.clock())
+		}
+	}
 	info := m.info()
 	s.notify()
 	return info, nil
@@ -877,11 +887,25 @@ func (s *Supervisor) Kill(ctx context.Context, sessionID string) error {
 	return err
 }
 
-// Archive drops a finished session from the roster and emits
-// session.archived, keeping its journal. It rejects (returns [ErrRunning]) a
-// session with a turn in flight OR queued-but-not-yet-dispatched prompts —
-// both surface as StatusWorking in the roster, and archiving a queued session
-// would silently discard that pending work. Interrupt or kill it first.
+// Archive drops a finished session from the roster and emits session.archived,
+// keeping its journal. It rejects (returns [ErrRunning]) a session with a turn
+// in flight OR queued-but-not-yet-dispatched prompts — both surface as
+// StatusWorking in the roster, and archiving a queued session would silently
+// discard that pending work. Interrupt or kill it first.
+//
+// Archiving is durable across a restart: the roster removal alone is in-memory,
+// and the emitted session.archived event never reaches the JSONL journal (the
+// SDK journal has no lifecycle entry type), so Archive also records the marker
+// in the session's `.meta.json` sidecar. That marker — not the journal, which
+// this never mutates — is what keeps an archived session off the rebuilt
+// overview roster after the daemon restarts (see [Supervisor.OverviewRoster]).
+//
+// It also handles an OFFLINE session — one not in the live roster but present on
+// disk, the shape a previously-live session takes after a restart. Since the
+// overview now shows those offline rows, the user must be able to archive them
+// to clear them; there is no live session to stop, so Archive just writes the
+// marker (idempotently) and returns. An id that is neither live nor on disk is
+// [ErrNotLive].
 //
 // The check-then-act race between "is id idle and unqueued" and "remove id
 // from the roster" is closed by holding both the roster lock and m's own lock
@@ -907,7 +931,18 @@ func (s *Supervisor) Archive(ctx context.Context, sessionID string) error {
 	m, ok := s.roster[sessionID]
 	if !ok {
 		s.mu.Unlock()
-		return fmt.Errorf("supervisor: archive %s: %w", sessionID, ErrNotLive)
+		// Not live: archive an OFFLINE session by recording the durable marker,
+		// if it exists on disk. This is the post-restart path — a session that
+		// was live before the daemon restarted is now an offline row the user can
+		// still clear from the overview.
+		found, err := SetArchivedOnDisk(s.root, sessionID, true, s.clock())
+		if err != nil {
+			return fmt.Errorf("supervisor: archive %s: %w", sessionID, err)
+		}
+		if !found {
+			return fmt.Errorf("supervisor: archive %s: %w", sessionID, ErrNotLive)
+		}
+		return nil
 	}
 
 	m.mu.Lock()
@@ -915,6 +950,22 @@ func (s *Supervisor) Archive(ctx context.Context, sessionID string) error {
 		m.mu.Unlock()
 		s.mu.Unlock()
 		return fmt.Errorf("supervisor: archive %s: %w", sessionID, ErrRunning)
+	}
+	// Record the durable marker under both locks, before committing the
+	// in-memory removal: the idle check just passed, so this is a genuine
+	// archive, and doing the write here means a marker-write failure fails the
+	// archive with NO in-memory change to undo (the session stays live and on the
+	// roster). The write is a small local sidecar fsync+rename — not a Session
+	// call — so it respects this file's lock discipline (which bars Prompt/Close/
+	// done/notify under m.mu, not a local file write) even while it briefly holds
+	// the cold-path archive locks. The session's directory is read from its live
+	// journal path.
+	if dir := filepath.Dir(m.sess.JournalPath()); dir != "" {
+		if err := setArchived(dir, sessionID, true, s.clock()); err != nil {
+			m.mu.Unlock()
+			s.mu.Unlock()
+			return fmt.Errorf("supervisor: archive %s: %w", sessionID, err)
+		}
 	}
 	m.closing = true
 	m.mu.Unlock()
@@ -1006,6 +1057,41 @@ func (s *Supervisor) List(ctx context.Context) ([]SessionInfo, error) {
 	return out, nil
 }
 
+// OverviewRoster is the roster the overview shows: every NON-archived session on
+// disk (live sessions overlaid with their full live snapshot, every other as an
+// offline Live=false row enriched from its journal), newest-first. It is the
+// projection of the journals architecture invariant #4 makes durable — the
+// journals are the source of truth, and the roster is rebuilt from them on every
+// fetch, so a daemon restart no longer loses the sessions that were showing.
+//
+// It is [List] MINUS archived entries: List keeps archived rows (so `gofer ps
+// --all` and the resume picker still see them), while the overview hides them —
+// archiving is exactly the durable way to drop a session from the overview
+// without deleting its journal. A killed/terminated session is NOT archived, so
+// it reappears here as an offline row (visible, resumable, not "live") until the
+// user archives it. The read is entirely READ-ONLY over the journals; archive
+// state comes from the `.meta.json` sidecar, never from mutating the JSONL.
+func (s *Supervisor) OverviewRoster(ctx context.Context) ([]SessionInfo, error) {
+	infos, err := s.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := infos[:0:0]
+	for _, info := range infos {
+		if info.Archived {
+			continue
+		}
+		out = append(out, info)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Created.Equal(out[j].Created) {
+			return out[i].Created.After(out[j].Created)
+		}
+		return out[i].ID > out[j].ID
+	})
+	return out, nil
+}
+
 // diskSessionInfo builds a disk-only [SessionInfo] for id under slug at path,
 // enriched from the journal read-only via [session.ReadEntries] (no append
 // handle is opened — List never resumes a session just to enumerate it):
@@ -1037,6 +1123,7 @@ func diskSessionInfo(id, slug, path string) SessionInfo {
 		ParentID:    meta.ParentID,
 		Agent:       meta.Agent,
 		Depth:       meta.Depth,
+		Archived:    meta.Archived,
 	}
 
 	entries, err := session.ReadEntries(path)

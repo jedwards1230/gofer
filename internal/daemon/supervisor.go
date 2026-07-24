@@ -52,6 +52,11 @@ type Supervisor interface {
 	List(ctx context.Context) ([]supervisor.SessionInfo, error)
 	// Roster returns just the live sessions' snapshots.
 	Roster(ctx context.Context) ([]supervisor.SessionInfo, error)
+	// OverviewRoster returns the roster the overview shows: List MINUS archived
+	// sessions (live sessions overlaid with live state, every other non-archived
+	// session as an offline row rebuilt from its journal). It is the projection
+	// of the on-disk journals that makes the overview survive a daemon restart.
+	OverviewRoster(ctx context.Context) ([]supervisor.SessionInfo, error)
 	// SetModel changes a session's model for its next turn.
 	SetModel(ctx context.Context, sessionID, model string) error
 	// SetEffort changes a session's reasoning effort for its next turn. An

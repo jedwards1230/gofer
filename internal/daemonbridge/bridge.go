@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/jedwards1230/agent-sdk-go/acp"
@@ -69,13 +70,27 @@ type sessionInfoDTO = wirestream.SessionInfo
 // from that narrower wire projection; this Supervisor is the thin TUI-facing
 // adapter over it.
 type Supervisor struct {
-	// core reconstructs each session's typed event stream from the daemon's
-	// wire and owns the demuxer goroutine + the client's lifecycle (Close).
-	core *wirestream.Reconstructor
-	// client is the SAME connection core drives; this bridge also issues the
-	// handful of direct control Calls that need no reconstruction (create,
-	// kill, archive, set-model, interrupt, reply). [daemon.Client] is safe for
-	// concurrent Call/Notify, so sharing it with the core's demuxer is sound.
+	// conn holds the live connection — the reconstruction core and the client it
+	// drives — behind an atomic pointer so [Supervisor.RestartDaemon] can swap in
+	// a fresh one after restarting the daemon without a lock on every method. A
+	// method loads the current conn once and runs against that snapshot; a
+	// concurrent swap closes the old one, so an in-flight call against it simply
+	// errors and the overview's next poll lands on the new daemon. It is never
+	// nil after [New].
+	conn atomic.Pointer[conn]
+	// reconnect restarts the daemon and redials, returning a fresh CONNECTED
+	// client to swap in. It is injected (see [WithReconnect]) because restarting
+	// the daemon needs the store root, endpoint address, and token this
+	// transport-only bridge deliberately does not carry — cmd/gofer owns that.
+	// nil ⇒ [Supervisor.RestartDaemon] reports the capability is unavailable.
+	reconnect func(ctx context.Context) (*daemon.Client, error)
+}
+
+// conn is one live connection: the reconstruction core and the client it drives.
+// core owns the client's lifecycle (Close), so closing the core closes the
+// client and joins its demuxer goroutine.
+type conn struct {
+	core   *wirestream.Reconstructor
 	client *daemon.Client
 }
 
@@ -83,24 +98,69 @@ type Supervisor struct {
 // means the daemon's wire contract drifted from what the TUI drives.
 var _ tui.Supervisor = (*Supervisor)(nil)
 
+// Option configures a [Supervisor] built by [New].
+type Option func(*Supervisor)
+
+// WithReconnect injects the restart-and-redial capability [Supervisor.RestartDaemon]
+// needs: fn stops the current daemon, starts a replacement (on the CLIENT's
+// build — the self-update the stale-daemon banner promises), waits for it to
+// advertise its endpoint, and returns a fresh connected [*daemon.Client]. Only
+// cmd/gofer can supply this (it owns the store root, endpoint, and token), so a
+// bridge built without it treats RestartDaemon as unsupported.
+func WithReconnect(fn func(ctx context.Context) (*daemon.Client, error)) Option {
+	return func(s *Supervisor) { s.reconnect = fn }
+}
+
 // New returns a Supervisor driving the daemon reached through client. The
 // caller dials client (see [daemon.Dial]) and hands it over; New builds the
 // reconstruction core, which starts the demuxer goroutine that drains
 // [daemon.Client.Notifications] for the lifetime of the Supervisor. Call
 // [Supervisor.Close] to tear both down.
-func New(client *daemon.Client) *Supervisor {
-	return &Supervisor{
-		core:   wirestream.New(client),
-		client: client,
+func New(client *daemon.Client, opts ...Option) *Supervisor {
+	s := &Supervisor{}
+	s.conn.Store(&conn{core: wirestream.New(client), client: client})
+	for _, opt := range opts {
+		opt(s)
 	}
+	return s
 }
+
+// cur returns the current live connection snapshot. Never nil after [New].
+func (s *Supervisor) cur() *conn { return s.conn.Load() }
 
 // Close tears down the reconstruction core: it shuts the underlying client
 // connection down, waits for the demuxer goroutine to exit, and closes every
 // session's reconstructed broker so any live subscription observes a clean
 // close. Idempotent (see [wirestream.Reconstructor.Close]).
 func (s *Supervisor) Close() error {
-	return s.core.Close()
+	return s.cur().core.Close()
+}
+
+// RestartDaemon restarts the daemon this bridge is connected to — the
+// stale-daemon banner's one-key action — and reconnects to the replacement.
+// After it returns nil, the overview's next roster poll lands on the NEW daemon,
+// which (per the roster-rebuild-from-journals work) restores the sessions that
+// were showing before the restart. It errors, changing nothing, when the bridge
+// was built without the [WithReconnect] capability (e.g. a daemon reached by an
+// explicit --daemon address cmd/gofer cannot drive a service manager for).
+//
+// On success it swaps the fresh connection in atomically and closes the old
+// one; an in-flight call against the old connection errors and is retried by the
+// caller's next poll. The restart itself is bounded by the injected reconnect
+// func (cmd/gofer's daemonStartTimeout), not held here.
+func (s *Supervisor) RestartDaemon(ctx context.Context) error {
+	if s.reconnect == nil {
+		return fmt.Errorf("daemonbridge: restart unsupported — this daemon connection cannot be self-restarted")
+	}
+	client, err := s.reconnect(ctx)
+	if err != nil {
+		return fmt.Errorf("daemonbridge: restart daemon: %w", err)
+	}
+	old := s.conn.Swap(&conn{core: wirestream.New(client), client: client})
+	if old != nil {
+		_ = old.core.Close()
+	}
+	return nil
 }
 
 // statusFromWire maps the daemon's roster Status string — literally
@@ -150,12 +210,23 @@ func toTUISessionInfo(d sessionInfoDTO) tui.SessionInfo {
 	}
 }
 
-// Roster calls gofer/roster (via the reconstruction core's one wire decoder)
-// and maps the result to the TUI's row type.
+// Roster is the roster the overview polls: it calls gofer/overview (the
+// persistent roster — every non-archived session, live plus offline rebuilt
+// from journals, so the overview survives a daemon restart) and maps the result
+// to the TUI's row type. A daemon OLDER than the client predates gofer/overview
+// and answers method-not-found; this falls back to gofer/roster (live-only) so a
+// stale daemon still shows its live sessions rather than an empty overview —
+// which is exactly the daemon the stale-daemon banner's restart action replaces.
 func (s *Supervisor) Roster(ctx context.Context) ([]tui.SessionInfo, error) {
-	dtos, err := s.core.Roster(ctx)
+	core := s.cur().core
+	dtos, err := core.OverviewRoster(ctx)
 	if err != nil {
-		return nil, err
+		if !daemon.IsMethodNotFound(err) {
+			return nil, err
+		}
+		if dtos, err = core.Roster(ctx); err != nil {
+			return nil, err
+		}
 	}
 	out := make([]tui.SessionInfo, len(dtos))
 	for i, d := range dtos {
@@ -171,14 +242,14 @@ func (s *Supervisor) Roster(ctx context.Context) ([]tui.SessionInfo, error) {
 // peek/attach re-entering a session already in flight still sees its lifecycle
 // events and any open permission request.
 func (s *Supervisor) Subscribe(ctx context.Context, sessionID string) (*event.Subscription, error) {
-	return s.core.Subscribe(ctx, sessionID)
+	return s.cur().core.Subscribe(ctx, sessionID)
 }
 
 // Send submits prompt as sessionID's next turn, delegating to the
 // reconstruction core (see [wirestream.Reconstructor.Send]): fire-and-forget,
 // history-before-live ordered, one-outstanding-turn-per-session caller-enforced.
 func (s *Supervisor) Send(ctx context.Context, sessionID, prompt string) error {
-	return s.core.Send(ctx, sessionID, prompt)
+	return s.cur().core.Send(ctx, sessionID, prompt)
 }
 
 // Create starts a new session via session/new. opts.Model, when non-empty, is
@@ -204,7 +275,8 @@ func (s *Supervisor) Send(ctx context.Context, sessionID, prompt string) error {
 // ever triggers a needless session/load for a session that, by construction,
 // has no history yet.
 func (s *Supervisor) Create(ctx context.Context, prompt string, opts tui.CreateOptions) (tui.SessionInfo, error) {
-	raw, err := s.client.Call(ctx, acp.MethodSessionNew,
+	c := s.cur()
+	raw, err := c.client.Call(ctx, acp.MethodSessionNew,
 		daemon.NewSessionRequestFor(opts.Cwd, opts.Model, opts.ParentID, opts.Agent))
 	if err != nil {
 		return tui.SessionInfo{}, fmt.Errorf("daemonbridge: create: %w", err)
@@ -213,7 +285,7 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts tui.CreateO
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return tui.SessionInfo{}, fmt.Errorf("daemonbridge: decode %s response: %w", acp.MethodSessionNew, err)
 	}
-	s.core.RegisterFresh(resp.SessionID)
+	c.core.RegisterFresh(resp.SessionID)
 
 	// The subagent link the daemon ASSIGNED, not the one requested — Depth is
 	// computed daemon-side (parent + 1) and is not knowable here at all.
@@ -271,7 +343,7 @@ func (s *Supervisor) ListSessions(ctx context.Context) ([]tui.SessionRef, error)
 		cursor string
 	)
 	for range listSessionsPageCap {
-		raw, err := s.client.Call(ctx, acp.MethodSessionList, acp.ListSessionsRequest{Cursor: cursor})
+		raw, err := s.cur().client.Call(ctx, acp.MethodSessionList, acp.ListSessionsRequest{Cursor: cursor})
 		if err != nil {
 			return nil, fmt.Errorf("daemonbridge: list sessions: %w", err)
 		}
@@ -315,8 +387,9 @@ func (s *Supervisor) ListSessions(ctx context.Context) ([]tui.SessionRef, error)
 // then reads back (the same retained-backlog handoff the core's own load path
 // relies on).
 func (s *Supervisor) Resume(ctx context.Context, sessionID, cwd string) error {
-	s.core.RegisterFresh(sessionID)
-	if _, err := s.client.Call(ctx, acp.MethodSessionLoad, acp.LoadSessionRequest{SessionID: sessionID, Cwd: cwd}); err != nil {
+	c := s.cur()
+	c.core.RegisterFresh(sessionID)
+	if _, err := c.client.Call(ctx, acp.MethodSessionLoad, acp.LoadSessionRequest{SessionID: sessionID, Cwd: cwd}); err != nil {
 		return fmt.Errorf("daemonbridge: resume %s: %w", sessionID, err)
 	}
 	return nil
@@ -324,7 +397,7 @@ func (s *Supervisor) Resume(ctx context.Context, sessionID, cwd string) error {
 
 // Kill calls gofer/kill.
 func (s *Supervisor) Kill(ctx context.Context, sessionID string) error {
-	if _, err := s.client.Call(ctx, methodGoferKill, map[string]string{"sessionId": sessionID}); err != nil {
+	if _, err := s.cur().client.Call(ctx, methodGoferKill, map[string]string{"sessionId": sessionID}); err != nil {
 		return fmt.Errorf("daemonbridge: kill %s: %w", sessionID, err)
 	}
 	return nil
@@ -332,7 +405,7 @@ func (s *Supervisor) Kill(ctx context.Context, sessionID string) error {
 
 // Archive calls gofer/archive.
 func (s *Supervisor) Archive(ctx context.Context, sessionID string) error {
-	if _, err := s.client.Call(ctx, methodGoferArchive, map[string]string{"sessionId": sessionID}); err != nil {
+	if _, err := s.cur().client.Call(ctx, methodGoferArchive, map[string]string{"sessionId": sessionID}); err != nil {
 		return fmt.Errorf("daemonbridge: archive %s: %w", sessionID, err)
 	}
 	return nil
@@ -348,7 +421,7 @@ func (s *Supervisor) Archive(ctx context.Context, sessionID string) error {
 // against the same model registry the SDK's provider package exposes —
 // before calling, instead of trying to errors.Is against this return value.
 func (s *Supervisor) SetModel(ctx context.Context, sessionID, model string) error {
-	if _, err := s.client.Call(ctx, methodGoferSetModel, map[string]string{"sessionId": sessionID, "model": model}); err != nil {
+	if _, err := s.cur().client.Call(ctx, methodGoferSetModel, map[string]string{"sessionId": sessionID, "model": model}); err != nil {
 		return fmt.Errorf("daemonbridge: set model %s: %w", sessionID, err)
 	}
 	return nil
@@ -365,7 +438,7 @@ func (s *Supervisor) SetModel(ctx context.Context, sessionID, model string) erro
 // An empty effort is a legitimate request — the SDK's "clear back to the
 // provider's default" — and is sent as such, not treated as a missing param.
 func (s *Supervisor) SetEffort(ctx context.Context, sessionID, effort string) error {
-	if _, err := s.client.Call(ctx, methodGoferSetEffort, map[string]string{"sessionId": sessionID, "effort": effort}); err != nil {
+	if _, err := s.cur().client.Call(ctx, methodGoferSetEffort, map[string]string{"sessionId": sessionID, "effort": effort}); err != nil {
 		return fmt.Errorf("daemonbridge: set effort %s: %w", sessionID, err)
 	}
 	return nil
@@ -387,7 +460,7 @@ func (s *Supervisor) Interrupt(ctx context.Context, sessionID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := s.client.Notify(acp.MethodSessionCancel, acp.CancelNotification{SessionID: sessionID}); err != nil {
+	if err := s.cur().client.Notify(acp.MethodSessionCancel, acp.CancelNotification{SessionID: sessionID}); err != nil {
 		return fmt.Errorf("daemonbridge: interrupt %s: %w", sessionID, err)
 	}
 	return nil
@@ -420,7 +493,7 @@ func (s *Supervisor) ExplainPermission(ctx context.Context, sessionID, callID st
 	ctx, cancel := context.WithTimeout(ctx, explainTimeout)
 	defer cancel()
 
-	raw, err := s.client.Call(ctx, acp.MethodSessionExplainPermission, acp.ExplainPermissionRequest{
+	raw, err := s.cur().client.Call(ctx, acp.MethodSessionExplainPermission, acp.ExplainPermissionRequest{
 		SessionID:  sessionID,
 		ToolCallID: callID,
 	})
@@ -466,7 +539,7 @@ func (s *Supervisor) Reply(ctx context.Context, sessionID, id string, d tui.Perm
 		Remember bool            `json:"remember,omitempty"`
 		Input    json.RawMessage `json:"input,omitempty"`
 	}{ID: id, Verdict: verdict, Remember: d.Remember, Input: d.Input}
-	if err := s.client.Notify(methodPermissionReply, params); err != nil {
+	if err := s.cur().client.Notify(methodPermissionReply, params); err != nil {
 		return fmt.Errorf("daemonbridge: reply %s (session %s): %w", id, sessionID, err)
 	}
 	return nil
@@ -490,7 +563,7 @@ func (s *Supervisor) Decisions(ctx context.Context, sessionID string) (*decision
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return s.core.Decisions(ctx, sessionID)
+	return s.cur().core.Decisions(ctx, sessionID)
 }
 
 // AnswerDecision resolves an outstanding decision request by sending
@@ -521,7 +594,7 @@ func (s *Supervisor) AnswerDecision(ctx context.Context, sessionID, requestID st
 		ID        string               `json:"id"`
 		Answers   []acp.DecisionAnswer `json:"answers"`
 	}{SessionID: sessionID, ID: requestID, Answers: answers}
-	if err := s.client.Notify(methodDecisionAnswer, params); err != nil {
+	if err := s.cur().client.Notify(methodDecisionAnswer, params); err != nil {
 		return fmt.Errorf("daemonbridge: answer decision %s (session %s): %w", requestID, sessionID, err)
 	}
 	return nil

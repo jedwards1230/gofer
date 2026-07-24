@@ -169,6 +169,22 @@ Event-sourced JSONL journals (SDK). `kill` = interrupt + terminate a running
 session; `archive` = drop a finished one from the roster. **Journals are never
 deleted** — both emit must-deliver events (`session.killed` / `.archived`).
 
+**The roster is a projection of the non-archived journals.** The journals are
+the source of truth, so the overview roster is rebuilt from them on every fetch
+(the daemon's `gofer/overview` / `Supervisor.OverviewRoster`), not held only in
+memory — which is why restarting the daemon no longer loses the sessions that
+were showing. A restart brings back every non-archived journal as an offline
+(resumable) row; a killed session is one of those (terminated, but its journal
+persists), so it stays visible until archived. `archive` is the durable way to
+drop a session from the overview *without* deleting it: because the SDK journal
+has no lifecycle entry type, the archive marker lives in the session's
+`<id>.meta.json` sidecar, never in the JSONL — so the rebuild is strictly
+read-only over the journals. Resuming an archived session clears the marker, so
+it returns to the overview for good. When the roster comes from a daemon older
+than the client, the overview's stale-daemon banner offers a one-key **R**
+restart: it brings the daemon back on the client's build and reconnects, and the
+roster repopulates from the journals on the next poll.
+
 ## Auto mode pipeline (M3 → M8)
 
 Contain before you classify · fail closed · no local SLM.

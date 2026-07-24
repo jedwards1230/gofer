@@ -386,3 +386,5 @@ func (s *vhsSupervisor) Decisions(context.Context, string) (*decision.Subscripti
 func (s *vhsSupervisor) AnswerDecision(context.Context, string, string, []acp.DecisionAnswer) error {
 	return nil
 }
+
+func (s *vhsSupervisor) RestartDaemon(context.Context) error { return nil }

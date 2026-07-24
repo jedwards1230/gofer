@@ -125,6 +125,18 @@ type SessionInfo struct {
 	Queued      int
 	Live        bool // false for disk-only archived entries from List
 
+	// Archived reports that this session was archived — dropped from the
+	// overview roster while keeping its journal (architecture invariant #4). It
+	// is durable: [Supervisor.Archive] records it in the session's `.meta.json`
+	// sidecar (the SDK journal has no lifecycle entry type, so an emitted
+	// session.archived event does not survive a restart), and [Supervisor.List]
+	// reads it back on an offline row via [diskSessionInfo]. A LIVE row is never
+	// archived — Archive removes the session from the live roster — so this is
+	// always false for a Live entry. [Supervisor.OverviewRoster] filters archived
+	// rows out; [Supervisor.List] keeps them (carrying this flag) so `gofer ps
+	// --all` and the resume picker still see them.
+	Archived bool
+
 	// BinaryVersion is the gofer build version of the process actually running
 	// this session — under M6 process isolation, its worker's, which may differ
 	// from the router's after a daemon upgrade (design §6; the router's

@@ -94,6 +94,20 @@
 // latest. [Supervisor.List] additionally enumerates archived/offline
 // sessions still on disk, overlaying live state.
 //
+// [Supervisor.OverviewRoster] is the roster the TUI overview shows: List MINUS
+// archived sessions. It is the projection of the on-disk journals that makes the
+// overview survive a restart — a fresh Supervisor comes up with an empty LIVE
+// roster (Roster), but OverviewRoster rebuilds what was showing from the
+// journals, so a client polling it sees its sessions again. A killed/terminated
+// session is not archived, so it reappears here as an offline (Live=false)
+// resumable row; only [Supervisor.Archive] hides a session, which it does
+// durably by recording a marker in the session's `<id>.meta.json` sidecar (the
+// SDK journal has no lifecycle entry type — an emitted session.archived event
+// does not survive a restart). The rebuild is strictly READ-ONLY over the
+// journals: archive state lives in the sidecar, never in the JSONL, and
+// [Supervisor.Resume] clears the marker so a resumed session stays on the
+// overview.
+//
 // # Concurrency
 //
 // Every session in the roster runs its own goroutine (its "pump") that

@@ -25,6 +25,12 @@ const (
 	// live sessions (see [Reconstructor.Roster] and [Reconstructor.sessionCwd]).
 	methodGoferRoster = "gofer/roster"
 
+	// methodGoferOverview is the gofer/overview Call this core makes to enumerate
+	// the OVERVIEW roster — every non-archived session, live plus offline, so the
+	// overview survives a daemon restart (see [Reconstructor.OverviewRoster]).
+	// Distinct from methodGoferRoster's live-only set.
+	methodGoferOverview = "gofer/overview"
+
 	// methodGoferPermissionRequested / methodGoferPermissionResolved are the
 	// gofer-native notifications the daemon fans a session's permission events
 	// out to every attached peer with — mirroring
@@ -402,6 +408,24 @@ func (r *Reconstructor) Roster(ctx context.Context) ([]SessionInfo, error) {
 	var dtos []SessionInfo
 	if err := json.Unmarshal(raw, &dtos); err != nil {
 		return nil, fmt.Errorf("wirestream: decode %s response: %w", methodGoferRoster, err)
+	}
+	return dtos, nil
+}
+
+// OverviewRoster calls gofer/overview and decodes the raw wire rows — the
+// overview's roster source: every NON-archived session, live rows overlaid with
+// their live snapshot and offline rows (Live=false) rebuilt from their journals,
+// so the overview survives a daemon restart. It is Roster's persistent twin
+// (gofer/roster is live-only); offline rows carry Live=false, which the same DTO
+// already round-trips (gofer/ps sends them today), so the decode is unchanged.
+func (r *Reconstructor) OverviewRoster(ctx context.Context) ([]SessionInfo, error) {
+	raw, err := r.client.Call(ctx, methodGoferOverview, nil)
+	if err != nil {
+		return nil, fmt.Errorf("wirestream: overview roster: %w", err)
+	}
+	var dtos []SessionInfo
+	if err := json.Unmarshal(raw, &dtos); err != nil {
+		return nil, fmt.Errorf("wirestream: decode %s response: %w", methodGoferOverview, err)
 	}
 	return dtos, nil
 }

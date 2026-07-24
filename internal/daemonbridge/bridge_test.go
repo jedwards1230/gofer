@@ -1027,8 +1027,21 @@ func TestKillArchive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Roster: %v", err)
 	}
-	if len(roster) != 0 {
-		t.Errorf("Roster after kill+archive = %+v, want empty", roster)
+	// The overview roster is the projection of the NON-archived journals, so the
+	// two lifecycle ops resolve differently now (session-persistence work): a
+	// KILLED session keeps its journal and stays on the overview as an offline
+	// row (the operator can still see and archive it), while an ARCHIVED session
+	// is dropped from the overview. So the roster carries the killed id and not
+	// the archived one — not "empty", which was the old live-only Roster's answer.
+	ids := make(map[string]bool, len(roster))
+	for _, r := range roster {
+		ids[r.ID] = true
+	}
+	if !ids[killed.ID] {
+		t.Errorf("Roster after kill+archive = %+v, want it to still carry the killed session %s (its journal persists)", roster, killed.ID)
+	}
+	if ids[archived.ID] {
+		t.Errorf("Roster after kill+archive = %+v, want the archived session %s dropped from the overview", roster, archived.ID)
 	}
 }
 

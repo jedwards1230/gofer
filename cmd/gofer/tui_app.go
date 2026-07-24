@@ -120,7 +120,20 @@ func selectTUIBackend(ctx context.Context, df *daemonFlags, cwd, root string, st
 	c, dialErr := dialDaemon(ctx, df, "", stderr)
 	switch {
 	case dialErr == nil:
-		b := daemonbridge.New(c)
+		// The stale-daemon banner's one-key restart: stop the daemon, start a
+		// replacement on THIS binary (the self-update the banner promises), and
+		// redial. rootDir is where the daemon advertises its endpoint, and df
+		// still carries the address/token this connection used, so the redial
+		// lands on the replacement bound to the same address. Injected here
+		// because only cmd/gofer owns the store root and the dial precedence the
+		// restart+redial needs — the bridge itself is transport-only.
+		reconnect := func(ctx context.Context) (*daemon.Client, error) {
+			if err := restartDaemonProcess(ctx, rootDir); err != nil {
+				return nil, err
+			}
+			return dialDaemon(ctx, df, "", io.Discard)
+		}
+		b := daemonbridge.New(c, daemonbridge.WithReconnect(reconnect))
 		// The panel's /model needs to know the default it writes cannot reach
 		// this daemon (see tui.CommandEnv.DaemonBacked) — the local config
 		// wrappers above are unchanged either way, since auth.json/config.json
