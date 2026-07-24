@@ -6,9 +6,10 @@ package tui
 // input box included — while an event.PermissionRequested is awaiting a
 // decision, returning the footer once the request is answered. It replaces
 // the M3 centered-overlay modal for the "approvals relay + phone approval
-// UX" item — the transcript's own ● badge (itemApproval) and resolution line
-// (itemApprovalResolved) are unrelated permanent records that render
-// elsewhere in model.go and are unaffected by this file.
+// UX" item — the transcript's own ● badge (the gated call's itemTool block, or
+// a standalone itemApproval as the fallback) and the resolution line
+// (itemApprovalResolved) are separate transcript records that render elsewhere
+// in model.go and are unaffected by this file.
 
 import (
 	"fmt"
@@ -58,9 +59,12 @@ type pendingApproval struct {
 	// [rationaleHeaderLine]).
 	rationale *acp.PermissionRationale
 
-	// badgeIdx is the transcript index of the itemApproval badge this request
-	// added, so transcriptLines can suppress it while the prompt is showing
-	// (the prompt already repeats the tool + args line).
+	// badgeIdx is the transcript index of the item this request suppresses while
+	// the prompt is showing (the prompt already repeats the tool + args line).
+	// Normally it points at the gated call's own itemTool block — reused as the
+	// badge slot so the call renders as ONE item across its lifecycle (see the
+	// PermissionRequested case in Ingest) — or, when no tool block exists for the
+	// id, at the standalone itemApproval badge appended as the fallback record.
 	badgeIdx int
 
 	// amend is the open inline amend editor (amend.go), or nil when the

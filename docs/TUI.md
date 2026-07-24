@@ -90,12 +90,19 @@ silent on both. Reusing the separator slot keeps the header a fixed
 renders byte-identically.
 
 A pending permission request is **not** a centered modal — it renders inline in
-the conversation's bottom UI. The transcript records a permanent `● <tool>`
-badge the moment the request arrives, but while it's unresolved the live
-prompt **commandeers the whole footer** (status line, input box, and its
-framing rules) and the badge is suppressed from the transcript so it isn't
-shown twice; once answered, the footer returns and the badge becomes visible
-again. It reads as a confirm prompt — a rule, an attributed `<tool> command`
+the conversation's bottom UI. The gated call's **own tool block** is the
+transcript record: the SDK emits `ToolCallStarted` while the provider streams
+the `tool_use` (before the loop gates the call), so a `● <tool>` block already
+sits in the transcript when the request arrives. While the request is
+unresolved the live prompt **commandeers the whole footer** (status line, input
+box, and its framing rules) and that block is suppressed from the transcript so
+it isn't shown twice; once answered, the footer returns, the block reappears,
+and `ToolCallFinished` fills it in with the args/output/exit — **one call, one
+item**. (Appending a separate `● <tool>` badge alongside the tool block instead
+— the pre-fix shape — left both alive past an allow, rendering the call twice:
+the real `● bash(args)` block beside an empty `● bash` bullet. A standalone
+`itemApproval` badge now survives only as the fallback for a request that has
+no matching tool block.) It reads as a confirm prompt — a rule, an attributed `<tool> command`
 header, the call's own description and body, a plain-English rationale, the
 question, and the action row, keyed `a`/`d`/`r` (`r` toggles remember, `1`/`2`
 alias allow/deny), `tab` amends the call before allowing and `ctrl+e` explains
@@ -140,11 +147,11 @@ sorted `k=v` list beneath it; the whole body is capped at
 frame.
 
 Resolution is deliberately quiet. A routine **allow** adds *no* transcript
-line — the `●` badge already recorded that the call was gated, and a
-`permission allow` line on every approved call (printed *after* the result,
-reading as if config auto-allowed it) was pure noise. A **deny** keeps a red
-`permission deny` line, because a blocked call changed what happened. The old
-rule-source parenthetical is dropped either way.
+line — the call's own `● <tool>` block already records it (and fills in on
+`ToolCallFinished`), and a `permission allow` line on every approved call
+(printed *after* the result, reading as if config auto-allowed it) was pure
+noise. A **deny** keeps a red `permission deny` line, because a blocked call
+changed what happened. The old rule-source parenthetical is dropped either way.
 
 **Richer provenance — what ships.** The prompt now carries the call's
 **attribution** ("from the `<agent>` agent", correlated from the tool call's
@@ -616,7 +623,12 @@ transcript (`Model.view` joins `attachHeaderLines` to `transcriptLines`
 before windowing) — a short conversation leaves the header pinned at the top
 with blank filler below it, exactly as before, but a transcript long enough
 to overflow the viewport scrolls the header off the top along with the
-oldest messages, tailing to the latest by default. `Overview.render` pads
+oldest messages, tailing to the latest by default. A single blank **spacer row**
+is pinned at the top of the attach input block (counted in the footer, above the
+menu/rules/input), so an overflowing transcript tailing flush to the frame keeps
+one row of breathing space between the newest message and the input rule instead
+of butting against it; in a short, padded frame it is indistinguishable from the
+blank filler below it, so those frames are unchanged. `Overview.render` pads
 its own header (unaffected — the overview's header stays fixed; only its
 roster rows scroll) plus roster rows with blank filler up to the height it's
 handed before appending the pinned dispatch block, so a short roster leaves
@@ -866,8 +878,12 @@ first line on a `└`, up to two more indented, and any remainder collapsed to
 start-of-block seed — an empty `{}` when a provider streams the arguments as
 `input_json_delta` fragments, so building the header from it rendered every call
 as `bash({})`). A command-shaped input is summarized to its own text
-(`bash(find . -type f | wc -l)` rather than `bash({"command":"…"})`); unknown
-tool shapes fall back to compact JSON. While a call is still running its input is
+(`bash(find . -type f | wc -l)` rather than `bash({"command":"…"})`); the
+`ask_user` call summarizes to its question(s) — the first question's title (or
+its text), or `N questions` for a batch, so the block reads
+`ask_user(Choose a task)` over its answer line, never the raw
+`{"questions":[…]}` payload; other unknown tool shapes fall back to compact
+JSON. While a call is still running its input is
 usually just the empty seed, so the header shows the **bare tool name** (yellow
 `● bash`) until the real command lands on finish. `ToolCallDelta` is ignored —
 it carries input fragments, not result text (it used to be mis-appended to the
