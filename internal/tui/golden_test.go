@@ -346,6 +346,20 @@ func TestGoldenSessionError(t *testing.T) {
 	render(t, "session_error", event.NewSessionError(sid, "boom", true))
 }
 
+// TestGoldenSessionInterrupted covers a user interrupt (Esc / session/cancel):
+// the SDK surfaces the cancelled turn as a context-cancellation session.error,
+// which Ingest reframes to the muted "⏹ stopped" indicator rather than a red
+// error. The styled counterpart is the load-bearing one — it locks the muted
+// (non-danger) color, so a regression that rendered the interrupt as a red
+// failure, or leaked the raw "context canceled" text, goes red.
+func TestGoldenSessionInterrupted(t *testing.T) {
+	render(t, "session_interrupted", event.NewSessionError(sid, "context canceled", true))
+}
+
+func TestGoldenSessionInterruptedStyled(t *testing.T) {
+	renderStyled(t, "session_interrupted", event.NewSessionError(sid, "context canceled", true))
+}
+
 // attributionSuffix is the exact substring the approval prompt's header
 // carries when — and only when — the gated call is attributed to an agent.
 // Its ABSENCE is the un-attributed contract (see
