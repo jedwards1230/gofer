@@ -396,35 +396,60 @@ func runDaemonRestart(ctx context.Context, args []string, stdout, stderr io.Writ
 		_, _ = fmt.Fprintln(stdout, "No gofer daemon was running; starting one.")
 	}
 
-	if out.serviceManaged {
-		mgr := newServiceManager()
-		path, perr := mgr.unitPath()
-		if perr != nil {
-			return perr
-		}
-		if err := mgr.startService(ctx, path); err != nil {
-			return fmt.Errorf("start service %s: %w", mgr.label(), err)
-		}
-	} else if _, err := startDaemonProcess(ctx, daemonStartSpec{
-		root:   *root,
-		listen: out.addr,
-		token:  out.token,
-	}); err != nil {
-		return err
-	}
-
-	// The spawned pid is not the confirmation — the endpoint file is. A daemon
-	// that starts and then fails a startup check (model, port, credential) never
-	// writes one, and reporting the pid alone would call that a successful
-	// restart. Waiting for a fresh advertisement is what makes "exactly one
-	// daemon running, endpoint pointing at the NEW pid" an assertion rather than
-	// a hope.
-	newPID, err := waitEndpointLive(ctx, *root, out.pid, daemonStartTimeout)
+	newPID, err := startReplacementDaemon(ctx, *root, out)
 	if err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(stdout, "Started gofer daemon (pid %d).\n", newPID)
 	return nil
+}
+
+// startReplacementDaemon starts the daemon that replaces a just-stopped one and
+// waits for it to advertise its endpoint, returning the new pid. It mirrors how
+// the stopped daemon was being run: a service-managed one comes back through its
+// service manager (the unit's full argv), a hand-started one is respawned from
+// the CURRENT executable (see spawnDetachedDaemon) with the root/listen/token
+// recovered from the stop outcome — so a hand-started daemon comes back on the
+// running binary's build, which is the self-update the stale-daemon banner
+// promises. It is the shared start+confirm half of runDaemonRestart and
+// restartDaemonProcess.
+//
+// The spawned pid is not the confirmation — the endpoint file is: a daemon that
+// starts then fails a startup check (model, port, credential) never writes one,
+// so waiting for a fresh advertisement is what makes "exactly one daemon
+// running, endpoint pointing at the NEW pid" an assertion rather than a hope.
+func startReplacementDaemon(ctx context.Context, root string, out stopOutcome) (int, error) {
+	if out.serviceManaged {
+		mgr := newServiceManager()
+		path, perr := mgr.unitPath()
+		if perr != nil {
+			return 0, perr
+		}
+		if err := mgr.startService(ctx, path); err != nil {
+			return 0, fmt.Errorf("start service %s: %w", mgr.label(), err)
+		}
+	} else if _, err := startDaemonProcess(ctx, daemonStartSpec{
+		root:   root,
+		listen: out.addr,
+		token:  out.token,
+	}); err != nil {
+		return 0, err
+	}
+	return waitEndpointLive(ctx, root, out.pid, daemonStartTimeout)
+}
+
+// restartDaemonProcess stops the daemon at root and starts a replacement
+// (start+confirm via startReplacementDaemon), returning once the replacement has
+// advertised its endpoint. It is the non-printing core the TUI stale-daemon
+// banner's reconnect closure drives (see runTUI's selectTUIBackend), the same
+// stop→start→wait `gofer daemon restart` runs but without any stdout reporting.
+func restartDaemonProcess(ctx context.Context, root string) error {
+	out, err := stopDaemon(ctx, root)
+	if err != nil {
+		return err
+	}
+	_, err = startReplacementDaemon(ctx, root, out)
+	return err
 }
 
 // waitEndpointLive polls root's endpoint file until it names a live pid that is

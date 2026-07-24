@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -576,7 +577,7 @@ func (s *Supervisor) List(ctx context.Context) ([]supervisor.SessionInfo, error)
 				continue
 			}
 			path := filepath.Join(sessionsDir, slug, id+".jsonl")
-			out = append(out, diskSessionInfo(s.root, id, slug, path))
+			out = append(out, diskSessionInfo(id, slug, path))
 		}
 	}
 	// A live session whose journal is not on disk yet (a just-spawned worker
@@ -586,6 +587,35 @@ func (s *Supervisor) List(ctx context.Context) ([]supervisor.SessionInfo, error)
 			out = append(out, info)
 		}
 	}
+	return out, nil
+}
+
+// OverviewRoster is the roster the overview shows in --workers mode: [List]
+// (live workers ∪ on-disk journals) MINUS archived entries. It mirrors
+// [supervisor.Supervisor.OverviewRoster] so the overview persists across a
+// router restart the same way it does in-process — the journals are the source
+// of truth and the roster is rebuilt from them on every fetch. Archived sessions
+// (their `.meta.json` sidecar marker set — see [supervisor.SetArchivedOnDisk])
+// stay off it; killed/offline sessions reappear as Live=false rows until
+// archived. Read-only over the journals.
+func (s *Supervisor) OverviewRoster(ctx context.Context) ([]supervisor.SessionInfo, error) {
+	infos, err := s.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := infos[:0:0]
+	for _, info := range infos {
+		if info.Archived {
+			continue
+		}
+		out = append(out, info)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Created.Equal(out[j].Created) {
+			return out[i].Created.After(out[j].Created)
+		}
+		return out[i].ID > out[j].ID
+	})
 	return out, nil
 }
 
@@ -786,7 +816,14 @@ func (s *Supervisor) Archive(ctx context.Context, sessionID string) error {
 	}
 	h, ok := s.get(sessionID)
 	if !ok {
-		// Offline: nothing live to drop; the journal already persists.
+		// Offline: no worker to drop, but the archive must be DURABLE so the
+		// session stays off the rebuilt overview roster after a restart. There is
+		// no worker to forward gofer/archive to, so record the sidecar marker
+		// directly (mirroring the in-process supervisor's offline-archive path).
+		// A genuinely-unknown id (not on disk) stays the prior no-op.
+		if _, err := supervisor.SetArchivedOnDisk(s.root, sessionID, true, time.Now()); err != nil {
+			return fmt.Errorf("router: archive %s: %w", sessionID, err)
+		}
 		return nil
 	}
 	actx, cancel := wireCallCtx()
@@ -898,22 +935,28 @@ func statusFromWire(s string) supervisor.SessionStatus {
 // and last entry times. A read error or an empty journal degrades to the bare
 // {ID, Project, JournalPath, Live:false} snapshot rather than failing List.
 //
-// root is the store root, needed for the subagent link: it lives in a sidecar
-// beside the journal, not in the journal itself, and is read through
-// [supervisor.DiskMeta] — the SAME reader the in-process List uses. Under M6 the
-// router IS the daemon a TUI or `gofer ps` talks to, so skipping it here would
-// collapse a subagent tree into a flat list of roots the moment its workers
-// exited, on the primary deployment path.
-func diskSessionInfo(root, id, slug, path string) supervisor.SessionInfo {
-	parentID, agentID, depth := supervisor.DiskMeta(root, id)
+// The subagent link and archive marker live in a sidecar beside the journal,
+// not in the journal itself, and are read together through
+// [supervisor.ReadSidecar] — the by-directory reader the in-process List's own
+// builder uses. Under M6 the router IS the daemon a TUI or `gofer ps` talks to,
+// so skipping the link here would collapse a subagent tree into a flat list of
+// roots the moment its workers exited, and skipping the archive marker would
+// resurface an archived session on the overview after a restart — both on the
+// primary deployment path.
+func diskSessionInfo(id, slug, path string) supervisor.SessionInfo {
+	// Read the sidecar by the directory we already hold (filepath.Dir(path)),
+	// folding the subagent link and the archive marker into one read — no
+	// per-session project scan (what supervisor.DiskMeta would cost).
+	sc := supervisor.ReadSidecar(filepath.Dir(path), id)
 	info := supervisor.SessionInfo{
 		ID:          id,
 		Project:     slug,
 		JournalPath: path,
 		Live:        false,
-		ParentID:    parentID,
-		Agent:       agentID,
-		Depth:       depth,
+		ParentID:    sc.ParentID,
+		Agent:       sc.Agent,
+		Depth:       sc.Depth,
+		Archived:    sc.Archived,
 	}
 
 	entries, err := session.ReadEntries(path)

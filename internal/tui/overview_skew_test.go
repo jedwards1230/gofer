@@ -65,8 +65,9 @@ func TestOverviewSkewBannerCases(t *testing.T) {
 			if hasDiff := strings.Contains(got, differsMarker); hasDiff != c.wantDifferent {
 				t.Errorf("differs banner present = %v, want %v\n%s", hasDiff, c.wantDifferent, got)
 			}
-			// Whenever a banner shows, it must carry the one-command fix.
-			if (c.wantStale || c.wantDifferent) && !strings.Contains(got, "gofer daemon restart") {
+			// Whenever a banner shows, it must invite the one-key in-app restart
+			// (the "R" the overview binds while the banner is up).
+			if (c.wantStale || c.wantDifferent) && !strings.Contains(got, "press R to restart") {
 				t.Errorf("banner omits the restart instruction:\n%s", got)
 			}
 		})

@@ -121,6 +121,17 @@ type CallError struct {
 
 func (e *CallError) Error() string { return e.Message }
 
+// IsMethodNotFound reports whether err is a [Client.Call] failure the daemon
+// answered with JSON-RPC method-not-found (-32601) — i.e. the daemon does not
+// implement the called method, the signature of a daemon OLDER than the client.
+// A caller uses it to fall back to an earlier method a stale daemon still has
+// (e.g. gofer/overview → gofer/roster), the same shape [Client.Hello] handles
+// inline for the version handshake.
+func IsMethodNotFound(err error) bool {
+	var ce *CallError
+	return errors.As(err, &ce) && ce.Code == codeMethodNotFound
+}
+
 // ErrHelloUnsupported is returned by [Client.Hello] when the daemon does not
 // implement gofer/hello (a pre-hello daemon: it replies method-not-found,
 // JSON-RPC -32601). A caller treats this as "this daemon predates the version

@@ -150,6 +150,7 @@ func screenKeymap() []keyBinding {
 		{Keys: "esc", Scope: scopeOverview, Desc: "Clear the dispatch bar"},
 		{Keys: "ctrl+x", Scope: scopeOverview, Desc: "Kill a running session, archive a finished one (press twice to confirm)"},
 		{Keys: "ctrl+t", Scope: scopeOverview, Desc: "Stop every subagent under the selected session"},
+		{Keys: "R", Scope: scopeOverview, Desc: "Restart a stale daemon (shown only when the daemon is out of date)"},
 		{Keys: "pgup/pgdn", Scope: scopeOverview, Desc: "Scroll the roster"},
 		{Keys: "?", Scope: scopeOverview, Desc: "Open this help (empty dispatch bar)"},
 

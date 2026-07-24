@@ -287,4 +287,14 @@ type Supervisor interface {
 	// was interrupted). Unlike a permission call id, requestID is unique only
 	// within its session, so sessionID is what disambiguates it.
 	AnswerDecision(ctx context.Context, sessionID, requestID string, answers []acp.DecisionAnswer) error
+
+	// RestartDaemon restarts the daemon this client is talking to — the
+	// stale-daemon banner's one-key action — bringing it back on the CLIENT's
+	// build (the honest self-update the banner offers) and reconnecting to the
+	// replacement. On success the overview's next roster poll lands on the new
+	// daemon, which rebuilds the roster from the on-disk journals so the sessions
+	// that were showing return. A backend with no daemon to restart (the local
+	// in-process supervisor — which never shows the banner) returns an error; the
+	// key is only reachable while the banner is up, so that path is unreached.
+	RestartDaemon(ctx context.Context) error
 }

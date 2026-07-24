@@ -519,6 +519,23 @@ func (a App) doArchive(id string) tea.Cmd {
 	}
 }
 
+// daemonRestartMsg carries the outcome of the stale-daemon banner's restart
+// action (see [App.doRestartDaemon]).
+type daemonRestartMsg struct{ err error }
+
+// doRestartDaemon restarts the stale daemon via the Supervisor — the banner's
+// one-key action — and, on success, the Update handler follows it with a fresh
+// roster fetch so the overview repopulates from the RESTARTED daemon (which
+// rebuilds the roster from the on-disk journals). It uses context.Background:
+// the restart drives the daemon's own start timeout end to end and must not be
+// cut short by a transient UI context. Blocking, so it runs as its own tea.Cmd
+// goroutine rather than inline.
+func (a App) doRestartDaemon() tea.Cmd {
+	return func() tea.Msg {
+		return daemonRestartMsg{err: a.sup.RestartDaemon(context.Background())}
+	}
+}
+
 // switchSession points the peek/attach transcript at a different session: it
 // closes the old subscription (so the broker stops buffering into a stream no
 // one reads), resets sess to empty, and subscribes to id. Callers use it (via
@@ -905,6 +922,18 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
+	case daemonRestartMsg:
+		if msg.err != nil {
+			a.setStatus(sevDanger, fmt.Sprintf("Daemon restart failed: %s", msg.err.Error()))
+			return a, nil
+		}
+		// The replacement is up and this client is reconnected (the bridge swapped
+		// its connection). Refresh the roster NOW rather than waiting for the next
+		// tick, so the sessions the restart rebuilt from their journals reappear
+		// immediately — the visible proof the restart worked.
+		a.setStatus(sevOK, "Daemon restarted; roster restored.")
+		return a, a.fetchRoster
+
 	case permissionExplainedMsg:
 		// A ctrl+e explain landing (dialog.go). It never resolves or dismisses
 		// the pending request — see applyPermissionExplained, which also drops
@@ -1272,6 +1301,19 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		a.setStatus(sevOK, fmt.Sprintf("Stopping %s.", plural(len(ids), "subagent")))
 		return a, a.doKillTree(ids)
+
+	case key.Text == "R" && a.over.InputEmpty() && a.over.daemonStale():
+		// Restart a stale daemon in place — the TUI counterpart of the banner's
+		// "run: gofer daemon restart" hint. Gated three ways so it never
+		// surprises: only on an EMPTY dispatch bar (with text, "R" is an ordinary
+		// character and falls through to the input keymap, like "?" and the bare
+		// → above), only while the stale-daemon banner is actually showing (so
+		// "R" means restart ONLY in the narrow window the banner invites it),
+		// and — since the local backend never shows that banner — only ever on a
+		// daemon-backed overview. The restart runs as a background Cmd; its
+		// daemonRestartMsg refreshes the roster from the replacement (Update).
+		a.setStatus(sevOK, "Restarting daemon…")
+		return a, a.doRestartDaemon()
 
 	case key.Text == "?" && a.over.InputEmpty():
 		// The roster footer has advertised "? shortcuts" since M2 with nothing

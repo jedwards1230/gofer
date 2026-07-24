@@ -46,11 +46,20 @@ interrupted) or archive (finished) — a **two-press confirm**: the first `ctrl-
 arms the action and shows a status line naming the verb for that row's state
 (`kill` vs `archive`), the second `ctrl-x` (same session still selected) runs it;
 any other key cancels · `ctrl-t` stop every subagent **below** the
-selected row, acting immediately on the selected row. `enter`, `space`, `ctrl-x`
-and `ctrl-t` take these meanings only while the dispatch bar is empty; every
-other key types into it — so `space` on non-empty text is an ordinary space —
-and `enter` on non-empty text starts a new session, or dispatches a `/` command.
-Journals are never deleted — `gofer ps --all` lists archived sessions.
+selected row, acting immediately on the selected row · `R` restart a stale
+daemon (only while the stale-daemon banner is showing — see below). `enter`,
+`space`, `ctrl-x`, `ctrl-t` and `R` take these meanings only while the dispatch
+bar is empty; every other key types into it — so `space` on non-empty text is an
+ordinary space, and `R` on non-empty text is an ordinary character — and `enter`
+on non-empty text starts a new session, or dispatches a `/` command.
+
+The overview roster is the projection of the **non-archived** on-disk journals,
+rebuilt from them on every poll (`Supervisor.OverviewRoster` / the daemon's
+`gofer/overview`), so restarting the daemon no longer loses the sessions that
+were showing — each returns as an offline, resumable row. Journals are never
+deleted: a killed session stays visible (offline) until archived, `archive`
+drops a session from the overview *durably* (a marker in its `<id>.meta.json`
+sidecar, never the journal), and `gofer ps --all` still lists archived sessions.
 
 **Peek** — a summary card for one session: its title, a one-line
 waiting/status line, and a `❯ reply` input. `up`/`down` move the roster
@@ -80,7 +89,7 @@ one session).
 The overview header's fourth line is normally the blank separator, but when the
 roster is served by a daemon whose build is **older than (or a different build
 from) the running CLI** it carries a persistent warn-styled banner —
-`⚠ daemon is stale (<daemon> < <cli>) — run: gofer daemon restart`
+`⚠ daemon is stale (<daemon> < <cli>) — press R to restart`
 (`Overview.skewSeparator`, overview_render.go). It is the TUI-visible twin of
 the CLI's stderr version-skew warning (`warnVersionSkew`, daemonclient.go),
 which the alt-screen swallows on the roster path; both share one classifier
@@ -88,6 +97,16 @@ which the alt-screen swallows on the roster path; both share one classifier
 silent on both. Reusing the separator slot keeps the header a fixed
 `headerLines` tall, so the banner costs no body rows and a non-skewed roster
 renders byte-identically.
+
+While the banner shows, pressing **R** (on an empty dispatch bar) restarts the
+daemon in place — the honest, visible self-update the banner offers: it stops
+the daemon and starts a replacement on the **client's** build
+(`Supervisor.RestartDaemon` → the daemonbridge's injected reconnect closure →
+`restartDaemonProcess`, cmd/gofer), then reconnects. Because the overview roster
+is rebuilt from the journals (above), the sessions that were showing reappear on
+the next poll — the visible proof the restart worked. The key is gated on the
+banner being up (and is inert on the local in-process backend, which never shows
+it), so a stale daemon is the only context in which `R` means restart.
 
 A pending permission request is **not** a centered modal — it renders inline in
 the conversation's bottom UI. The gated call's **own tool block** is the

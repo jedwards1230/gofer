@@ -216,6 +216,8 @@ func (f *fakeSup) AnswerDecision(context.Context, string, string, []acp.Decision
 	return nil
 }
 
+func (f *fakeSup) RestartDaemon(context.Context) error { return nil }
+
 // content renders m the way a real frame would, returning just the string
 // content for substring assertions.
 func content(m tea.Model) string {

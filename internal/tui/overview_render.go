@@ -194,14 +194,28 @@ func (o Overview) skewSeparator(width int) string {
 	switch versionskew.Classify(o.meta.Version, o.meta.DaemonVersion) {
 	case versionskew.Older:
 		return truncate(o.theme.WarnStyle().Render(fmt.Sprintf(
-			"⚠ daemon is stale (%s < %s) — run: gofer daemon restart",
+			"⚠ daemon is stale (%s < %s) — press R to restart",
 			shortVersion(o.meta.DaemonVersion), shortVersion(o.meta.Version))), width)
 	case versionskew.Differs:
 		return truncate(o.theme.WarnStyle().Render(fmt.Sprintf(
-			"⚠ daemon is a different build (%s) — run: gofer daemon restart if it is stale",
+			"⚠ daemon is a different build (%s) — press R to restart if it is stale",
 			shortVersion(o.meta.DaemonVersion))), width)
 	default:
 		return ""
+	}
+}
+
+// daemonStale reports whether the stale-daemon banner is currently showing —
+// the daemon this roster came from is older than, or a different build from, the
+// running client. It is the single source [App.handleOverviewKey] gates the "R"
+// restart key on, so the key is live exactly when [Overview.skewSeparator]
+// renders the banner and silent otherwise (an unknown/equal/newer daemon).
+func (o Overview) daemonStale() bool {
+	switch versionskew.Classify(o.meta.Version, o.meta.DaemonVersion) {
+	case versionskew.Older, versionskew.Differs:
+		return true
+	default:
+		return false
 	}
 }
 

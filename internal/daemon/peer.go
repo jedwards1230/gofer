@@ -249,7 +249,7 @@ func (p *peer) handleFrame(ctx context.Context, data []byte) {
 // log at DEBUG rather than INFO — see handleFrame.
 func isHighFrequencyRead(method string) bool {
 	switch method {
-	case methodGoferRoster, methodGoferPS, acp.MethodSessionList:
+	case methodGoferRoster, methodGoferOverview, methodGoferPS, acp.MethodSessionList:
 		return true
 	default:
 		return false

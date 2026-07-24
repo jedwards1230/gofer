@@ -14,6 +14,7 @@ package tuibridge
 
 import (
 	"context"
+	"errors"
 
 	"github.com/jedwards1230/agent-sdk-go/acp"
 	"github.com/jedwards1230/agent-sdk-go/event"
@@ -59,9 +60,15 @@ func New(sup *supervisor.Supervisor, defaultModel func(context.Context) string) 
 // the supervisor's method set drifted from what the TUI drives.
 var _ tui.Supervisor = Adapter{}
 
-// Roster maps the supervisor's live roster to the TUI's row type.
+// Roster is the roster the overview polls: the supervisor's OVERVIEW roster —
+// non-archived sessions, live ones overlaid with live state and every other as
+// an offline row rebuilt from its journal — mapped to the TUI's row type. Using
+// OverviewRoster (not the live-only Roster) is what makes the overview survive a
+// restart: after a fresh in-process supervisor comes up with an empty live
+// roster, the sessions that were showing are rebuilt from their on-disk
+// journals, minus any archived one.
 func (a Adapter) Roster(ctx context.Context) ([]tui.SessionInfo, error) {
-	infos, err := a.sup.Roster(ctx)
+	infos, err := a.sup.OverviewRoster(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -229,6 +236,16 @@ func (a Adapter) Decisions(_ context.Context, sessionID string) (*decision.Subsc
 // in-memory routing.
 func (a Adapter) AnswerDecision(_ context.Context, sessionID, requestID string, answers []acp.DecisionAnswer) error {
 	return a.sup.AnswerDecision(sessionID, requestID, answers)
+}
+
+// RestartDaemon is unsupported on the in-process backend: there is no separate
+// daemon process to restart — this supervisor IS the process — and the
+// stale-daemon banner never shows here (a local backend reports its own version
+// as the "daemon" version, so versionskew.Classify is always Equal). The key
+// that would call this is therefore unreachable; the method exists only to
+// satisfy [tui.Supervisor], and returns a clear error rather than pretending.
+func (a Adapter) RestartDaemon(_ context.Context) error {
+	return errors.New("tuibridge: no daemon to restart (in-process supervisor)")
 }
 
 // toTUI copies the fields the TUI renders from a supervisor snapshot. The

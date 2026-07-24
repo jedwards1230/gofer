@@ -1,7 +1,7 @@
 gofer v0.3.1
 claude-sonnet-5 · ~/orchestration
 2 awaiting input · 1 working · 2 completed
-⚠ daemon is stale (v0.2.1 < v0.3.1) — run: gofer daemon restart
+⚠ daemon is stale (v0.2.1 < v0.3.1) — press R to restart
 ~/orchestration
 ▸ wire the websocket ACP list…  Needs input · blocked: approve Bash(kubect…  now
   explore three agent ecosyst…  Working · M2 launched; awaiting sketch rev…   2m
