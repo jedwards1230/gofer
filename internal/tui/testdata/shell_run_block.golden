@@ -1,12 +1,12 @@
-! git status --short
+! git status --short · you ran this
    └  M internal/tui/app.go
      ?? internal/tui/shell.go
 
-!! cat missing.txt
+!! cat missing.txt · you ran this
    └ cat: missing.txt: No such file or directory
      exit 1
 
-! false
+! false · you ran this
    └ exit 1
 
 

@@ -295,6 +295,65 @@ func TestComposePromptReportsExitCodeAndTruncation(t *testing.T) {
 	}
 }
 
+// TestComposePromptFramesFoldedBlock pins the fold-framing contract (Part A):
+// the folded `!` block leads with [shellFoldHeader] ONCE, ahead of the `$ cmd`
+// lines, so the agent reads the output as user-run rather than re-running the
+// commands as its own tool calls. The header appears exactly once even when the
+// block carries several `!` runs, and it precedes every `$ cmd`.
+func TestComposePromptFramesFoldedBlock(t *testing.T) {
+	a := App{shellRuns: []shellRun{
+		finishedRun(1, "git status", "M shell.go", true),
+		finishedRun(2, "go build ./...", "", true),
+	}}
+
+	got := a.composePrompt("what changed?")
+
+	if n := strings.Count(got, shellFoldHeader); n != 1 {
+		t.Fatalf("fold header appeared %d times, want exactly 1:\n%q", n, got)
+	}
+	if !strings.HasPrefix(got, shellFoldHeader) {
+		t.Errorf("prompt does not LEAD with the fold header:\n%q", got)
+	}
+	if strings.Index(got, shellFoldHeader) > strings.Index(got, "$ git status") {
+		t.Errorf("fold header does not precede the first `$ cmd`:\n%q", got)
+	}
+	if !strings.HasSuffix(got, "what changed?") {
+		t.Errorf("prompt = %q, want the user's own text last", got)
+	}
+}
+
+// TestComposePromptDoubleBangGetsNoHeader is the safety pair: a `!!`-only submit
+// folds nothing, so it takes no header either — the framing can never annotate
+// or leak a private run.
+func TestComposePromptDoubleBangGetsNoHeader(t *testing.T) {
+	a := App{shellRuns: []shellRun{finishedRun(1, "cat secret.env", "TOKEN=xyz", false)}}
+	got := a.composePrompt("ready")
+	if got != "ready" {
+		t.Fatalf("prompt = %q, want the bare user text — a `!!`-only submit folds nothing and takes no header", got)
+	}
+}
+
+// TestComposePromptCleanNoOutputRunReadsCompleted covers the no-output case: a
+// clean `! sleep 10` that printed nothing must still communicate that it
+// COMPLETED ([shellNoOutputMarker]) so the agent does not run it to get a
+// result. A run that DID print keeps its output as the completion signal and
+// gets no marker.
+func TestComposePromptCleanNoOutputRunReadsCompleted(t *testing.T) {
+	silent := App{shellRuns: []shellRun{finishedRun(1, "sleep 10", "", true)}}
+	got := silent.composePrompt("done?")
+	if !strings.Contains(got, "$ sleep 10") {
+		t.Fatalf("prompt = %q, want the command echoed", got)
+	}
+	if !strings.Contains(got, shellNoOutputMarker) {
+		t.Errorf("clean no-output run = %q, want a completion marker so the agent does not re-run it", got)
+	}
+
+	printed := App{shellRuns: []shellRun{finishedRun(2, "echo hi", "hi", true)}}
+	if got := printed.composePrompt("x"); strings.Contains(got, shellNoOutputMarker) {
+		t.Errorf("a run WITH output got a no-output marker: %q", got)
+	}
+}
+
 func TestApplyShellDoneIgnoresUnknownSeq(t *testing.T) {
 	a := App{shellRuns: []shellRun{finishedRun(1, "echo hi", "hi", true)}}
 	before := a.shellRuns[0]
@@ -622,6 +681,28 @@ func TestShellRunBlockNoDispositionLine(t *testing.T) {
 	out2 := New(theme.Test()).WithShellRuns([]shellRun{shared}).View(testkit.Width, testkit.Height)
 	if !strings.Contains(out2, "! echo hi") {
 		t.Errorf("`!` run block does not lead with the `!` sigil marker:\n%s", out2)
+	}
+}
+
+// TestShellRunHeaderAttributesToUser pins the user-run attribution (Part B):
+// both a `!` and a `!!` transcript block carry the muted `· you ran this`
+// clause on the command header, so the run reads as a user-run local command
+// rather than an agent tool call. Asserted on the ascii render (theme.Test),
+// which strips color, so it pins the clause TEXT; the styled golden pins its
+// muted color.
+func TestShellRunHeaderAttributesToUser(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  shellRun
+		want string
+	}{
+		{"sent", finishedRun(1, "git status", "clean", true), "! git status" + shellRunAttribution},
+		{"private", finishedRun(2, "cat secret", "x", false), "!! cat secret" + shellRunAttribution},
+	} {
+		out := New(theme.Test()).WithShellRuns([]shellRun{tc.run}).View(testkit.Width, testkit.Height)
+		if !strings.Contains(out, tc.want) {
+			t.Errorf("%s run block missing user-run attribution %q:\n%s", tc.name, tc.want, out)
+		}
 	}
 }
 

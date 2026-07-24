@@ -1,12 +1,12 @@
-<accent>!</accent> git status --short
+<accent>!</accent> git status --short<muted> · you ran this</muted>
    └  M internal/tui/app.go
      ?? internal/tui/shell.go
 
-<yellow>!!</yellow> cat missing.txt
+<yellow>!!</yellow> cat missing.txt<muted> · you ran this</muted>
    └ cat: missing.txt: No such file or directory
 <red>     exit 1</red>
 
-<accent>!</accent> false
+<accent>!</accent> false<muted> · you ran this</muted>
 <red>   └ exit 1</red>
 
 

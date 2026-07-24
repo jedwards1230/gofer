@@ -72,6 +72,27 @@ import (
 // the one interpreter every supported host is guaranteed to have.
 const fallbackShell = "/bin/sh"
 
+// shellFoldHeader frames the folded `!` block once, ahead of the `$ cmd` lines,
+// so the model reads what follows as output the USER produced locally rather
+// than a request to run those commands. Without it a reply-now `!` fold — which
+// fires a turn carrying only `$ cmd\n<output>` — reads as an instruction, and
+// the agent re-runs the command as its own `bash` tool call (which then hits the
+// permission gate): the redundant re-run this framing exists to stop. It states
+// three things the model must not confuse: the commands were run by the user,
+// the output is informational, and it must not re-run them. A named const rather
+// than an inline literal so the one place the wording lives is greppable and the
+// fold-framing test can pin it; it is not a per-machine config value (like the
+// `$ ` prefix format beside it, it is the shape of the fold, not a user setting).
+const shellFoldHeader = "[The shell command(s) below were run by the USER in their terminal, not by you — output is shown for your reference; do not re-run them.]"
+
+// shellNoOutputMarker stands in for a clean run that printed nothing, so the
+// model reads `$ sleep 10` as a command that COMPLETED silently rather than one
+// it still has to run to see a result. contextBlock otherwise prints an outcome
+// line only when something abnormal happened (a note or a non-zero exit), which
+// left a clean no-output run as a bare `$ cmd` — indistinguishable, once framed,
+// from a command awaiting execution.
+const shellNoOutputMarker = "[no output]"
+
 // shellWaitDelay bounds how long [exec.Cmd.Run] waits for the command's
 // output pipes to close after the process itself is gone.
 //
@@ -373,7 +394,7 @@ func (w *boundedWriter) String() string { return w.buf.String() }
 // never observes the mutation.
 func (a *App) composePrompt(prompt string) string {
 	runs := append([]shellRun(nil), a.shellRuns...)
-	var b strings.Builder
+	var blocks strings.Builder
 	var committed []shellRun
 	for i := range runs {
 		if !runs[i].done || runs[i].consumed {
@@ -384,9 +405,21 @@ func (a *App) composePrompt(prompt string) string {
 		if !runs[i].inContext {
 			continue
 		}
-		b.WriteString(runs[i].contextBlock())
+		blocks.WriteString(runs[i].contextBlock())
 	}
 	a.shellRuns = runs
+
+	// Frame the whole folded block ONCE (shellFoldHeader) — not per `$ cmd` line —
+	// only when at least one `!` run actually contributed. A `!!`-only submit
+	// leaves blocks empty, so it takes no header and folds nothing: the header can
+	// never annotate or leak a private run. The header is part of the fold string
+	// handed to CommitShellRuns so the daemon's verbatim user-echo strips it too.
+	var b strings.Builder
+	if blocks.Len() > 0 {
+		b.WriteString(shellFoldHeader)
+		b.WriteString("\n\n")
+		b.WriteString(blocks.String())
+	}
 	// Pin the just-consumed runs into the transcript as persistent sigil blocks
 	// at this position, and queue the model-facing fold so its user-message echo
 	// is stripped of the `$ cmd` text — the run shows once, as a `!`/`!!` block,
@@ -401,11 +434,13 @@ func (a *App) composePrompt(prompt string) string {
 	return b.String() + prompt
 }
 
-// contextBlock renders one `!` run the way the model sees it: the command that
-// produced the output, the output itself, and — only when there is something
-// abnormal to say — the exit code and truncation marker. Deliberately plain
-// and small (docs/CLAUDE.md's context-cost discipline): a shell transcript,
-// not a wrapper format the model has to learn.
+// contextBlock renders one `!` run the way the model sees it, UNDER the block's
+// shared [shellFoldHeader]: the command that produced the output, the output
+// itself, the exit code / truncation marker when something abnormal happened,
+// and — for a clean run that printed nothing — a [shellNoOutputMarker] so the
+// silent completion still reads as done rather than pending. Deliberately plain
+// and small (docs/CLAUDE.md's context-cost discipline): a framed shell
+// transcript, not a wrapper format the model has to learn.
 func (r shellRun) contextBlock() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "$ %s\n", r.line)
@@ -417,6 +452,10 @@ func (r shellRun) contextBlock() string {
 		fmt.Fprintf(&b, "[%s]\n", r.note)
 	} else if r.exitCode != 0 {
 		fmt.Fprintf(&b, "[exit %d]\n", r.exitCode)
+	} else if r.output == "" {
+		// A clean run that printed nothing still needs to read as COMPLETED under
+		// the fold header, not as a command the model must run to get a result.
+		b.WriteString(shellNoOutputMarker + "\n")
 	}
 	if r.truncated {
 		b.WriteString("[output truncated]\n")
