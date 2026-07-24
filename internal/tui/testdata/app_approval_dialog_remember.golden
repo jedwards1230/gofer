@@ -5,20 +5,20 @@ claude-sonnet-5 · ~/orchestration
 
 
 
-
-
-
-
-
-
-
-
 ────────────────────────────────────────────────────────────────────────────────
 bash command
 
-  cmd=rm -rf /tmp/x
+  rm -rf /tmp/x
 
-Allow this tool call?
-  [a] allow   [d] deny   [r] remember: on
+Why you're being asked
 
-esc cancel · session 0192a1b2-app0-7000-8000-000000000001
+  No permission rule matched this `bash` call, so gofer is asking before it
+  runs. It also cannot be sandboxed on this host, so an allow rule alone will
+  not let it run unattended.
+  … ctrl+e to explain
+
+Do you want to proceed?
+▸ [a] Yes
+  [d] No
+
+enter/↑↓ select · [r] remember: on · [tab] amend · ctrl+e explain · esc cancel

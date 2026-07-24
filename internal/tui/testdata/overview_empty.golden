@@ -20,5 +20,5 @@ No sessions yet — type below to start one.
 
 
 ────────────────────────────────────────────────────────────────────────────────
-❯ describe a task for a new session
-enter peek · → attach · tab toggle view · ctrl-x kill · ? shortcuts
+❯ describe a task for a new session · ! for shell mode
+enter open · space peek · tab toggle view · ctrl-x×2 kill · ? shortcuts

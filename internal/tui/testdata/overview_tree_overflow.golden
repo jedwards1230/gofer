@@ -1,0 +1,14 @@
+gofer v0.3.0
+claude-sonnet-5 · ~/orchestration
+0 awaiting input · 9 working · 0 completed
+
+~/orchestration
+▸ ship the subagent roster      Working · two workers…     41m · ↓ 214.7k tokens
+    tui-inline-perm-owner       Working · editing ove…   5m 9s · ↓ 214.7k tokens
+    go-developer                Working · running the…  6m 47s · ↓ 128.0k tokens
+    worker-0                    Working · working          1m 0s · ↓ 1.0k tokens
+    worker-1                    Working · working          2m 0s · ↓ 2.0k tokens
+↓ 4 more
+────────────────────────────────────────────────────────────────────────────────
+❯ describe a task for a new session · ! for shell mode
+enter open · space peek · tab toggle view · ctrl-x×2 kill · ctrl-t stop agents

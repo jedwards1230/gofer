@@ -57,6 +57,25 @@ func settingsRegistry() []Setting {
 			},
 		},
 		{
+			// The four Options are the SDK's unified effort vocabulary with
+			// its empty value spelled "off" — the same spelling /thinking
+			// accepts — because an enum row cycles through Options and renders
+			// the current one, and a literal "" would render as a blank cell
+			// indistinguishable from an unset row.
+			Key:     "session.effort",
+			Label:   "Reasoning effort",
+			Kind:    SettingEnum,
+			Options: []string{"off", "low", "medium", "high"},
+			Get:     func(c config.Config) string { return effortLabel(c.Session.Effort) },
+			Set: func(c config.Config, v string) config.Config {
+				// A value outside the vocabulary cannot arrive here (the view
+				// only ever cycles through Options), so the ok result is
+				// discarded — "off" maps back to the empty level.
+				c.Session.Effort, _ = parseEffortArg(v)
+				return c
+			},
+		},
+		{
 			Key:     "session.permission_mode",
 			Label:   "Permission mode",
 			Kind:    SettingEnum,
@@ -117,6 +136,29 @@ func settingsRegistry() []Setting {
 			Set: func(c config.Config, v string) config.Config {
 				enabled := v == "true"
 				c.TUI.Mouse = &enabled
+				return c
+			},
+		},
+		{
+			// The persisted startup default for the `!` shell escape's
+			// reply-now/queue disposition; the ctrl+r toggle flips it per
+			// session. "reply" fires an agent turn the instant a `!` command
+			// finishes, "queue" holds its output for the next Enter. Unset and
+			// any unrecognized value read back as "reply" (see
+			// config.TUI.ShellQueueDefault), so the enum only ever shows the two
+			// live options.
+			Key:     "tui.shell_reply_mode",
+			Label:   "Shell reply mode",
+			Kind:    SettingEnum,
+			Options: []string{"reply", "queue"},
+			Get: func(c config.Config) string {
+				if c.TUI.ShellQueueDefault() {
+					return "queue"
+				}
+				return "reply"
+			},
+			Set: func(c config.Config, v string) config.Config {
+				c.TUI.ShellReplyMode = v
 				return c
 			},
 		},

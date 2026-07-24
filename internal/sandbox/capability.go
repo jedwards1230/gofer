@@ -10,6 +10,12 @@ package sandbox
 // plan; no fs/network/exec), so it is strictly safer than the file tools and
 // belongs here too — otherwise every plan revision would escalate to a human
 // "ask" for no benefit.
+// ask_user (internal/decision) is mutation-free for the same reasons — it
+// touches no fs, no network, and no exec; it only asks the human a question
+// and waits — and escalating it defeats the tool's entire purpose: the user
+// would get an "allow this tool call?" prompt asking whether the agent may ask
+// them something, and a deny would turn the agent's question into
+// "permission denied" instead of an answer.
 var containableTools = map[string]bool{
 	"bash":        true,
 	"read":        true,
@@ -19,6 +25,7 @@ var containableTools = map[string]bool{
 	"glob":        true,
 	"grep":        true,
 	"update_plan": true,
+	"ask_user":    true,
 }
 
 // containableTool reports whether name is a tool call a sandbox backend can

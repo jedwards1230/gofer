@@ -1,0 +1,24 @@
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+bash command
+
+  go test -race ./... \
+    -run 'TestApproval|TestGolden' \
+    -count=1 -timeout 120s -v -args -update -
+  someveryverylongflagvalue=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+Why you're being asked
+
+  No permission rule matched this `bash` call, so gofer is asking before it
+  runs. It also cannot be sandboxed on this host, so an allow rule alone will
+  not let it run unattended.
+  … ctrl+e to explain
+
+Do you want to proceed?
+▸ [a] Yes
+  [d] No
+
+enter/↑↓ select · [r] remember: off · [tab] amend · ctrl+e explain · esc cancel

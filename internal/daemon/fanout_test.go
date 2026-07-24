@@ -291,7 +291,8 @@ func (s *scriptedToolTurnSession) Cost() session.CostReport { return session.Cos
 
 // SetModel is a no-op: this fake's Prompt is a fully scripted event
 // sequence that never reads a model.
-func (s *scriptedToolTurnSession) SetModel(string) error { return nil }
+func (s *scriptedToolTurnSession) SetModel(string) error  { return nil }
+func (s *scriptedToolTurnSession) SetEffort(string) error { return nil }
 
 func (s *scriptedToolTurnSession) Close() error {
 	s.broker.Close()

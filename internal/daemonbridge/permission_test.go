@@ -26,16 +26,20 @@ import (
 
 	"github.com/jedwards1230/gofer/internal/daemon"
 	"github.com/jedwards1230/gofer/internal/daemonbridge"
+	"github.com/jedwards1230/gofer/internal/tui"
 )
 
-// newCapturingWSServer starts an httptest.Server that accepts exactly one
+// newRawCapturingWSServer starts an httptest.Server that accepts exactly one
 // WebSocket connection, reads exactly one text frame off it, and delivers
-// the decoded JSON-RPC frame on the returned channel. It never writes a
-// response — permission.reply is a fire-and-forget notification, so
+// that frame's BYTES on the returned channel. It never writes a response —
+// permission.reply is a fire-and-forget notification, so
 // [daemon.Client.Notify] neither expects nor waits for one.
-func newCapturingWSServer(t *testing.T) (url string, frames <-chan map[string]any) {
+//
+// The raw bytes are what the wire-fidelity tests below assert on: "the params
+// object is exactly these bytes" is a claim a decoded map cannot make.
+func newRawCapturingWSServer(t *testing.T) (url string, frames <-chan json.RawMessage) {
 	t.Helper()
-	ch := make(chan map[string]any, 1)
+	ch := make(chan json.RawMessage, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
 		if err != nil {
@@ -46,14 +50,105 @@ func newCapturingWSServer(t *testing.T) (url string, frames <-chan map[string]an
 		if err != nil {
 			return
 		}
-		var frame map[string]any
-		if err := json.Unmarshal(data, &frame); err == nil {
-			ch <- frame
-		}
+		ch <- json.RawMessage(data)
 		<-r.Context().Done() // keep the connection open until the client hangs up
 	}))
 	t.Cleanup(srv.Close)
 	return "ws" + srv.URL[len("http"):], ch
+}
+
+// newCapturingWSServer is [newRawCapturingWSServer] with the frame decoded
+// into a generic map, for the assertions that only care about member values.
+func newCapturingWSServer(t *testing.T) (url string, frames <-chan map[string]any) {
+	t.Helper()
+	url, raw := newRawCapturingWSServer(t)
+	ch := make(chan map[string]any, 1)
+	go func() {
+		data, ok := <-raw
+		if !ok {
+			return
+		}
+		var frame map[string]any
+		if err := json.Unmarshal(data, &frame); err == nil {
+			ch <- frame
+		}
+	}()
+	return url, ch
+}
+
+// awaitReplyParams reads the captured permission.reply frame and returns its
+// params member's raw bytes.
+func awaitReplyParams(t *testing.T, frames <-chan json.RawMessage) json.RawMessage {
+	t.Helper()
+	select {
+	case data := <-frames:
+		var frame struct {
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+		}
+		if err := json.Unmarshal(data, &frame); err != nil {
+			t.Fatalf("decode frame %s: %v", data, err)
+		}
+		if frame.Method != "permission.reply" {
+			t.Fatalf("method = %q, want %q", frame.Method, "permission.reply")
+		}
+		return frame.Params
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the permission.reply frame")
+		return nil
+	}
+}
+
+// newReplyBridge dials url and returns a bridge over it, closed on cleanup.
+func newReplyBridge(t *testing.T, url string) *daemonbridge.Supervisor {
+	t.Helper()
+	c, err := daemon.Dial(context.Background(), url, "")
+	if err != nil {
+		t.Fatalf("daemon.Dial: %v", err)
+	}
+	b := daemonbridge.New(c)
+	t.Cleanup(func() { _ = b.Close() })
+	return b
+}
+
+// TestReplyPlainAllowOmitsInput is the backward-compatibility pin for the
+// amend field: a plain allow must put the EXACT same bytes on the wire as it
+// did before amend existed, so a daemon too old to know about "input" is
+// unaffected. `omitempty` is what makes that true, and a byte comparison is
+// the only assertion that proves it — a decoded map would happily report a
+// present-but-null member as absent.
+func TestReplyPlainAllowOmitsInput(t *testing.T) {
+	url, frames := newRawCapturingWSServer(t)
+	b := newReplyBridge(t, url)
+
+	if err := b.Reply(context.Background(), "sess-1", "perm-1", tui.PermissionDecision{Allow: true}); err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+
+	got := string(awaitReplyParams(t, frames))
+	if want := `{"id":"perm-1","verdict":"allow"}`; got != want {
+		t.Errorf("plain allow params = %s, want %s", got, want)
+	}
+}
+
+// TestReplyAmendedAllowCarriesInput is the other half: an amended allow adds
+// the replacement tool input verbatim, so the daemon can hand it to the gate
+// and the SDK can substitute it into the call.
+func TestReplyAmendedAllowCarriesInput(t *testing.T) {
+	url, frames := newRawCapturingWSServer(t)
+	b := newReplyBridge(t, url)
+
+	input := json.RawMessage(`{"cmd":"rm -rf /tmp/x --dry-run","timeout":120}`)
+	d := tui.PermissionDecision{Allow: true, Remember: true, Input: input}
+	if err := b.Reply(context.Background(), "sess-1", "perm-1", d); err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+
+	got := string(awaitReplyParams(t, frames))
+	want := `{"id":"perm-1","verdict":"allow","remember":true,"input":{"cmd":"rm -rf /tmp/x --dry-run","timeout":120}}`
+	if got != want {
+		t.Errorf("amended allow params = %s, want %s", got, want)
+	}
 }
 
 // TestReplySendsPermissionReplyNotification asserts Supervisor.Reply sends a
@@ -70,7 +165,7 @@ func TestReplySendsPermissionReplyNotification(t *testing.T) {
 	b := daemonbridge.New(c)
 	defer func() { _ = b.Close() }()
 
-	if err := b.Reply(context.Background(), "sess-1", "perm-1", true, true); err != nil {
+	if err := b.Reply(context.Background(), "sess-1", "perm-1", tui.PermissionDecision{Allow: true, Remember: true}); err != nil {
 		t.Fatalf("Reply: %v", err)
 	}
 
@@ -114,7 +209,7 @@ func TestReplyDenyOmitsRemember(t *testing.T) {
 	b := daemonbridge.New(c)
 	defer func() { _ = b.Close() }()
 
-	if err := b.Reply(context.Background(), "sess-1", "perm-1", false, false); err != nil {
+	if err := b.Reply(context.Background(), "sess-1", "perm-1", tui.PermissionDecision{}); err != nil {
 		t.Fatalf("Reply: %v", err)
 	}
 

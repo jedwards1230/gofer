@@ -2,10 +2,12 @@ package router
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -128,6 +130,35 @@ func (s *Supervisor) SetModel(ctx context.Context, sessionID, model string) erro
 	return nil
 }
 
+// SetEffort changes sessionID's reasoning effort for its next turn by forwarding
+// gofer/set_effort to its worker — the effort-axis twin of [Supervisor.SetModel],
+// with the same ctx discipline (read once by the admission check; the write runs
+// under an owned bound, see [wireCallCtx]) and the same skew refusal: an effort
+// change configures the worker's NEXT turn, so it is new work.
+//
+// The worker validates the level (an unknown effort, or a model the registry
+// knows cannot reason, surface as the Call's application error) — the router
+// forwards rather than second-guesses, exactly as it does for the model.
+func (s *Supervisor) SetEffort(ctx context.Context, sessionID, effort string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	h, ok := s.get(sessionID)
+	if !ok {
+		return fmt.Errorf("router: set effort %s: %w", sessionID, ErrNotLive)
+	}
+	if err := h.refuseNewWork("set the reasoning effort on"); err != nil {
+		return fmt.Errorf("router: set effort %s: %w", sessionID, err)
+	}
+	cctx, cancel := wireCallCtx()
+	defer cancel()
+	params := map[string]string{"sessionId": sessionID, "effort": effort}
+	if _, err := h.client.Call(cctx, methodGoferSetEffort, params); err != nil {
+		return fmt.Errorf("router: set effort %s: %w", sessionID, err)
+	}
+	return nil
+}
+
 // Reply answers a pending permission request by forwarding permission.reply to
 // the owning worker as a bare notification. The write's lifetime is owned by
 // [daemon.Client.Notify], which takes no context and derives its own bound (see
@@ -135,16 +166,23 @@ func (s *Supervisor) SetModel(ctx context.Context, sessionID, model string) erro
 // The op carries no session id (the worker resolves the request by call id at
 // its own gate), but the router still looks the handle up by sessionID to reach
 // the right worker's connection.
+//
+// An amended allow's replacement input rides the hop as the same optional
+// "input" member the daemon's own permission.reply accepts (see
+// internal/daemon's permissionReplyParams) — a router-backed session must
+// amend identically to an in-process one — and stays `omitempty` so a plain
+// allow/deny reaches the worker as the exact bytes it did before amend.
 func (s *Supervisor) Reply(sessionID string, op event.PermissionReply) error {
 	h, ok := s.get(sessionID)
 	if !ok {
 		return fmt.Errorf("router: reply %s: %w", sessionID, ErrNotLive)
 	}
 	params := struct {
-		ID       string        `json:"id"`
-		Verdict  event.Verdict `json:"verdict"`
-		Remember bool          `json:"remember,omitempty"`
-	}{ID: op.ID, Verdict: op.Verdict, Remember: op.Remember}
+		ID       string          `json:"id"`
+		Verdict  event.Verdict   `json:"verdict"`
+		Remember bool            `json:"remember,omitempty"`
+		Input    json.RawMessage `json:"input,omitempty"`
+	}{ID: op.ID, Verdict: op.Verdict, Remember: op.Remember, Input: op.Input}
 	if err := h.client.Notify(methodPermissionReply, params); err != nil {
 		return fmt.Errorf("router: reply %s: %w", sessionID, err)
 	}
@@ -351,15 +389,30 @@ func (s *Supervisor) resumeOffline(ctx context.Context, id string, opts supervis
 
 	s.log.Info("worker resumed", "session", id, "addr", sw.ep.Addr, "pid", sw.pid)
 	now := time.Now()
+	// The subagent link comes off disk, not the worker: session/load carries no
+	// `_meta` to answer with (unlike session/new — see [Supervisor.Create]), and
+	// the resumed worker read the same sidecar to restore its own attribution.
+	// Without this the row a client gets back from a resume would report a child
+	// as a root until the next roster poll corrected it.
+	parentID, agentID, depth := supervisor.DiskMeta(s.root, id)
 	return supervisor.SessionInfo{
-		ID:            id,
-		Model:         model,
-		Cwd:           opts.Cwd,
-		Status:        supervisor.StatusNeedsInput,
+		ID:    id,
+		Model: model,
+		Cwd:   opts.Cwd,
+		// A just-resumed worker has run no turn and holds no pending request, so
+		// it is at rest, not awaiting the user. StatusIdle (not StatusNeedsInput)
+		// keeps merely reopening an offline row from moving the awaiting-input
+		// counter; the roster cache then seeds the worker's own gofer/roster
+		// status (also StatusIdle) on top, and the first prompt flips it to
+		// StatusWorking. See supervisor.managed.info.
+		Status:        supervisor.StatusIdle,
 		Created:       now,
 		Updated:       now,
 		Live:          true,
 		BinaryVersion: sw.hello.BinaryVersion,
+		ParentID:      parentID,
+		Agent:         agentID,
+		Depth:         depth,
 	}, nil
 }
 
@@ -540,6 +593,35 @@ func (s *Supervisor) List(ctx context.Context) ([]supervisor.SessionInfo, error)
 			out = append(out, info)
 		}
 	}
+	return out, nil
+}
+
+// OverviewRoster is the roster the overview shows in --workers mode: [List]
+// (live workers ∪ on-disk journals) MINUS archived entries. It mirrors
+// [supervisor.Supervisor.OverviewRoster] so the overview persists across a
+// router restart the same way it does in-process — the journals are the source
+// of truth and the roster is rebuilt from them on every fetch. Archived sessions
+// (their `.meta.json` sidecar marker set — see [supervisor.SetArchivedOnDisk])
+// stay off it; killed/offline sessions reappear as Live=false rows until
+// archived. Read-only over the journals.
+func (s *Supervisor) OverviewRoster(ctx context.Context) ([]supervisor.SessionInfo, error) {
+	infos, err := s.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := infos[:0:0]
+	for _, info := range infos {
+		if info.Archived {
+			continue
+		}
+		out = append(out, info)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Created.Equal(out[j].Created) {
+			return out[i].Created.After(out[j].Created)
+		}
+		return out[i].ID > out[j].ID
+	})
 	return out, nil
 }
 
@@ -740,7 +822,14 @@ func (s *Supervisor) Archive(ctx context.Context, sessionID string) error {
 	}
 	h, ok := s.get(sessionID)
 	if !ok {
-		// Offline: nothing live to drop; the journal already persists.
+		// Offline: no worker to drop, but the archive must be DURABLE so the
+		// session stays off the rebuilt overview roster after a restart. There is
+		// no worker to forward gofer/archive to, so record the sidecar marker
+		// directly (mirroring the in-process supervisor's offline-archive path).
+		// A genuinely-unknown id (not on disk) stays the prior no-op.
+		if _, err := supervisor.SetArchivedOnDisk(s.root, sessionID, true, time.Now()); err != nil {
+			return fmt.Errorf("router: archive %s: %w", sessionID, err)
+		}
 		return nil
 	}
 	actx, cancel := wireCallCtx()
@@ -810,6 +899,7 @@ func toSupervisorInfo(d wirestream.SessionInfo, binaryVersion string) supervisor
 		Title:         d.Title,
 		Status:        statusFromWire(d.Status),
 		Model:         d.Model,
+		Effort:        d.Effort,
 		Cost:          d.Cost,
 		Usage:         d.Usage,
 		Pending:       d.Pending,
@@ -819,6 +909,12 @@ func toSupervisorInfo(d wirestream.SessionInfo, binaryVersion string) supervisor
 		Project:       d.Project,
 		Live:          true,
 		Cwd:           d.Cwd,
+		// The subagent link travels with the row: it is the worker's own
+		// supervisor bookkeeping (it resolved the parent and derived the depth),
+		// unlike BinaryVersion above, which only the router knows.
+		ParentID: d.ParentID,
+		Agent:    d.Agent,
+		Depth:    d.Depth,
 	}
 }
 
@@ -833,6 +929,8 @@ func statusFromWire(s string) supervisor.SessionStatus {
 		return supervisor.StatusWorking
 	case "finished":
 		return supervisor.StatusFinished
+	case "idle":
+		return supervisor.StatusIdle
 	default:
 		return supervisor.StatusNeedsInput
 	}
@@ -844,12 +942,29 @@ func statusFromWire(s string) supervisor.SessionStatus {
 // root entry, Title from the first user message, Created/Updated from the first
 // and last entry times. A read error or an empty journal degrades to the bare
 // {ID, Project, JournalPath, Live:false} snapshot rather than failing List.
+//
+// The subagent link and archive marker live in a sidecar beside the journal,
+// not in the journal itself, and are read together through
+// [supervisor.ReadSidecar] — the by-directory reader the in-process List's own
+// builder uses. Under M6 the router IS the daemon a TUI or `gofer ps` talks to,
+// so skipping the link here would collapse a subagent tree into a flat list of
+// roots the moment its workers exited, and skipping the archive marker would
+// resurface an archived session on the overview after a restart — both on the
+// primary deployment path.
 func diskSessionInfo(id, slug, path string) supervisor.SessionInfo {
+	// Read the sidecar by the directory we already hold (filepath.Dir(path)),
+	// folding the subagent link and the archive marker into one read — no
+	// per-session project scan (what supervisor.DiskMeta would cost).
+	sc := supervisor.ReadSidecar(filepath.Dir(path), id)
 	info := supervisor.SessionInfo{
 		ID:          id,
 		Project:     slug,
 		JournalPath: path,
 		Live:        false,
+		ParentID:    sc.ParentID,
+		Agent:       sc.Agent,
+		Depth:       sc.Depth,
+		Archived:    sc.Archived,
 	}
 
 	entries, err := session.ReadEntries(path)

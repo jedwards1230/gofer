@@ -2,6 +2,7 @@ package daemonbridge_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http/httptest"
@@ -692,10 +693,15 @@ func TestToolCallReconstruction(t *testing.T) {
 
 	// session.info (title "read a.txt"), then: message.started(user),
 	// message.finished(user), turn.started, tool.call.started,
-	// turn.finished(tool_use), tool.call.finished, turn.started,
-	// message.started(text), message.delta, message.finished(text),
-	// turn.finished(end_turn) = 11 turn events after the leading title event.
-	events := drainFirstTurnEvents(t, sub, "read a.txt", 11)
+	// tool.call.delta, turn.finished(tool_use), tool.call.finished,
+	// turn.started, message.started(text), message.delta,
+	// message.finished(text), turn.finished(end_turn) = 12 turn events after
+	// the leading title event. The tool.call.delta is SDK v0.19.0's synthetic
+	// delta: the faux tool call seeds a blank input on tool.call.start and
+	// supplies it on tool.call.end with no arg-deltas between, so converter.
+	// toolEnd emits one assembled delta ({"path":"a.txt"}) so the input is
+	// visible live before the tool executes.
+	events := drainFirstTurnEvents(t, sub, "read a.txt", 12)
 
 	if fin, ok := events[1].(event.MessageFinished); !ok || fin.MessageKind != event.MessageUser || fin.Content != "read a.txt" {
 		t.Errorf("event 1 (user finished) = %+v, want MessageFinished(user, content=read a.txt)", events[1])
@@ -710,29 +716,36 @@ func TestToolCallReconstruction(t *testing.T) {
 	if started.ID != "tc-1" || started.Name != "read_file" {
 		t.Errorf("ToolCallStarted = %+v, want ID=tc-1 Name=read_file", started)
 	}
-	if tf, ok := events[4].(event.TurnFinished); !ok || tf.StopReason != "tool_use" {
-		t.Fatalf("event 4 = %+v, want TurnFinished(stop_reason=tool_use)", events[4])
-	}
-	finished, ok := events[5].(event.ToolCallFinished)
+	delta, ok := events[4].(event.ToolCallDelta)
 	if !ok {
-		t.Fatalf("event 5 = %+v, want ToolCallFinished", events[5])
+		t.Fatalf("event 4 = %+v, want ToolCallDelta (v0.19.0 synthetic assembled input)", events[4])
+	}
+	if delta.ID != "tc-1" || delta.Delta != `{"path":"a.txt"}` {
+		t.Errorf("ToolCallDelta = %+v, want ID=tc-1 Delta=%q", delta, `{"path":"a.txt"}`)
+	}
+	if tf, ok := events[5].(event.TurnFinished); !ok || tf.StopReason != "tool_use" {
+		t.Fatalf("event 5 = %+v, want TurnFinished(stop_reason=tool_use)", events[5])
+	}
+	finished, ok := events[6].(event.ToolCallFinished)
+	if !ok {
+		t.Fatalf("event 6 = %+v, want ToolCallFinished", events[6])
 	}
 	if finished.ID != "tc-1" || !finished.IsError {
 		t.Errorf("ToolCallFinished = %+v, want ID=tc-1 IsError=true (no tool registry configured)", finished)
 	}
-	if _, ok := events[6].(event.TurnStarted); !ok {
-		t.Errorf("event 6 = %+v, want TurnStarted (the second model-call round)", events[6])
+	if _, ok := events[7].(event.TurnStarted); !ok {
+		t.Errorf("event 7 = %+v, want TurnStarted (the second model-call round)", events[7])
 	}
 
-	if _, ok := events[7].(event.MessageStarted); !ok {
-		t.Errorf("event 7 = %+v, want MessageStarted", events[7])
+	if _, ok := events[8].(event.MessageStarted); !ok {
+		t.Errorf("event 8 = %+v, want MessageStarted", events[8])
 	}
-	if fin, ok := events[9].(event.MessageFinished); !ok || fin.Content != "done" {
-		t.Errorf("event 9 = %+v, want MessageFinished(content=done)", events[9])
+	if fin, ok := events[10].(event.MessageFinished); !ok || fin.Content != "done" {
+		t.Errorf("event 10 = %+v, want MessageFinished(content=done)", events[10])
 	}
-	tf, ok := events[10].(event.TurnFinished)
+	tf, ok := events[11].(event.TurnFinished)
 	if !ok {
-		t.Fatalf("event 10 = %+v, want TurnFinished", events[10])
+		t.Fatalf("event 11 = %+v, want TurnFinished", events[11])
 	}
 	if tf.StopReason != "end_turn" {
 		t.Errorf("TurnFinished.StopReason = %q, want end_turn", tf.StopReason)
@@ -774,23 +787,27 @@ func TestPermissionRelayEndToEnd(t *testing.T) {
 	// gate(), called only AFTER the requesting round's own turn.finished(
 	// tool_use) has already been published (loop.callModel publishes it
 	// before loop.Run ever calls runOneTool — see TestToolCallReconstruction's
-	// doc) — so these 6 events arrive until this test replies:
+	// doc) — so these 7 events arrive until this test replies:
 	// message.started(user), message.finished(user), turn.started,
-	// tool.call.started, turn.finished(tool_use), permission.requested — after
-	// the leading session.info title event (title "read a.txt").
-	before := drainFirstTurnEvents(t, sub, "read a.txt", 6)
+	// tool.call.started, tool.call.delta (v0.19.0's synthetic assembled
+	// input), turn.finished(tool_use), permission.requested — after the
+	// leading session.info title event (title "read a.txt").
+	before := drainFirstTurnEvents(t, sub, "read a.txt", 7)
 	if _, ok := before[2].(event.TurnStarted); !ok {
 		t.Fatalf("event 2 = %+v, want TurnStarted", before[2])
 	}
 	if _, ok := before[3].(event.ToolCallStarted); !ok {
 		t.Fatalf("event 3 = %+v, want ToolCallStarted", before[3])
 	}
-	if tf, ok := before[4].(event.TurnFinished); !ok || tf.StopReason != "tool_use" {
-		t.Fatalf("event 4 = %+v, want TurnFinished(stop_reason=tool_use)", before[4])
+	if delta, ok := before[4].(event.ToolCallDelta); !ok || delta.Delta != `{"path":"a.txt"}` {
+		t.Fatalf("event 4 = %+v, want ToolCallDelta(Delta=%q)", before[4], `{"path":"a.txt"}`)
 	}
-	pr, ok := before[5].(event.PermissionRequested)
+	if tf, ok := before[5].(event.TurnFinished); !ok || tf.StopReason != "tool_use" {
+		t.Fatalf("event 5 = %+v, want TurnFinished(stop_reason=tool_use)", before[5])
+	}
+	pr, ok := before[6].(event.PermissionRequested)
 	if !ok {
-		t.Fatalf("event 5 = %+v, want PermissionRequested", before[5])
+		t.Fatalf("event 6 = %+v, want PermissionRequested", before[6])
 	}
 	if pr.Tool != "read_file" {
 		t.Errorf("PermissionRequested.Tool = %q, want %q", pr.Tool, "read_file")
@@ -799,7 +816,7 @@ func TestPermissionRelayEndToEnd(t *testing.T) {
 	// Reply through the exact bridge method the TUI's approval dialog calls
 	// (see internal/tui/dialog.go's doReply) — the client-side half of
 	// contract #1, not a supervisor-internal shortcut.
-	if err := b.Reply(context.Background(), info.ID, pr.ID, true, false); err != nil {
+	if err := b.Reply(context.Background(), info.ID, pr.ID, tui.PermissionDecision{Allow: true}); err != nil {
 		t.Fatalf("Reply: %v", err)
 	}
 
@@ -833,6 +850,67 @@ func TestPermissionRelayEndToEnd(t *testing.T) {
 	}
 	if tf.StopReason != "end_turn" {
 		t.Errorf("TurnFinished.StopReason = %q, want end_turn", tf.StopReason)
+	}
+}
+
+// TestAmendedPermissionReplyReachesTheGate is TestPermissionRelayEndToEnd for
+// an AMENDED allow: the reply carries replacement tool input, and the call the
+// SDK then runs must be the human's, not the model's.
+//
+// The proof is the post-reply ToolCallFinished. The SDK's loop substitutes
+// event.PermissionReply.Input into call.Input inside awaitApproval and emits
+// that call's input on tool.call.finished (loop.runOneTool), so an
+// unsubstituted (or dropped) input shows up here as the model's original
+// {"path":"a.txt"}. That single assertion covers every layer between: the
+// bridge's wire params, the daemon's permissionReplyParams, and the gate.
+func TestAmendedPermissionReplyReachesTheGate(t *testing.T) {
+	sup := newTestSupervisorGuarded(t, func() provider.Provider { return &toolTurnProvider{} }, true)
+	url := newTestDaemon(t, sup)
+	b := newBridge(t, url)
+
+	info, err := b.Create(context.Background(), "", tui.CreateOptions{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sub, err := b.Subscribe(context.Background(), info.ID)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer sub.Close()
+
+	if err := b.Send(context.Background(), info.ID, "read a.txt"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	before := drainFirstTurnEvents(t, sub, "read a.txt", 7)
+	pr, ok := before[6].(event.PermissionRequested)
+	if !ok {
+		t.Fatalf("event 6 = %+v, want PermissionRequested", before[6])
+	}
+
+	// The amended input the human "typed": the full original spec with the
+	// path replaced, exactly as the TUI's editor builds it (see
+	// tui.Model.AmendedInput).
+	amended := json.RawMessage(`{"path":"b.txt"}`)
+	d := tui.PermissionDecision{Allow: true, Input: amended}
+	if err := b.Reply(context.Background(), info.ID, pr.ID, d); err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+
+	after := drainEvents(t, sub, 7)
+	resolved, ok := after[0].(event.PermissionResolved)
+	if !ok {
+		t.Fatalf("event 0 (post-reply) = %+v, want PermissionResolved", after[0])
+	}
+	if resolved.Verdict != event.VerdictAllow {
+		t.Errorf("PermissionResolved.Verdict = %q, want allow", resolved.Verdict)
+	}
+	finished, ok := after[1].(event.ToolCallFinished)
+	if !ok {
+		t.Fatalf("event 1 (post-reply) = %+v, want ToolCallFinished", after[1])
+	}
+	if got := string(finished.Input); got != string(amended) {
+		t.Errorf("the executed call's input = %s, want the amended %s — the replacement input did not reach the gate", got, amended)
 	}
 }
 
@@ -965,8 +1043,21 @@ func TestKillArchive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Roster: %v", err)
 	}
-	if len(roster) != 0 {
-		t.Errorf("Roster after kill+archive = %+v, want empty", roster)
+	// The overview roster is the projection of the NON-archived journals, so the
+	// two lifecycle ops resolve differently now (session-persistence work): a
+	// KILLED session keeps its journal and stays on the overview as an offline
+	// row (the operator can still see and archive it), while an ARCHIVED session
+	// is dropped from the overview. So the roster carries the killed id and not
+	// the archived one — not "empty", which was the old live-only Roster's answer.
+	ids := make(map[string]bool, len(roster))
+	for _, r := range roster {
+		ids[r.ID] = true
+	}
+	if !ids[killed.ID] {
+		t.Errorf("Roster after kill+archive = %+v, want it to still carry the killed session %s (its journal persists)", roster, killed.ID)
+	}
+	if ids[archived.ID] {
+		t.Errorf("Roster after kill+archive = %+v, want the archived session %s dropped from the overview", roster, archived.ID)
 	}
 }
 

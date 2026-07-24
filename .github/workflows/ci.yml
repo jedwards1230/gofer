@@ -42,6 +42,16 @@ jobs:
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.11
+          # A restored analysis cache loses staticcheck's noreturn fact for
+          # testing.T.Fatal, so SA5011 fires on every `if p == nil { t.Fatal(...) }`
+          # in whichever packages that run happens to re-analyze — pre-existing
+          # test files no commit touched. A fully warm cache hides it (results are
+          # reused) and a genuinely cold run is clean; only the partial restore is
+          # wrong, which is why it surfaces as a PR that "breaks" untouched files.
+          # There are ~45 such sites across the repo, so annotating them is
+          # unbounded whack-a-mole and excluding SA5011 in tests would give up a
+          # real check. Analyzing from cold costs ~1-2min and is always correct.
+          skip-cache: true
 
   race:
     runs-on: ubuntu-latest

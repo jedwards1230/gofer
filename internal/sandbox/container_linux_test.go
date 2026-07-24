@@ -45,6 +45,7 @@ func TestBwrapContainer_CanContain(t *testing.T) {
 	}{
 		{"available + bash", bwrapLookPathHit, loop.ToolCall{Name: "bash"}, true},
 		{"available + read", bwrapLookPathHit, loop.ToolCall{Name: "read"}, true},
+		{"available + ask_user", bwrapLookPathHit, loop.ToolCall{Name: "ask_user"}, true},
 		{"available + unknown tool", bwrapLookPathHit, loop.ToolCall{Name: "unknown"}, false},
 		{"runtime absent + bash", bwrapLookPathMiss, loop.ToolCall{Name: "bash"}, false},
 	}

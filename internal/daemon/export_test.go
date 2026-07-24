@@ -76,3 +76,46 @@ func (d *Daemon) OutstandingPermissionRequestCount() int {
 	defer d.permReqMu.Unlock()
 	return len(d.permReqCancels)
 }
+
+// MethodDecisionAnswer / MethodGoferDecisionRequested / MethodGoferDecisionResolved
+// are the structured-decision wire methods, exported for the external test
+// package for the same reason [MethodGoferEvent] is: a test that drains a peer's
+// notification stream until one of these arrives turns into a silent infinite
+// drain if the method is renamed and the test still matches an old literal.
+const (
+	MethodDecisionAnswer         = methodDecisionAnswer
+	MethodGoferDecisionRequested = methodGoferDecisionRequested
+	MethodGoferDecisionResolved  = methodGoferDecisionResolved
+)
+
+// OutstandingDecisionRequestCount reports how many decision requests still have
+// a live session/request_decision fan-out (their cancel func has not yet fired)
+// — the decision-side twin of [Daemon.OutstandingPermissionRequestCount], used
+// to assert that resolving a decision by ANY path (an answer from either
+// surface, an interrupt, the session ending) retracts the outstanding requests
+// at every peer rather than leaving a daemon-side waiter dangling.
+func (d *Daemon) OutstandingDecisionRequestCount() int {
+	d.decisionMu.Lock()
+	defer d.decisionMu.Unlock()
+	return len(d.decisionReqCancels)
+}
+
+// OpenDecisionCount reports how many decision requests the daemon still
+// considers open (routed and answerable). It is the accessor a test asserts
+// route cleanup with: an id whose route outlives its resolution would keep
+// accepting answers for a request no gate is holding.
+func (d *Daemon) OpenDecisionCount() int {
+	d.decisionMu.Lock()
+	defer d.decisionMu.Unlock()
+	return len(d.decisionRoutes)
+}
+
+// RetainedDecisionCount reports how many decision requests the daemon still
+// retains for replay-on-attach. It must fall back to zero on resolution — a
+// retained payload that outlives its request would re-surface an answered
+// question to the next peer that attaches.
+func (d *Daemon) RetainedDecisionCount() int {
+	d.decisionMu.Lock()
+	defer d.decisionMu.Unlock()
+	return len(d.pendingDecisions)
+}

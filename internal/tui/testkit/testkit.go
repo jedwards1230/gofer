@@ -157,6 +157,12 @@ func styleTags() map[string]string {
 		open(th.MutedStyle()):  "muted",
 		open(th.AccentStyle()): "accent",
 		open(th.InkStyle()):    "ink",
+		// The focused-row bar is a background, not a foreground. The renderer
+		// re-opens it after every interior reset (see [tui.Overview.highlightLine]),
+		// so it still arrives as a FLAT alternation of single-SGR opens the scan
+		// below handles — a background open, a foreground open, a reset, another
+		// background open — never a combined fg+bg escape.
+		open(th.RowHighlightStyle()): "highlight",
 	}
 }
 

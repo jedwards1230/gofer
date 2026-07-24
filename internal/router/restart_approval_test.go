@@ -64,6 +64,7 @@ func (f *gatedSession) EventsLive() *event.Subscription {
 func (f *gatedSession) Emit(e event.Event)       { f.broker.Publish(e) }
 func (f *gatedSession) Cost() session.CostReport { return session.CostReport{} }
 func (f *gatedSession) SetModel(string) error    { return nil }
+func (f *gatedSession) SetEffort(string) error   { return nil }
 func (f *gatedSession) Close() error             { f.broker.Close(); return nil }
 
 func (f *gatedSession) Prompt(ctx context.Context, text string) error {

@@ -133,7 +133,7 @@ func longTranscriptEvents() []event.Event {
 		event.NewMessageStarted(sid, event.MessageText),
 		event.NewMessageFinished(sid, event.MessageText, "One package failed; I need to delete the stale session fixture before re-running."),
 		event.NewTurnFinished(sid, "end_turn", provider.Usage{InputTokens: 120, OutputTokens: 64}),
-		event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"cmd": "rm -rf /tmp/session-fixtures"}, []string{"no rule"}),
+		event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"cmd": "rm -rf /tmp/session-fixtures"}, tui.GoldenTrace()),
 	}
 }
 

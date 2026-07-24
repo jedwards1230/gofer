@@ -226,6 +226,11 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 	var sup daemon.Supervisor
 	var closeSup func() error
 	var routerSup *router.Supervisor
+	// inProcSup is the same value as sup on the non-workers path, kept in its
+	// concrete type so the decision relay can be injected after the daemon is
+	// built (see SetDecisionRelay below) — that setter is the in-process
+	// supervisor's own, not part of the daemon.Supervisor hosting interface.
+	var inProcSup *supervisor.Supervisor
 	if *workers {
 		// Each worker is spawned from THIS gofer binary (`gofer session-worker`),
 		// so the router needs its own executable path.
@@ -259,6 +264,14 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 		isup, serr := supervisor.New(supervisor.Config{
 			Root:        rootDir,
 			Permissions: cfg.Engine,
+			// The subagent depth cap is an operator opinion, so it comes from
+			// config (session.max_subagent_depth) rather than a literal; an unset
+			// value resolves to the package default.
+			MaxSubagentDepth: cfg.Session.SubagentDepthLimit(),
+			// Re-read per session (not the startup snapshot cfg above) so a
+			// /yolo from an attached TUI reaches the next session this daemon
+			// creates — see permissionModeResolver.
+			PermissionMode: permissionModeResolver(rootDir),
 			// Attach a per-session telemetry observer at registration, before the
 			// session's first turn — subscribing here (rather than after a turn
 			// has already started) means Events' replay backlog is still empty,
@@ -283,7 +296,7 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 		if serr != nil {
 			return fmt.Errorf("build supervisor: %w", serr)
 		}
-		sup, closeSup = isup, isup.Close
+		sup, closeSup, inProcSup = isup, isup.Close, isup
 	}
 
 	d := daemon.New(sup, daemon.Config{
@@ -355,6 +368,24 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 	if routerSup != nil {
 		routerSup.SetPermissionRelay(d)
 		routerSup.SetEventRelay(d)
+	}
+
+	// Let a structured decision (the ask_user tool — see internal/decision) cross
+	// the daemon wire. Unlike the two relays above this is NOT a worker-mode
+	// bridge: a decision rides no event stream, so the supervisor's standing
+	// per-session gate watcher is the daemon's ONLY way to observe one at all,
+	// and without this every ask_user on a daemon-hosted session would be
+	// invisible to every client. Injected here, after daemon.New, for the same
+	// reason as the others — the daemon does not exist when the supervisor is
+	// built — and before Serve, so no session can be created before it is
+	// installed.
+	//
+	// The --workers path is deliberately NOT wired: its sessions live in worker
+	// processes and the relay does not yet cross the router↔worker hop (see
+	// internal/daemon's DecisionAnswerer). A decision there is refused with a
+	// clear error rather than silently swallowed.
+	if inProcSup != nil {
+		inProcSup.SetDecisionRelay(d)
 	}
 
 	// Install the interrupt handler around the whole serve loop: the daemon
@@ -498,6 +529,30 @@ func daemonDefaultModelResolver(pinned bool, root string) func(context.Context) 
 	}
 	return func(ctx context.Context) (string, error) {
 		return resolveRunModel(ctx, root)
+	}
+}
+
+// permissionModeResolver is [supervisor.Config.PermissionMode] for a process
+// rooted at root: it RE-READS <root>/config.json every time a session is
+// created, so a `/yolo` toggle (or a hand-edited `session.permission_mode`)
+// governs the next session this process starts rather than only the next
+// process. It is the guardrail twin of [daemonDefaultModelResolver], and it is
+// wired into every supervisor gofer builds — the daemon's, a session worker's,
+// and the TUI's local in-process fallback.
+//
+// A config that won't load resolves to [config.PermissionModeAsk]. The
+// alternative — carrying the last good value, or defaulting to whatever the
+// process started with — would mean a config.json that goes unreadable mid-run
+// silently keeps guardrails OFF. Failing toward asking is the only safe
+// reading. (A malformed config is already a hard start-up failure on every path
+// that loads one, so this is the mid-life corruption case only.)
+func permissionModeResolver(root string) func() config.PermissionMode {
+	return func() config.PermissionMode {
+		cfg, err := config.Load(config.DefaultPath(root))
+		if err != nil {
+			return config.PermissionModeAsk
+		}
+		return cfg.Session.Mode()
 	}
 }
 

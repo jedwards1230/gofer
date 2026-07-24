@@ -46,6 +46,13 @@ required check —
 it complements, never gates. Fork PRs get a read-only token and degrade to a
 `vhs-frames` artifact upload instead of a push+comment.
 
+**Command-pane tab coverage.** Every command-pane tab view has both an Ascii
+render golden (`testdata/app_panel_<tab>.golden`, driven through the App via
+`dispatchSlash`) and a VHS tape (`vhs/panel-<tab>.tape`) that reproduces the
+same state in color: **status, config, model, thinking, usage, stats, help,
+resume**. Each tape reproduces the exact state its `app_panel_<tab>.golden`
+pins, so the two never disagree.
+
 ## Worker-fleet benchmark (M6, off by default)
 
 `internal/router/bench_test.go` spawns ~50 real detached worker processes and

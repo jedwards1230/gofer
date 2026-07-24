@@ -4,7 +4,7 @@
 <muted>1 awaiting input · 1 working · 0 completed</muted>
 
 <muted>~/orchestration</muted>
-<accent>▸ wire the app root             </accent><yellow>Working</yellow><muted> · overview <-> peek <-> attach nav</muted>    2m
+<highlight>▸ wire the app root             </highlight><yellow>Working</yellow><highlight></highlight><muted> · overview <-> peek <-> attach nav</muted><highlight>    2m</highlight>
   review the supervisor contr…  <yellow>Needs input</yellow><muted> · turn finished — awaiting the…</muted>   5m
 
 
@@ -19,6 +19,6 @@
 
 
 ────────────────────────────────────────────────────────────────────────────────
-❯ <muted>describe a task for a new session</muted>
-<muted>enter peek · → attach · tab toggle view · ctrl-x kill · ? shortcuts</muted>
+❯ <muted>describe a task for a new session · ! for shell mode</muted>
+<muted>enter open · space peek · tab toggle view · ctrl-x×2 kill · ? shortcuts</muted>
 <green>Default model set to Haiku 4.5.</green>

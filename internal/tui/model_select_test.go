@@ -103,7 +103,7 @@ func TestModelSelectAttachedSameProviderHotSwaps(t *testing.T) {
 	sup := newFakeSup(modelSelectRoster())
 	m := newModelSelectApp(t, sup, modelSelectEnv(&saved))
 
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected (sonnet) session
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the selected (sonnet) session
 	m = dispatchSlash(t, m, "/model")
 	m = pressDown(t, m, pressesToHaiku)
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -133,7 +133,7 @@ func TestModelSelectAttachedCrossProviderWarnsOnly(t *testing.T) {
 	sup := newFakeSup(modelSelectRoster())
 	m := newModelSelectApp(t, sup, modelSelectEnv(&saved))
 
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected (sonnet) session
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the selected (sonnet) session
 	m = dispatchSlash(t, m, "/model")
 	m = pressDown(t, m, pressesToGPT5)
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -209,7 +209,7 @@ func TestModelSelectSaveConfigErrorStopsBeforeSetModel(t *testing.T) {
 	env.SaveConfig = func(config.Config) error { return errors.New("disk full") }
 
 	m := newModelSelectApp(t, sup, env)
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected (sonnet) session
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the selected (sonnet) session
 	m = dispatchSlash(t, m, "/model")
 	m = pressDown(t, m, pressesToHaiku) // claude-haiku-4-5: anthropic-only list, row 1 = haiku
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -241,7 +241,7 @@ func TestModelSelectConfigReadErrorAbortsBeforeSave(t *testing.T) {
 	env.SaveConfig = func(c config.Config) error { saved = append(saved, c); return nil }
 
 	m := newModelSelectApp(t, sup, env)
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected (sonnet) session
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the selected (sonnet) session
 	m = dispatchSlash(t, m, "/model")
 	m = pressDown(t, m, pressesToHaiku)
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -298,7 +298,7 @@ func TestModelSelectTypedUnregisteredIDHotSwapsSameProvider(t *testing.T) {
 	sup := newFakeSup(modelSelectRoster())
 	m := newModelSelectApp(t, sup, modelSelectEnv(&saved))
 
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected (sonnet) session
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the selected (sonnet) session
 	m = dispatchSlash(t, m, "/model")
 	m = type_(t, m, typed)
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -390,7 +390,7 @@ func TestGoldenModelSelectHotSwap(t *testing.T) {
 	sup := newFakeSup(modelSelectRoster())
 	m := newModelSelectApp(t, sup, modelSelectEnv(&saved))
 
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected (sonnet) session
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the selected (sonnet) session
 	m = dispatchSlash(t, m, "/model")
 	m = pressDown(t, m, pressesToHaiku)
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -407,7 +407,7 @@ func TestGoldenModelSelectCrossProviderWarn(t *testing.T) {
 	sup := newFakeSup(modelSelectRoster())
 	m := newModelSelectApp(t, sup, modelSelectEnv(&saved))
 
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected (sonnet) session
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the selected (sonnet) session
 	m = dispatchSlash(t, m, "/model")
 	m = pressDown(t, m, pressesToGPT5)
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -429,7 +429,7 @@ func TestGoldenModelSelectCrossProviderWarnStyled(t *testing.T) {
 	sup := newFakeSup(modelSelectRoster())
 	m := newModelSelectAppWithTheme(t, testkit.ColorTheme(), sup, modelSelectEnv(&saved))
 
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected (sonnet) session
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the selected (sonnet) session
 	m = dispatchSlash(t, m, "/model")
 	m = pressDown(t, m, pressesToGPT5)
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -536,7 +536,7 @@ func TestModelSelectDaemonAttachedHotSwapStillReportsDefaultReach(t *testing.T) 
 	sup := newFakeSup(modelSelectRoster())
 	m := newModelSelectApp(t, sup, daemonModelSelectEnv(&saved))
 
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected (sonnet) session
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the selected (sonnet) session
 	m = dispatchSlash(t, m, "/model")
 	m = pressDown(t, m, pressesToHaiku)
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})

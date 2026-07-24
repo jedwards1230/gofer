@@ -173,3 +173,78 @@ func TestWrapRegistry_SpecsUnchanged(t *testing.T) {
 		}
 	}
 }
+
+// extraTool is a stand-in for a gofer-authored tool (the real one is
+// internal/decision's ask_user). It lives here rather than importing that
+// package so these tests keep proving the REGISTRY seam, not one tool.
+type extraTool struct{ ran bool }
+
+func (*extraTool) Name() string        { return "extra_tool" }
+func (*extraTool) Description() string { return "a gofer-authored tool" }
+func (*extraTool) Spec() tool.Schema {
+	return tool.ObjectSchema([]string{"why"}, map[string]tool.Property{
+		"why": {Type: "string", Description: "why"},
+	})
+}
+
+func (e *extraTool) Run(context.Context, json.RawMessage) (tool.Result, error) {
+	e.ran = true
+	return tool.Result{Content: "ran"}, nil
+}
+
+func TestWrapRegistry_ExtraToolsAreRegistered(t *testing.T) {
+	dir := t.TempDir()
+	extra := &extraTool{}
+	reg := WrapRegistry(dir, nil, extra)
+
+	got, ok := reg.Get("extra_tool")
+	if !ok {
+		t.Fatal("extra tool not resolvable through Get")
+	}
+	res, err := got.Run(context.Background(), json.RawMessage(`{"why":"because"}`))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Content != "ran" || !extra.ran {
+		t.Errorf("Run = %+v (ran=%v), want the extra tool itself to have run", res, extra.ran)
+	}
+	// It must also be ADVERTISED — a tool the model cannot see is not
+	// registered in any useful sense.
+	var advertised bool
+	for _, s := range reg.Specs() {
+		if s.Name == "extra_tool" {
+			advertised = true
+			if s.Description != extra.Description() {
+				t.Errorf("spec description = %q, want %q", s.Description, extra.Description())
+			}
+			if !strings.Contains(string(s.InputSchema), `"why"`) {
+				t.Errorf("spec schema = %s, want the tool's own schema", s.InputSchema)
+			}
+		}
+	}
+	if !advertised {
+		t.Error("extra tool missing from Specs()")
+	}
+	// And the builtins are still there alongside it.
+	if _, ok := reg.Get("bash"); !ok {
+		t.Error("bash missing after adding an extra tool")
+	}
+}
+
+func TestWrapRegistry_ExtraToolsSurviveContainerWrapping(t *testing.T) {
+	dir := t.TempDir()
+	fc := &fakeContainer{
+		available: true,
+		wrapFn:    func(string, string) ([]string, bool) { return []string{"true"}, true },
+	}
+	reg := WrapRegistry(dir, fc, &extraTool{})
+
+	// The contained-registry wrapper delegates everything but bash, so an
+	// extra tool must resolve identically with a live Container.
+	if _, ok := reg.Get("extra_tool"); !ok {
+		t.Fatal("extra tool not resolvable through the contained registry")
+	}
+	if _, ok := reg.Get("bash"); !ok {
+		t.Error("bash missing from the contained registry")
+	}
+}

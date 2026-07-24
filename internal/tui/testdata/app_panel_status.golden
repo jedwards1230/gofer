@@ -13,7 +13,7 @@ claude-sonnet-5 · ~/orchestration
 
 
 ────────────────────────────────────────────────────────────────────────────────
-[Status]  Config  Model  Usage  Stats
+[Status]  Config  Model  Thinking  Usage  Stats  Resume  Help
 ────────────────────────────────────────────────────────────────────────────────
 Version: 0.3.0
 Session: —

@@ -46,6 +46,24 @@
 // delivered to every other attached peer. Peers are deregistered on connection
 // close (see [Daemon.detachPeer]). See [Daemon.broadcastUpdate].
 //
+// # Structured decisions
+//
+// A session's ask_user questions (see internal/decision) cross this wire as
+// gofer/decision_requested + gofer/decision_resolved notifications, answered by
+// the decision.answer op or — for a pure ACP peer — by the spec
+// session/request_decision request, first answer winning. Unlike a permission,
+// which the session/prompt handler observes inline on the event stream, a
+// decision rides no stream at all, so the hosted supervisor's standing
+// per-session watcher is the only observation point: it drives
+// [Daemon.RequestDecision]/[Daemon.ResolveDecision] (see decision_relay.go).
+//
+// This is wired for a single daemon hosting the in-process supervisor. It does
+// NOT yet cross the M6 router↔worker leg: the router's supervisor implements no
+// [DecisionAnswerer], so an answer routed at a router is refused with a clear
+// error rather than silently dropped, and a worker's own daemon installs no
+// decision relay. Closing that gap needs the treatment permissions got — a relay
+// plus a Notify across the leg, and skew-subset handling in internal/router.
+//
 // # Auth
 //
 // A daemon configured with [Config.BearerToken] requires it on every

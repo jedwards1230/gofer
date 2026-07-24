@@ -49,6 +49,7 @@ func (f *editSession) Emit(e event.Event)       { f.broker.Publish(e) }
 func (f *editSession) Cost() session.CostReport { return session.CostReport{} }
 func (f *editSession) Close() error             { f.broker.Close(); return nil }
 func (f *editSession) SetModel(string) error    { return nil }
+func (f *editSession) SetEffort(string) error   { return nil }
 
 func (f *editSession) Prompt(_ context.Context, _ string) error {
 	input := json.RawMessage(`{"path":"main.go"}`)

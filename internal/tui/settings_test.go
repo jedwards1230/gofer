@@ -15,10 +15,12 @@ import (
 func TestSettingsRegistryDefaults(t *testing.T) {
 	want := map[string]string{
 		"session.model":           "",
+		"session.effort":          "off",
 		"session.permission_mode": "ask",
 		"tui.roster_view":         "flat",
 		"tui.autoscroll":          "true",
 		"tui.mouse":               "true",
+		"tui.shell_reply_mode":    "reply",
 		"telemetry.enabled":       "false",
 		"telemetry.endpoint":      "",
 	}
@@ -70,10 +72,12 @@ func TestSettingsRegistryKinds(t *testing.T) {
 		options []string
 	}{
 		"session.model":           {SettingString, nil},
+		"session.effort":          {SettingEnum, []string{"off", "low", "medium", "high"}},
 		"session.permission_mode": {SettingEnum, []string{"ask", "yolo"}},
 		"tui.roster_view":         {SettingEnum, []string{"flat", "grouped"}},
 		"tui.autoscroll":          {SettingBool, nil},
 		"tui.mouse":               {SettingBool, nil},
+		"tui.shell_reply_mode":    {SettingEnum, []string{"reply", "queue"}},
 		"telemetry.enabled":       {SettingBool, nil},
 		"telemetry.endpoint":      {SettingString, nil},
 	}

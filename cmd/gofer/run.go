@@ -192,6 +192,8 @@ func runRun(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 	model := fs.String("m", "", "model to run (default: the sole logged-in provider's model)")
 	root := fs.String("root", "", "session store root (default ~/.gofer)")
 	asJSON := fs.Bool("json", false, "emit each event as JSONL instead of a human-readable transcript")
+	parent := fs.String("parent", "", "create the session as a subagent of this session id (needs a daemon)")
+	agentID := fs.String("agent", "", "agent identity stamped on the session's tool calls (needs a daemon)")
 	df := addDaemonFlags(fs)
 	local := addLocalFlag(fs)
 	if help, err := parseFlags(fs, args); err != nil {
@@ -232,6 +234,16 @@ func runRun(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 	}
 	if daemonRunning {
 		noteDaemonDeviations(stderr, "run", *model, *root, *asJSON)
+	}
+
+	// A subagent session is a supervisor concept: the parent link is resolved,
+	// depth-capped, and persisted by whatever supervisor owns the roster. The
+	// in-process fallback below drives a bare runner.New with no supervisor at
+	// all, so there is nothing there to link to — refuse with the remedy named
+	// rather than silently creating an unlinked root session.
+	sub := subagentLink{parentID: *parent, agent: *agentID}
+	if sub.set() && !daemonRunning {
+		return &usageError{msg: "--parent/--agent create a subagent session, which needs a running daemon — start `gofer daemon` (and drop --local)"}
 	}
 
 	// Resolve --root through gofer's own default (~/.gofer, never the SDK's)
@@ -289,7 +301,7 @@ func runRun(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 	}
 
 	if daemonRunning {
-		return driveDaemonSession(ctx, daemonClient, "run", "", cwd, prompt, *asJSON, stdout, stderr)
+		return driveDaemonSession(ctx, daemonClient, "run", "", cwd, prompt, sub, *asJSON, stdout, stderr)
 	}
 
 	r, err := runner.New(ctx, runner.Options{

@@ -65,6 +65,7 @@ func (f *blockingApprovalSession) EventsLive() *event.Subscription {
 func (f *blockingApprovalSession) Emit(e event.Event)       { f.broker.Publish(e) }
 func (f *blockingApprovalSession) Cost() session.CostReport { return session.CostReport{} }
 func (f *blockingApprovalSession) SetModel(string) error    { return nil }
+func (f *blockingApprovalSession) SetEffort(string) error   { return nil }
 func (f *blockingApprovalSession) Close() error             { f.broker.Close(); return nil }
 
 func (f *blockingApprovalSession) Prompt(ctx context.Context, text string) error {

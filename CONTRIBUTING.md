@@ -22,6 +22,14 @@ golangci-lint run
 Still run it locally before anything touching concurrency so you catch a race
 before CI does — but a data race now blocks the PR, not just the release.
 
+## Local install
+
+Use `make install` (not a bare `go install ./cmd/gofer`) to install gofer
+locally. It stamps the binary with `git describe` via ldflags so it reports its
+true HEAD; a bare `go install` from a linked git worktree mis-stamps the
+version from the *primary* worktree's commit, which silently defeats the
+stale-daemon version-skew banner. `make build` does the same into `bin/gofer`.
+
 ## Hard rules
 
 - **gofer consumes the SDK only through the typed Event/Op contract.** If a
@@ -65,6 +73,17 @@ about the workaround.
   loop, or over one the loop body reassigns, is still a genuine data race and
   the report may well be right. Check *which* variable is captured before
   reaching for this entry.
+
+- **"Check `ctx.Done()` between loop iterations."** Reports that a paginating
+  or retrying loop can outlive a cancelled context are wrong whenever every
+  iteration already makes a context-honoring call. [`daemon.Client.Call`]
+  selects on `ctx.Done()` and returns `ctx.Err()`, so the next iteration's
+  request aborts immediately and the loop returns the error — an extra
+  `if err := ctx.Err(); err != nil` between iterations adds a second, earlier
+  place for the same outcome and nothing else. Reply with the `Call` select and
+  a cancellation test, and resolve. (Genuinely unbounded work *between* calls —
+  a long pure computation, a `time.Sleep` — is a different case and the report
+  may be right.)
 
 If you refute one of these, add it here rather than only in the PR thread — the
 bot has no memory across pull requests, but this file does.

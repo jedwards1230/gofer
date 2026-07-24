@@ -50,6 +50,7 @@ go vet -tags workerbench ./...                     # also on the PR lane
 golangci-lint run                                  # lint, zero tolerance
 go test -race ./...                                # PR lane + push/tags
 go run ./cmd/gofer demo                            # offline faux-provider stream
+make install                                       # local install, truthfully version-stamped (never bare `go install`)
 ```
 
 ## Layout
@@ -69,7 +70,9 @@ go run ./cmd/gofer demo                            # offline faux-provider strea
   (`gofer daemon`); see its package doc.
 - `internal/tui/` (bubbletea) — the attach/peek/overview frontend, plus the
   slash-command dispatcher and command panel (`/status`, `/config`, `/model`,
-  `/usage`, `/stats`).
+  `/thinking`, `/usage`, `/stats`, `/resume`, `/help`), plus the
+  session-lifecycle commands `/new` and `/quit`, the `/yolo` guardrail toggle,
+  and the declarative keymap `/help` renders from.
 - `internal/tuibridge/` — adapts the daemon supervisor to the TUI's narrow
   `Supervisor` interface (the single seam importing both).
 - `internal/render/` — turns a session's typed event stream into terminal
@@ -80,6 +83,10 @@ go run ./cmd/gofer demo                            # offline faux-provider strea
   (M4). See its package doc.
 - `internal/sandbox/` — OS containment backends (seatbelt / bwrap+seccomp)
   behind the SDK's permission guard.
+- `internal/decision/` — gofer's structured-decision round trip: the
+  `ask_user` tool (gofer's first tool of its own) plus the per-session `Gate`
+  it blocks on, carrying `acp` decision types over a gofer-native transport
+  because the SDK's Event union has no decision kind. A leaf over the SDK.
 - `internal/telemetry/` — OpenTelemetry (traces/metrics/log-correlation) off
   the Event/Op stream; the only otel importer.
 - `internal/router/` — the M6 thin router daemon: roster aggregation, client
@@ -103,3 +110,13 @@ go run ./cmd/gofer demo                            # offline faux-provider strea
   live listing is unavailable. A leaf over the SDK.
 - `internal/modelmeta/` — display naming for model ids (`DisplayName`, e.g.
   `claude-sonnet-5` → `Sonnet 5`).
+- `internal/usercmd/` — user-authored markdown slash commands: discovery under
+  `<root>/commands` + `<cwd>/.gofer/commands`, the two-key frontmatter reader,
+  and the `$1`/`$ARGUMENTS`/`${1:-def}`/`${@:N}` substitution engine. A leaf
+  (stdlib only) so the rules are table-tested without a terminal; the TUI only
+  adapts a loaded command into a dispatcher entry.
+- `internal/versionskew/` — classifies how a daemon's build relates to the
+  client's (older / different / silent), the one comparison the CLI's stderr
+  version-skew warning (`cmd/gofer`) and the roster's stale-daemon banner
+  (`internal/tui`) share so the two surfaces never disagree. A leaf over
+  `x/mod/semver`.

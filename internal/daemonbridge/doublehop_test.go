@@ -2,6 +2,7 @@ package daemonbridge_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http/httptest"
 	"reflect"
@@ -72,7 +73,11 @@ func (r *routerSupervisor) SubscribeLive(ctx context.Context, sessionID string) 
 }
 
 func (r *routerSupervisor) Reply(sessionID string, op event.PermissionReply) error {
-	return r.b.Reply(context.Background(), sessionID, op.ID, op.Verdict == event.VerdictAllow, op.Remember)
+	return r.b.Reply(context.Background(), sessionID, op.ID, tui.PermissionDecision{
+		Allow:    op.Verdict == event.VerdictAllow,
+		Remember: op.Remember,
+		Input:    op.Input,
+	})
 }
 
 func (r *routerSupervisor) Interrupt(ctx context.Context, sessionID string) error {
@@ -81,6 +86,10 @@ func (r *routerSupervisor) Interrupt(ctx context.Context, sessionID string) erro
 
 func (r *routerSupervisor) SetModel(ctx context.Context, sessionID, model string) error {
 	return r.b.SetModel(ctx, sessionID, model)
+}
+
+func (r *routerSupervisor) SetEffort(ctx context.Context, sessionID, effort string) error {
+	return r.b.SetEffort(ctx, sessionID, effort)
 }
 
 func (r *routerSupervisor) Kill(ctx context.Context, sessionID string) error {
@@ -118,6 +127,12 @@ func (r *routerSupervisor) Roster(ctx context.Context) ([]supervisor.SessionInfo
 // List has no disk-view over the bridge (the bridge only sees the worker's live
 // roster); the prototype returns the same live set Roster does.
 func (r *routerSupervisor) List(ctx context.Context) ([]supervisor.SessionInfo, error) {
+	return r.Roster(ctx)
+}
+
+// OverviewRoster mirrors List for this prototype — with no disk view there are
+// no offline or archived rows to filter, so the live set IS the overview set.
+func (r *routerSupervisor) OverviewRoster(ctx context.Context) ([]supervisor.SessionInfo, error) {
 	return r.Roster(ctx)
 }
 
@@ -252,24 +267,28 @@ func TestDoubleHopPermissionRoundTrip(t *testing.T) {
 	}
 
 	// message.started(user), message.finished(user), turn.started,
-	// tool.call.started, turn.finished(tool_use), permission.requested — after
-	// the leading session.info title event, exactly as TestPermissionRelayEndToEnd.
-	before := drainFirstTurnEvents(t, sub, "read a.txt", 6)
+	// tool.call.started, tool.call.delta (v0.19.0's synthetic assembled input),
+	// turn.finished(tool_use), permission.requested — after the leading
+	// session.info title event, exactly as TestPermissionRelayEndToEnd.
+	before := drainFirstTurnEvents(t, sub, "read a.txt", 7)
 	if _, ok := before[3].(event.ToolCallStarted); !ok {
 		t.Fatalf("event 3 = %+v, want ToolCallStarted", before[3])
 	}
-	if tf, ok := before[4].(event.TurnFinished); !ok || tf.StopReason != "tool_use" {
-		t.Fatalf("event 4 = %+v, want TurnFinished(stop_reason=tool_use)", before[4])
+	if delta, ok := before[4].(event.ToolCallDelta); !ok || delta.Delta != `{"path":"a.txt"}` {
+		t.Fatalf("event 4 = %+v, want ToolCallDelta(Delta=%q)", before[4], `{"path":"a.txt"}`)
 	}
-	pr, ok := before[5].(event.PermissionRequested)
+	if tf, ok := before[5].(event.TurnFinished); !ok || tf.StopReason != "tool_use" {
+		t.Fatalf("event 5 = %+v, want TurnFinished(stop_reason=tool_use)", before[5])
+	}
+	pr, ok := before[6].(event.PermissionRequested)
 	if !ok {
-		t.Fatalf("event 5 = %+v, want PermissionRequested", before[5])
+		t.Fatalf("event 6 = %+v, want PermissionRequested", before[6])
 	}
 	if pr.Tool != "read_file" {
 		t.Errorf("PermissionRequested.Tool = %q, want %q", pr.Tool, "read_file")
 	}
 
-	if err := b.Reply(context.Background(), info.ID, pr.ID, true, false); err != nil {
+	if err := b.Reply(context.Background(), info.ID, pr.ID, tui.PermissionDecision{Allow: true}); err != nil {
 		t.Fatalf("Reply: %v", err)
 	}
 
@@ -292,6 +311,59 @@ func TestDoubleHopPermissionRoundTrip(t *testing.T) {
 	}
 	if tf.StopReason != "end_turn" {
 		t.Errorf("TurnFinished.StopReason = %q, want end_turn", tf.StopReason)
+	}
+}
+
+// TestDoubleHopAmendedPermissionSurvivesTheWorkerHop is
+// TestAmendedPermissionReplyReachesTheGate across two hops: a router-backed
+// session must amend identically to an in-process one, so the replacement
+// input has to survive client → router → worker intact rather than being
+// dropped at the extra serialize/deserialize boundary the router adds (its
+// own permission.reply forward — see internal/router's Supervisor.Reply,
+// whose params this prototype's routerSupervisor stands in for).
+//
+// As in the single-hop test, the proof is the executed call's input on the
+// post-reply ToolCallFinished: the SDK substitutes the amended input into
+// call.Input, so a hop that lost it shows the model's original {"path":"a.txt"}.
+func TestDoubleHopAmendedPermissionSurvivesTheWorkerHop(t *testing.T) {
+	sup := newTestSupervisorGuarded(t, func() provider.Provider { return &toolTurnProvider{} }, true)
+	workerURL := newTestDaemon(t, sup)
+	routerURL := newRouterDaemon(t, workerURL)
+	b := newBridge(t, routerURL)
+
+	info, err := b.Create(context.Background(), "", tui.CreateOptions{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sub, err := b.Subscribe(context.Background(), info.ID)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer sub.Close()
+
+	if err := b.Send(context.Background(), info.ID, "read a.txt"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	before := drainFirstTurnEvents(t, sub, "read a.txt", 7)
+	pr, ok := before[6].(event.PermissionRequested)
+	if !ok {
+		t.Fatalf("event 6 = %+v, want PermissionRequested", before[6])
+	}
+
+	amended := json.RawMessage(`{"path":"b.txt"}`)
+	d := tui.PermissionDecision{Allow: true, Input: amended}
+	if err := b.Reply(context.Background(), info.ID, pr.ID, d); err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+
+	after := drainEvents(t, sub, 7)
+	finished, ok := after[1].(event.ToolCallFinished)
+	if !ok {
+		t.Fatalf("event 1 (post-reply) = %+v, want ToolCallFinished", after[1])
+	}
+	if got := string(finished.Input); got != string(amended) {
+		t.Errorf("the executed call's input = %s, want the amended %s — the replacement input was lost on the worker hop", got, amended)
 	}
 }
 

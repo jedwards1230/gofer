@@ -87,6 +87,21 @@ func TestGoldenStyledOverviewFlat(t *testing.T) {
 	testkit.AssertGoldenStyled(t, "overview_flat", testkit.Render(o, testkit.Width, testkit.Height))
 }
 
+// TestGoldenStyledOverviewFocusHighlight pins Bug 2's contract: the focused
+// roster row is a FULL-WIDTH themed background bar, not a foreground recolor
+// that dies at the first interior reset. Selection is moved off the first row so
+// the bar is asserted on a row whose status word / summary carry their own
+// colors — the styled golden shows the <highlight> tag re-opening after each
+// colored segment and covering the trailing age column, proving the bar spans
+// every column. Ascii goldens can't show this (the background is a no-op under
+// termenv.Ascii), which is why it lives only as a styled golden.
+func TestGoldenStyledOverviewFocusHighlight(t *testing.T) {
+	o := tui.NewOverview(testkit.ColorTheme(), tui.GoldenMeta()).
+		WithSessions(rosterFixture()).
+		MoveDown().MoveDown()
+	testkit.AssertGoldenStyled(t, "overview_focus_highlight", testkit.Render(o, testkit.Width, testkit.Height))
+}
+
 // TestGoldenOverviewGrouped renders the grouped view: Working / Needs input /
 // Finished sections, each recency-sorted, with per-section counts in the
 // header.
@@ -149,10 +164,24 @@ func TestOverviewPendingReadsAsNeedsInput(t *testing.T) {
 	if !strings.Contains(got, "Needs input") {
 		t.Errorf("rendered roster does not contain the %q status word:\n%s", "Needs input", got)
 	}
-	// No glyph, and no pending count anywhere — pending is boolean now.
+	// Scope the count/glyph check to the session's ROW rather than the whole
+	// frame: the dispatch-bar hint legitimately carries digits ("ctrl-x×2"), and
+	// this test's claim is specifically that the pending COUNT never reaches the
+	// row (pending is boolean now — one or many approvals read identically).
+	var row string
+	for _, line := range strings.Split(got, "\n") {
+		if strings.Contains(line, "blocked on approval") {
+			row = line
+			break
+		}
+	}
+	if row == "" {
+		t.Fatalf("no roster row for the pending session:\n%s", got)
+	}
+	// No glyph, and no pending count on the row — pending is boolean now.
 	for _, absent := range []string{"●", "●2", "(2)", "2"} {
-		if strings.Contains(got, absent) {
-			t.Errorf("rendered roster unexpectedly contains %q (glyph/count should be gone):\n%s", absent, got)
+		if strings.Contains(row, absent) {
+			t.Errorf("roster row unexpectedly contains %q (glyph/count should be gone): %q", absent, row)
 		}
 	}
 }
@@ -283,7 +312,7 @@ func TestOverviewHideDispatchBlanksBar(t *testing.T) {
 	if !strings.Contains(shown, "describe a task for a new session") {
 		t.Fatal("precondition failed: expected the dispatch placeholder with hideDispatch=false")
 	}
-	if strings.Contains(hidden, "describe a task for a new session") || strings.Contains(hidden, "enter peek") {
+	if strings.Contains(hidden, "describe a task for a new session") || strings.Contains(hidden, "space peek") {
 		t.Errorf("hideDispatch=true still shows the dispatch bar/hint:\n%s", hidden)
 	}
 }

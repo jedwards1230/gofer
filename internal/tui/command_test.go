@@ -42,7 +42,7 @@ func TestGoldenPanelStatus(t *testing.T) {
 // statusView-level goldens for the field mapping itself).
 func TestStatusReflectsAttachedSession(t *testing.T) {
 	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected (recency-first) session
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the selected (recency-first) session
 
 	m = dispatchSlash(t, m, "/status")
 
@@ -70,7 +70,7 @@ func TestGoldenPanelUsage(t *testing.T) {
 // (the GoldenRoster's first row carries a populated Usage fixture).
 func TestUsageReflectsAttachedSession(t *testing.T) {
 	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected session
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the selected session
 	m = dispatchSlash(t, m, "/usage")
 
 	got := content(m)
@@ -162,7 +162,7 @@ func TestSlashUnknownCommandSetsStatus(t *testing.T) {
 func TestSlashFromAttachOpensPanel(t *testing.T) {
 	sup := newFakeSup(tui.GoldenRoster())
 	m := newTestApp(t, sup)
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected session
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the selected session
 
 	m = type_(t, m, "/config")
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -220,11 +220,15 @@ func TestPanelConfigEditPersistsViaSaveConfig(t *testing.T) {
 	m, _ = m.Update(m.Init()())
 
 	m = dispatchSlash(t, m, "/config")
-	// session.model, session.permission_mode, tui.roster_view,
-	// tui.autoscroll, tui.mouse, telemetry.enabled — six ↓ presses (the first
-	// selects row 0) land on telemetry.enabled, a bool row that saves on
-	// Enter with no further input needed.
-	for i := 0; i < 6; i++ {
+	// session.model, session.effort, session.permission_mode, tui.roster_view,
+	// tui.autoscroll, tui.mouse, tui.shell_reply_mode, telemetry.enabled — eight
+	// ↓ presses (the first selects row 0) land on telemetry.enabled, a bool row
+	// that saves on Enter with no further input needed. This package can't read
+	// the unexported registry to derive the count (config_view_test.go's
+	// downPressesTo does), so the row list above is the thing to update when a
+	// setting is added ahead of telemetry.enabled — the assertions below fail
+	// loudly if it isn't.
+	for i := 0; i < 8; i++ {
 		m = press(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})

@@ -42,7 +42,7 @@ func TestGoldenMenuOverviewFilteredStyled(t *testing.T) {
 // attach input's rule.
 func TestGoldenMenuAttachFiltered(t *testing.T) {
 	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected session
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the selected session
 	m = type_(t, m, "/c")
 	testkit.AssertGolden(t, "app_menu_attach_filtered", content(m))
 }
@@ -52,7 +52,7 @@ func TestGoldenMenuAttachFilteredStyled(t *testing.T) {
 	var m tea.Model = tui.NewApp(testkit.ColorTheme(), sup, tui.GoldenMeta(), tui.GoldenCommandEnv())
 	m, _ = m.Update(tea.WindowSizeMsg{Width: testkit.Width, Height: testkit.Height})
 	m, _ = m.Update(m.Init()())
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = type_(t, m, "/c")
 	testkit.AssertGoldenStyled(t, "app_menu_attach_filtered", content(m))
 }
@@ -159,30 +159,55 @@ func TestMenuEnterRunsHighlightedCommand(t *testing.T) {
 	}
 }
 
+// highlightedCommand returns the name of the popup row currently marked "▸ /",
+// or "" when no row is highlighted. It reads the rendered frame rather than the
+// registry so the assertions below stay black-box.
+func highlightedCommand(t *testing.T, m tea.Model) string {
+	t.Helper()
+	for _, line := range strings.Split(content(m), "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "▸ /")
+		if !ok {
+			continue
+		}
+		return strings.Fields(rest)[0]
+	}
+	return ""
+}
+
 // TestMenuUpDownMovesHighlight covers ↓/↑ moving the highlighted row across
-// every builtin command (the bare "/" matches all of them, Name-sorted:
-// config, model, stats, status, usage).
+// the builtin commands a bare "/" matches (all of them, Name-sorted). It
+// asserts the MOVEMENT — first row, then successive neighbors, then back —
+// against the registry's own sorted order as rendered, rather than against
+// hardcoded command names: every command added to newBuiltinRegistry changes
+// which names land in positions 0..2, and that churn says nothing about
+// whether ↓/↑ work.
 func TestMenuUpDownMovesHighlight(t *testing.T) {
 	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
 	m = type_(t, m, "/")
 
-	if got := content(m); !strings.Contains(got, "▸ /config") {
-		t.Fatalf("expected /config highlighted first (Name-sorted), got:\n%s", got)
+	first := highlightedCommand(t, m)
+	if first == "" {
+		t.Fatalf("expected a highlighted row on open, got:\n%s", content(m))
 	}
 
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
-	if got := content(m); !strings.Contains(got, "▸ /model") {
-		t.Fatalf("expected ↓ to move the highlight to /model, got:\n%s", got)
+	second := highlightedCommand(t, m)
+	if second == first || second == "" {
+		t.Fatalf("expected ↓ to move the highlight off /%s, got /%s:\n%s", first, second, content(m))
+	}
+	if second < first {
+		t.Errorf("↓ moved the highlight to /%s, which sorts BEFORE /%s — the popup lists Name-sorted", second, first)
 	}
 
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
-	if got := content(m); !strings.Contains(got, "▸ /stats") {
-		t.Fatalf("expected a second ↓ to move the highlight to /stats, got:\n%s", got)
+	third := highlightedCommand(t, m)
+	if third == second || third == "" {
+		t.Fatalf("expected a second ↓ to move the highlight off /%s, got /%s:\n%s", second, third, content(m))
 	}
 
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyUp})
-	if got := content(m); !strings.Contains(got, "▸ /model") {
-		t.Fatalf("expected ↑ to move the highlight back to /model, got:\n%s", got)
+	if got := highlightedCommand(t, m); got != second {
+		t.Fatalf("expected ↑ to move the highlight back to /%s, got /%s:\n%s", second, got, content(m))
 	}
 }
 
@@ -263,7 +288,7 @@ func TestColorMenuMatchesLayoutAcrossWidths(t *testing.T) {
 // text-entry surfaces the trigger rule covers (docs/TUI.md).
 func TestMenuAppliesToBothInputPaths(t *testing.T) {
 	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach
 	m = type_(t, m, "/mo")
 
 	if got := content(m); !strings.Contains(got, "▸ /model") {

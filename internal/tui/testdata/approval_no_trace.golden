@@ -1,0 +1,24 @@
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+bash command
+
+  rm -rf /tmp/x
+
+Why you're being asked
+
+  gofer could not determine why this `bash` call was gated.
+
+  Press `r` before allowing to remember this exact call for the rest of the
+  session. Add a rule to the `permissions` array in `config.json` — e.g.
+  `{"verdict": "allow", "tool": "bash", "specifier": "rm *"}` — to stop being
+  asked.
+
+Do you want to proceed?
+▸ [a] Yes
+  [d] No
+
+enter/↑↓ select · [r] remember: off · [tab] amend · ctrl+e explain · esc cancel

@@ -74,7 +74,11 @@ func hermeticDaemonHome(t *testing.T) {
 // no network) behind an in-process httptest server, returning a
 // --daemon-flag-shaped address (bare host:port, no scheme — see
 // [dialDaemon]/[wsURL]) a ps/kill/archive test points --daemon at.
-func testDaemon(t *testing.T, token string, newProvider func() provider.Provider) string {
+// testDaemon starts an in-process test daemon and returns its host:port. An
+// optional version is advertised verbatim as gofer/hello's binaryVersion (and
+// nowhere else), so a test can exercise the client's authoritative version-skew
+// handshake; omit it (the common case) for a daemon that reports no version.
+func testDaemon(t *testing.T, token string, newProvider func() provider.Provider, version ...string) string {
 	t.Helper()
 	root := t.TempDir()
 	store, err := session.NewFileStore(session.WithRoot(root))
@@ -105,7 +109,11 @@ func testDaemon(t *testing.T, token string, newProvider func() provider.Provider
 	}
 	t.Cleanup(func() { _ = sup.Close() })
 
-	d := daemon.New(sup, daemon.Config{BearerToken: token, DefaultModel: "faux"})
+	var ver string
+	if len(version) > 0 {
+		ver = version[0]
+	}
+	d := daemon.New(sup, daemon.Config{BearerToken: token, DefaultModel: "faux", Version: ver})
 	srv := httptest.NewServer(d.Handler())
 	t.Cleanup(srv.Close)
 

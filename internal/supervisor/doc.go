@@ -50,6 +50,28 @@
 // on-disk journal: gofer's hard invariant (docs/CLAUDE.md) is that journals
 // are never deleted, only the roster forgets them.
 //
+// # Subagent sessions
+//
+// A subagent is not a black box inside a turn: it is a real session with its
+// own journal, cost and transcript, plus a link to the session that spawned it.
+// [CreateOptions.ParentID] makes one — Create resolves the parent (live roster
+// first, then disk), derives Depth = parent+1, and enforces
+// [Config.MaxSubagentDepth] ([ErrNoParent] / [ErrDepthExceeded]).
+// [CreateOptions.Agent] is forwarded to [runner.Options.Agent] so the child's
+// tool-call events carry its agent id.
+//
+// The link is DURABLE and gofer-native: it is written beside the journal as
+// <root>/sessions/<slug>/<id>.meta.json (see the sidecar file), so
+// [Supervisor.List] reports it for offline sessions too and [Supervisor.Resume]
+// restores a child's attribution. Only a session that actually has a parent or
+// an agent writes a sidecar; a plain root session writes none and every session
+// predating this feature reads back as a root, unchanged.
+//
+// [DiskMeta] is that sidecar's exported reader, for the OTHER offline-row
+// builder: internal/router keeps its own List over the same store, and under M6
+// it is the daemon clients actually talk to — so both must read the link, or an
+// offline subagent tree would flatten on the isolated path only.
+//
 // # Prompt queue and steering
 //
 // [Supervisor.Send] never rejects a busy session. A prompt sent to an idle
@@ -71,6 +93,20 @@
 // pump — it may skip intermediate snapshots but always converges to the
 // latest. [Supervisor.List] additionally enumerates archived/offline
 // sessions still on disk, overlaying live state.
+//
+// [Supervisor.OverviewRoster] is the roster the TUI overview shows: List MINUS
+// archived sessions. It is the projection of the on-disk journals that makes the
+// overview survive a restart — a fresh Supervisor comes up with an empty LIVE
+// roster (Roster), but OverviewRoster rebuilds what was showing from the
+// journals, so a client polling it sees its sessions again. A killed/terminated
+// session is not archived, so it reappears here as an offline (Live=false)
+// resumable row; only [Supervisor.Archive] hides a session, which it does
+// durably by recording a marker in the session's `<id>.meta.json` sidecar (the
+// SDK journal has no lifecycle entry type — an emitted session.archived event
+// does not survive a restart). The rebuild is strictly READ-ONLY over the
+// journals: archive state lives in the sidecar, never in the JSONL, and
+// [Supervisor.Resume] clears the marker so a resumed session stays on the
+// overview.
 //
 // # Concurrency
 //

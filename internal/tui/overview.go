@@ -44,6 +44,15 @@ type OverviewMeta struct {
 	Cwd     string
 	Now     time.Time
 
+	// DaemonVersion is the build version of the daemon this roster came from,
+	// read off the gofer/hello handshake (empty for the local in-process
+	// backend, or a daemon that predates the field). The header compares it
+	// against Version to warn when the roster is being served by a stale daemon
+	// — the TUI-visible twin of the CLI's stderr version-skew warning, since a
+	// warning printed before the alt-screen is never seen. See
+	// [Overview.skewSeparator] and internal/versionskew.
+	DaemonVersion string
+
 	// AttachSessionID, when set, opens the app directly on that session's
 	// attach screen instead of the overview — the `gofer attach <id>` entry
 	// point. Empty (the default) starts on the overview.
@@ -57,7 +66,7 @@ const (
 	// viewFlat lists every session most-recently-active first, grouped under a
 	// cwd header per working directory.
 	viewFlat rosterView = iota
-	// viewGrouped splits the list into Working / Needs input / Finished
+	// viewGrouped splits the list into Working / Needs input / Idle / Finished
 	// sections, each most-recently-active first.
 	viewGrouped
 )
@@ -96,7 +105,7 @@ func (o Overview) MoveUp() Overview { return o.move(-1) }
 // move shifts selection by delta rows within the current ordering, clamping at
 // the ends.
 func (o Overview) move(delta int) Overview {
-	rows := o.ordered()
+	rows := o.renderedOrder()
 	if len(rows) == 0 {
 		return o
 	}
@@ -167,6 +176,80 @@ func (o Overview) Selected() (SessionInfo, bool) {
 		}
 	}
 	return SessionInfo{}, false
+}
+
+// SessionByID returns the roster row with that id, or false when the snapshot
+// holds no such session. It is the lookup behind the attach screen's
+// drill-out (← from a child returns to its parent — see [App.parentOf]): the
+// roster is the only place the client learns a session's parent link, and a
+// polled snapshot can legitimately be missing the row it names.
+func (o Overview) SessionByID(id string) (SessionInfo, bool) {
+	if id == "" {
+		return SessionInfo{}, false
+	}
+	for _, s := range o.sessions {
+		if s.ID == id {
+			return s, true
+		}
+	}
+	return SessionInfo{}, false
+}
+
+// Children returns the roster rows spawned directly by id — one level, not the
+// whole subtree — in the same depth-first tree order the roster renders (see
+// [byTree]). The attach transcript's background-agents block lists them (see
+// [Model.WithBackgroundAgents]); a session with no children yields nil, which
+// is what makes that block absent rather than empty.
+func (o Overview) Children(id string) []SessionInfo {
+	if id == "" {
+		return nil
+	}
+	var out []SessionInfo
+	for _, s := range byTree(o.sessions) {
+		if s.ParentID == id && s.ID != id {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// Descendants returns the ids of every session BELOW id in the subagent tree —
+// children, grandchildren, and so on — in depth-first order, excluding id
+// itself. It is what the roster's bulk stop binding kills (one
+// [Supervisor.Kill] per id; see [App.doKillTree]), which is exactly why the
+// parent is not in the list: "stop the agents this session fanned out" must not
+// terminate the session the operator is supervising from.
+//
+// Like [byTree] it is cycle-safe (a visited set bounds the walk) and tolerates
+// a parent link naming a row absent from the polled snapshot: an unreachable
+// row simply isn't a descendant of anything on screen.
+func (o Overview) Descendants(id string) []string {
+	if id == "" {
+		return nil
+	}
+	// Built off the tree ordering rather than the raw snapshot so the kill order
+	// matches the order the roster shows the rows in.
+	children := make(map[string][]string, len(o.sessions))
+	for _, s := range byTree(o.sessions) {
+		if s.ParentID != "" && s.ParentID != s.ID {
+			children[s.ParentID] = append(children[s.ParentID], s.ID)
+		}
+	}
+	visited := map[string]bool{id: true}
+	var out []string
+	var walk func(parent string)
+	walk = func(parent string) {
+		for _, child := range children[parent] {
+			if visited[child] {
+				continue
+			}
+			visited[child] = true
+			out = append(out, child)
+			walk(child)
+		}
+	}
+	walk(id)
+	return out
 }
 
 // TypeRune inserts r into the dispatch-bar buffer at the cursor.
@@ -278,7 +361,7 @@ func (o *Overview) TakeSubmitted() (string, bool) {
 // resolveSelection returns want if a session with that id is still present,
 // otherwise the first row of the current ordering (or "" when empty).
 func (o Overview) resolveSelection(want string) string {
-	rows := o.ordered()
+	rows := o.renderedOrder()
 	for _, s := range rows {
 		if s.ID == want {
 			return want
@@ -290,17 +373,69 @@ func (o Overview) resolveSelection(want string) string {
 	return ""
 }
 
-// ordered returns the sessions in the current view's row order: recency-first
-// within the whole list (flat) or within each status group (grouped).
+// ordered returns the sessions in the current view's row order.
+//
+// The flat view is a depth-first SUBAGENT TREE order: each root immediately
+// followed by its descendants, siblings by the same recency rule as before (see
+// [byTree]). A roster with no subagents in it is a forest of roots, which is
+// byte-for-byte the old recency ordering — the tree walk is a superset, not a
+// replacement.
+//
+// The grouped view is deliberately NOT nested: it splits the roster into
+// Working / Needs input / Idle / Finished, and a child's status is independent of its
+// parent's, so nesting there would either put a row in a section whose label
+// contradicts its status or duplicate it across sections. Children stay in
+// their own status section and are identified by their agent label instead (see
+// [Overview.rowLabel]).
 func (o Overview) ordered() []SessionInfo {
 	if o.view == viewGrouped {
 		var rows []SessionInfo
-		for _, st := range []SessionStatus{StatusWorking, StatusNeedsInput, StatusFinished} {
+		for _, st := range []SessionStatus{StatusWorking, StatusNeedsInput, StatusIdle, StatusFinished} {
 			rows = append(rows, byRecency(o.filter(st))...)
 		}
 		return rows
 	}
-	return byRecency(append([]SessionInfo(nil), o.sessions...))
+	return byTree(o.sessions)
+}
+
+// flatGroups buckets the flat view's [Overview.ordered] roster by cwd,
+// preserving first-appearance order so the most-recently-active cwd's group
+// comes first. It is the single source of the flat view's on-screen grouping,
+// shared by the renderer (which draws a cwd header + that group's rows — see
+// [Overview.rows]) and [Overview.renderedOrder] (which flattens it for
+// navigation), so arrow-nav walks exactly the rows the roster draws.
+func (o Overview) flatGroups() (order []string, groups map[string][]SessionInfo) {
+	groups = map[string][]SessionInfo{}
+	for _, s := range o.ordered() {
+		key := o.cwdLabel(s)
+		if _, seen := groups[key]; !seen {
+			order = append(order, key)
+		}
+		groups[key] = append(groups[key], s)
+	}
+	return order, groups
+}
+
+// renderedOrder returns the sessions in the exact top-to-bottom order the
+// roster renders them — headers and blank separators excluded — so selection
+// movement ([Overview.move]) and the default selection
+// ([Overview.resolveSelection]) step through precisely the rows on screen.
+//
+// The grouped view already renders in [Overview.ordered] order (its rows() arm
+// iterates the same Working/Needs input/Finished sections). The flat view
+// re-buckets that order by cwd (see [Overview.flatGroups]) — the order the
+// operator actually sees — which is where navigating the raw [Overview.ordered]
+// sequence diverged from the screen.
+func (o Overview) renderedOrder() []SessionInfo {
+	if o.view == viewGrouped {
+		return o.ordered()
+	}
+	order, groups := o.flatGroups()
+	out := make([]SessionInfo, 0, len(o.sessions))
+	for _, key := range order {
+		out = append(out, groups[key]...)
+	}
+	return out
 }
 
 // filter returns the sessions in effective status st.
@@ -312,6 +447,106 @@ func (o Overview) filter(st SessionStatus) []SessionInfo {
 		}
 	}
 	return out
+}
+
+// byTree returns sessions in depth-first subagent-tree order — every root
+// immediately followed by its descendants, siblings ordered by the shared
+// recency rule — with each returned row's [SessionInfo.Depth] rewritten to its
+// DISPLAY depth. The rows are copies, so the overview's own snapshot keeps the
+// depth the daemon assigned; the render wants the depth of the tree it can
+// actually see, which is not always the same number.
+//
+// Two snapshot realities it must survive, because the roster is a POLLED
+// snapshot rather than a consistent view of the daemon:
+//
+//   - Orphans. A ParentID naming a session absent from the snapshot (archived,
+//     filtered out, or simply polled between two writes) renders as a root at
+//     depth 0 — indenting a row under a parent that is not on screen reads as a
+//     render bug, and dropping it would lose a live session from the roster.
+//   - Cycles. A parent chain that loops (never produced by the supervisor, but
+//     cheap to defend against) leaves its members unreachable from any root. The
+//     visited set bounds the walk, and the final sweep re-enters anything the
+//     walk never reached, so a cycle degrades to "rendered somewhere" rather
+//     than to a hang or a vanished row. No row is ever dropped.
+func byTree(sessions []SessionInfo) []SessionInfo {
+	// Sorting up front means every derived slice below (roots, each child list)
+	// inherits recency order from the stable sort, with no re-sorting per node.
+	rows := byRecency(append([]SessionInfo(nil), sessions...))
+
+	present := make(map[string]bool, len(rows))
+	for _, s := range rows {
+		present[s.ID] = true
+	}
+	// Indices, not values: ids are unique in practice but a duplicated one must
+	// not make two rows collapse into one.
+	children := make(map[string][]int, len(rows))
+	var roots []int
+	for i, s := range rows {
+		if s.ParentID != "" && s.ParentID != s.ID && present[s.ParentID] {
+			children[s.ParentID] = append(children[s.ParentID], i)
+			continue
+		}
+		roots = append(roots, i)
+	}
+
+	out := make([]SessionInfo, 0, len(rows))
+	visited := make([]bool, len(rows))
+	var walk func(i, depth int)
+	walk = func(i, depth int) {
+		if visited[i] {
+			return
+		}
+		visited[i] = true
+		s := rows[i]
+		s.Depth = depth
+		out = append(out, s)
+		for _, c := range children[s.ID] {
+			walk(c, depth+1)
+		}
+	}
+	for _, i := range roots {
+		walk(i, 0)
+	}
+	for i := range rows {
+		walk(i, 0)
+	}
+	return out
+}
+
+// blockedTree reports, per session id, whether that session or any of its
+// descendants is awaiting the user — the ancestor rollup behind the roster's
+// gutter marker. An approval pending three levels down has to be visible from
+// the ancestor row without descending into it, which is exactly the state a
+// collapsed tree would otherwise hide.
+//
+// It is computed ONCE per render and read per row: walking up from each blocked
+// session is linear in the roster, where asking "does any descendant of this
+// row need input?" per row is not.
+func blockedTree(sessions []SessionInfo) map[string]bool {
+	parent := make(map[string]string, len(sessions))
+	for _, s := range sessions {
+		if s.ParentID != "" && s.ParentID != s.ID {
+			parent[s.ID] = s.ParentID
+		}
+	}
+	blocked := make(map[string]bool, len(sessions))
+	for _, s := range sessions {
+		if effectiveStatus(s) != StatusNeedsInput {
+			continue
+		}
+		blocked[s.ID] = true
+		// Bounded by the roster size so a parent cycle terminates.
+		id := s.ID
+		for range sessions {
+			p, ok := parent[id]
+			if !ok || blocked[p] {
+				break
+			}
+			blocked[p] = true
+			id = p
+		}
+	}
+	return blocked
 }
 
 // byRecency sorts sessions most-recently-active first, breaking ties by id for
@@ -341,17 +576,22 @@ func effectiveStatus(s SessionInfo) SessionStatus {
 	return s.Status
 }
 
-// counts tallies the roster by effective status for the header line.
-func (o Overview) counts() (working, needsInput, finished int) {
+// counts tallies the roster by effective status for the header line. Idle
+// (at-rest / reloaded-untouched) rows are counted separately so they never
+// inflate the awaiting-input tally — the whole point of the status: opening a
+// reloaded session must not read as "one more awaiting you".
+func (o Overview) counts() (working, needsInput, idle, finished int) {
 	for _, s := range o.sessions {
 		switch effectiveStatus(s) {
 		case StatusWorking:
 			working++
 		case StatusNeedsInput:
 			needsInput++
+		case StatusIdle:
+			idle++
 		case StatusFinished:
 			finished++
 		}
 	}
-	return working, needsInput, finished
+	return working, needsInput, idle, finished
 }

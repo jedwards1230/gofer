@@ -20,6 +20,18 @@ import (
 // deterministic across machines and CI.
 var GoldenNow = time.Date(2026, 7, 12, 18, 0, 0, 0, time.UTC)
 
+// GoldenTrace returns the shared permission-decision trace every approval
+// fixture requests with: the exact two-entry shape the SDK's loop.RuleGuard
+// emits for the commonest gated call — nothing matched, and the host can't
+// sandbox it either (see loop/guard.go's Evaluate/containOrAsk). Fixtures use
+// the real shape, not a made-up string, because the approval prompt's
+// rationale is DERIVED from it — a fixture the parser can't read would render
+// the "could not determine why" fallback in every golden and hide the feature
+// under test.
+func GoldenTrace() []string {
+	return []string{"rule: unmatched", "containable: false (no container configured)"}
+}
+
 // GoldenMeta returns the shared OverviewMeta the App/Overview golden tests
 // build through.
 func GoldenMeta() OverviewMeta {
@@ -43,6 +55,19 @@ func GoldenCommandEnv() CommandEnv {
 		Config:     func() (config.Config, error) { return config.Config{}, nil },
 		SaveConfig: func(config.Config) error { return nil },
 	}
+}
+
+// promptScopeEnv is GoldenCommandEnv with session.prompt_esc_scope set to
+// "prompt" — the opt-in where Esc cancels only the focused prompt (an ask_user
+// decision resolves cancelled, an approval is denied) instead of interrupting
+// the whole turn. The dialog tests that assert the opt-in behavior build
+// through it; every other test keeps the default (turn) scope.
+func promptScopeEnv() CommandEnv {
+	env := GoldenCommandEnv()
+	env.Config = func() (config.Config, error) {
+		return config.Config{Session: config.Session{PromptEscScope: string(config.PromptEscScopePrompt)}}, nil
+	}
+	return env
 }
 
 // GoldenRoster returns the two-session fixture the App golden and behavioral

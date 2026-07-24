@@ -36,6 +36,19 @@ const (
 	// NeedsInput, i.e. ready for another prompt. It exists so the enum's
 	// wire values are stable when a later milestone defines "finished".
 	StatusFinished
+	// StatusIdle is a session AT REST that is not actively awaiting the user:
+	// a reloaded offline row, or a session just resumed from disk that has not
+	// been prompted since (so it has run no turn and holds no pending
+	// decision). It is deliberately distinct from StatusNeedsInput — merely
+	// browsing/opening a reloaded session must not label it "needs input" or
+	// move the overview's awaiting-input counter (which counts a session as
+	// awaiting only when it has really finished a turn or holds a pending
+	// request). The moment the session is prompted it derives StatusWorking
+	// and, once that turn settles with an empty queue, StatusNeedsInput —
+	// normal derivation resumes and this value is never seen again for it.
+	// Appended after StatusFinished so the existing wire values stay stable;
+	// the wire carries the String() form ("idle"), not the int.
+	StatusIdle
 )
 
 // String renders a SessionStatus for logs and debugging.
@@ -47,6 +60,8 @@ func (s SessionStatus) String() string {
 		return "needs-input"
 	case StatusFinished:
 		return "finished"
+	case StatusIdle:
+		return "idle"
 	default:
 		return "unknown"
 	}
@@ -83,6 +98,15 @@ type Session interface {
 	// call while a turn is in flight — the change takes effect on the next
 	// turn.
 	SetModel(model string) error
+	// SetEffort changes the reasoning effort this session uses for its next
+	// turn — the effort-axis parallel to SetModel. It rejects a level outside
+	// the unified vocabulary ([provider.ValidEffort]) and a non-empty level on
+	// a model the registry KNOWS cannot reason; "" clears back to the
+	// provider's default and is always accepted. Unlike SetModel it carries NO
+	// same-provider constraint (effort is provider-agnostic — each backend
+	// projects a level onto its own wire format). Safe to call while a turn is
+	// in flight — the change takes effect on the next turn.
+	SetEffort(effort string) error
 	// Close shuts the session down, releasing its broker and journal.
 	Close() error
 }
@@ -102,6 +126,7 @@ type SessionInfo struct {
 	Summary   string // M2: "" (reserved)
 	Status    SessionStatus
 	Model     string
+	Effort    string // reasoning effort: "", "low", "medium", or "high"
 	Cost      provider.Cost
 	Usage     provider.Usage
 	Pending   int // approvals; 0 in M2
@@ -115,6 +140,18 @@ type SessionInfo struct {
 	Queued      int
 	Live        bool // false for disk-only archived entries from List
 
+	// Archived reports that this session was archived — dropped from the
+	// overview roster while keeping its journal (architecture invariant #4). It
+	// is durable: [Supervisor.Archive] records it in the session's `.meta.json`
+	// sidecar (the SDK journal has no lifecycle entry type, so an emitted
+	// session.archived event does not survive a restart), and [Supervisor.List]
+	// reads it back on an offline row via [diskSessionInfo]. A LIVE row is never
+	// archived — Archive removes the session from the live roster — so this is
+	// always false for a Live entry. [Supervisor.OverviewRoster] filters archived
+	// rows out; [Supervisor.List] keeps them (carrying this flag) so `gofer ps
+	// --all` and the resume picker still see them.
+	Archived bool
+
 	// BinaryVersion is the gofer build version of the process actually running
 	// this session — under M6 process isolation, its worker's, which may differ
 	// from the router's after a daemon upgrade (design §6; the router's
@@ -123,6 +160,21 @@ type SessionInfo struct {
 	// empty, as does the in-process supervisor (there is no second binary to
 	// distinguish). Additive — a consumer that ignores it is unaffected.
 	BinaryVersion string
+
+	// ParentID is the id of the session that SPAWNED this one — "" for a root
+	// session, which every session predating subagents is. A subagent session is
+	// a real session with its own journal, cost and transcript; this link is what
+	// makes it a child rather than a sibling. It is gofer-native (the SDK has no
+	// session-parent concept) and durable: it is persisted beside the journal, so
+	// a disk-only entry from [Supervisor.List] carries it too.
+	ParentID string
+	// Agent is the session's agent type/identity (e.g. "go-developer"), the same
+	// value forwarded to [runner.Options.Agent] so its tool-call events carry the
+	// attribution field. "" is un-attributed. Independent of ParentID.
+	Agent string
+	// Depth is the session's depth in the subagent tree: 0 for a root session,
+	// parent+1 for a child, capped by [Config.MaxSubagentDepth].
+	Depth int
 
 	// Cwd is the working directory the session was created/resumed into.
 	// Live sessions carry it from their [managed] bookkeeping; a disk-only

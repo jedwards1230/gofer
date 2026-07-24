@@ -2,6 +2,8 @@ package supervisor_test
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -143,5 +145,80 @@ func TestReplyUnknownSession(t *testing.T) {
 	h := newHarness(t)
 	if err := h.sup.Reply("does-not-exist", event.PermissionReply{ID: "x", Verdict: event.VerdictAllow}); err == nil {
 		t.Fatal("Reply(unknown): want error, got nil")
+	}
+}
+
+// TestExplainPermissionWhilePending is the in-process (daemonless) half of
+// ctrl+e: while a request is outstanding the supervisor answers why it was
+// gated from the payload it retained beside the pending count, and — the part
+// that matters — answering leaves the request pending, so the reply that
+// follows still resolves the gate.
+func TestExplainPermissionWhilePending(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	info, err := h.sup.Create(ctx, "", supervisor.CreateOptions{Cwd: h.root, Model: "m"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	fs := h.session(info.ID)
+	fs.setPermReq("call-1")
+
+	if err := h.sup.Send(ctx, info.ID, "rm -rf /"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	fs.waitStarted(t)
+	waitForPending(t, h.sup, info.ID, 1)
+
+	rationale, err := h.sup.ExplainPermission(info.ID, "call-1")
+	if err != nil {
+		t.Fatalf("ExplainPermission: %v", err)
+	}
+	// The fake's guard reports `rule: ask` on a "bash" call (see helpers_test.go).
+	if !strings.Contains(rationale.Reason, "bash") {
+		t.Errorf("reason = %q, want it to name the gated tool", rationale.Reason)
+	}
+	if rationale.Policy != "ask" {
+		t.Errorf("policy = %q, want the matched rule label %q", rationale.Policy, "ask")
+	}
+	if len(rationale.Trace) != 1 || rationale.Trace[0] != "rule: ask" {
+		t.Errorf("trace = %v, want the guard's own entry verbatim", rationale.Trace)
+	}
+
+	// Read-only: a second explain still works, and the reply still lands.
+	if _, err := h.sup.ExplainPermission(info.ID, "call-1"); err != nil {
+		t.Fatalf("second ExplainPermission: %v", err)
+	}
+	if err := h.sup.Reply(info.ID, event.PermissionReply{ID: "call-1", Verdict: event.VerdictAllow}); err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	waitForStatus(t, h.sup, info.ID, supervisor.StatusNeedsInput)
+	waitForPending(t, h.sup, info.ID, 0)
+
+	// Once resolved, the retained payload is gone: explaining it reports "not
+	// pending" rather than a rationale for a decision already made.
+	if _, err := h.sup.ExplainPermission(info.ID, "call-1"); !errors.Is(err, supervisor.ErrNoPendingPermission) {
+		t.Errorf("ExplainPermission after resolve: err = %v, want ErrNoPendingPermission", err)
+	}
+}
+
+// TestExplainPermissionUnknownIDsAndSessions covers the two ways an explain
+// can miss: a session that is not live, and a call id that is not outstanding
+// on the session asked about (which is also what keeps one session's rationale
+// from leaking through another's id — each session retains only its own).
+func TestExplainPermissionUnknownIDsAndSessions(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	info, err := h.sup.Create(ctx, "", supervisor.CreateOptions{Cwd: h.root, Model: "m"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if _, err := h.sup.ExplainPermission("does-not-exist", "call-1"); !errors.Is(err, supervisor.ErrNotLive) {
+		t.Errorf("ExplainPermission(unknown session): err = %v, want ErrNotLive", err)
+	}
+	if _, err := h.sup.ExplainPermission(info.ID, "call-1"); !errors.Is(err, supervisor.ErrNoPendingPermission) {
+		t.Errorf("ExplainPermission(no pending request): err = %v, want ErrNoPendingPermission", err)
 	}
 }

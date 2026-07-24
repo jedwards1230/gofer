@@ -16,7 +16,7 @@ claude-sonnet-5 · ~/orchestration
 
 
 ────────────────────────────────────────────────────────────────────────────────
-Status  Config  Model  Usage  [Stats]
+Status  Config  Model  Thinking  Usage  [Stats]  Resume  Help
 ────────────────────────────────────────────────────────────────────────────────
 Sessions: 2
 Total tokens: 34842

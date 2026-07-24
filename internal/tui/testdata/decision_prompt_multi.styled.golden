@@ -1,0 +1,24 @@
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+<yellow>decision</yellow><muted> · </muted>2 questions
+<muted>←</muted>   <accent>▸</accent> <muted>□</muted> M4 slicing     <accent>✔</accent> <muted>Views v1 scope</muted>     <muted>□</muted> <muted>Submit</muted>   <muted>→</muted>
+
+How should the M4 milestone be sliced?
+
+<accent>▸</accent> 1  Renderer first, wiring after                   <muted>│</muted> <muted>context</muted>
+<muted>       goldens land early, so the frame is</muted>          <muted>│</muted> M4 is the TUI polish
+<muted>       reviewable before any plumbing moves</muted>         <muted>│</muted> milestone; whichever half
+  2  Wiring first, renderer after  <accent>(Recommended)</accent>    <muted>│</muted> lands first is what M5 has
+<muted>       unblocks the daemon path sooner, at the cost</muted> <muted>│</muted> to build on.
+<muted>       of an unreviewable frame</muted>                     <muted>│</muted>
+                                                    <muted>│</muted> <muted>reference</muted>
+  › Type something.                                 <muted>│</muted> docs/TUI.md#rendering
+  ↳ Chat about this                                 <muted>│</muted>
+                                                    <muted>│</muted> <muted>notes</muted>
+                                                    <muted>│</muted> leaning renderer-first,
+                                                    <muted>│</muted> ask again after the spike
+
+<muted>Enter to select · ↑/↓ to navigate · n to add notes · Tab to switch questions ·</muted>
+<muted>Esc to cancel</muted>

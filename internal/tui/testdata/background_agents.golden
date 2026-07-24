@@ -1,0 +1,24 @@
+○ Fan out two workers.
+
+● 2 background agents launched (↓ to manage)
+   └ wire the return path · go-developer
+     review the return path · go-reviewer
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+> ▏
+────────────────────────────────────────────────────────────────────────────────
