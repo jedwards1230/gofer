@@ -1,5 +1,4 @@
 
-
 ────────────────────────────────────────────────────────────────────────────────
 <yellow>bash command</yellow>
 
@@ -19,6 +18,7 @@ Why you're being asked
   asked.
 
 Do you want to proceed?
-  1. [a] Yes   2. [d] No   ·   [r] remember: off   ·   [tab] amend
+<accent>▸</accent> [a] Yes
+  [d] No
 
-<muted>esc cancel · ctrl+e explain · session 0192a1b2-c3d4-7e5f-8a90-000000000001</muted>
+<muted>enter/↑↓ select · [r] remember: off · [tab] amend · ctrl+e explain · esc cancel</muted>

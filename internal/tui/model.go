@@ -487,6 +487,29 @@ func (m Model) ToggleApprovalRemember() Model {
 	return m
 }
 
+// MoveApprovalCursor moves the focused answer row (Yes/No) by delta, CLAMPED to
+// the list rather than wrapping (see [stepChoiceCursor]), reallocating rather
+// than mutating in place (Model's copy-on-write discipline). A no-op when
+// nothing is pending. The a/d quick keys resolve without moving it — this is
+// only the ↑/↓ path (see App.handleApprovalKey).
+func (m Model) MoveApprovalCursor(delta int) Model {
+	if m.pending == nil {
+		return m
+	}
+	p := *m.pending
+	p.cursor = stepChoiceCursor(p.cursor, delta, approvalChoiceCount)
+	m.pending = &p
+	return m
+}
+
+// ApprovalAllowFocused reports whether the focused answer row is Yes (allow) —
+// what Enter resolves to. False when nothing is pending; the app root guards on
+// [Model.PendingApproval] before acting on it, so the value is only consulted
+// when a request is live.
+func (m Model) ApprovalAllowFocused() bool {
+	return m.pending != nil && m.pending.cursor == 0
+}
+
 // ApprovalExplaining reports whether a session/explain_permission call is in
 // flight for the pending request — the app root reads it so a second ctrl+e
 // while the first is still out is a no-op rather than a stacked call. False

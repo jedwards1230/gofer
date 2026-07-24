@@ -284,6 +284,39 @@ func TestDecisionMultiTabCycles(t *testing.T) {
 	}
 }
 
+// TestDecisionMultiArrowKeysSwitchQuestions is the ←/→ mutation check: the tab
+// strip draws end arrows, so left/right must move between question tabs (and
+// onto Submit) just as Tab/shift+tab do — a rendered affordance that did
+// nothing when pressed would be a lie. → walks forward through the questions
+// and onto Submit; ← walks back.
+func TestDecisionMultiArrowKeysSwitchQuestions(t *testing.T) {
+	_, a, req := openMultiDecision(t)
+	defer req.stillBlocked(t)
+
+	if got := a.sess.pendingDec.tab; got != 0 {
+		t.Fatalf("initial tab = %d; want the first question", got)
+	}
+
+	// → advances to the second question, then onto Submit.
+	a = pressDecision(t, a, tea.KeyPressMsg{Code: tea.KeyRight})
+	if got := a.sess.pendingDec.tab; got != 1 {
+		t.Fatalf("tab after one → = %d; want 1", got)
+	}
+	if got := a.render(); !strings.Contains(got, "Which views ship in v1?") {
+		t.Errorf("expected the second question rendered after →:\n%s", got)
+	}
+	a = pressDecision(t, a, tea.KeyPressMsg{Code: tea.KeyRight})
+	if !a.sess.pendingDec.onSubmitTab() {
+		t.Fatal("expected the second → to land on the Submit tab")
+	}
+
+	// ← walks back off Submit onto the last question.
+	a = pressDecision(t, a, tea.KeyPressMsg{Code: tea.KeyLeft})
+	if got := a.sess.pendingDec.tab; got != 1 {
+		t.Errorf("tab after ← off Submit = %d; want 1", got)
+	}
+}
+
 // TestDecisionMultiAnswersAccumulateThenSubmitOnce is the batch contract's
 // load-bearing test: answering on one tab does NOT send anything, answers
 // accumulate across tabs, and the Submit tab sends exactly ONE

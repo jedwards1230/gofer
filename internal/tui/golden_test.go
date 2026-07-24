@@ -435,7 +435,7 @@ func TestGoldenApprovalMultilineCommand(t *testing.T) {
 // TestGoldenApprovalTruncatedBody covers the row budget
 // (config.TUI.ApprovalBodyLineLimit, default 12): a command with more lines
 // than the cap renders the first cap-1 of them plus a muted "… +N more
-// lines", so the question and the action row can never be pushed off the
+// lines", so the question and the choice list can never be pushed off the
 // frame by a pasted script.
 func TestGoldenApprovalTruncatedBody(t *testing.T) {
 	lines := make([]string, 0, 20)
@@ -541,8 +541,8 @@ func TestGoldenStyledApproval(t *testing.T) {
 
 // TestGoldenApprovalPromptInline covers the same pending permission request
 // as TestGoldenApproval, named explicitly for the inline prompt: the
-// footer-commandeering block (tool·args, the question, the a/d/r action row,
-// and a dim esc/session footer), replacing the old centered-overlay modal.
+// footer-commandeering block (tool·args, the question, the vertical Yes/No
+// choice list, and a dim hint footer), replacing the old centered-overlay modal.
 func TestGoldenApprovalPromptInline(t *testing.T) {
 	renderPrompt(t, "approval_prompt_inline",
 		event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"cmd": "rm -rf /tmp/x"}, tui.GoldenTrace()),
@@ -558,7 +558,7 @@ func gatedCall() event.Event {
 // TestGoldenApprovalExplaining covers the in-flight state of ctrl+e: the
 // rationale header carries the muted "explaining…" marker while the
 // session/explain_permission call is out, and NOTHING else about the prompt
-// changes — the request is still pending, the action row still answerable.
+// changes — the request is still pending, the choice list still answerable.
 func TestGoldenApprovalExplaining(t *testing.T) {
 	m := ingestPrompt(gatedCall()).MarkApprovalExplaining()
 	got := testkit.Render(m, testkit.Width, testkit.Height)
@@ -567,8 +567,8 @@ func TestGoldenApprovalExplaining(t *testing.T) {
 	if !strings.Contains(got, "explaining") {
 		t.Errorf("in-flight prompt missing the explaining marker:\n%s", got)
 	}
-	if !strings.Contains(got, "1. [a] Yes   2. [d] No") {
-		t.Errorf("in-flight prompt lost its action row — an explain must not disarm the decision:\n%s", got)
+	if !strings.Contains(got, "[a] Yes") || !strings.Contains(got, "[d] No") {
+		t.Errorf("in-flight prompt lost its Yes/No choice list — an explain must not disarm the decision:\n%s", got)
 	}
 }
 
@@ -613,8 +613,9 @@ func TestGoldenApprovalCollapsed(t *testing.T) {
 		"No permission rule matched this `bash` call", // the opening paragraph
 		"… ctrl+e to explain",                         // where the rest went
 		"Do you want to proceed?",                     // the question
-		"1. [a] Yes   2. [d] No",                      // how to answer it
-		"esc cancel · ctrl+e explain · session ",      // the hint line
+		"[a] Yes",                                     // the Yes choice row
+		"[d] No",                                      // the No choice row
+		"[tab] amend · ctrl+e explain · esc cancel", // the hint line
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("collapsed prompt missing %q:\n%s", want, got)

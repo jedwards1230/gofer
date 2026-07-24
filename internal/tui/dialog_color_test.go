@@ -91,8 +91,8 @@ func TestColorApprovalDialogComposite(t *testing.T) {
 
 	// The prompt must survive compositing intact — the title, the command
 	// body, the rationale's section header and its policy line, the question,
-	// the action row, and the footer — not fragments scattered by a
-	// display-width bug.
+	// the vertical Yes/No choice list, and the footer hint — not fragments
+	// scattered by a display-width bug.
 	stripped := ansi.Strip(colored)
 	for _, want := range []string{
 		"bash command",
@@ -100,8 +100,9 @@ func TestColorApprovalDialogComposite(t *testing.T) {
 		"Why you're being asked",
 		"Policy: unmatched",
 		"Do you want to proceed?",
-		"1. [a] Yes   2. [d] No   ·   [r] remember: off",
-		"esc cancel · ctrl+e explain · session ",
+		"[a] Yes",
+		"[d] No",
+		"[r] remember: off · [tab] amend · ctrl+e explain · esc cancel",
 	} {
 		if !strings.Contains(stripped, want) {
 			t.Errorf("composited frame missing inline approval prompt content %q:\n%s", want, stripped)

@@ -22,18 +22,19 @@ import (
 // handleApprovalKey handles key presses while the peeked/attached session
 // has a pending approval (see [Model.HasPendingApproval]), capturing all
 // input until it resolves or is dismissed — [App.Update] routes here instead
-// of the per-screen handlers whenever that's true. Keymap: a/y allow, d/n
-// deny (both reply immediately and dismiss the prompt), r toggles remember,
-// tab opens the inline amend editor (see [App.beginAmend]), esc dismisses
-// the prompt without replying — the underlying request stays pending
-// server-side (e.g. a matching [event.PermissionResolved] from another
-// attached client, or a later re-attach to the same session, can still
-// surface or settle it).
+// of the per-screen handlers whenever that's true. Keymap: ↑/↓ move the focused
+// answer row and Enter takes it (the same vertical-choice-list model the
+// decision prompt uses), a/y allow, d/n deny (all of these reply immediately
+// and dismiss the prompt), r toggles remember, tab opens the inline amend
+// editor (see [App.beginAmend]), esc dismisses the prompt without replying —
+// the underlying request stays pending server-side (e.g. a matching
+// [event.PermissionResolved] from another attached client, or a later
+// re-attach to the same session, can still surface or settle it).
 //
-// 1/2 are aliases for allow/deny because the prompt itself renders the
-// choices numbered ("1. [a] Yes   2. [d] No" — see renderApprovalPrompt): a
-// rendered affordance that did nothing when pressed would be a lie, and
-// numbered answers are the reflex a confirm prompt trains.
+// The choice list renders [a]/[d] as each row's leader, so a/d/y/n are the
+// quick keys the prompt visibly advertises; 1/2 stay bound as un-advertised
+// aliases for allow/deny (the reflex the old numbered row trained), harmless
+// now that the row is a caret list rather than "1. … 2. …".
 //
 // ctrl+e is the one key here that answers nothing: it fetches the agent's own
 // gating rationale (see [App.explainApproval]) and leaves the request exactly
@@ -59,6 +60,17 @@ func (a App) handleApprovalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return a.handleAmendKey(key)
 	}
 	switch {
+	case key.Code == tea.KeyUp:
+		a.sess = a.sess.MoveApprovalCursor(-1)
+		return a, nil
+
+	case key.Code == tea.KeyDown:
+		a.sess = a.sess.MoveApprovalCursor(1)
+		return a, nil
+
+	case key.Code == tea.KeyEnter:
+		return a.resolveApproval(a.sess.ApprovalAllowFocused())
+
 	case key.Text == "a" || key.Text == "y" || key.Text == "1":
 		return a.resolveApproval(true)
 

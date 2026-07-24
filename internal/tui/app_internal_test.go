@@ -633,10 +633,80 @@ func TestAppApprovalDialogAllowSendsReply(t *testing.T) {
 	}
 }
 
-// TestAppApprovalDialogNumberKeysSendReply verifies the numbered choices the
-// prompt renders ("1. [a] Yes   2. [d] No") are real keys, not decoration:
-// '1' allows and '2' denies, each routed through Supervisor.Reply exactly
-// like its lettered alias.
+// TestAppApprovalDialogArrowEnterSelects is the vertical-choice-list mutation
+// check: the prompt opens focused on Yes, ↓ moves the caret to No, ↑ moves it
+// back, and Enter resolves whichever row is focused — so the arrow+enter path
+// answers the same request the a/d quick keys do. The render is checked at each
+// step so the caret actually tracks the cursor, not just the internal field.
+func TestAppApprovalDialogArrowEnterSelects(t *testing.T) {
+	sup := newInternalFakeSup(GoldenRoster())
+	a := attachForDialogTest(t, sup)
+	a = requestApproval(t, a, "perm-1")
+
+	// Opens on Yes.
+	if !a.sess.ApprovalAllowFocused() {
+		t.Fatal("prompt should open focused on Yes (allow)")
+	}
+	if !strings.Contains(a.render(), "▸ [a] Yes") {
+		t.Errorf("caret should sit on Yes at open:\n%s", a.render())
+	}
+
+	// ↓ moves the caret onto No; ↓ again clamps (does not wrap to Yes).
+	mdl, _ := a.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	a = mdl.(App)
+	mdl, _ = a.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	a = mdl.(App)
+	if a.sess.ApprovalAllowFocused() {
+		t.Error("after ↓ the focus should be on No, not Yes")
+	}
+	if !strings.Contains(a.render(), "▸ [d] No") {
+		t.Errorf("caret should sit on No after ↓:\n%s", a.render())
+	}
+
+	// Enter on the focused No resolves as a deny.
+	mdl, cmd := a.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	a = mdl.(App)
+	if a.sess.HasPendingApproval() {
+		t.Fatal("Enter should resolve and dismiss the prompt")
+	}
+	if cmd == nil {
+		t.Fatal("expected a Reply cmd after Enter")
+	}
+	cmd()
+	if len(sup.replies) != 1 {
+		t.Fatalf("sup.replies = %+v, want one entry", sup.replies)
+	}
+	if want := (replyCall{sessionID: a.sessID, id: "perm-1", allow: false, remember: false}); sup.replies[0] != want {
+		t.Errorf("sup.replies[0] = %+v, want the focused-No deny %+v", sup.replies[0], want)
+	}
+}
+
+// TestAppApprovalDialogEnterOnDefaultAllows pins the affirmative default: with
+// no arrow pressed the focus is Yes, so Enter resolves as an allow — the reflex
+// a confirm prompt trains, one arrow away from the deny.
+func TestAppApprovalDialogEnterOnDefaultAllows(t *testing.T) {
+	sup := newInternalFakeSup(GoldenRoster())
+	a := attachForDialogTest(t, sup)
+	a = requestApproval(t, a, "perm-1")
+
+	mdl, cmd := a.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	a = mdl.(App)
+	if a.sess.HasPendingApproval() {
+		t.Fatal("Enter should resolve and dismiss the prompt")
+	}
+	if cmd == nil {
+		t.Fatal("expected a Reply cmd after Enter")
+	}
+	cmd()
+	if len(sup.replies) != 1 || !sup.replies[0].allow {
+		t.Errorf("sup.replies = %+v, want a single allow from Enter-on-Yes", sup.replies)
+	}
+}
+
+// TestAppApprovalDialogNumberKeysSendReply verifies the un-advertised 1/2
+// aliases still resolve: '1' allows and '2' denies, each routed through
+// Supervisor.Reply exactly like its lettered alias, even though the vertical
+// choice list now advertises [a]/[d] rather than numbers.
 func TestAppApprovalDialogNumberKeysSendReply(t *testing.T) {
 	tests := []struct {
 		key       string
@@ -782,8 +852,8 @@ func TestAppApprovalExplainIsReadOnly(t *testing.T) {
 	if !strings.Contains(frame, "sandbox profile denies deletes") {
 		t.Errorf("frame does not show the agent's rationale:\n%s", frame)
 	}
-	if !strings.Contains(frame, "1. [a] Yes   2. [d] No") {
-		t.Errorf("frame lost the action row — the human still has to answer:\n%s", frame)
+	if !strings.Contains(frame, "[a] Yes") || !strings.Contains(frame, "[d] No") {
+		t.Errorf("frame lost the Yes/No choice list — the human still has to answer:\n%s", frame)
 	}
 
 	// ...and answering still works afterwards, which is the point of all of it.
@@ -893,21 +963,28 @@ func TestAppApprovalExplainStaleResultIgnored(t *testing.T) {
 func TestApprovalPromptFooterLockstep(t *testing.T) {
 	noFloor := 0
 	tests := []struct {
-		name string
-		env  CommandEnv
+		name   string
+		env    CommandEnv
+		height int // 0 = the golden frame height
 	}{
 		// The default floor collapses the prompt at the golden frame height...
 		{name: "default config", env: GoldenCommandEnv()},
-		// ...and an explicit "never collapse" draws the full block instead.
-		// Both must reach transcriptRegion, or it is measuring a prompt the
-		// render never drew.
-		{name: "never collapse", env: envWithTUI(config.TUI{ApprovalMinTranscriptRows: &noFloor})},
+		// ...and an explicit "never collapse" draws the full block instead — on
+		// a taller frame, because the full prompt now fills a 24-row frame on
+		// its own and would leave transcriptRegion no rows to report. Both must
+		// reach transcriptRegion, or it is measuring a prompt the render never
+		// drew.
+		{name: "never collapse", env: envWithTUI(config.TUI{ApprovalMinTranscriptRows: &noFloor}), height: 40},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			sup := newInternalFakeSup(GoldenRoster())
 			a := attachForDialogTestEnv(t, sup, tc.env)
+			if tc.height > 0 {
+				mdl, _ := a.Update(tea.WindowSizeMsg{Width: testkit.Width, Height: tc.height})
+				a = mdl.(App)
+			}
 			for i := range 30 {
 				mdl, _ := a.Update(sessEventMsg{
 					id: a.sessID,
@@ -1002,7 +1079,7 @@ func TestAppHeaderOnEveryScreen(t *testing.T) {
 	}
 
 	// The approval prompt is checked on a taller terminal: the prompt block
-	// (title, body, rationale, question, action row) is ~22 rows, so at the
+	// (title, body, rationale, question, choice list) is ~23 rows, so at the
 	// 24-row golden height it legitimately leaves no room for the header —
 	// header+transcript are ONE scrollable region above a pinned footer (see
 	// Model.view), and a footer that tall scrolls the header away exactly as a
