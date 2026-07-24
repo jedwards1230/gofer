@@ -39,6 +39,21 @@ Tape/scenario names follow one slug schema, `<area>-<view>[-<state>]`
   one continuous process, no restart — as `panel-model-daemon-refresh-before`
   / `-after`. The daemon is an in-process stub probe, so the scene performs no
   network IO.
+- `panel-thinking.tape` — the Thinking tab: the reasoning-effort adjuster
+  (`Runner.SetEffort`) with its level list and the active level marked.
+- `panel-usage.tape` — the Usage tab opened from the overview (no session
+  attached): the honest empty state.
+- `panel-stats.tape` — the Stats tab: the roster rollup (session-state counts
+  and totals) over the canned two-session roster.
+- `panel-help.tape` — the Help tab: the keymap + slash-command reference
+  rendered from the live command registry.
+- `panel-resume.tape` — the Resume tab: the session picker with a fetched
+  listing applied (an offline session plus a live one). Listing only, no
+  resume.
+
+Each of the five panel-thinking/usage/stats/help/resume tapes reproduces the
+exact state its `internal/tui/testdata/app_panel_<tab>.golden` pins, so the
+color frame and the Ascii golden agree.
 
 Run: `scripts/tui-vhs.sh [slug...]` (no arg = all tapes, e.g.
 `scripts/tui-vhs.sh panel-status panel-config`). It prebuilds

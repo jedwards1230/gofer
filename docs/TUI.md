@@ -1291,6 +1291,12 @@ human-eye check of real rendered frames, `vhs/` holds on-demand
   own defaults. `panel-model` / `panel-model-empty` — the Model tab's picker
   with authenticated providers (populated list, ✓ active mark) vs zero
   providers (empty state, "/login" hint).
+- `panel-thinking` / `panel-usage` / `panel-stats` / `panel-help` /
+  `panel-resume` — the remaining command-panel tabs: the reasoning-effort
+  adjuster, the Usage tab's empty state (no session attached), the Stats
+  roster rollup, the registry-driven Help reference, and the Resume picker
+  with a fetched listing. Each reproduces the state its
+  `app_panel_<tab>.golden` pins.
 
 Run `scripts/tui-vhs.sh [slug...]` (no arg = all tapes). It prebuilds
 `vhs/.bin/harness`, then renders each tape to `vhs/out/` (GIF of the whole turn

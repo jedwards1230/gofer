@@ -60,7 +60,7 @@ type step struct {
 // vocabulary is spelled out, so the two never drift apart. Slugs follow
 // `<area>-<view>[-<state>]`, kebab-case: transcript-* (the attach scenes),
 // roster-* (the overview scene), panel-* (the command-panel scenes).
-const scenarioHelp = "transcript-tool-call | transcript-approval | roster-overview | panel-status-overview | panel-status | panel-config | panel-model | panel-model-empty | panel-model-daemon-refresh"
+const scenarioHelp = "transcript-tool-call | transcript-approval | roster-overview | panel-status-overview | panel-status | panel-config | panel-model | panel-model-empty | panel-model-daemon-refresh | panel-thinking | panel-usage | panel-stats | panel-help | panel-resume"
 
 func main() {
 	scenario := flag.String("scenario", "transcript-tool-call", "scripted scene to play: "+scenarioHelp)
@@ -84,7 +84,11 @@ func main() {
 		script = approvalScene()
 	case "roster-overview":
 		model = overviewScene()
-	case "panel-status-overview", "panel-status", "panel-config", "panel-model":
+	case "panel-status-overview", "panel-status", "panel-config", "panel-model",
+		"panel-thinking", "panel-usage", "panel-stats", "panel-help", "panel-resume":
+		// Every command-panel tab shares one canned App; the tape types the slash
+		// command (and any navigation) that selects which tab is on screen. The
+		// panel-resume scene additionally reads [vhsSupervisor.ListSessions].
 		model = commandViewApp(cannedCommandEnv())
 	case "panel-model-empty":
 		model = commandViewApp(emptyCommandEnv())
@@ -331,8 +335,15 @@ func (s *vhsSupervisor) Create(context.Context, string, tui.CreateOptions) (tui.
 	return tui.SessionInfo{}, nil
 }
 
+// ListSessions backs the panel-resume scene's picker: a small frozen listing
+// (an offline session no longer in the roster, plus a live one) so /resume
+// renders a real list rather than an empty state. Updated times derive from
+// [fixedNow] so the resume snapshot is reproducible across renders.
 func (s *vhsSupervisor) ListSessions(context.Context) ([]tui.SessionRef, error) {
-	return nil, nil
+	return []tui.SessionRef{
+		{ID: "0192a0c4-off0-7000-8000-000000000009", Title: "an offline session", Cwd: "/home/j/elsewhere", Updated: fixedNow.Add(-time.Hour)},
+		{ID: "sess-1", Title: "wire the websocket ACP listener", Cwd: "~/orchestration", Updated: fixedNow.Add(-2 * time.Minute)},
+	}, nil
 }
 
 func (s *vhsSupervisor) Resume(context.Context, string, string) error { return nil }
