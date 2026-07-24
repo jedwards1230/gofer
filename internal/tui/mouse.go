@@ -133,7 +133,7 @@ func (a App) transcriptRegion() (top, bottom int, ok bool) {
 		if prompt := am.promptLines(a.width, fl.h); prompt != nil {
 			footerLen = len(prompt)
 		} else {
-			footerLen = len(fl.menuLines) + 3 // rule, input line, rule
+			footerLen = 1 + len(fl.menuLines) + 3 // spacer, menu, then rule/input/rule
 			if am.statusLine() != "" {
 				footerLen++
 			}

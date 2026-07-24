@@ -369,21 +369,37 @@ func (m Model) Ingest(e event.Event) Model {
 		m.items = append(m.items, item{kind: itemError, text: ev.Err, done: true})
 
 	case event.PermissionRequested:
-		// The inline badge is the permanent transcript record; m.pending is
-		// the transient interactive prompt state rendered beneath it (see
-		// View). A second request supersedes the first — last one shown wins;
-		// the superseded request stays pending server-side and its own
+		// m.pending is the transient interactive prompt state rendered beneath the
+		// transcript (see View). A second request supersedes the first — last one
+		// shown wins; the superseded request stays pending server-side and its own
 		// PermissionResolved simply finds m.pending pointed elsewhere below.
-		// badgeIdx records the badge's transcript index so transcriptLines can
-		// suppress it while the prompt block is showing (the prompt already
-		// repeats the tool + args line).
-		// agent/trace are the request's provenance: the agent that issued the
-		// gated call (correlated through toolAgents — ev.ID is the tool call
-		// id) and the guard's own decision trace, which the prompt renders as
-		// the rationale. A miss in toolAgents yields "", the un-attributed
-		// rendering.
-		idx := len(m.items)
-		m.items = append(m.items, item{kind: itemApproval, text: ev.Tool, done: true})
+		//
+		// The gated call already has its OWN transcript block: the SDK emits
+		// ToolCallStarted while the provider streams the tool_use, BEFORE the loop
+		// gates the call (loop.runTools runs after the turn's stream drains), so
+		// m.toolIndex still holds this id here — ToolCallFinished, which deletes it,
+		// cannot have fired on a call still awaiting approval. Point badgeIdx at
+		// that existing tool item and append NOTHING: transcriptLines suppresses
+		// badgeIdx while the prompt shows the tool + args, then the SAME item fills
+		// in on ToolCallFinished (args/output/exit). One call, one item.
+		//
+		// Appending a separate itemApproval badge here instead — the pre-fix shape —
+		// left the running tool block AND the badge both alive past the resolve, so
+		// an allowed bash call rendered twice: the real `● bash(args)` block with
+		// its output beside an empty `● bash` bullet, one stray bullet accumulating
+		// per call. The badge only survives now as the fallback for a request with
+		// no matching tool block (none seen, or a future non-tool gate), where it is
+		// the sole transcript record of the gated call.
+		//
+		// agent/trace are the request's provenance: the agent that issued the gated
+		// call (correlated through toolAgents — ev.ID is the tool call id) and the
+		// guard's own decision trace, which the prompt renders as the rationale. A
+		// miss in toolAgents yields "", the un-attributed rendering.
+		badgeIdx, ok := m.toolIndex[ev.ID]
+		if !ok {
+			badgeIdx = len(m.items)
+			m.items = append(m.items, item{kind: itemApproval, text: ev.Tool, done: true})
+		}
 		m.pending = &pendingApproval{
 			id:       ev.ID,
 			tool:     ev.Tool,
@@ -391,7 +407,7 @@ func (m Model) Ingest(e event.Event) Model {
 			session:  ev.SessionID(),
 			agent:    m.toolAgents[ev.ID],
 			trace:    ev.Trace,
-			badgeIdx: idx,
+			badgeIdx: badgeIdx,
 		}
 
 	case event.PermissionResolved:
@@ -1021,6 +1037,39 @@ func summarizeToolInput(compact string) string {
 	return compact
 }
 
+// summarizeAskUser renders the ask_user tool's questions payload as a concise
+// header summary — the first question's title (or its text when it has no
+// title), or "N questions" for a batch — so the transcript block reads
+// `● ask_user(Choose a task)` instead of dumping the whole
+// `{"questions":[{"title":…,"options":[…]}]}` blob summarizeToolInput would
+// fall through to for this non-command-shaped input. The selected answer stays
+// in the block body (the tool's own result — see internal/decision.formatAnswers).
+// An unparseable or question-less payload yields "" (the bare `● ask_user`
+// header), never the raw JSON. Keyed off title/question, whose single-word keys
+// read identically whether the model sent the tool's snake_case schema or a
+// camelCase re-encoding.
+func summarizeAskUser(compact string) string {
+	if compact == "" || compact == "{}" {
+		return ""
+	}
+	var in struct {
+		Questions []struct {
+			Title    string `json:"title"`
+			Question string `json:"question"`
+		} `json:"questions"`
+	}
+	if err := json.Unmarshal([]byte(compact), &in); err != nil || len(in.Questions) == 0 {
+		return ""
+	}
+	if len(in.Questions) > 1 {
+		return plural(len(in.Questions), "question")
+	}
+	if q := in.Questions[0]; q.Title != "" {
+		return q.Title
+	}
+	return in.Questions[0].Question
+}
+
 // TypeRune inserts r into the input buffer at the cursor.
 func (m Model) TypeRune(r rune) Model {
 	m.input = m.input.InsertRune(r)
@@ -1238,6 +1287,16 @@ func (m Model) view(width, height int, menuLines, headerLines []string, scroll i
 		// shell-mode rule): shell mode is now signalled by the sigil leading the
 		// input line itself (see inputLine), not by a rule label.
 		rule := strings.Repeat("─", width)
+		// One blank spacer row between the transcript and the input block (the
+		// menu, when open, plus the framing rules and input line). Counted in the
+		// footer so it is pinned directly above that block: when the transcript
+		// overflows and tails flush to the frame, the newest message no longer
+		// butts against the top rule — it keeps exactly one row of breathing space.
+		// When the transcript is short, this row is indistinguishable from the
+		// blank filler pad() already lays down beneath it, so those frames render
+		// unchanged. Not added to the approval/decision prompt footer, which owns
+		// the whole footer and carries its own blank padding.
+		footer = append(footer, "")
 		footer = append(footer, menuLines...)
 		footer = append(footer, rule, truncate(m.inputLine(), width), rule)
 		// The status line carries only usage/cost now, and only once a turn has
@@ -1594,7 +1653,14 @@ func (m Model) renderToolLines(it item) []string {
 	}
 
 	header := it.toolName
-	if summary := summarizeToolInput(it.toolInput); summary != "" {
+	summary := summarizeToolInput(it.toolInput)
+	if it.toolName == decision.ToolName {
+		// ask_user's input is a questions payload, not a command — render its
+		// question(s) cleanly instead of the raw JSON blob summarizeToolInput
+		// would otherwise fall through to (see summarizeAskUser).
+		summary = summarizeAskUser(it.toolInput)
+	}
+	if summary != "" {
 		header = fmt.Sprintf("%s(%s)", it.toolName, summary)
 	}
 	header = attributeHeader(header, it.toolAgent)

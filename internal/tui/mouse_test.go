@@ -588,7 +588,7 @@ func buildOverflowingMixedTranscript(t *testing.T) App {
 	// marker/gap/continuation line counts above change.
 	naturalHeight := headerLines + len(a.sess.transcriptLines(a.width))
 	avail := naturalHeight - headerLines // trims exactly the identity header
-	const footerLen = 3                  // rule, input line, rule — no status/menu here
+	const footerLen = 4                  // spacer, then rule, input line, rule — no status/menu here
 	height := avail + footerLen + layout.TopPadding
 
 	mdl, _ = a.Update(tea.WindowSizeMsg{Width: testkit.Width, Height: height})
