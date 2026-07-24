@@ -525,6 +525,14 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 	// an unreadable journal leaves the slug fallback, exactly as before. Read-only.
 	if entries, rerr := session.ReadEntries(sess.JournalPath()); rerr == nil {
 		m.seedTitle(firstUserSnippet(entries))
+		// Also restore the last-activity time from the journal's last entry — the
+		// same source diskSessionInfo uses for an offline row's Updated — so a
+		// resumed session keeps the age of its last real conversation event instead
+		// of reading "now" just because it was reopened. Seeded before the info
+		// snapshot below so this resume's own SessionInfo already carries it.
+		if n := len(entries); n > 0 {
+			m.seedUpdated(entries[n-1].Time)
+		}
 	}
 	info := m.info()
 	s.notify()

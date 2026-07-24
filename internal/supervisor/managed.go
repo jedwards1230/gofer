@@ -268,6 +268,31 @@ func (m *managed) seedTitle(title string) {
 	m.mu.Unlock()
 }
 
+// seedUpdated restores a resumed session's last-activity time from its journal's
+// last entry, so the overview age reflects the last real conversation event
+// rather than the moment the session was reopened. newManaged seeds updated to
+// the resume time as a fallback; this overwrites it with the journaled truth, so
+// merely resuming/attaching to a row no longer flips its age to "now" — it keeps
+// the same last-activity the offline row showed (see diskSessionInfo, which
+// derives Updated from the same last entry's Time).
+//
+// It is a no-op for a zero time (an unreadable or empty journal — the resume-time
+// fallback then stands, matching the offline row that reports a zero Updated),
+// and, like seedTitle, only touches a still-resumed session: once the first
+// prompt clears resumed in enqueue, the session has done real work and the pump
+// owns updated from there on, so this must not drag it back to a stale journal
+// time. Locked like every other m.updated access.
+func (m *managed) seedUpdated(t time.Time) {
+	if t.IsZero() {
+		return
+	}
+	m.mu.Lock()
+	if m.resumed {
+		m.updated = t
+	}
+	m.mu.Unlock()
+}
+
 // enqueue appends text to the pump's queue and wakes it. It captures the
 // session title from the first prompt that yields a non-empty snippet, set once
 // and never overwritten thereafter, and — on that first capture only — emits a
