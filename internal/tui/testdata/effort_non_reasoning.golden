@@ -1,0 +1,5 @@
+claude-no-think-1 doesn't support reasoning effort — switch with /model.
+▸ ✓ off — no explicit level; the provider decides
+    low — least reasoning, fastest turns
+    medium — balanced reasoning
+    high — most reasoning, slowest and priciest turns

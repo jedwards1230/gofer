@@ -111,14 +111,30 @@ func (a App) transcriptRegion() (top, bottom int, ok bool) {
 		// rows are transcript (as opposed to header, or blank fill below a
 		// short conversation) rather than any fixed offset.
 		header := headerLines // attachHeaderLines always pads to this many rows
-		transcript := len(a.sess.transcriptLines(a.width))
+		// Measure through the SAME fully composed model App.render draws from
+		// (background-agents + shell-run blocks appended to the transcript), not
+		// the bare a.sess: those tail blocks are real transcript rows, so
+		// counting a.sess alone here would place the selectable region above
+		// them and a drag over a `$ ls` shell block (or a background-agents
+		// line) would select nothing. See [App.attachModel].
+		am := a.attachModel()
+		transcript := len(am.transcriptLines(a.width))
 
+		// promptLines takes the same width AND height Model.view hands it
+		// (fl.h), through the same composed model: the prompt collapses its
+		// rationale when the frame is short, so measuring it at a different
+		// height — or with a different configured floor — would give a footer
+		// length the render never produced, and every highlight below it would
+		// be off by the difference. (The shell/background blocks are transcript
+		// items, not footer, so the footer length is unchanged by them —
+		// measuring through the same model just keeps the two call sites reading
+		// one source.)
 		var footerLen int
-		if prompt := a.sess.promptLines(a.width); prompt != nil {
+		if prompt := am.promptLines(a.width, fl.h); prompt != nil {
 			footerLen = len(prompt)
 		} else {
-			footerLen = len(fl.menuLines) + 3 // rule, input line, rule
-			if a.sess.statusLine() != "" {
+			footerLen = 1 + len(fl.menuLines) + 3 // spacer, menu, then rule/input/rule
+			if am.statusLine() != "" {
 				footerLen++
 			}
 		}

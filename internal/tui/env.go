@@ -14,6 +14,8 @@ import (
 	"context"
 	"time"
 
+	"github.com/jedwards1230/agent-sdk-go/provider"
+
 	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/modelcatalog"
 )
@@ -96,6 +98,24 @@ type CommandEnv struct {
 	// valid and leaves the picker on the floor it seeded itself with — never
 	// an empty list.
 	Models func(ctx context.Context, providerID string) ([]modelcatalog.Model, error)
+
+	// ModelInfo answers the SDK registry's per-model metadata, wrapping
+	// [provider.Lookup]. nil — the zero CommandEnv, and EVERY production
+	// wiring, since cmd/gofer has nothing to add to a compiled-in table — means
+	// exactly provider.Lookup; see [effortCapable], the only reader.
+	//
+	// It is a seam rather than a direct call for one reason: every model in the
+	// SDK's compiled-in registry today carries Reasoning:true, so the Thinking
+	// tab's refusal branch is unreachable from any test that can only name real
+	// ids, and an unreachable branch is an untested one that rots the first
+	// time the registry gains a non-reasoning model. It lives HERE, on the
+	// env struct each view already carries, rather than in a package-level var
+	// a test swaps: a mutable global is a data race waiting for the first
+	// t.Parallel() in this package.
+	//
+	// Unlike every other closure above it performs no IO at all — a map read —
+	// so it is safe on the render path.
+	ModelInfo func(id string) (provider.ModelInfo, bool)
 }
 
 // AuthKind is a credential's kind, mirroring the SDK auth package's CredKind

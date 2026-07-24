@@ -19,14 +19,18 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/jedwards1230/agent-sdk-go/acp"
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
+	"github.com/jedwards1230/gofer/internal/config"
+	"github.com/jedwards1230/gofer/internal/decision"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
 
@@ -41,7 +45,32 @@ const (
 	itemError
 	itemApproval
 	itemApprovalResolved
+	// itemBackgroundAgents is the block naming the subagent sessions this
+	// session spawned. Unlike every kind above it, no event produces it: a
+	// subagent is a separate session with its own journal and event stream, so
+	// the children are a ROSTER fact the app composes onto a render-local copy
+	// of the model (see [Model.WithBackgroundAgents]), never an ingested one.
+	itemBackgroundAgents
+	// itemShellRun is one `!` / `!!` shell escape the operator ran (shell.go).
+	// Like itemBackgroundAgents it is composed onto a render-local copy of the
+	// model, never ingested: a run is App state, and an unconsumed one is
+	// transient — it stops rendering the moment [App.composePrompt] folds it
+	// into a prompt (see [Model.WithShellRuns]).
+	itemShellRun
+	// itemThinking is the transient "a turn is in flight" indicator at the
+	// transcript tail. Like the two above it is composed onto a render-local copy
+	// ([Model.WithThinking]), never ingested — it is derived from [Model.turnActive]
+	// and vanishes the instant the turn finishes, so it never belongs to the
+	// durable item list or the exit-flushed transcript.
+	itemThinking
 )
+
+// spawnedAgent is one child session named by an [itemBackgroundAgents] block:
+// the name to show it under and the agent identity it runs as.
+type spawnedAgent struct {
+	name  string
+	agent string
+}
 
 // item is one entry in the transcript. Tool-only fields are zero on every
 // other kind.
@@ -55,9 +84,25 @@ type item struct {
 	toolResult string
 	toolErr    bool
 
+	// toolAgent is itemTool-only: the agent id that ISSUED the call, carried by
+	// event.ToolCallStarted.Agent (SDK v0.17.0) and stamped by the supervisor
+	// from CreateOptions.Agent. "" — the whole single-agent world, and any
+	// pre-v0.17.0 daemon — renders the un-attributed block byte-for-byte as
+	// before (see [Model.renderToolLines]).
+	toolAgent string
+
+	// spawned is itemBackgroundAgents-only: the child sessions this session
+	// fanned out to, in roster order.
+	spawned []spawnedAgent
+
 	// approvalVerdict is itemApprovalResolved-only: the resolved
 	// event.Verdict ("allow"/"deny").
 	approvalVerdict string
+
+	// shell is itemShellRun-only: the `!` / `!!` run this block renders. Its
+	// inContext flag drives the block's disposition LABEL only — what actually
+	// reaches the model is [App.composePrompt]'s call, never this copy.
+	shell shellRun
 }
 
 // Model is gofer's minimal attach surface. It is immutable from the
@@ -70,6 +115,11 @@ type item struct {
 type Model struct {
 	theme theme.Theme
 
+	// md renders a settled assistant message's markdown (markdown.go). It is a
+	// pointer so the memo it holds survives Model's copy-on-write recopying —
+	// every copy shares the one renderer created in New.
+	md *markdownRenderer
+
 	items []item
 
 	// openText/openReasoning index into items for the message currently
@@ -80,6 +130,36 @@ type Model struct {
 
 	// toolIndex maps an in-flight tool call's ID to its item index.
 	toolIndex map[string]int
+
+	// toolAgents maps an in-flight tool call's ID to the originating agent id
+	// its event carried (event.ToolCallStarted.Agent), for the approval prompt
+	// to attribute a gated call to the subagent that issued it. The correlation
+	// is by tool call id because event.PermissionRequested.ID *is* the tool call
+	// id (the SDK's loop.awaitApproval publishes NewPermissionRequested with
+	// call.ID), and tool.call.started is emitted while the model streams —
+	// before the gate — so the entry is always already recorded when the request
+	// arrives. Un-attributed calls are simply absent, and a lookup miss yields
+	// "" (the un-attributed rendering), never a placeholder.
+	toolAgents map[string]string
+
+	// approvalBodyLines is the resolved tui.approval_body_lines row cap the
+	// approval prompt's body honors, or 0 for "use the config default" — the
+	// zero value a Model built by [New] carries, so every caller that doesn't
+	// plumb config (every golden test, FullTranscript) renders the default. The
+	// App sets it per render off its always-current config read (see
+	// App.render).
+	approvalBodyLines int
+
+	// approvalMinTranscriptRows is the resolved tui.approval_min_transcript_rows
+	// floor the approval prompt collapses against, or -1 for "use the config
+	// default". It is -1 rather than 0 for the zero value's sake: 0 is a
+	// MEANINGFUL setting here ("never collapse", see
+	// [config.TUI.ApprovalMinTranscriptRowFloor]), so it cannot double as the
+	// unset sentinel the way approvalBodyLines' 0 does. [New] sets it; the App
+	// overwrites it per render off its always-current config read. A Model
+	// built as a zero value (a struct literal in a test) reads 0 and simply
+	// never collapses, which is the pre-collapse behavior.
+	approvalMinTranscriptRows int
 
 	// pending is the session's current unresolved permission request, if any
 	// (nil = none) — the backing state for the interactive inline approval
@@ -92,6 +172,18 @@ type Model struct {
 	// reallocates and repoints.
 	pending *pendingApproval
 
+	// pendingDec is the session's current unresolved structured-decision
+	// request, if any (nil = none) — the backing state for the inline decision
+	// prompt (decision.go). It is `pending`'s sibling in every respect that
+	// matters here: transient client-side state, not a transcript item, and
+	// while set it commandeers the whole footer the same way. It arrives on a
+	// SEPARATE stream ([Model.IngestDecision], not [Model.Ingest]) because the
+	// SDK's Event union carries no decision kind — see internal/decision's
+	// package doc. An approval outranks it when both are somehow pending (see
+	// promptLines): a permission gate blocks a tool call already in flight,
+	// which is the more urgent of the two.
+	pendingDec *pendingDecision
+
 	usage *provider.Usage
 	cost  *provider.Cost
 
@@ -101,15 +193,41 @@ type Model struct {
 
 	submitted    string
 	hasSubmitted bool
+
+	// pendingEchoFolds is the FIFO queue of model-facing shell folds
+	// ([shellRun.contextBlock] output) that [App.composePrompt] submitted and
+	// whose user-message echo has not yet arrived. When a MessageFinished{User}
+	// echo begins with the head fold, that prefix is stripped from the displayed
+	// message (the shell runs already render as sigil blocks, committed by
+	// [Model.CommitShellRuns] at submit time) and the head is popped — so the
+	// `$ cmd` fold the MODEL reads is never shown on screen, only the `!` sigil
+	// block. A byte-exact prefix match, not parsing: on any miss it degrades to
+	// today's behavior (the echo renders verbatim) rather than guessing. Empty on
+	// resume — a session attached mid-conversation has no record of past folds, so
+	// historical `$` echoes render as-is (see docs/TUI.md).
+	pendingEchoFolds []string
+
+	// turnActive reports whether a turn is in flight — the agent is generating a
+	// response. Set true on [event.TurnStarted], false on [event.TurnFinished]
+	// (and defensively on [event.SessionError], which ends the turn's work). It
+	// is the backing state for the transcript's thinking indicator
+	// ([Model.WithThinking]); the broker retains TurnStarted as must-deliver, so
+	// attaching mid-turn replays it and the indicator shows correctly. A
+	// zero-value Model (every golden calling View directly) is idle, so no
+	// indicator renders and no existing golden churns.
+	turnActive bool
 }
 
 // New returns an empty Model rendering through th.
 func New(th theme.Theme) Model {
 	return Model{
-		theme:         th,
-		openText:      -1,
-		openReasoning: -1,
-		toolIndex:     map[string]int{},
+		theme:                     th,
+		md:                        newMarkdownRenderer(th.Profile),
+		openText:                  -1,
+		openReasoning:             -1,
+		toolIndex:                 map[string]int{},
+		toolAgents:                map[string]string{},
+		approvalMinTranscriptRows: -1, // "use the config default" — see the field doc
 	}
 }
 
@@ -124,9 +242,25 @@ func (m Model) Ingest(e event.Event) Model {
 		toolIndex[k] = v
 	}
 	m.toolIndex = toolIndex
+	toolAgents := make(map[string]string, len(m.toolAgents))
+	for k, v := range m.toolAgents {
+		toolAgents[k] = v
+	}
+	m.toolAgents = toolAgents
+	// Clone the fold queue up front, alongside items/maps: Model is value-copied
+	// per frame, so the MessageFinished{User} case below reslicing this to pop the
+	// head must not write through to a prior Model's shared backing array. Same
+	// nil-when-empty idiom as m.items above.
+	m.pendingEchoFolds = append([]string(nil), m.pendingEchoFolds...)
 
 	switch ev := e.(type) {
+	case event.TurnStarted:
+		// A turn is now in flight — the agent is generating. Drives the thinking
+		// indicator ([Model.WithThinking]); no transcript item, just the flag.
+		m.turnActive = true
+
 	case event.TurnFinished:
+		m.turnActive = false
 		usage := ev.Usage
 		m.usage = &usage
 		m.cost = ev.Cost
@@ -157,7 +291,23 @@ func (m Model) Ingest(e event.Event) Model {
 
 	case event.MessageFinished:
 		if ev.MessageKind == event.MessageUser {
-			m.items = append(m.items, item{kind: itemUser, text: ev.Content, done: true})
+			// Strip the model-facing shell fold from the echo: a reply-now `!` run
+			// (or a `!`+typed submit) reaches the model as `$ cmd\n<output>\n\n` +
+			// the typed text, and the daemon echoes that verbatim. The shell runs
+			// already render as sigil blocks (CommitShellRuns at submit); showing
+			// the `$` fold here too would duplicate them in the model's format. A
+			// byte-exact prefix match against the head pending fold — never
+			// parsing `$`, so a miss just renders verbatim (today's behavior).
+			content := ev.Content
+			if len(m.pendingEchoFolds) > 0 && strings.HasPrefix(content, m.pendingEchoFolds[0]) {
+				content = strings.TrimPrefix(content, m.pendingEchoFolds[0])
+				m.pendingEchoFolds = m.pendingEchoFolds[1:] // safe: the queue was cloned at the top of Ingest
+			}
+			// A pure `!` turn (no typed text) strips to nothing: the sigil block is
+			// the whole user turn, so add no empty user message.
+			if content != "" {
+				m.items = append(m.items, item{kind: itemUser, text: content, done: true})
+			}
 			break
 		}
 		if idx, ok := m.openIndex(ev.MessageKind); ok {
@@ -172,8 +322,17 @@ func (m Model) Ingest(e event.Event) Model {
 			kind:      itemTool,
 			toolName:  ev.Name,
 			toolInput: compactJSON(ev.Input),
+			// The attribution rides the ITEM, not just the per-call toolAgents
+			// map below: the map is dropped on ToolCallFinished (it exists to
+			// correlate a gated call to its approval prompt, a window that closes
+			// when the call runs), while the transcript block keeps naming its
+			// source for as long as the transcript exists.
+			toolAgent: ev.Agent,
 		})
 		m.toolIndex[ev.ID] = idx
+		if ev.Agent != "" {
+			m.toolAgents[ev.ID] = ev.Agent
+		}
 
 	case event.ToolCallDelta:
 		// ToolCallDelta carries a fragment of the streaming INPUT (partial
@@ -192,23 +351,64 @@ func (m Model) Ingest(e event.Event) Model {
 			m.items[idx].toolErr = ev.IsError
 			m.items[idx].done = true
 		}
+		// The call is over: both per-call maps drop it in the same place, so an
+		// attribution lives exactly as long as the item index it is keyed
+		// alongside. The PermissionRequested window has necessarily closed by
+		// now — the guard gates a call BEFORE it runs, so a finished call can
+		// no longer be awaiting approval — which is also why ToolCallFinished
+		// deliberately does NOT record ev.Agent: an entry written here would be
+		// deleted on the next line and could never be read.
 		delete(m.toolIndex, ev.ID)
+		delete(m.toolAgents, ev.ID)
 
 	case event.SessionError:
+		// A turn that errors is no longer working: clear the thinking indicator
+		// so it can't stick "working…" on after a failure that emits no
+		// TurnFinished.
+		m.turnActive = false
 		m.items = append(m.items, item{kind: itemError, text: ev.Err, done: true})
 
 	case event.PermissionRequested:
-		// The inline badge is the permanent transcript record; m.pending is
-		// the transient interactive prompt state rendered beneath it (see
-		// View). A second request supersedes the first — last one shown wins;
-		// the superseded request stays pending server-side and its own
+		// m.pending is the transient interactive prompt state rendered beneath the
+		// transcript (see View). A second request supersedes the first — last one
+		// shown wins; the superseded request stays pending server-side and its own
 		// PermissionResolved simply finds m.pending pointed elsewhere below.
-		// badgeIdx records the badge's transcript index so transcriptLines can
-		// suppress it while the prompt block is showing (the prompt already
-		// repeats the tool + args line).
-		idx := len(m.items)
-		m.items = append(m.items, item{kind: itemApproval, text: ev.Tool, done: true})
-		m.pending = &pendingApproval{id: ev.ID, tool: ev.Tool, spec: ev.Spec, session: ev.SessionID(), badgeIdx: idx}
+		//
+		// The gated call already has its OWN transcript block: the SDK emits
+		// ToolCallStarted while the provider streams the tool_use, BEFORE the loop
+		// gates the call (loop.runTools runs after the turn's stream drains), so
+		// m.toolIndex still holds this id here — ToolCallFinished, which deletes it,
+		// cannot have fired on a call still awaiting approval. Point badgeIdx at
+		// that existing tool item and append NOTHING: transcriptLines suppresses
+		// badgeIdx while the prompt shows the tool + args, then the SAME item fills
+		// in on ToolCallFinished (args/output/exit). One call, one item.
+		//
+		// Appending a separate itemApproval badge here instead — the pre-fix shape —
+		// left the running tool block AND the badge both alive past the resolve, so
+		// an allowed bash call rendered twice: the real `● bash(args)` block with
+		// its output beside an empty `● bash` bullet, one stray bullet accumulating
+		// per call. The badge only survives now as the fallback for a request with
+		// no matching tool block (none seen, or a future non-tool gate), where it is
+		// the sole transcript record of the gated call.
+		//
+		// agent/trace are the request's provenance: the agent that issued the gated
+		// call (correlated through toolAgents — ev.ID is the tool call id) and the
+		// guard's own decision trace, which the prompt renders as the rationale. A
+		// miss in toolAgents yields "", the un-attributed rendering.
+		badgeIdx, ok := m.toolIndex[ev.ID]
+		if !ok {
+			badgeIdx = len(m.items)
+			m.items = append(m.items, item{kind: itemApproval, text: ev.Tool, done: true})
+		}
+		m.pending = &pendingApproval{
+			id:       ev.ID,
+			tool:     ev.Tool,
+			spec:     ev.Spec,
+			session:  ev.SessionID(),
+			agent:    m.toolAgents[ev.ID],
+			trace:    ev.Trace,
+			badgeIdx: badgeIdx,
+		}
 
 	case event.PermissionResolved:
 		// A routine allow is the expected outcome, and its transcript line is
@@ -287,12 +487,541 @@ func (m Model) ToggleApprovalRemember() Model {
 	return m
 }
 
+// MoveApprovalCursor moves the focused answer row (Yes/No) by delta, CLAMPED to
+// the list rather than wrapping (see [stepChoiceCursor]), reallocating rather
+// than mutating in place (Model's copy-on-write discipline). A no-op when
+// nothing is pending. The a/d quick keys resolve without moving it — this is
+// only the ↑/↓ path (see App.handleApprovalKey).
+func (m Model) MoveApprovalCursor(delta int) Model {
+	if m.pending == nil {
+		return m
+	}
+	p := *m.pending
+	p.cursor = stepChoiceCursor(p.cursor, delta, approvalChoiceCount)
+	m.pending = &p
+	return m
+}
+
+// ApprovalAllowFocused reports whether the focused answer row is Yes (allow) —
+// what Enter resolves to. False when nothing is pending; the app root guards on
+// [Model.PendingApproval] before acting on it, so the value is only consulted
+// when a request is live.
+func (m Model) ApprovalAllowFocused() bool {
+	return m.pending != nil && m.pending.cursor == 0
+}
+
+// ApprovalExplaining reports whether a session/explain_permission call is in
+// flight for the pending request — the app root reads it so a second ctrl+e
+// while the first is still out is a no-op rather than a stacked call. False
+// when nothing is pending.
+func (m Model) ApprovalExplaining() bool {
+	return m.pending != nil && m.pending.explaining
+}
+
+// MarkApprovalExplaining records that an explain is in flight for the pending
+// request, reallocating rather than mutating in place (Model's copy-on-write
+// discipline). A no-op when nothing is pending.
+//
+// It does NOT touch the request itself: an explain is read-only, so the prompt
+// stays open and answerable while it runs, and the a/d/r/esc keys keep
+// working exactly as they did (see [App.explainApproval]).
+func (m Model) MarkApprovalExplaining() Model {
+	if m.pending == nil {
+		return m
+	}
+	p := *m.pending
+	p.explaining = true
+	m.pending = &p
+	return m
+}
+
+// SetApprovalRationale records the authoritative rationale an explain returned
+// and clears the in-flight marker, reallocating rather than mutating in place.
+// A no-op when nothing is pending. The pending request is untouched — the
+// human still answers it.
+func (m Model) SetApprovalRationale(r acp.PermissionRationale) Model {
+	if m.pending == nil {
+		return m
+	}
+	p := *m.pending
+	p.explaining = false
+	p.rationale = &r
+	m.pending = &p
+	return m
+}
+
+// ClearApprovalExplaining drops the in-flight marker WITHOUT recording a
+// rationale — the failed-explain path. Whatever rationale was on screen (the
+// local derivation, or an earlier successful answer) stays, so a failed
+// explain costs the user nothing but the status-line note the app root sets.
+func (m Model) ClearApprovalExplaining() Model {
+	if m.pending == nil {
+		return m
+	}
+	p := *m.pending
+	p.explaining = false
+	m.pending = &p
+	return m
+}
+
+// WithApprovalBodyLines sets the row cap the inline approval prompt's body
+// honors, reallocating rather than mutating in place (Model's copy-on-write
+// discipline). n <= 0 means "the config default" — see [Model.approvalBodyLimit].
+// [App.render] calls this with its always-current tui.approval_body_lines
+// read; a Model nobody plumbs config into keeps the default.
+func (m Model) WithApprovalBodyLines(n int) Model {
+	m.approvalBodyLines = n
+	return m
+}
+
+// WithBackgroundAgents returns a copy of the model whose transcript ends with
+// a block naming the child sessions this one spawned — "N background agents
+// launched (↓ to manage)", then one line per child. children with no entries
+// returns the model untouched, so a session that never fanned out renders
+// byte-for-byte as it always has.
+//
+// It is a per-render composition, not an Ingest: a subagent is a separate
+// session with its own event stream, so nothing on THIS session's stream
+// announces one (there is deliberately no agent-facing spawn tool — see
+// docs/TUI.md § "Subagent sessions"). [App.render] calls it on a render-local
+// copy with the current roster's children, exactly as it does
+// [Model.WithApprovalBodyLines], so the block tracks the poll instead of
+// accumulating a stale item per frame.
+//
+// The block sits at the TAIL of the transcript rather than at the point of
+// spawn: it is a live summary of what is running now, not a historical entry,
+// and the transcript is bottom-anchored so the tail is where a reader is
+// already looking. Appending also leaves every existing item index untouched,
+// which the pending approval's badgeIdx depends on.
+func (m Model) WithBackgroundAgents(children []SessionInfo) Model {
+	if len(children) == 0 {
+		return m
+	}
+	spawned := make([]spawnedAgent, 0, len(children))
+	for _, c := range children {
+		spawned = append(spawned, spawnedAgent{name: backgroundAgentName(c), agent: c.Agent})
+	}
+	items := make([]item, 0, len(m.items)+1)
+	items = append(items, m.items...)
+	m.items = append(items, item{kind: itemBackgroundAgents, done: true, spawned: spawned})
+	return m
+}
+
+// WithShellRuns returns a copy of the model whose transcript ends with one
+// block per shell escape (shell.go) that is either still running or finished
+// but NOT YET consumed by a prompt. A consumed run is deliberately skipped:
+//
+//   - a `!` run's output has by then been folded into a real prompt
+//     ([App.composePrompt]) and comes back as the echoed user message, so
+//     rendering the run too would duplicate it; and
+//   - a `!!` run's output was operator-only and was never sent, so once the
+//     operator moves on (sends their next prompt, consuming it) there is
+//     nothing in the thread it belongs beside.
+//
+// So the only shell blocks on screen are the ones a subsequent prompt will
+// act on — which is exactly what makes rendering them at the TAIL correct:
+// they are the most recent thing the operator did, and nothing follows them
+// until a prompt is sent. runs with no visible entries returns the model
+// untouched, byte-for-byte as a session that ran no commands.
+//
+// Like [Model.WithBackgroundAgents] this is a per-render composition, never an
+// Ingest: the runs are App state (they must survive a screen switch and feed
+// composePrompt), and appending leaves every existing item index untouched,
+// which the pending approval's badgeIdx depends on.
+func (m Model) WithShellRuns(runs []shellRun) Model {
+	// Count first so the common steady state — no runs, or every run already
+	// folded into a prompt (consumed) — returns untouched without cloning the
+	// transcript, mirroring WithBackgroundAgents' len(children)==0 short circuit.
+	visible := 0
+	for _, r := range runs {
+		if !r.consumed {
+			visible++
+		}
+	}
+	if visible == 0 {
+		return m
+	}
+	items := make([]item, 0, len(m.items)+visible)
+	items = append(items, m.items...)
+	for _, r := range runs {
+		if r.consumed {
+			continue
+		}
+		items = append(items, item{kind: itemShellRun, done: r.done, shell: r})
+	}
+	m.items = items
+	return m
+}
+
+// CommitShellRuns pins consumed shell runs into the transcript as PERSISTENT
+// sigil blocks at the current tail — the point in the conversation where they
+// were folded into a submit, just before that submit's user-message echo. It is
+// how a consumed `!` run keeps showing as `! cmd` after it fires its turn
+// (WithShellRuns render-local blocks vanish on consume, and would tail-misorder
+// after the reply anyway): once committed here they are ordinary ingested items,
+// correctly placed and stable across later events. Both `!` and `!!` runs commit
+// (each renders with its own sigil marker); fold is the concatenated model-facing
+// [shellRun.contextBlock] output of the `!` runs only (a `!!` run contributes
+// none — it is never sent), queued so the matching MessageUser echo can be
+// stripped of it (see the MessageFinished{User} case in [Model.Ingest]).
+//
+// Called by [App.composePrompt] at submit time. Copy-on-write like every mutator
+// here. An empty runs slice with an empty fold is a no-op.
+func (m Model) CommitShellRuns(runs []shellRun, fold string) Model {
+	if len(runs) == 0 && fold == "" {
+		return m
+	}
+	if len(runs) > 0 {
+		items := make([]item, 0, len(m.items)+len(runs))
+		items = append(items, m.items...)
+		for _, r := range runs {
+			items = append(items, item{kind: itemShellRun, done: r.done, shell: r})
+		}
+		m.items = items
+	}
+	if fold != "" {
+		m.pendingEchoFolds = append(append([]string(nil), m.pendingEchoFolds...), fold)
+	}
+	return m
+}
+
+// WithThinking returns a copy of the model whose transcript ends with a muted
+// "⋯ working…" indicator when a turn is in flight ([Model.turnActive]) — the
+// "something is happening" signal for the gaps where nothing streams (before the
+// first token, while a tool runs). It renders IFF the turn is active AND no
+// approval/decision is pending: an approval commandeers the footer as "awaiting
+// YOU," which is the opposite of "working," so the indicator would be a lie
+// there (this is the load-bearing gate). Idle or pending returns the model
+// untouched, byte-for-byte, so a session between turns looks exactly as it did
+// before this indicator existed.
+//
+// Like [Model.WithShellRuns] it is a per-render composition appended LAST (below
+// the shell/background blocks), never an Ingest: the indicator is derived state
+// that must vanish the instant the turn finishes and must never enter the
+// durable item list or the exit-flushed transcript. Called last in
+// [App.attachModel] so both the frame draw and the mouse-selection measurement
+// account for the same tail row.
+func (m Model) WithThinking() Model {
+	if !m.turnActive || m.pending != nil || m.pendingDec != nil {
+		return m
+	}
+	items := make([]item, 0, len(m.items)+1)
+	items = append(items, m.items...)
+	m.items = append(items, item{kind: itemThinking, done: false})
+	return m
+}
+
+// backgroundAgentName is the name a spawned child is listed under: its own
+// title when it has one, else its agent identity, else a short form of its id.
+// A child's title is derived from the prompt its parent handed it, so it is the
+// most specific thing available — unlike the roster row, which is read as a
+// column of siblings and so leads with the agent instead (see
+// [Overview.rowLabel]). The id fallback exists because a row with neither is
+// still a session the operator has to be able to find.
+func backgroundAgentName(s SessionInfo) string {
+	switch {
+	case s.Title != "":
+		return s.Title
+	case s.Agent != "":
+		return s.Agent
+	case len(s.ID) > 8:
+		return s.ID[:8]
+	default:
+		return s.ID
+	}
+}
+
+// approvalBodyLimit resolves the effective approval-prompt body row cap:
+// config.DefaultApprovalBodyLines unless a caller plumbed one in through
+// [Model.WithApprovalBodyLines]. The resolution lives here, not at the call
+// site, so every render path — App.render, a golden test calling View
+// directly — agrees on the default.
+func (m Model) approvalBodyLimit() int {
+	if m.approvalBodyLines <= 0 {
+		return config.DefaultApprovalBodyLines
+	}
+	return m.approvalBodyLines
+}
+
+// WithApprovalMinTranscriptRows sets the transcript-row floor the inline
+// approval prompt collapses against, reallocating rather than mutating in
+// place (Model's copy-on-write discipline). n < 0 means "the config default"
+// — see [Model.approvalTranscriptFloor]. [App.render] calls this with its
+// always-current tui.approval_min_transcript_rows read.
+func (m Model) WithApprovalMinTranscriptRows(n int) Model {
+	m.approvalMinTranscriptRows = n
+	return m
+}
+
+// approvalTranscriptFloor resolves the effective transcript-row floor:
+// config.DefaultApprovalMinTranscriptRows unless a caller plumbed one in
+// through [Model.WithApprovalMinTranscriptRows]. Resolved here, not at the
+// call site, so every render path — App.render, App.transcriptRegion, a golden
+// test calling View directly — agrees on the default.
+func (m Model) approvalTranscriptFloor() int {
+	if m.approvalMinTranscriptRows < 0 {
+		return config.DefaultApprovalMinTranscriptRows
+	}
+	return m.approvalMinTranscriptRows
+}
+
 // DismissApproval clears the pending request without resolving it — the esc
 // dismiss and the optimistic local clear after a reply. The underlying request
 // stays pending server-side; a re-attach replays PermissionRequested and
 // re-surfaces it.
 func (m Model) DismissApproval() Model {
 	m.pending = nil
+	return m
+}
+
+// IngestDecision applies one [decision.Update] to the prompt state and returns
+// the updated Model. It is [Model.Ingest]'s twin for the decision stream: the
+// SDK's Event union carries no decision kind (internal/decision's package doc
+// has the why), so a structured question arrives on its own subscription and
+// lands here rather than in Ingest's event switch. It adds no transcript
+// items, which is why the app root ingests it directly instead of through
+// [App.ingestAttach]'s autoscroll accounting — there are no new transcript
+// lines for a scrolled-back reader's window to be pulled off by.
+//
+// An [decision.UpdateRequested] opens the prompt, superseding whatever was
+// showing — last one shown wins, exactly like a second PermissionRequested;
+// the superseded request stays open server-side and its own UpdateResolved
+// simply finds m.pendingDec pointed elsewhere. A request carrying no questions
+// is ignored rather than opening an empty prompt (decision.Gate.Request
+// already rejects one, so this is belt-and-braces against a future transport).
+// An [decision.UpdateResolved] clears the prompt only when the ids match: the
+// request this client was showing has been answered by another peer, or its
+// turn was interrupted and the agent is no longer waiting.
+func (m Model) IngestDecision(u decision.Update) Model {
+	switch u.Kind {
+	case decision.UpdateRequested:
+		if len(u.Request.Questions) == 0 {
+			return m
+		}
+		m.pendingDec = &pendingDecision{
+			id:      u.Request.ID,
+			session: u.Request.SessionID,
+			// Shared with the gate's snapshot, which documents Questions as
+			// read-only once the request is open — nothing here writes to it.
+			// The parallel drafts slice is this client's own, one entry per
+			// question, all unanswered until the user picks something.
+			questions: u.Request.Questions,
+			drafts:    make([]decisionDraft, len(u.Request.Questions)),
+		}
+	case decision.UpdateResolved:
+		if m.pendingDec != nil && m.pendingDec.id == u.Request.ID {
+			m.pendingDec = nil
+		}
+	}
+	return m
+}
+
+// HasPendingDecision reports whether an unresolved structured-decision request
+// is awaiting an answer on this session — the app root consults it to route
+// keys to the decision prompt (see App.Update), one rung below the approval
+// prompt.
+func (m Model) HasPendingDecision() bool { return m.pendingDec != nil }
+
+// PendingDecision returns the id of the pending decision request, for the app
+// root to build the [Supervisor.AnswerDecision] call. ok is false when nothing
+// is pending.
+func (m Model) PendingDecision() (id string, ok bool) {
+	if m.pendingDec == nil {
+		return "", false
+	}
+	return m.pendingDec.id, true
+}
+
+// DismissDecision clears the pending decision locally. It is ONLY the
+// optimistic local clear every resolution makes before its
+// [Supervisor.AnswerDecision] call lands — an answer, or esc's cancel (see
+// App.cancelDecision). There is deliberately no "dismiss without resolving"
+// path: unlike a permission request, which a re-attach re-surfaces off the
+// event stream's replay, a decision left open here would leave the agent's turn
+// blocked with no prompt on screen and no transcript badge to find it by.
+func (m Model) DismissDecision() Model {
+	m.pendingDec = nil
+	return m
+}
+
+// moveDecisionCursor moves the focused row by delta, CLAMPED to the row list
+// rather than wrapping: the list is short and ordered, and wrapping from the
+// last escape hatch back onto option 1 is precisely the surprise that gets the
+// wrong answer sent. A no-op when nothing is pending, or when the question
+// offers no rows at all. Reallocates rather than mutating in place (Model's
+// copy-on-write discipline), like every mutator here.
+func (m Model) moveDecisionCursor(delta int) Model {
+	if m.pendingDec == nil {
+		return m
+	}
+	p := *m.pendingDec
+	rows := len(p.rows())
+	if rows == 0 {
+		return m
+	}
+	p.cursor = clampCursor(p.cursor+delta, rows-1)
+	m.pendingDec = &p
+	return m
+}
+
+// startDecisionTyping activates the free-text row's editor — the first Enter
+// on "Type something.". A no-op when nothing is pending or typing is already
+// active, so the buffer a user has half-typed is never cleared by a stray
+// repeat.
+func (m Model) startDecisionTyping() Model {
+	if m.pendingDec == nil || m.pendingDec.typing {
+		return m
+	}
+	p := *m.pendingDec
+	p.typing = true
+	m.pendingDec = &p
+	return m
+}
+
+// stopDecisionTyping leaves typing mode, discarding the half-typed answer —
+// esc's FIRST press while the free-text row is active. A second esc then
+// dismisses the whole prompt (see App.handleDecisionKey), so escape never
+// throws away more than one thing at a time.
+func (m Model) stopDecisionTyping() Model {
+	if m.pendingDec == nil {
+		return m
+	}
+	p := *m.pendingDec
+	p.typing = false
+	p.input = inputBuffer{}
+	m.pendingDec = &p
+	return m
+}
+
+// withDecisionInput replaces the free-text answer's buffer with buf — the
+// write-back half of routing a key press through the shared input keymap
+// (input_keymap.go), which returns an updated buffer rather than mutating one.
+func (m Model) withDecisionInput(buf inputBuffer) Model {
+	if m.pendingDec == nil {
+		return m
+	}
+	p := *m.pendingDec
+	p.input = buf
+	m.pendingDec = &p
+	return m
+}
+
+// moveDecisionTab moves the focused tab by delta on a multi-question request —
+// Tab/shift+tab and ←/→ (see App.handleDecisionKey). A no-op on a
+// single-question request, which has no tab strip at all.
+//
+// Unlike the row cursor, which CLAMPS (moveDecisionCursor: wrapping from the
+// last row onto option 1 is how a stray press sends the wrong answer), tab
+// movement WRAPS. Switching tabs commits nothing — no answer is sent until the
+// Submit row — so the surprise the clamp protects against does not exist here,
+// and cycling is what a tab strip and its two end arrows advertise.
+//
+// Switching leaves both editors, discarding whatever was half-typed in them:
+// an editor belongs to the question that opened it, and carrying a half-typed
+// answer onto the next question is a worse outcome than losing it. The cursor
+// lands on the answer this question already has, if any (see draftRow).
+func (m Model) moveDecisionTab(delta int) Model {
+	if m.pendingDec == nil || !m.pendingDec.multi() {
+		return m
+	}
+	p := *m.pendingDec
+	n := p.tabCount()
+	p.tab = ((p.tab+delta)%n + n) % n
+	p.typing = false
+	p.input = inputBuffer{}
+	p.noting = false
+	p.notes = inputBuffer{}
+	p.cursor = p.draftRow()
+	m.pendingDec = &p
+	return m
+}
+
+// recordDecisionAnswer stores outcome as the focused question's drafted answer.
+// It is where EVERY answer lands, single-question and multi alike: the
+// single-question path then submits immediately (App.answerDecision), so the
+// draft is a moment old rather than long-lived, but there is only one place
+// that decides what a question's answer is.
+//
+// The drafts slice is cloned rather than written through: a pendingDecision
+// struct copy shares its backing array, so mutating in place would rewrite the
+// answer inside every older Model value too — the one hole a copy-on-write
+// discipline built on struct copies leaves open.
+func (m Model) recordDecisionAnswer(outcome acp.DecisionOutcome) Model {
+	if m.pendingDec == nil {
+		return m
+	}
+	p := *m.pendingDec
+	if p.tab < 0 || p.tab >= len(p.drafts) {
+		return m
+	}
+	p.drafts = slices.Clone(p.drafts)
+	p.drafts[p.tab].outcome = outcome
+	p.typing = false
+	p.input = inputBuffer{}
+	m.pendingDec = &p
+	return m
+}
+
+// startDecisionNoting opens the notes editor on the focused question's draft —
+// the `n` key. It preloads whatever note that draft already carries, so `n`
+// re-opens a note for editing rather than silently restarting it.
+func (m Model) startDecisionNoting() Model {
+	if m.pendingDec == nil || m.pendingDec.noting {
+		return m
+	}
+	p := *m.pendingDec
+	p.noting = true
+	p.notes = inputBuffer{}.SetText(p.draft().notes)
+	m.pendingDec = &p
+	return m
+}
+
+// stopDecisionNoting closes the notes editor WITHOUT saving — esc's first press
+// while a note is being edited, mirroring stopDecisionTyping. The draft's
+// existing note is left exactly as it was.
+func (m Model) stopDecisionNoting() Model {
+	if m.pendingDec == nil {
+		return m
+	}
+	p := *m.pendingDec
+	p.noting = false
+	p.notes = inputBuffer{}
+	m.pendingDec = &p
+	return m
+}
+
+// commitDecisionNote saves the notes editor's contents onto the focused
+// question's draft and closes the editor — Enter in notes mode. An empty (or
+// whitespace-only) note CLEARS whatever note was there, which is the only way
+// to take a note back off an answer.
+func (m Model) commitDecisionNote() Model {
+	if m.pendingDec == nil {
+		return m
+	}
+	p := *m.pendingDec
+	// A tab with no draft behind it has nowhere to store the note (the Submit
+	// tab, which `n` is not bound on). Close the editor anyway rather than
+	// leaving it open with no key that can shut it — an editor Enter cannot
+	// close is a wedge.
+	if p.tab >= 0 && p.tab < len(p.drafts) {
+		p.drafts = slices.Clone(p.drafts) // see recordDecisionAnswer
+		p.drafts[p.tab].notes = strings.TrimSpace(p.notes.String())
+	}
+	p.noting = false
+	p.notes = inputBuffer{}
+	m.pendingDec = &p
+	return m
+}
+
+// withDecisionNotes replaces the notes editor's buffer with buf —
+// withDecisionInput's twin for the second editor.
+func (m Model) withDecisionNotes(buf inputBuffer) Model {
+	if m.pendingDec == nil {
+		return m
+	}
+	p := *m.pendingDec
+	p.notes = buf
+	m.pendingDec = &p
 	return m
 }
 
@@ -329,6 +1058,39 @@ func summarizeToolInput(compact string) string {
 		}
 	}
 	return compact
+}
+
+// summarizeAskUser renders the ask_user tool's questions payload as a concise
+// header summary — the first question's title (or its text when it has no
+// title), or "N questions" for a batch — so the transcript block reads
+// `● ask_user(Choose a task)` instead of dumping the whole
+// `{"questions":[{"title":…,"options":[…]}]}` blob summarizeToolInput would
+// fall through to for this non-command-shaped input. The selected answer stays
+// in the block body (the tool's own result — see internal/decision.formatAnswers).
+// An unparseable or question-less payload yields "" (the bare `● ask_user`
+// header), never the raw JSON. Keyed off title/question, whose single-word keys
+// read identically whether the model sent the tool's snake_case schema or a
+// camelCase re-encoding.
+func summarizeAskUser(compact string) string {
+	if compact == "" || compact == "{}" {
+		return ""
+	}
+	var in struct {
+		Questions []struct {
+			Title    string `json:"title"`
+			Question string `json:"question"`
+		} `json:"questions"`
+	}
+	if err := json.Unmarshal([]byte(compact), &in); err != nil || len(in.Questions) == 0 {
+		return ""
+	}
+	if len(in.Questions) > 1 {
+		return plural(len(in.Questions), "question")
+	}
+	if q := in.Questions[0]; q.Title != "" {
+		return q.Title
+	}
+	return in.Questions[0].Question
 }
 
 // TypeRune inserts r into the input buffer at the cursor.
@@ -458,13 +1220,25 @@ func (m Model) transcriptLines(width int) []string {
 		if m.pending != nil && i == m.pending.badgeIdx {
 			continue // shown by the pending prompt block, not inline
 		}
+		rendered := m.renderItemLines(it, width)
+		if len(rendered) == 0 {
+			// An item that renders nothing — a contentless reasoning block (which
+			// providers, Claude included, emit routinely after a tool call), an
+			// empty assistant-text item, an empty background-agents block — must
+			// NOT consume a gap: prepending the gap before it and another before
+			// the next rendered item stacks two blank rows where the reader sees
+			// one block flowing into the next (the "double blank after a tool/shell
+			// block" defect). Skip it entirely so the gap is only ever paid between
+			// two blocks that actually have lines.
+			continue
+		}
 		if !first {
 			for range transcriptGap {
 				lines = append(lines, "")
 			}
 		}
 		first = false
-		for _, line := range m.renderItemLines(it) {
+		for _, line := range rendered {
 			lines = append(lines, wrap(line, width)...)
 		}
 	}
@@ -523,16 +1297,29 @@ func (m Model) view(width, height int, menuLines, headerLines []string, scroll i
 	}
 
 	// The input box is framed by full-width rules above and below, with the
-	// status line beneath it. A pending approval commandeers the whole
-	// footer: the rules, input box, and status line are suppressed so the
-	// prompt block stands alone — whichever footer shows, the transcript
+	// status line beneath it. A pending approval or structured decision
+	// commandeers the whole footer: the rules, input box, and status line are
+	// suppressed so the prompt block stands alone — whichever footer shows, the transcript
 	// above tails to fit so the footer stays anchored to the bottom however
 	// long the conversation grows.
 	var footer []string
-	if prompt := m.promptLines(width); prompt != nil {
+	if prompt := m.promptLines(width, height); prompt != nil {
 		footer = prompt
 	} else {
+		// Plain framing rules top and bottom (round-5 reverted the labeled
+		// shell-mode rule): shell mode is now signalled by the sigil leading the
+		// input line itself (see inputLine), not by a rule label.
 		rule := strings.Repeat("─", width)
+		// One blank spacer row between the transcript and the input block (the
+		// menu, when open, plus the framing rules and input line). Counted in the
+		// footer so it is pinned directly above that block: when the transcript
+		// overflows and tails flush to the frame, the newest message no longer
+		// butts against the top rule — it keeps exactly one row of breathing space.
+		// When the transcript is short, this row is indistinguishable from the
+		// blank filler pad() already lays down beneath it, so those frames render
+		// unchanged. Not added to the approval/decision prompt footer, which owns
+		// the whole footer and carries its own blank padding.
+		footer = append(footer, "")
 		footer = append(footer, menuLines...)
 		footer = append(footer, rule, truncate(m.inputLine(), width), rule)
 		// The status line carries only usage/cost now, and only once a turn has
@@ -565,14 +1352,48 @@ func (m Model) view(width, height int, menuLines, headerLines []string, scroll i
 	return strings.Join(lines, "\n")
 }
 
-// promptLines renders the pending approval as the bottom-anchored, input-
-// replacing prompt's lines, each truncated to width. Empty when nothing is
-// pending. Used by View to anchor the inline approval prompt to the bottom.
-func (m Model) promptLines(width int) []string {
-	if m.pending == nil {
+// promptLines renders whichever inline prompt is pending as the bottom-
+// anchored, input-replacing block's lines, each truncated to width. Empty when
+// nothing is pending. Used by View to anchor the prompt to the bottom.
+//
+// An approval outranks a decision when both are somehow pending: a permission
+// gate blocks a tool call the agent has ALREADY started, while a decision
+// blocks it before it has chosen what to do — the in-flight one is the more
+// urgent, and the decision prompt is still there once the approval clears
+// (its request stays open on the gate regardless of what this client renders).
+//
+// height is the frame the prompt has to share with the transcript, and is what
+// makes the APPROVAL block adaptive: the full prompt runs ~22 rows, so on an
+// 80x24 terminal it would leave a two-line transcript and scroll the identity
+// header out — the conversation that LED to the gated call disappearing exactly
+// when a human needs it to decide. When the full block would leave fewer than
+// [Model.approvalTranscriptFloor] rows, the rationale collapses to its opening
+// paragraph plus a ctrl+e pointer (see renderApprovalPrompt); everything a
+// decision requires — the header, the gated call, the question, the action row
+// — is never collapsed, and a frame too short even for that falls to View's
+// existing truncate/avail floor rather than to any special case here.
+//
+// The collapsed block is rendered fresh rather than sliced out of the full
+// one: the paragraphs it drops are wrapped text, so cutting rows off a
+// rendered block would leave a half-sentence dangling.
+//
+// The decision prompt has no collapsed form to fall back to — it is already
+// only its question plus one row per answer, and every one of those rows is
+// load-bearing (a hidden option is an answer the human cannot give) — so it
+// ignores height and relies on the same View-level floor.
+func (m Model) promptLines(width, height int) []string {
+	var raw []string
+	switch {
+	case m.pending != nil:
+		raw = renderApprovalPrompt(m.theme, *m.pending, width, m.approvalBodyLimit(), false)
+		if height-len(raw) < m.approvalTranscriptFloor() {
+			raw = renderApprovalPrompt(m.theme, *m.pending, width, m.approvalBodyLimit(), true)
+		}
+	case m.pendingDec != nil:
+		raw = renderDecisionPrompt(m.theme, *m.pendingDec, width)
+	default:
 		return nil
 	}
-	raw := renderApprovalPrompt(m.theme, *m.pending, width)
 	out := make([]string, len(raw))
 	for i, l := range raw {
 		out[i] = truncate(l, width)
@@ -630,6 +1451,31 @@ func styledMarkerLines(style lipgloss.Style, glyph, text string, render func(str
 // item's own text.
 func plainRender(s string) string { return s }
 
+// markerBlockLines is [styledMarkerLines]' counterpart for already-rendered
+// rows (markdown out of [markdownRenderer.render], which carry their own ANSI
+// per row): it fronts the first row with the state marker and indents the
+// continuation rows under the glyph, exactly like styledMarkerLines, but takes
+// a pre-split []string instead of a "\n"-joined string and — crucially — keeps
+// a blank separator row ("") truly blank rather than indenting it to a run of
+// spaces, so a markdown block's inter-paragraph gaps stay clean empty rows (no
+// trailing whitespace in a golden, nothing stray for a selection to copy).
+func markerBlockLines(style lipgloss.Style, glyph string, rows []string) []string {
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]string, len(rows))
+	out[0] = markerLine(style, glyph, rows[0])
+	indent := strings.Repeat(" ", ansi.StringWidth(glyph)+1)
+	for i := 1; i < len(rows); i++ {
+		if rows[i] == "" {
+			out[i] = ""
+			continue
+		}
+		out[i] = indent + rows[i]
+	}
+	return out
+}
+
 // renderItemLines renders a single transcript item to its display lines. A
 // tool item is a collapsed tree block spanning header + up to three
 // result lines; every text-bearing kind renders to one line per physical line
@@ -637,7 +1483,7 @@ func plainRender(s string) string { return s }
 // single-line case. Every kind is marker-only styled: the leading glyph
 // carries the state color, the text after it keeps its own styling (plain, or
 // muted for reasoning/status body).
-func (m Model) renderItemLines(it item) []string {
+func (m Model) renderItemLines(it item, width int) []string {
 	switch it.kind {
 	case itemAssistantReasoning:
 		// Some providers (Claude included) emit a reasoning/thinking block
@@ -670,6 +1516,21 @@ func (m Model) renderItemLines(it item) []string {
 		}
 		return []string{markerLine(style, m.theme.GlyphAgent, "permission "+it.approvalVerdict)}
 
+	case itemBackgroundAgents:
+		return m.renderBackgroundAgentLines(it)
+
+	case itemShellRun:
+		return m.renderShellRunLines(it.shell)
+
+	case itemThinking:
+		// Transient turn-in-flight indicator: a muted `⋯ working…`. Marker-only
+		// styling like every other block, but the text is muted too so the whole
+		// line reads as subdued chrome, not a message. "working" (not "thinking")
+		// because the turn may be running a tool, not only reasoning — a
+		// one-token swap if that preference changes.
+		muted := m.theme.MutedStyle()
+		return []string{markerLine(muted, "⋯", muted.Render("working…"))}
+
 	default: // itemAssistantText
 		// Same empty-guard as itemAssistantReasoning above: an assistant-text
 		// item with no content yet (or that resolved empty) renders nothing
@@ -677,12 +1538,123 @@ func (m Model) renderItemLines(it item) []string {
 		if strings.TrimSpace(it.text) == "" {
 			return nil
 		}
-		style := m.theme.WarnStyle()
-		if it.done {
-			style = m.theme.OKStyle()
+		glyph := m.theme.GlyphAgent
+		contentWidth := width - (ansi.StringWidth(glyph) + 1)
+		if !it.done {
+			// Streaming: render block-by-block. Every COMPLETE markdown block (a
+			// paragraph closed by a blank line, or a closed ``` fence) is glamoured
+			// and memoized; only the trailing INCOMPLETE block — a half-arrived
+			// fence or a paragraph with no terminating blank yet — stays raw, since
+			// glamouring a half-block is garbage. The marker is warn (yellow) while
+			// the turn is in flight; it goes green (below) once the message settles.
+			rows := m.md.renderStreaming(it.text, contentWidth)
+			return markerBlockLines(m.theme.WarnStyle(), glyph, rows)
 		}
-		return styledMarkerLines(style, m.theme.GlyphAgent, it.text, plainRender)
+		// Settled: render the whole message's markdown at once — byte-identical to
+		// the pre-incremental settle path — wrapped to leave room for the "● "
+		// marker glyph and the matching continuation indent so a wrapped row still
+		// lands within width. Whole-document (not per-block) so glamour's
+		// cross-block layout is exactly what a finished reply always rendered.
+		rows := m.md.render(it.text, contentWidth)
+		return markerBlockLines(m.theme.OKStyle(), glyph, rows)
 	}
+}
+
+// attributeHeader appends the originating-agent clause to a tool block's
+// header — "ToolName(args) · from the <agent> agent", docs/TUI.md's shape — so
+// a transcript interleaving a parent's calls with its subagents' reads
+// unambiguously. An empty agent returns header untouched, which is the whole
+// fallback contract: a single-agent session (and any daemon predating the
+// SDK's Agent field) renders exactly the bytes it rendered before attribution
+// existed, with no placeholder standing in for the missing id.
+//
+// A multi-line header — a heredoc or multi-statement shell command, which
+// [summarizeToolInput] passes through verbatim — takes the clause on its FIRST
+// physical line. The attribution answers "who is running this?", which a
+// reader needs at the top of the block, not buried at the end of a script.
+func attributeHeader(header, agent string) string {
+	if agent == "" {
+		return header
+	}
+	clause := " · from the " + agent + " agent"
+	first, rest, multiline := strings.Cut(header, "\n")
+	if !multiline {
+		return header + clause
+	}
+	return first + clause + "\n" + rest
+}
+
+// blockRow is one gutter body row of a [contentBlock]: its text and the
+// per-row styling to apply to the whole prefixed row (nil = plainRender).
+// Per-row styling is what lets the shell block mix a plain output row with a
+// danger exit row and a muted disposition row inside one body.
+type blockRow struct {
+	text   string
+	render func(string) string
+}
+
+// contentBlock is the shared transcript-block shape: a marker glyph + header,
+// then a └-gutter body with aligned continuation and an optional "… +N lines"
+// collapse. It is the one place the Claude-Code tool-block grammar lives, so
+// the tool call, the background-agents summary, and a `!`/`!!` shell run all
+// read the same — and a future block gets the grammar (and, because every
+// block built through it is a transcript item inside App.transcriptRegion, the
+// drag-selection + OSC 52 copy) for free.
+type contentBlock struct {
+	marker      lipgloss.Style
+	glyph       string // ● (GlyphAgent) or the shell sigil (! / !!)
+	header      string // may contain "\n" (heredoc / multi-statement)
+	rows        []blockRow
+	maxBody     int                 // 0 = show all rows; >0 = show maxBody then collapse
+	collapseRen func(string) string // styling for the "… +N lines" row (nil = plainRender)
+}
+
+const (
+	// blockGutterHead prefixes a content block's FIRST body row (the tree
+	// elbow); blockGutterCont prefixes every continuation row. These are the
+	// exact indents the collapsed tool tree has always used, so the three
+	// unified blocks stay byte-identical to the tool block's original shape.
+	blockGutterHead = "   └ "
+	blockGutterCont = "     "
+)
+
+// renderBlock renders a [contentBlock] to its display lines: the marker+header
+// (split per physical line by [styledMarkerLines], so a heredoc header still
+// counts one slice entry per row for the height accounting), then the └-gutter
+// body. Each shown row is render(prefix+text) — the WHOLE prefixed row is
+// styled, gutter included — reproducing the tool block's original
+// styleBody("   └ "+…). With maxBody>0 the body shows maxBody rows then a
+// single "… +N lines" collapse row; maxBody==0 shows every row (shell output
+// is byte-bounded already, so it is never collapsed — the user needs to
+// select/copy it whole). Empty rows renders the header alone.
+func (m Model) renderBlock(b contentBlock) []string {
+	lines := styledMarkerLines(b.marker, b.glyph, b.header, plainRender)
+
+	shown := b.rows
+	collapsed := b.maxBody > 0 && len(b.rows) > b.maxBody
+	if collapsed {
+		shown = b.rows[:b.maxBody]
+	}
+	for i, row := range shown {
+		prefix := blockGutterCont
+		if i == 0 {
+			prefix = blockGutterHead
+		}
+		render := row.render
+		if render == nil {
+			render = plainRender
+		}
+		lines = append(lines, render(prefix+row.text))
+	}
+	if collapsed {
+		ren := b.collapseRen
+		if ren == nil {
+			ren = plainRender
+		}
+		extra := len(b.rows) - b.maxBody
+		lines = append(lines, ren(blockGutterCont+fmt.Sprintf("… +%d lines", extra)))
+	}
+	return lines
 }
 
 // renderToolLines renders a tool call as a collapsed tree block: a header
@@ -690,7 +1662,8 @@ func (m Model) renderItemLines(it item) []string {
 // three tree-indented result lines, collapsing any remainder into a single
 // "… +N lines" line. Marker-only styled: running is yellow, done is green, a
 // failed call's marker is red like a session error — the muted body is what
-// de-emphasizes the noisy output, not a softer header color.
+// de-emphasizes the noisy output, not a softer header color. It is one caller
+// of the shared [Model.renderBlock] grammar.
 func (m Model) renderToolLines(it item) []string {
 	style := m.theme.WarnStyle() // running = yellow
 	failed := false
@@ -703,18 +1676,25 @@ func (m Model) renderToolLines(it item) []string {
 	}
 
 	header := it.toolName
-	if summary := summarizeToolInput(it.toolInput); summary != "" {
+	summary := summarizeToolInput(it.toolInput)
+	if it.toolName == decision.ToolName {
+		// ask_user's input is a questions payload, not a command — render its
+		// question(s) cleanly instead of the raw JSON blob summarizeToolInput
+		// would otherwise fall through to (see summarizeAskUser).
+		summary = summarizeAskUser(it.toolInput)
+	}
+	if summary != "" {
 		header = fmt.Sprintf("%s(%s)", it.toolName, summary)
 	}
-	// A multi-line command (a heredoc, an inline multi-statement script) is a
-	// literal "\n" inside summary, not a rare shape for a bash tool call —
-	// styledMarkerLines splits it the same way the transcript's own text
-	// items are split above, for the same avail/scrollTail height-accounting
-	// reason (see its doc).
-	lines := styledMarkerLines(style, m.theme.GlyphAgent, header, plainRender)
+	header = attributeHeader(header, it.toolAgent)
 
+	// A multi-line command (a heredoc, an inline multi-statement script) is a
+	// literal "\n" inside the header — styledMarkerLines (via renderBlock)
+	// splits it the same way the transcript's own text items are split, for
+	// the same avail/scrollTail height-accounting reason (see its doc). Before
+	// the call finishes there is no body to render, so emit the header alone.
 	if !it.done || it.toolResult == "" {
-		return lines
+		return styledMarkerLines(style, m.theme.GlyphAgent, header, plainRender)
 	}
 
 	styleBody := func(s string) string {
@@ -725,20 +1705,114 @@ func (m Model) renderToolLines(it item) []string {
 	}
 
 	resultLines := strings.Split(it.toolResult, "\n")
-	lines = append(lines, styleBody("   └ "+resultLines[0]))
-	const maxExtra = 2
-	shown := 1
-	for _, l := range resultLines[1:] {
-		if shown >= 1+maxExtra {
-			break
+	rows := make([]blockRow, len(resultLines))
+	for i, l := range resultLines {
+		rows[i] = blockRow{text: l, render: styleBody}
+	}
+	return m.renderBlock(contentBlock{
+		marker:      style,
+		glyph:       m.theme.GlyphAgent,
+		header:      header,
+		rows:        rows,
+		maxBody:     3,
+		collapseRen: styleBody,
+	})
+}
+
+// renderBackgroundAgentLines renders the background-agents block: a header
+// counting the sessions this one spawned, then one tree-indented line per
+// child naming it and the agent it runs as. It goes through the shared
+// [Model.renderBlock] grammar, so it wears the tool block's "   └ " / "     "
+// gutter without re-deriving it.
+//
+// The marker is accent-styled, not one of the state colors: this block reports
+// no state of its own (its children each carry their own, on their own roster
+// rows), it is a navigational affordance — which is what the "(↓ to manage)"
+// caption points at, the roster being where a child is stopped or drilled into.
+func (m Model) renderBackgroundAgentLines(it item) []string {
+	if len(it.spawned) == 0 {
+		return nil
+	}
+	header := fmt.Sprintf("%s launched (↓ to manage)", plural(len(it.spawned), "background agent"))
+	rows := make([]blockRow, len(it.spawned))
+	for i, s := range it.spawned {
+		label := s.name
+		// A child whose name IS its agent id (an untitled session — see
+		// backgroundAgentName) states it once, not twice.
+		if s.agent != "" && s.agent != s.name {
+			label += " · " + s.agent
 		}
-		lines = append(lines, styleBody("     "+l))
-		shown++
+		rows[i] = blockRow{text: label}
 	}
-	if extra := len(resultLines) - shown; extra > 0 {
-		lines = append(lines, styleBody(fmt.Sprintf("     … +%d lines", extra)))
+	return m.renderBlock(contentBlock{
+		marker: m.theme.AccentStyle(),
+		glyph:  m.theme.GlyphAgent,
+		header: header,
+		rows:   rows,
+	})
+}
+
+// shellMarker is a run's block marker: the SIGIL is the marker (round-5) — `!`
+// for a run the agent will see, `!!` for a private run it never will — and the
+// two wear DISTINCT colors. This is load-bearing for safety: the `· not sent to
+// the agent` text line is gone, so the doubled glyph plus a distinct color is
+// now the ONLY at-a-glance signal that the agent cannot see a `!!` run. `!` is
+// accent (the ordinary "shared" sigil); `!!` is warn — attention-drawing and
+// unmistakably apart from `!`, not de-emphasized, because you do not mute your
+// only safety signal. Derived from r.inContext for DISPLAY only;
+// [App.composePrompt] remains the sole decider of what reaches the model.
+func (m Model) shellMarker(r shellRun) (glyph string, style lipgloss.Style) {
+	if r.inContext {
+		return "!", m.theme.AccentStyle()
 	}
-	return lines
+	return "!!", m.theme.WarnStyle()
+}
+
+// renderShellRunLines renders one `!` / `!!` run (shell.go) as a transcript
+// block: the sigil marker + command header, the command's output under the
+// `└` gutter, and its outcome — a non-zero exit (`exit N`), a timeout/failure
+// note, or a truncation marker, each shown only when there is something
+// abnormal to say. A clean exit-0 run shows only its output; there is no
+// disposition line at all (round-5 dropped the `· not sent to the agent` text —
+// the `!!` marker carries that signal now, see [Model.shellMarker]).
+//
+// A multi-line command (a heredoc, a pasted multi-statement script) splits the
+// same way the transcript's text items split, for the same one-slice-entry-per-
+// row height accounting (see styledMarkerLines' doc).
+func (m Model) renderShellRunLines(r shellRun) []string {
+	glyph, marker := m.shellMarker(r)
+	block := contentBlock{marker: marker, glyph: glyph, header: r.line}
+
+	muted := func(s string) string { return m.theme.MutedStyle().Render(s) }
+	danger := func(s string) string { return m.theme.DangerStyle().Render(s) }
+
+	if !r.done {
+		block.rows = []blockRow{{text: "running…", render: muted}}
+		return m.renderBlock(block)
+	}
+
+	var rows []blockRow
+	// A command that printed nothing (or only trailing newlines) adds no blank
+	// output row — TrimRight collapses that to "" so the loop is skipped
+	// entirely, rather than emitting a lone indented empty line.
+	if body := strings.TrimRight(r.output, "\n"); body != "" {
+		for _, l := range strings.Split(body, "\n") {
+			rows = append(rows, blockRow{text: l})
+		}
+	}
+	switch {
+	case r.note != "":
+		rows = append(rows, blockRow{text: r.note, render: danger})
+	case r.exitCode != 0:
+		rows = append(rows, blockRow{text: fmt.Sprintf("exit %d", r.exitCode), render: danger})
+	}
+	if r.truncated {
+		rows = append(rows, blockRow{text: "… output truncated", render: muted})
+	}
+	block.rows = rows
+	// maxBody stays 0: shell output is byte-bounded already, and the user
+	// needs to select/copy it whole — do NOT collapse it.
+	return m.renderBlock(block)
 }
 
 // statusLine reports the turn's token usage and cost once TurnFinished has
@@ -757,11 +1831,16 @@ func (m Model) statusLine() string {
 	return m.theme.MutedStyle().Render(line)
 }
 
-// inputLine renders the input buffer with the cursor marker spliced in at
-// its actual position — mid-text when the cursor sits mid-buffer, not
-// always at the end.
+// inputLine renders the input buffer with the cursor marker spliced in at its
+// actual position — mid-text when the cursor sits mid-buffer, not always at the
+// end. In shell mode the sigil IS the prompt: the `> ` glyph is dropped and the
+// line starts with the accented `!` / `!!` (round-5), so the sigil that triggers
+// shell mode is the leading signal. An ordinary prompt keeps `> `.
 func (m Model) inputLine() string {
-	return "> " + m.input.Render("▏")
+	if strings.HasPrefix(m.input.String(), "!") {
+		return shellInputLine(m.theme, m.input, "▏")
+	}
+	return "> " + shellInputLine(m.theme, m.input, "▏")
 }
 
 // FullTranscript renders every transcript item unclipped by height, followed

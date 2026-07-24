@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jedwards1230/agent-sdk-go/acp"
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/loop"
 	"github.com/jedwards1230/agent-sdk-go/permission"
@@ -18,6 +19,8 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/session"
 
 	"github.com/jedwards1230/gofer/internal/config"
+	"github.com/jedwards1230/gofer/internal/decision"
+	"github.com/jedwards1230/gofer/internal/permrationale"
 	"github.com/jedwards1230/gofer/internal/sandbox"
 )
 
@@ -31,6 +34,15 @@ type Config struct {
 	// Defaults to time.Now. Test seam.
 	Clock func() time.Time
 
+	// MaxSubagentDepth caps how deep a subagent session tree may nest (see
+	// [CreateOptions.ParentID]): a root session is depth 0 and a Create whose
+	// parent already sits at this depth is refused with [ErrDepthExceeded]. Zero
+	// or negative resolves to [config.DefaultMaxSubagentDepth] — zero is "unset",
+	// never "no children allowed" — so a supervisor built without one behaves
+	// like the operator default. Callers that load gofer's config pass
+	// [config.Session.SubagentDepthLimit].
+	MaxSubagentDepth int
+
 	// Permissions returns a FRESH permission engine for each new session's guard
 	// (see [config.Config.Engine]). A per-session engine keeps a remember-grant
 	// — an allow rule appended by [loop.RuleGuard.Grant] when a human answers
@@ -40,6 +52,21 @@ type Config struct {
 	// matching an empty config — so a supervisor built without an explicit
 	// policy never runs a tool uncontained without asking.
 	Permissions func() *permission.Engine
+
+	// PermissionMode resolves the guardrail posture each NEW session is created
+	// with (see [config.Session.Mode]). Like Permissions it is a factory, called
+	// once per Create/Resume rather than sampled at construction, so a
+	// `session.permission_mode` write — the /yolo toggle, or a hand-edited
+	// config.json — governs the next session a RUNNING gofer starts, with no
+	// restart (the same shape, and the same reason, as the daemon's
+	// ResolveDefaultModel; issue #156).
+	//
+	// It cannot reach a session that already exists: the SDK fixes a session's
+	// guard at construction (runner.Options.Guard) and exposes no way to swap
+	// it, so a live session keeps the posture it was created under for its
+	// lifetime. Nil defaults to [config.PermissionModeAsk] — contain-or-ask,
+	// identical to gofer before this seam existed.
+	PermissionMode func() config.PermissionMode
 
 	// Store, when set, is used instead of building a store from Root, and is
 	// NOT closed by [Supervisor.Close] — the caller owns its lifecycle. Test
@@ -77,6 +104,10 @@ type Supervisor struct {
 	newSession    func(ctx context.Context, opts runner.Options) (Session, error)
 	resumeSession func(ctx context.Context, id string, opts runner.Options) (Session, error)
 
+	// maxSubagentDepth is the resolved [Config.MaxSubagentDepth] (never <= 0
+	// after New).
+	maxSubagentDepth int
+
 	// onRegister mirrors Config.OnRegister; nil is fine (see its doc).
 	onRegister func(sess Session) (stop func())
 
@@ -85,6 +116,10 @@ type Supervisor struct {
 	// (never nil after New — a nil Config.Permissions resolves to the default
 	// contain-or-ask catch-all factory).
 	newEngine func() *permission.Engine
+
+	// permissionMode mirrors Config.PermissionMode; never nil after New (a nil
+	// Config.PermissionMode resolves to a constant ask factory).
+	permissionMode func() config.PermissionMode
 
 	// resumeMu serializes Resume end-to-end (roster check through
 	// registration) so two concurrent Resumes of the same id can never both
@@ -96,6 +131,12 @@ type Supervisor struct {
 	mu     sync.Mutex
 	roster map[string]*managed
 	closed bool
+	// decisionRelay is the host's structured-decision fan-out, nil until (and
+	// unless) a host installs one with [Supervisor.SetDecisionRelay] — see its
+	// doc for why nil is a meaningful configuration and not merely "not wired up
+	// yet". Guarded by mu so [Supervisor.register] reads it atomically with the
+	// roster insert that publishes the session it is about to watch.
+	decisionRelay DecisionRelay
 
 	// watchMu guards the WatchRoster subscriber registry and its shutdown
 	// flag, independent of mu so notify's fan-out never contends with roster
@@ -164,32 +205,77 @@ func New(cfg Config) (*Supervisor, error) {
 		}
 	}
 
+	maxDepth := cfg.MaxSubagentDepth
+	if maxDepth <= 0 {
+		maxDepth = config.DefaultMaxSubagentDepth
+	}
+
+	permissionMode := cfg.PermissionMode
+	if permissionMode == nil {
+		// No explicit posture: contain-or-ask, the same fail-safe
+		// config.Session.Mode resolves an unset knob to.
+		permissionMode = func() config.PermissionMode { return config.PermissionModeAsk }
+	}
+
 	return &Supervisor{
-		root:          root,
-		store:         store,
-		ownsStore:     ownsStore,
-		clock:         clock,
-		newSession:    newSession,
-		resumeSession: resumeSession,
-		onRegister:    cfg.OnRegister,
-		newEngine:     newEngine,
-		roster:        make(map[string]*managed),
-		watchers:      make(map[*watcher]struct{}),
-		watchDone:     make(chan struct{}),
+		root:             root,
+		store:            store,
+		ownsStore:        ownsStore,
+		clock:            clock,
+		newSession:       newSession,
+		resumeSession:    resumeSession,
+		maxSubagentDepth: maxDepth,
+		onRegister:       cfg.OnRegister,
+		newEngine:        newEngine,
+		permissionMode:   permissionMode,
+		roster:           make(map[string]*managed),
+		watchers:         make(map[*watcher]struct{}),
+		watchDone:        make(chan struct{}),
 	}, nil
 }
 
 // sessionGuard builds the per-session permission plumbing: a fresh reply Gate
-// (reply routing is per-session — see [Supervisor.Reply]), a sandbox Container
-// shared between the RuleGuard's containability check and the sandbox-wrapping
-// tool registry, and the compiled RuleGuard over the shared engine. It returns
-// the three runner.Options fields to inject plus the Gate to store on the
-// managed session.
-func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.Gate, tools loop.ToolRegistry) {
+// (reply routing is per-session — see [Supervisor.Reply]), a fresh decision Gate
+// backing the session's own ask_user tool (routing is per-session for the same
+// reason — see [Supervisor.AnswerDecision]), a sandbox Container shared between
+// the RuleGuard's containability check and the sandbox-wrapping tool registry,
+// and the compiled guard over a fresh engine. It returns the three
+// runner.Options fields to inject plus the two Gates to store on the managed
+// session.
+//
+// The decision gate is built with an empty session id and bound in [register]:
+// the tool registry closes over the gate and must be handed to runner.New, and
+// only that call mints a created session's id (see [decision.Gate.Bind]).
+//
+// The guardrail posture is resolved HERE, per session, so a
+// `session.permission_mode` change reaches the next session a running gofer
+// creates (see [Config.PermissionMode]):
+//
+//   - ask (the default) — [loop.RuleGuard] over a sandbox Container, with the
+//     bash-wrapping registry: allow ⇒ run contained, else escalate to a human.
+//   - yolo — [yoloGuard] over the same engine, with the PLAIN builtin registry
+//     (WrapRegistry with a nil Container): deny rules still block, everything
+//     else runs, uncontained and unasked.
+//
+// Both Gates, and the ask_user tool, are built the SAME way in either mode.
+// yolo turns off the guardrail — the human in front of a tool call gofer wants
+// to run — and nothing else. ask_user is the agent asking a question of its own
+// accord, which is a capability rather than a gate, so dropping it under yolo
+// would silently take a feature away in the name of removing a restriction.
+// Keeping the reply Gate uniform likewise means the managed session's routing
+// doesn't need to know which mode built it (a yolo session simply never emits a
+// permission request for it to carry).
+func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.Gate, decisions *decision.Gate, tools loop.ToolRegistry) {
 	gate := loop.NewGate()
+	dgate := decision.NewGate("")
+	askUser := decision.NewAskUser(dgate)
+	engine := s.newEngine()
+	if s.permissionMode() == config.PermissionModeYolo {
+		return yoloGuard{engine: engine}, gate, dgate, sandbox.WrapRegistry(cwd, nil, askUser)
+	}
 	container := sandbox.New()
-	rg := loop.RuleGuard{Engine: s.newEngine(), Container: container, Target: sandbox.ToolTarget}
-	return rg, gate, sandbox.WrapRegistry(cwd, container)
+	rg := loop.RuleGuard{Engine: engine, Container: container, Target: sandbox.ToolTarget}
+	return rg, gate, dgate, sandbox.WrapRegistry(cwd, container, askUser)
 }
 
 // ResolveRoot is gofer's single source of the ~/.gofer default — the SDK
@@ -223,6 +309,30 @@ type CreateOptions struct {
 	System   string
 	Params   provider.Params
 	MaxIters int
+
+	// ParentID is the id of the session SPAWNING this one — empty for a root
+	// session, which is every session gofer created before subagents existed.
+	// When set, the new session is a real child session (its own journal, cost
+	// and transcript) linked to that parent: Create resolves the parent (live
+	// roster first, then the store root on disk), derives Depth = parent+1,
+	// enforces [Config.MaxSubagentDepth], and persists the link beside the
+	// journal so it survives a restart. An unknown parent is [ErrNoParent]; too
+	// deep is [ErrDepthExceeded].
+	//
+	// The link is gofer-native on purpose: supervision and roster stay above the
+	// SDK (the SDK promotion test), and the SDK has no session-parent concept.
+	ParentID string
+
+	// Agent is the child's agent type/identity (e.g. "go-developer"). It is
+	// forwarded verbatim to [runner.Options.Agent] — the one SDK surface this
+	// feature consumes — which stamps it onto every event.ToolCallStarted/
+	// Delta/Finished the session's loop emits, so a transcript interleaving a
+	// parent's and its children's tool calls can attribute each one. Empty is
+	// un-attributed, the default and the pre-existing behavior.
+	//
+	// It is independent of ParentID: a root session may carry an agent identity,
+	// and a child need not.
+	Agent string
 }
 
 // Create starts a fresh session and registers it live. An empty prompt
@@ -244,17 +354,39 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts CreateOptio
 		return SessionInfo{}, fmt.Errorf("supervisor: create session: %w — run 'gofer login <provider>' if none is logged in, or set session.model in %s",
 			ErrNoModel, filepath.Join(s.root, config.ConfigFileName))
 	}
-	guard, gate, tools := s.sessionGuard(opts.Cwd)
+	meta, err := s.resolveParent(opts)
+	if err != nil {
+		return SessionInfo{}, err
+	}
+
+	guard, gate, decisions, tools := s.sessionGuard(opts.Cwd)
 	sess, err := s.newSession(ctx, runner.Options{
 		Root: s.root, Cwd: opts.Cwd, Model: opts.Model, System: opts.System,
-		Params: opts.Params, MaxIters: opts.MaxIters,
+		Params: opts.Params, MaxIters: opts.MaxIters, Agent: opts.Agent,
 		Guard: guard, Approver: gate, Tools: tools,
 	})
 	if err != nil {
 		return SessionInfo{}, fmt.Errorf("supervisor: create session: %w", err)
 	}
 
-	m, err := s.register(sess, opts.Model, opts.Cwd, gate)
+	// The runner seeds its own effort from Params.Thinking.Effort at
+	// construction, so the roster's bookkeeping starts from the same value
+	// rather than from a hardcoded "" that a later SetEffort would silently
+	// contradict (see managed.effort).
+	// Persist the parent/agent link beside the journal BEFORE the session becomes
+	// reachable, so a client that sees the session at all sees a linked one. A
+	// plain root session records nothing (see sessionMeta.recordable), which is
+	// why this whole path is inert for every pre-existing caller. A failed write
+	// fails the create: a child whose link was silently dropped is an orphan the
+	// roster can never place in its tree, which is worse than a loud refusal.
+	if meta.recordable() {
+		if err := writeSessionMeta(filepath.Dir(sess.JournalPath()), sess.ID(), meta); err != nil {
+			_ = sess.Close()
+			return SessionInfo{}, fmt.Errorf("supervisor: create session: %w", err)
+		}
+	}
+
+	m, err := s.register(sess, opts.Model, opts.Params.Thinking.Effort, opts.Cwd, gate, decisions, meta)
 	if err != nil {
 		// Lost a race with Close between the isClosed check above and here:
 		// tear down the just-built session so it does not leak. Its store is
@@ -272,6 +404,49 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts CreateOptio
 		s.notify()
 	}
 	return m.info(), nil
+}
+
+// resolveParent turns opts' subagent fields into the [sessionMeta] the new
+// session is registered and (when there is anything to record) journaled
+// alongside with.
+//
+// With no ParentID the result is a root session at depth 0 — carrying opts.Agent
+// if one was given, since agent attribution is independent of the parent link.
+// With one, the parent is resolved LIVE FIRST (its depth is authoritative and
+// in memory) and only then from disk, so a parent whose process was restarted —
+// or one owned by a different worker over the same shared store, which is the
+// normal case under M6 process isolation — still resolves. A parent found on
+// disk with no sidecar is a root at depth 0, which is exactly what it is.
+//
+// Write-ordering note, for whoever later makes Create cheaper: the sidecar is
+// written BEFORE the session becomes reachable (see Create), and that ordering
+// is load-bearing HERE. Reverse it — register first, persist later — and a
+// window opens in which a parent's journal exists but its sidecar does not, so
+// this lookup reads the parent back as a root at depth 0 and a child spawned in
+// that window silently dodges the cap. The window is unreachable today (a
+// client cannot know a session's id before Create returns it, and Create
+// returns only once the sidecar has landed); keep it that way.
+func (s *Supervisor) resolveParent(opts CreateOptions) (sessionMeta, error) {
+	meta := sessionMeta{ParentID: opts.ParentID, Agent: opts.Agent}
+	if opts.ParentID == "" {
+		return meta, nil
+	}
+
+	var parentDepth int
+	if m, ok := s.get(opts.ParentID); ok {
+		parentDepth = m.depth
+	} else if pm, found := lookupDiskSession(s.root, opts.ParentID); found {
+		parentDepth = pm.Depth
+	} else {
+		return sessionMeta{}, fmt.Errorf("supervisor: create session: %w: %s", ErrNoParent, opts.ParentID)
+	}
+
+	meta.Depth = parentDepth + 1
+	if meta.Depth > s.maxSubagentDepth {
+		return sessionMeta{}, fmt.Errorf("supervisor: create session: %w: depth %d exceeds the cap of %d — raise session.max_subagent_depth in %s",
+			ErrDepthExceeded, meta.Depth, s.maxSubagentDepth, filepath.Join(s.root, config.ConfigFileName))
+	}
+	return meta, nil
 }
 
 // ResumeOptions configures [Supervisor.Resume]. Model and Cwd are required —
@@ -300,17 +475,33 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 		return SessionInfo{}, ErrClosed
 	}
 
-	guard, gate, tools := s.sessionGuard(opts.Cwd)
+	// A resumed child keeps its attribution: the parent link, agent id and depth
+	// are read back from the on-disk sidecar (see [sessionMeta]) BEFORE the
+	// runner is built, since Agent is a construction-time runner option. A
+	// session with no sidecar — every session predating subagents — reads back
+	// the zero value and resumes exactly as it always did.
+	//
+	// This scans rather than jumping straight to session.Slugify(opts.Cwd), and
+	// that is NOT an oversight: a session's directory is the slug of the cwd it
+	// was CREATED with, while opts.Cwd is the cwd this resume asks for, and ACP
+	// makes the latter client-supplied and authoritative — the two legitimately
+	// differ. The SDK's own store resolves a journal by id the same way
+	// ([session.FileStore] scans the project dirs); shortcutting to the resume
+	// cwd's slug would silently read no sidecar and drop the child's attribution
+	// exactly when a client reopened it from somewhere else.
+	meta, _ := lookupDiskSession(s.root, id)
+
+	guard, gate, decisions, tools := s.sessionGuard(opts.Cwd)
 	sess, err := s.resumeSession(ctx, id, runner.Options{
 		Root: s.root, Cwd: opts.Cwd, Model: opts.Model, System: opts.System,
-		Params: opts.Params, MaxIters: opts.MaxIters,
+		Params: opts.Params, MaxIters: opts.MaxIters, Agent: meta.Agent,
 		Guard: guard, Approver: gate, Tools: tools,
 	})
 	if err != nil {
 		return SessionInfo{}, fmt.Errorf("supervisor: resume %s: %w", id, err)
 	}
 
-	m, err := s.register(sess, opts.Model, opts.Cwd, gate)
+	m, err := s.register(sess, opts.Model, opts.Params.Thinking.Effort, opts.Cwd, gate, decisions, meta)
 	if err != nil {
 		_ = sess.Close()
 		return SessionInfo{}, fmt.Errorf("supervisor: resume %s: %w", id, err)
@@ -330,14 +521,23 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 // is published into the roster below — so a concurrent Kill can never
 // observe a session whose teardown hasn't been stashed yet (see
 // Config.OnRegister's doc).
-func (s *Supervisor) register(sess Session, model, cwd string, gate *loop.Gate) (*managed, error) {
+func (s *Supervisor) register(sess Session, model, effort, cwd string, gate *loop.Gate, decisions *decision.Gate, meta sessionMeta) (*managed, error) {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		return nil, ErrClosed
 	}
-	m := newManaged(sess, model, s.clock(), s.clock, s.notify, cwd, gate, s.onRegister)
+	m := newManaged(sess, model, effort, s.clock(), s.clock, s.notify, cwd, gate, decisions, meta, s.onRegister)
+	// Stamp the session id onto the decision gate the moment it is knowable —
+	// before m is published anywhere and before anything can run a turn against
+	// it, so no request can ever open with an empty session id (see
+	// [decision.Gate.Bind]). Deliberately not "somewhere before go m.pump()":
+	// binding right here means no later statement can be moved above it and
+	// silently start minting requests the TUI would have to guess the session
+	// of.
+	decisions.Bind(m.id)
 	s.roster[m.id] = m
+	relay := s.decisionRelay
 	s.mu.Unlock()
 
 	go m.pump()
@@ -346,6 +546,16 @@ func (s *Supervisor) register(sess Session, model, cwd string, gate *loop.Gate) 
 	// before any turn can run — so the count never misses this session's first
 	// permission request.
 	go m.watchPermissions(sess.Events())
+	// Start the standing decision watcher on the same principle, and for a
+	// stronger reason: a decision is observable ONLY on this gate (no event
+	// carries one), so a host relaying decisions off-process has no other place
+	// to see them. Started here, at registration, before any turn can run — so
+	// the session's first ask_user is never missed, and the subscription exists
+	// before [decision.Gate.Request]'s ErrNoClient check can run. A nil relay
+	// (the daemonless path) starts nothing at all: see [Supervisor.SetDecisionRelay].
+	if relay != nil {
+		m.startDecisionWatch(relay)
+	}
 	return m, nil
 }
 
@@ -485,6 +695,59 @@ func (s *Supervisor) SetModel(ctx context.Context, sessionID, model string) erro
 	return nil
 }
 
+// SetEffort changes sessionID's reasoning effort for its next turn, consuming
+// the SDK runner's own setter ([runner.Runner.SetEffort]) — the effort-axis
+// parallel to [Supervisor.SetModel], hop for hop. Like SetModel it has no
+// idle-only restriction: the SDK setter is concurrency-safe with a turn already
+// in flight (the runner reads the effort once, at the top of the NEXT turn).
+//
+// Two ways it deliberately DIFFERS from SetModel:
+//
+//   - An empty effort is LEGAL. "" is the SDK's documented "clear back to the
+//     provider's default" ([provider.ValidEffort]), so there is no
+//     ErrEmptyModel analogue; the pre-check is ValidEffort, which admits "".
+//   - There is no cross-provider guard. A runner's provider client is fixed at
+//     creation, which is what constrains a model swap — but effort is
+//     provider-agnostic vocabulary each backend projects onto its own wire
+//     format (OpenAI's effort string, Anthropic's thinking budget), so the same
+//     level is meaningful everywhere and nothing about the session's provider
+//     can make it illegal.
+//
+// The reasoning-CAPABILITY check is left entirely to the SDK: [runner.Runner.SetEffort]
+// rejects a non-empty level only on positive registry evidence that the current
+// model cannot reason, and duplicating that rule here would be a second copy to
+// drift. Clients that want to refuse BEFORE calling (the TUI's picker does, so
+// it never offers four levels the runner will reject) read the same
+// [provider.Lookup] capability bit themselves.
+func (s *Supervisor) SetEffort(ctx context.Context, sessionID, effort string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Pre-checked here, rather than left to the SDK, for the same reason
+	// SetModel pre-checks cross-provider: the SDK's rejection is a plain,
+	// unwrapped error a caller cannot errors.Is against, and the daemon wire
+	// flattens it further. ValidEffort is the SDK's own predicate, so this is a
+	// typed restatement of its verdict, not a second opinion.
+	if !provider.ValidEffort(effort) {
+		return fmt.Errorf("supervisor: set effort %s: %w: %q (want %q, %q, %q, or \"\" to clear)",
+			sessionID, ErrInvalidEffort, effort, provider.EffortLow, provider.EffortMedium, provider.EffortHigh)
+	}
+	m, err := s.lookup(sessionID)
+	if err != nil {
+		return fmt.Errorf("supervisor: set effort %s: %w", sessionID, err)
+	}
+
+	if err := m.sess.SetEffort(effort); err != nil {
+		return fmt.Errorf("supervisor: set effort %s: %w", sessionID, err)
+	}
+
+	m.mu.Lock()
+	m.effort = effort
+	m.mu.Unlock()
+	s.notify()
+	return nil
+}
+
 // EmitConfigOptions publishes a session.config event onto sessionID's own event
 // stream via the runner Emit seam — the same seam the session-title emit uses
 // (see managed.go's enqueue) — carrying options as the session's authoritative
@@ -522,6 +785,78 @@ func (s *Supervisor) Reply(sessionID string, op event.PermissionReply) error {
 	}
 	m.gate.Reply(op)
 	return nil
+}
+
+// AnswerDecision routes a human's answers to sessionID's structured-decision
+// gate, unblocking the ask_user tool call waiting on requestID (see
+// [decision.Gate]). It is the decision-side counterpart of [Supervisor.Reply],
+// and errors the same way for an unknown session ([ErrNotLive]).
+//
+// Unlike Reply — a fire-and-forget op whose gate call cannot fail — this one
+// propagates the gate's validation error: a request that is no longer open
+// ([decision.ErrUnknownRequest], e.g. another peer answered first or the turn
+// was interrupted) or an answer that does not fit its question. The caller is a
+// UI that can act on that, and silently swallowing it would leave a prompt on
+// screen with nothing behind it.
+//
+// requestID is scoped to the session, so unlike a permission call id it is NOT
+// globally unique — sessionID is what disambiguates it.
+func (s *Supervisor) AnswerDecision(sessionID, requestID string, answers []acp.DecisionAnswer) error {
+	m, err := s.lookup(sessionID)
+	if err != nil {
+		return fmt.Errorf("supervisor: answer decision %s: %w", sessionID, err)
+	}
+	if err := m.decisions.Answer(requestID, answers); err != nil {
+		return fmt.Errorf("supervisor: answer decision %s: %w", sessionID, err)
+	}
+	return nil
+}
+
+// SubscribeDecisions returns a stream of sessionID's structured-decision
+// updates, buffered to hold buffer of them, replaying every request already
+// open so a client attaching mid-turn still sees the prompt the agent is
+// blocked on (see [decision.Gate.Subscribe]). It returns [ErrNotLive] for an
+// unknown session.
+//
+// The caller owns the returned subscription and must Close it when it stops
+// reading. It does NOT have to poll for the session ending: killing/archiving/
+// closing a session closes its gate (managed.stop), which closes every live
+// subscription — so a consumer learns the session is gone the same way it
+// learns its event subscription ended, by the channel closing.
+func (s *Supervisor) SubscribeDecisions(sessionID string, buffer int) (*decision.Subscription, error) {
+	m, err := s.lookup(sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("supervisor: subscribe decisions %s: %w", sessionID, err)
+	}
+	return m.decisions.Subscribe(buffer), nil
+}
+
+// ExplainPermission answers why sessionID's still-pending callID was gated,
+// deriving the rationale from the guard's own decision trace (see
+// [permrationale.Derive] — the SAME grammar the daemon answers ACP's
+// session/explain_permission with, so a TUI running against an in-process
+// supervisor and one running against a daemon get the same explanation).
+//
+// It is READ-ONLY, and that is a contract, not an implementation detail: it
+// never touches the gate, never resolves the request, and never mutates the
+// retained payload. A client can ask as many times as it likes and the human
+// still has to answer the prompt afterwards.
+//
+// It errors with [ErrNotLive] for an unknown session and
+// [ErrNoPendingPermission] for a call id that is not outstanding on it —
+// including one that belongs to a DIFFERENT session, since each session's
+// retained requests are its own, so one session's rationale can never leak
+// through another's id.
+func (s *Supervisor) ExplainPermission(sessionID, callID string) (acp.PermissionRationale, error) {
+	m, err := s.lookup(sessionID)
+	if err != nil {
+		return acp.PermissionRationale{}, fmt.Errorf("supervisor: explain permission %s: %w", sessionID, err)
+	}
+	pe, ok := m.pendingPerm(callID)
+	if !ok {
+		return acp.PermissionRationale{}, fmt.Errorf("supervisor: explain permission %s/%s: %w", sessionID, callID, ErrNoPendingPermission)
+	}
+	return permrationale.Derive(pe.Tool, pe.Trace), nil
 }
 
 // Kill interrupts any in-flight turn, drops id from the roster, emits
@@ -683,16 +1018,25 @@ func (s *Supervisor) List(ctx context.Context) ([]SessionInfo, error) {
 //   - Title mirrors how a live session derives it (see managed.go's
 //     enqueue/snippet): an excerpt of the first user-role message's text.
 //   - Created and Updated come from the first and last entry's Time.
+//   - ParentID, Agent and Depth come from the session's `<id>.meta.json`
+//     sidecar (see [sessionMeta]), so an offline child still shows its parent
+//     link. A session with no sidecar — every session predating subagents, and
+//     every root session, which writes none — reads back zero values and lists
+//     exactly as it did before.
 //
 // A read error, or a journal with no entries at all, degrades to the bare
 // {ID, Project, JournalPath, Live:false} snapshot rather than failing the
 // whole List — one unreadable journal must never hide every other session.
 func diskSessionInfo(id, slug, path string) SessionInfo {
+	meta := readSessionMeta(sidecarPath(filepath.Dir(path), id))
 	info := SessionInfo{
 		ID:          id,
 		Project:     slug,
 		JournalPath: path,
 		Live:        false,
+		ParentID:    meta.ParentID,
+		Agent:       meta.Agent,
+		Depth:       meta.Depth,
 	}
 
 	entries, err := session.ReadEntries(path)

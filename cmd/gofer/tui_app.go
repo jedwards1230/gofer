@@ -149,6 +149,10 @@ func selectTUIBackend(ctx context.Context, df *daemonFlags, cwd, root string, st
 				Model: daemonDefaultModel(ctx, c),
 				Cwd:   cwd,
 				Now:   time.Now(),
+				// The daemon's own build, so the header can warn when this roster
+				// is served by a stale daemon — the CLI's stderr skew warning is
+				// swallowed by the alt-screen on this path.
+				DaemonVersion: daemonBinaryVersion(ctx, c),
 			},
 			env: env,
 		}, nil
@@ -156,7 +160,30 @@ func selectTUIBackend(ctx context.Context, df *daemonFlags, cwd, root string, st
 		return tuiBackend{}, daemonDialErr(df.addr, dialErr)
 	}
 
-	sup, err := supervisor.New(supervisor.Config{Root: rootDir})
+	// The subagent depth cap is an operator opinion, so the local supervisor
+	// honors session.max_subagent_depth exactly as `gofer daemon` and
+	// `gofer session-worker` do — a cap silently ignored on one of the three
+	// paths that create sessions would be a config knob that only sometimes
+	// works. The guardrail posture (session.permission_mode) is honored on the
+	// same terms and for the same reason: this is the backend the TUI actually
+	// runs on when no daemon is reachable, which is exactly where a /yolo that
+	// reached nothing would be most misleading. Read best-effort, matching
+	// resolveOverviewModel's posture just below: config.Load's zero value
+	// resolves to the package default, so an unreadable or malformed config
+	// leaves the cap at its default rather than keeping the roster from opening
+	// at all.
+	//
+	// NOTE: this call still passes no Permissions, so local-backend sessions run
+	// the supervisor's built-in contain-or-ask catch-all rather than the
+	// operator's configured RULESET. That gap is pre-existing and unrelated to
+	// either the subagent cap or the permission MODE, and is left alone here
+	// rather than changed under cover of this work.
+	localCfg, _ := config.Load(config.DefaultPath(rootDir))
+	sup, err := supervisor.New(supervisor.Config{
+		Root:             rootDir,
+		MaxSubagentDepth: localCfg.Session.SubagentDepthLimit(),
+		PermissionMode:   permissionModeResolver(rootDir),
+	})
 	if err != nil {
 		return tuiBackend{}, fmt.Errorf("build supervisor: %w", err)
 	}
@@ -200,6 +227,21 @@ func selectTUIBackend(ctx context.Context, df *daemonFlags, cwd, root string, st
 func daemonDefaultModel(ctx context.Context, c *daemon.Client) string {
 	model, _ := daemonDefaultModelErr(ctx, c)
 	return model
+}
+
+// daemonBinaryVersion reads the connected daemon's build version off the
+// gofer/hello handshake, best-effort: a daemon predating the handshake (or the
+// field) yields "", which the roster header treats as "unknown" and shows no
+// skew banner for (internal/versionskew). It is the TUI-path source of the same
+// authoritative daemon version dialDaemon compares on the CLI path — read here
+// so the roster header can surface a stale-daemon warning the pre-alt-screen
+// stderr warning can never make visible.
+func daemonBinaryVersion(ctx context.Context, c *daemon.Client) string {
+	hello, err := c.Hello(ctx)
+	if err != nil {
+		return ""
+	}
+	return hello.BinaryVersion
 }
 
 // daemonDefaultModelErr is daemonDefaultModel keeping the error, for

@@ -1,0 +1,24 @@
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+<yellow>decision</yellow><muted> · </muted>Pick a migration strategy
+
+Which approach should I take?
+
+<accent>▸</accent> 1  In-place ALTER
+<muted>       fastest, but locks the table for the duration</muted>
+  2  Shadow table + backfill  <accent>(Recommended)</accent>
+<muted>       online, but doubles disk until cutover</muted>
+
+  › Type something.
+  ↳ Chat about this
+
+<muted>Enter to select · ↑/↓ to navigate · Esc to cancel</muted>

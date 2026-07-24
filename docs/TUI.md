@@ -41,23 +41,33 @@ UI.
 A row may be a whole fan-out hierarchy; it collapses to aggregate state,
 agent count, and whether approvals are pending, and expands inline to the
 subagent tree. `↑`/`↓` move the selection · `tab` switches view · `enter`
-peek · `→` attach · `ctrl-x` kill (running; subtree interrupted) or archive
-(finished), acting immediately on the selected row. `enter`, `→` and
-`ctrl-x` take these meanings only while the dispatch bar is empty; every
-other key types into it, and `enter` on non-empty text starts a new session
-— or dispatches a `/` command. Journals are never deleted — `gofer ps --all`
-lists archived sessions.
+open (attach the full session) · `space` peek · `ctrl-x` kill (running; subtree
+interrupted) or archive (finished) — a **two-press confirm**: the first `ctrl-x`
+arms the action and shows a status line naming the verb for that row's state
+(`kill` vs `archive`), the second `ctrl-x` (same session still selected) runs it;
+any other key cancels · `ctrl-t` stop every subagent **below** the
+selected row, acting immediately on the selected row. `enter`, `space`, `ctrl-x`
+and `ctrl-t` take these meanings only while the dispatch bar is empty; every
+other key types into it — so `space` on non-empty text is an ordinary space —
+and `enter` on non-empty text starts a new session, or dispatches a `/` command.
+Journals are never deleted — `gofer ps --all` lists archived sessions.
 
 **Peek** — a summary card for one session: its title, a one-line
 waiting/status line, and a `❯ reply` input. `up`/`down` move the roster
 selection (the card follows); `enter` opens (attaches) or, with reply text,
-sends the reply; `space` closes back to the overview; `ctrl+x` kills a
-running session or archives a finished one, as on the overview. Peek
-carries no transcript tail — it is a roster-only projection.
+sends the reply; `esc` closes back to the overview, and so does `space` with an
+empty reply (`space` is the toggle partner of the overview's `space`-to-peek);
+`ctrl+x` kills a running session or archives a finished one, as on the overview —
+the same two-press confirm (first press arms, second press acts). Peek carries no
+transcript tail — it is a roster-only projection.
 
 **Attach** — full transcript + input. `esc` interrupts the in-flight turn;
-`←` on an empty input backs out to the overview (with text, it moves the
-cursor).
+`←` on an empty input backs out — to the **parent session** when the attached
+session is a subagent, otherwise to the overview (with text, it moves the
+cursor); `↓` on an empty input goes the other way, to the overview with this
+session's **first spawned child** selected (a no-op when it has none). See
+[Subagent sessions](#subagent-sessions-m7--ecosystem) for the drill-in/drill-out
+pair.
 
 Every screen — overview, attach's transcript, its approval prompts, and its
 command-menu/panel overlays — opens with the same two-line identity header:
@@ -67,78 +77,273 @@ adds a third status-count line beneath it; the attach screen's copy leaves
 that row blank instead (a global roster tally means nothing once attached to
 one session).
 
+The overview header's fourth line is normally the blank separator, but when the
+roster is served by a daemon whose build is **older than (or a different build
+from) the running CLI** it carries a persistent warn-styled banner —
+`⚠ daemon is stale (<daemon> < <cli>) — run: gofer daemon restart`
+(`Overview.skewSeparator`, overview_render.go). It is the TUI-visible twin of
+the CLI's stderr version-skew warning (`warnVersionSkew`, daemonclient.go),
+which the alt-screen swallows on the roster path; both share one classifier
+(`internal/versionskew`), so an unknown, matching, or *newer* daemon stays
+silent on both. Reusing the separator slot keeps the header a fixed
+`headerLines` tall, so the banner costs no body rows and a non-skewed roster
+renders byte-identically.
+
 A pending permission request is **not** a centered modal — it renders inline in
-the conversation's bottom UI. The transcript records a permanent `● <tool>`
-badge the moment the request arrives, but while it's unresolved the live
-prompt **commandeers the whole footer** (status line, input box, and its
-framing rules) and the badge is suppressed from the transcript so it isn't
-shown twice; once answered, the footer returns and the badge becomes visible
-again. It reads as a confirm prompt — a rule, a titled `<tool> command`
-header, the indented args, the question, and the action row, keyed `a`/`d`/`r`
-(`r` toggles remember), `esc` dismisses without answering (the request stays
-pending; a re-attach re-surfaces it):
+the conversation's bottom UI. The gated call's **own tool block** is the
+transcript record: the SDK emits `ToolCallStarted` while the provider streams
+the `tool_use` (before the loop gates the call), so a `● <tool>` block already
+sits in the transcript when the request arrives. While the request is
+unresolved the live prompt **commandeers the whole footer** (status line, input
+box, and its framing rules) and that block is suppressed from the transcript so
+it isn't shown twice; once answered, the footer returns, the block reappears,
+and `ToolCallFinished` fills it in with the args/output/exit — **one call, one
+item**. (Appending a separate `● <tool>` badge alongside the tool block instead
+— the pre-fix shape — left both alive past an allow, rendering the call twice:
+the real `● bash(args)` block beside an empty `● bash` bullet. A standalone
+`itemApproval` badge now survives only as the fallback for a request that has
+no matching tool block.) It reads as a confirm prompt — a rule, an attributed `<tool> command`
+header, the call's own description and body, a plain-English rationale, the
+question, and a **vertical Yes/No choice list** (the same one the `ask_user`
+prompt uses), keyed `↑`/`↓` to move the focused row and `enter` to take it,
+`a`/`d` as quick keys (shown as each row's `[a]`/`[d]` leader; `y`/`n` and the
+un-advertised `1`/`2` alias them), `r` toggles remember, `tab` amends the call
+before allowing and `ctrl+e` explains why it was gated (read-only — both below),
+`esc` dismisses without answering (the request stays pending; a re-attach
+re-surfaces it):
 
 ```
  ────────────────────────────────────────────────
- bash command
+ bash command · from the `researcher` agent
+   Run the test suite with race detection
 
-   cmd=rm -rf /tmp/session-fixtures
+   go test -race ./... \
+     -run TestApproval
+   timeout=120
 
- Allow this tool call?
-   [a] allow   [d] deny   [r] remember: off
+ Why you're being asked
 
- esc cancel · session 0192a1b2-…
+   No permission rule matched this `bash` call, so gofer is asking before it
+   runs. It also cannot be sandboxed on this host, so an allow rule alone
+   will not let it run unattended.
+
+   Policy: unmatched · containable: false (no container configured)
+
+   Press `r` before allowing to remember this exact call for the rest of the
+   session. Add a rule to the `permissions` array in `config.json` — e.g.
+   `{"verdict": "allow", "tool": "bash", "specifier": "go *"}` — to stop
+   being asked.
+
+ Do you want to proceed?
+ ▸ [a] Yes
+   [d] No
+
+ enter/↑↓ select · [r] remember: off · [tab] amend · ctrl+e explain · esc cancel
 ```
 
+The answer is a caret-navigable list rather than a side-by-side `1. [a] Yes  2.
+[d] No` row, so the two interactive prompts share one selection model
+(choicelist.go): the same `▸` caret marks the focused row, `↑`/`↓` move it, and
+`enter` takes it, while the quick keys stay live. It opens focused on **Yes**,
+the affirmative default a confirm prompt trains, one arrow from the deny. The
+footer hint fits one line at 80 cells so the whole block stays within a
+non-collapsing 80x24 frame; the session id lives in the identity header rather
+than being repeated here.
+
+The header's attribution clause is omitted entirely for an un-attributed call
+(no subagent, or a stream that never carried one) — never a placeholder. The
+body is the call's own `command`/`cmd`/`script`/`file_path`/`path` value,
+rendered over as many rows as it needs with every other spec key demoted to a
+sorted `k=v` list beneath it; the whole body is capped at
+`tui.approval_body_lines` rows (default 12) with the remainder collapsed into
+`… +N more lines`, so a pasted script can never push the question off the
+frame.
+
 Resolution is deliberately quiet. A routine **allow** adds *no* transcript
-line — the `●` badge already recorded that the call was gated, and a
-`permission allow` line on every approved call (printed *after* the result,
-reading as if config auto-allowed it) was pure noise. A **deny** keeps a red
-`permission deny` line, because a blocked call changed what happened. The old
-rule-source parenthetical is dropped either way.
+line — the call's own `● <tool>` block already records it (and fills in on
+`ToolCallFinished`), and a `permission allow` line on every approved call
+(printed *after* the result, reading as if config auto-allowed it) was pure
+noise. A **deny** keeps a red `permission deny` line, because a blocked call
+changed what happened. The old rule-source parenthetical is dropped either way.
 
-The fuller pipeline trace (which rail matched, what the sandbox said, what the
-reviewer decided) and the richer action set (`edit cmd`, `why?`) land later; M3
-ships the inline allow/deny/remember prompt above.
+**Richer provenance — what ships.** The prompt now carries the call's
+**attribution** ("from the `<agent>` agent", correlated from the tool call's
+`event.Agent` — `event.PermissionRequested.ID` *is* the tool call id), its
+**multi-line body** (the real command text, not a one-line `cmd=…` summary),
+and a **rationale**: why it was gated in plain English, the matched policy
+with every raw trace entry preserved, and the two escape hatches that actually
+exist — `r` to remember the call for the session, or a rule in `config.json`'s
+`permissions` array (the example specifier is built from the call's own first
+token, and is omitted rather than guessed at when there is no command body).
 
-**Richer provenance (backlog).** Once the ACP permission request carries it,
-the prompt should render the request's full provenance rather than just the
-tool and its args: the **gating hook** that raised it (e.g. `PreToolUse:Bash`),
-the human **reason** and the **policy** that matched, a copy-paste **override
-hint** carrying its `[plugin:x]` provenance so a grant can be reproduced outside
-the TUI, and the call's **attribution** ("from the `<agent>` agent" when a
-subagent issued it). Two affordances ride the action row — `Tab` to amend the
-call before allowing, `ctrl+e` to explain why it was gated — but both need new
-SDK permission-outcome variants (an amended-input reply and an explain request)
-before the TUI can offer them; see the agent-sdk-go design backlog. Until the
-request carries these fields the prompt renders exactly the tool/args form
-above.
+**Local vs authoritative rationale.** The rationale on screen starts out
+**locally derived** from the guard's decision trace
+(`event.PermissionRequested.Trace`). **`ctrl+e`** asks the agent side for the
+**authoritative** one over ACP `session/explain_permission`, and replaces it;
+the header then reads `Why you're being asked · the agent's answer` (and
+`· explaining…` while the call is in flight, during which a second `ctrl+e` is
+a no-op). Both are produced by the same grammar — `internal/permrationale`,
+shared by the TUI's local render and the daemon's handler — so the two are
+comparable rather than differently-worded restatements. A failed explain says
+so on the status line and leaves the local rationale standing.
+
+`ctrl+e` is **read-only, and that is a contract, not an implementation
+detail**: an explain never resolves the request. The prompt stays open, the
+action row stays armed, and the human still answers — asking why must never
+cost you the ability to decide. The daemon answers from the request it already
+retains, so a client can ask as many times as it likes (`internal/daemon`'s
+`handleExplainPermission`; `internal/supervisor`'s `ExplainPermission` is the
+daemonless path). An unknown or already-resolved call id is an **error**, not
+an empty rationale — "no longer pending" and "gated for no stated reason" are
+different answers.
+
+**Height-aware collapse.** The full block runs ~22 rows, which on an 80×24
+terminal would leave a two-line transcript and scroll the identity header out
+— losing the conversation that led to the gated call exactly when it is needed
+to decide. So the prompt adapts: when the full block would leave fewer than
+`tui.approval_min_transcript_rows` (default 8) transcript rows, the rationale
+collapses to its opening paragraph plus a muted `… ctrl+e to explain`. The
+header, the call's body, the question, the action row, and the hint line are
+**never** collapsed — nor is an open amend editor, including its cursor line
+and its warning (see below). Set the key to `0` to never collapse at all.
+
+**`Tab` — amend the call before allowing — what ships.** `Tab` opens an inline
+editor prefilled with the gated call's command body (the same
+`command`/`cmd`/`script`/`file_path`/`path` value the prompt displays), in
+place of the decision row; the header, attribution, body, and rationale stay
+above it. `ctrl+s` approves the EDITED call, `esc` returns to the prompt with
+the request still pending and the call untouched, `enter` inserts a line
+break, and every other key edits — `a`/`d`/`r`/`1`/`2` type characters rather
+than answering, which is the only sane behavior for a text field. Within a
+line the app's ordinary text keymap applies (word motion, `ctrl+a`/`ctrl+e`,
+`ctrl+w`/`ctrl+u`/`ctrl+k`); `←`/`→` cross line boundaries and `↑`/`↓` move
+between lines. The visible editor is capped by the same
+`tui.approval_body_lines` budget as the body, but it SCROLLS to keep the
+cursor line in view rather than truncating it away. A call whose spec carries
+no command-ish key (a structured edit payload, a search query object) has
+nothing sensible to edit, so `Tab` there is a no-op with a status note saying
+so.
+
+**`ctrl+e` inside the editor is jump-to-end-of-line, not explain.** That is a
+deliberate split of the one key both features want: in a text field `ctrl+a`/
+`ctrl+e` are the readline bindings every other input in this app gives them,
+and an explain fired mid-edit would repaint the rationale under a live cursor
+and resize the block while the user types into it. Nothing is lost — `esc`
+leaves the editor with the request still pending and the command untouched,
+and `ctrl+e` explains from there; while amending, the collapsed rationale's
+pointer says `… esc, then ctrl+e to explain` rather than advertising a key
+that would do something else. An explain already in flight when `Tab` was
+pressed still lands normally: it swaps the rationale block above and leaves
+the editor's text, cursor, and warning alone.
+
+Neither the editor nor its warning participates in the height-aware collapse
+above. The collapse only ever shortens the rationale, so on any frame size the
+line being typed on and the "not re-run through the permission rules" warning
+are both still there — the two rows in this block it would be worst to lose.
+
+Two properties of an amend are load-bearing, and the editor states both on
+screen rather than burying them here:
+
+- **An amended call is NOT re-run through the permission rules.** The SDK
+  substitutes the replacement input into the call *after* the guard already
+  evaluated the model's original arguments (`loop.awaitApproval`) — approving
+  an edit is a deliberate human override, and the prompt says exactly that in
+  the warn style, never anything implying the edit was examined.
+- **A remembered amend pins the EDITED call.** The SDK substitutes the input
+  *before* calling `Grant`, so `r` + `Tab` + `ctrl+s` makes the command you
+  typed the standing grant, not the one the model proposed. The warning adds
+  that sentence whenever remember is on.
+
+The reply carries the call's **full original input** with only the edited key
+replaced (`tui.Model.AmendedInput`) — `event.PermissionReply.Input` is
+substituted wholesale, so a reply carrying just the command would erase every
+other argument (a `timeout`, a working directory). The same replacement input
+crosses every path a plain verdict does: in-process (`tuibridge`), over the
+daemon wire (`permission.reply`'s optional `input` member — `omitempty`, so a
+plain allow is byte-identical to before amend existed), through the router's
+worker hop, and from a pure ACP client answering with
+`{"outcome":"amended","optionId":…,"rawInput":…}`.
+
+**Richer provenance — what remains backlog.** The **gating hook** that raised
+the request (e.g. `PreToolUse:Bash`) and a copy-paste **override hint**
+carrying its `[plugin:x]` provenance both need fields the permission request
+doesn't carry yet — they are the last two provenance items still missing, and
+neither key is advertised on the prompt until it lands. Both action-row
+affordances now ship: `Tab` amends (SDK `PermissionOutcomeAmended`) and
+`ctrl+e` explains (SDK `session/explain_permission`).
 
 **Remember-as-rule** — a grant never widens silently: the prompt offers
 exact / prefix / broad patterns, but dangerous commands are force-downgraded
 to exact-match regardless, scoped (agent/global) and TTL'd.
 
-## Structured question / decision tool (M7, not yet built)
+## Structured question / decision prompt
 
-Design intent only. An agent that needs a **decision** — not a tool approval,
-but "which of these should I do?" — deserves a first-class prompt distinct from
-the permission dialog above. Like an approval it renders inline in the footer,
-commandeering it while unresolved; unlike one it carries the agent's own
-question and options rather than a tool call.
+An agent that needs a **decision** — not a tool approval, but "which of these
+should I do?" — gets a first-class prompt distinct from the permission dialog
+above. Like an approval it renders inline in the footer, commandeering it while
+unresolved; unlike one it carries the agent's own question and options rather
+than a tool call. Dispatch precedence is `panel > approval > decision > menu >
+active screen`: a permission gate blocks a tool call already in flight, so it
+outranks a decision if both are somehow pending.
 
-**Single question** — a title chip, the bold question, numbered options each
-with a dim rationale sub-line, a free-text row to answer off-menu, and an escape
-row that hands the turn back to the conversation:
+The request originates in gofer, from the `ask_user` tool
+(`internal/decision`), and travels its own stream — `Supervisor.Decisions` /
+`Supervisor.AnswerDecision`, not the Event/Op stream — because the SDK's
+`event.Event` union carries no decision kind. See `internal/decision`'s package
+doc for the full rationale.
+
+### The `ask_user` tool
+
+Input schema (snake_case, matching the SDK builtins):
+
+```
+{ "questions": [ {
+    "title":           string   // short chip label, e.g. "Fix rebuilds"
+    "question":        string   // required
+    "context":         string   // optional supporting context (multi-question side panel)
+    "options": [ {
+        "label":       string   // required, short — the choice itself
+        "rationale":   string   // the indented reasoning/risk body
+        "reference":   string   // optional locator for supporting material
+        "recommended": bool     // renders "(Recommended)"
+    } ]
+    "allow_free_text": bool     // DEFAULT TRUE when omitted
+    "allow_chat":      bool     // DEFAULT TRUE when omitted
+} ] }
+```
+
+**Ids are gofer's, never the model's**: `q1, q2, …` for questions and
+`q1o1, q1o2, …` for options, assigned by position (`decision.AssignIDs`). An
+answer therefore can't reference an id the model hallucinated, and the id space
+is stable across runs — which is what makes the tool's result text and this
+package's goldens deterministic.
+
+**The escape hatches are opt-out, not opt-in.** `allow_free_text` and
+`allow_chat` default to **true**; the model must set them explicitly to `false`
+to remove a row. A forced-choice prompt with no way out is a trap, so the agent
+has to ask for that trap deliberately.
+
+**Four answer shapes** come back, one per question, in question order:
+`selected` (an option id), `text` (the free-text answer), `chat` (the user
+wants to talk it through instead of choosing), and `cancelled` (left
+unanswered — the gate fills these in). Only a genuinely malformed call is an
+error; `chat` and `cancelled` are legitimate outcomes.
+
+### Single question (shipped)
+
+A title chip, the question, numbered options each with a dim rationale sub-line,
+a free-text row to answer off-menu, and an escape row that hands the turn back
+to the conversation:
 
 ```
  ────────────────────────────────────────────────
- decision   Pick a migration strategy
+ decision · Pick a migration strategy
 
  Which approach should I take?
 
    1  In-place ALTER
         fastest, but locks the table for the duration
-   2  Shadow table + backfill
+   2  Shadow table + backfill  (Recommended)
         online, but doubles disk until cutover
 
    › Type something.
@@ -147,32 +352,204 @@ row that hands the turn back to the conversation:
  Enter to select · ↑/↓ to navigate · Esc to cancel
 ```
 
-**Multi question** — a tabbed stepper strips across the top; `Tab` switches
-between questions, each with its own option list, and a right-side reference box
-shows the focused option's detail. `n` opens a notes field on that option:
+The header joins the `decision` chip to its title with a `·` separator, **not**
+a run of spaces: three spaces between two content words read as two tab cells
+(the multi-question strip's own spacing), so `decision   Choose a task` was
+being mistaken for a two-question strip. The bullet binds them as one label, and
+a single question draws **no tab strip at all** — that strip is a multi-question
+affordance only.
+
+The options are the shared vertical choice list (choicelist.go) — the same one
+the approval prompt answers through — so the focused row carries the same `▸`
+caret every other list in this TUI uses, in the gutter, and focusing a row never
+shifts the columns beneath it. Only the state-bearing tokens are colored
+(marker-only styling): the `decision` chip takes the approval header's warn
+style, the caret and `(Recommended)` take the accent, the rationale and the key
+hint are muted. A rationale-less option renders no sub-line at all, and a row the
+question opted out of is simply absent.
+
+**Keys** — `↑`/`↓` move the focused row (clamped, never wrapping: wrapping from
+the last row onto option 1 is how a stray press sends the wrong answer);
+`1`-`9` answer with that option directly; `Enter` resolves the focused row (an
+option answers with it, `Type something.` opens its editor and a **second**
+`Enter` submits, `Chat about this` answers with the chat hatch); `Esc` leaves
+typing mode, or — when not typing — **cancels the request**, answering every
+question in it with `cancelled`; `ctrl+c` quits. While typing, the hint reads
+`Enter to submit · Esc to cancel` and every unclaimed key goes to the shared
+input keymap, so digits type digits. `j`/`k` are deliberately unbound — every
+list here is arrow-only, and vi keys would fight the free-text row.
+
+`Esc` cancels rather than merely closing the prompt because there is nothing to
+come back to: unlike a permission request — which leaves a transcript badge and
+replays off the event stream on re-attach — a decision has neither, so a prompt
+closed without resolving would leave the agent's turn blocked forever with
+nothing on screen pointing at it. `cancelled` is a first-class outcome the model
+is told about and can act on, not an error.
+
+Resolving (an answer or a cancel) is an optimistic local dismiss, exactly like
+an approval: the matching `UpdateResolved` arriving a moment later finds nothing
+pending. A request another peer answers, or one an interrupted turn drops,
+clears the prompt the same way with no answer sent from here — as does the
+session ending, which closes its gate (and with it every decision subscription).
+
+### Multi question (shipped)
+
+A request carrying **several** questions grows a tab strip, a side panel, and a
+notes editor — and stops answering on every keystroke. Each answer accumulates
+as a **draft**; the final `Submit` tab commits the whole set in **one**
+`AnswerDecision` call, which is the whole point: an agent that needs four
+sign-offs asks once instead of stalling four times.
+
+The multi-question affordances engage only when the request carries more than
+one question. A single question renders exactly as above — a tab strip with one
+tab, or a Submit tab for one answer, would be noise on the common case.
 
 ```
- ────────────────────────────────────────────────
- ←   □ Q1    □ Q2    ✔ Submit   →
+ ────────────────────────────────────────────────────────────────────────────────
+ decision · 2 questions
+ ←   ▸ □ M4 slicing     ✔ Views v1 scope     □ Submit   →
 
- Q1   Which database?
+ How should the M4 milestone be sliced?
 
-   1  Postgres           ┌─ reference ───────────────┐
-   2  SQLite             │ Postgres: the focused      │
-                         │ option's detail renders    │
-   › Type something.     │ here.                      │
-   ↳ Chat about this     └────────────────────────────┘
-                                press n to add notes
+ ▸ 1  Renderer first, wiring after                   │ context
+        goldens land early, so the frame is          │ M4 is the TUI polish
+        reviewable before any plumbing moves         │ milestone; whichever half
+   2  Wiring first, renderer after  (Recommended)    │ lands first is what M5 has
+        unblocks the daemon path sooner, at the cost │ to build on.
+        of an unreviewable frame                     │
+                                                     │ reference
+   › Type something.                                 │ docs/TUI.md#rendering
+   ↳ Chat about this                                 │
+                                                     │ notes
+                                                     │ leaning renderer-first,
+                                                     │ ask again after the spike
 
- Enter to select · ↑/↓ to navigate · n to add notes ·
- Tab to switch questions · Esc to cancel
+ Enter to select · ↑/↓ to navigate · n to add notes · Tab to switch questions ·
+ Esc to cancel
 ```
 
-Both forms need a **structured-question ACP message type** the daemon can relay
-and the client can render — a decision request distinct from
-`permission.requested`, carrying the question(s), their options, and per-option
-rationale/reference — so this stays deferred until that lands; see the
-agent-sdk-go design backlog.
+**The tab strip** carries one tab per question plus the final `Submit` tab,
+between two end-affordance arrows. Each tab is `caret · checkbox · label`: the
+label is the question's own `title`, falling back to `Q1`/`Q2`/… when the agent
+gave it none; the checkbox is `✔` once that question has an answer drafted and
+`□` until then, and `Submit`'s own checkbox reports whether *every* question is
+answered. State rides two channels on purpose — the caret and the glyph read in
+a plain Ascii render (this TUI's "selection reads without color" rule), the
+accent on an answered `✔` and on the focused label is the color-only layer the
+styled golden pins. When the full strip doesn't fit it degrades to the focused
+tab plus an `(i/n)` counter rather than truncating, since a truncated strip can
+hide the very tab you're on.
+
+**The side panel** carries the focused question's `context`, the focused
+*option's* `reference`, and the note attached to this question's answer — the
+split the tool's schema defines: context belongs to the decision, a reference
+belongs to one choice within it. It takes about a third of the frame, and it
+degrades in two stages: with nothing to show there is no panel at all, and with
+something to show but no room beside the options it **stacks beneath them**
+instead of squeezing the labels into a two-cell column. A narrow terminal loses
+the geometry, never the text. (It is a divider rule rather than the drawn box
+the original sketch had: this TUI has no other boxes, and a box's borders have
+to be stretched to whichever column is taller, which reads worse than the rule
+as options wrap.)
+
+**Options wrap** onto continuation lines indented under their own label rather
+than being truncated — the normal case once the panel takes its third of the
+frame, and a choice you can't read in full is a choice you can't make.
+
+**Keys** — everything the single-question prompt binds, plus: `Tab` moves to the
+next question (and onto `Submit`), `shift+tab` moves back, `←`/`→` do the same
+(the strip draws those arrows, and a rendered affordance that does nothing when
+pressed would be a lie), and `n` opens a **notes** editor on the focused
+question's answer, landing in `DecisionAnswer.Notes`. Enter saves the note, Esc
+discards it, and an empty save clears the note — the only way to take one back
+off. Tab movement **wraps** where the row cursor clamps: switching tabs commits
+nothing, so the stray-keypress surprise the clamp protects against doesn't exist
+here. Switching tabs leaves both editors (a half-typed answer belongs to the
+question that opened it) and lands the cursor on the answer that question
+already has, so returning to it *shows* your pick rather than inviting you to
+make it twice. The hint line reads
+`Enter to select · ↑/↓ to navigate · n to add notes · Tab to switch questions · Esc to cancel`,
+wrapped to the frame.
+
+**Submit vs `Esc`, spelled out** (the issue's open question). The `Submit` tab
+reviews what is about to be sent — one line per question, with the unanswered
+ones labelled `not answered — cancelled on submit` — and `Enter` on its row
+sends **one** `AnswerDecision` carrying every drafted answer. Questions with no
+answer are simply **omitted**; the gate fills each of them in as `cancelled`
+(`decision.Gate.Answer`'s normalize), which is tested behavior there and is
+deliberately not re-implemented in the TUI. So **submitting two of four commits
+those two and cancels the other two, and `Esc` cancels all four** — `Esc`
+discards the drafts and their notes rather than quietly committing the half that
+happened to be filled in, matching the single-question contract above. The one
+draft a submit can't leave to the gate is a question that was *annotated but
+never answered*: omitting it would drop text the user typed, so it goes out as
+an explicit `cancelled` answer carrying its note.
+
+**Not built with it**: a single question's `context` and its options'
+`reference` have nowhere to render — the side panel is part of the
+multi-question widget, and growing the shipped single-question layout a second
+column is its own change with its own golden.
+
+### Across the daemon wire
+
+A decision crosses a daemon connection the way a permission does, with one
+structural difference: a permission is an `event.Event`, so the daemon's
+`session/prompt` handler observes every one inline while draining the turn's
+event stream. A decision is not — the SDK's Event union is closed and carries no
+decision kind — so the supervisor runs a **standing per-session watcher** over
+the session's gate and hands each update to a `DecisionRelay` the daemon
+implements (`internal/supervisor/decision_relay.go`, `internal/daemon/decision_relay.go`).
+That watcher is the daemon's only observation point; nothing else can see one.
+
+Four methods carry it:
+
+| Method | Direction | Params |
+|---|---|---|
+| `gofer/decision_requested` | daemon → every attached peer | `{sessionId, id, questions}` |
+| `gofer/decision_resolved` | daemon → every attached peer | `{sessionId, id}` |
+| `decision.answer` | client → daemon (notification) | `{sessionId, id, answers}` |
+| `session/request_decision` | daemon → each **ACP** peer (request) | ACP `RequestDecisionRequest`, answered with `RequestDecisionResponse` |
+
+`decision.answer` carries a `sessionId` that `permission.reply` does not need:
+a decision request id is minted **per session** (`dec-1`, `dec-2`, …), so unlike
+a permission call id it does not name a request on its own. The daemon keys its
+route/retain/cancel registries on the pair for the same reason.
+
+**First answer wins, from either surface.** A gofer client answers with
+`decision.answer`; a pure ACP client answers the `session/request_decision`
+request. Whichever reaches the gate first resolves it; the loser is a harmless
+no-op (the gate rejects an id that is no longer open) and its outstanding request
+is retracted, so no daemon-side waiter dangles. Every peer then receives
+`gofer/decision_resolved` and clears its prompt.
+
+**Replay on attach is unconditional.** A peer that attaches while a question is
+outstanding is sent it on `session/load`. Unlike a permission — which is an event
+and so rides the replay backlog and leaves a transcript badge — a decision is in
+no backlog and no journal, so this is the *only* way a late client learns a turn
+is blocked on one. It is not behind a config flag.
+
+**With zero peers attached, a decision simply stays open.** The supervisor's own
+watcher counts as a subscriber, so `ErrNoClient` (the "continue in prose" fast
+path on the daemonless attach) never fires under a daemon. The question waits
+until a peer attaches and is replayed it, the turn is interrupted, or the session
+ends — exactly what a permission asked with zero peers already does. There is no
+decision-side timeout; inventing one would silently answer a question the user
+never saw.
+
+**Still deferred: the `--workers` router hop.** Under `gofer daemon --workers`
+each session runs in a worker process, and the decision relay does not yet cross
+the router↔worker leg — the router's supervisor implements no
+`daemon.DecisionAnswerer`, so a decision there is refused with a clear error
+rather than silently swallowed. Closing it needs the same treatment permissions
+got: a relay + `Notify` across the leg, plus skew-subset handling in
+`internal/router/skew.go`.
+
+**And deferred with it**: decisions from **background sessions**. The App
+subscribes decisions only for the session it is *attached* to (`app.go`,
+alongside the event subscription), so an unattached session's question is not
+rendered even though it now reaches the client — the daemon fans it out to every
+peer, but the TUI subscribes per attached session. Surfacing "needs a decision"
+on the roster the way a pending approval is surfaced is the remaining UI work.
 
 ## Roster & navigation (M2)
 
@@ -225,15 +602,25 @@ read-along transcript tail and its side-by-side split; the `layout` package now
 holds only frame padding.)
 
 **Navigation contract** — enforced by the app root (`App` in `app.go`, the
-bubbletea root that composes overview/peek/attach): `enter` peeks the selected
-session (with dispatch-bar text, it instead creates a session from that text
-and attaches into it); `→` in an **empty** dispatch bar attaches the selected
-session (with text, it edits); `esc`
+bubbletea root that composes overview/peek/attach): `enter` in an **empty**
+dispatch bar opens the selected session — attaches into the full, subscribed
+transcript (with dispatch-bar text, it instead creates a session from that text
+and attaches into it); `space` in an **empty** dispatch bar peeks the selected
+session — the roster-only card that does not subscribe (with text, it is an
+ordinary space); the arrows carry no open/peek verb on the overview — a bare `→`
+is a plain cursor-move; `esc`
 interrupts/acts on the *active* session (never "go back"); `←` in an **empty**
-input backs out to the overview (with text, it edits); `ctrl-x` kills a running
-session or archives a finished one; `ctrl-c` quits. In peek, `up`/`down` move
+input backs out to the attached session's parent, or to the overview when it has
+none (with text, it edits); `↓` in an **empty** attach input returns to the
+overview with the attached session's first spawned child selected, and does
+nothing when it has no children (with text, the key belongs to the input keymap,
+not to navigation); `ctrl-x` kills a running
+session or archives a finished one (a two-press confirm — press twice);
+`ctrl-t` stops the selected row's subagents;
+`ctrl-c` quits. In peek, `up`/`down` move
 the selection, `enter` opens the session (or sends the reply when the `❯` input
-has text), `space` closes to the overview, and `ctrl+x` deletes.
+has text), `esc` closes to the overview (and `space` does too with an empty
+reply), and `ctrl+x` deletes (press twice to confirm).
 
 The app root is a **client** like any other (repo invariant): it reads the
 roster by polling `Supervisor.Roster` on a timer (the supervisor's roster is
@@ -257,7 +644,12 @@ transcript (`Model.view` joins `attachHeaderLines` to `transcriptLines`
 before windowing) — a short conversation leaves the header pinned at the top
 with blank filler below it, exactly as before, but a transcript long enough
 to overflow the viewport scrolls the header off the top along with the
-oldest messages, tailing to the latest by default. `Overview.render` pads
+oldest messages, tailing to the latest by default. A single blank **spacer row**
+is pinned at the top of the attach input block (counted in the footer, above the
+menu/rules/input), so an overflowing transcript tailing flush to the frame keeps
+one row of breathing space between the newest message and the input rule instead
+of butting against it; in a short, padded frame it is indistinguishable from the
+blank filler below it, so those frames are unchanged. `Overview.render` pads
 its own header (unaffected — the overview's header stays fixed; only its
 roster rows scroll) plus roster rows with blank filler up to the height it's
 handed before appending the pinned dispatch block, so a short roster leaves
@@ -292,6 +684,49 @@ view — the streaming top-anchor bug (`internal/tui/streaming_test.go`
 reproduces it end to end via incremental `MessageStarted`/`MessageDelta`
 events, the same shape a live daemon attach streams, before asserting the
 fix).
+
+**Markdown rendering (incremental, block-by-block)**: an assistant message's
+text is rendered as markdown — bold/italic, headings, lists, blockquotes, inline
+code, links, and fenced code blocks — via Charm's
+[glamour](https://github.com/charmbracelet/glamour) (the library behind `glow`),
+in `markdown.go`. A *settled* message (`MessageFinished`) renders its **whole
+text at once** (`markdownRenderer.render`), so glamour's cross-block layout is
+exactly what a finished reply shows. A *streaming* (still-open) message renders
+**block by block** (`markdownRenderer.renderStreaming`): its COMPLETE markdown
+blocks are glamoured while the trailing INCOMPLETE block stays raw. A block is
+complete when it is a paragraph closed by a blank line (a lone trailing newline
+doesn't count — the line is still being typed) or a `` ``` `` fence closed by its
+delimiter; the trailing block — a half-arrived fence, or a paragraph no blank
+line has terminated yet — is held raw because glamouring a half-block renders
+garbage (a lone `` ```go `` reads as an unterminated fence, a mid-typed `**bo` as
+literal asterisks). `splitMarkdownBlocks` is that complete-vs-incomplete oracle
+(fence-aware: a blank line inside a fence never splits it, and a closing fence
+must carry no info string, so a `` ```python `` line *inside* a fence is body,
+not a close). Because each complete block is memoized by its own text, a
+keystroke that only grows the tail re-renders nothing already complete; on settle
+the whole message renders once more (byte-identical to the finished reply it has
+always shown). glamour emits one multi-line string that `markdownRenderer`
+splits into one entry per physical row (upholding the one-entry-one-row
+invariant above), each already wrapped to the transcript width (so it reflows on
+resize) and stripped of glamour's right-pad (so a selection copy — and a code
+block especially — carries the raw text, not filler spaces). Three seams keep it
+honest: (1) **determinism** — under `theme.Test`'s `termenv.Ascii` profile the
+output is ANSI-stripped, so golden files stay plain, byte-stable text; the live
+adapter's real profile keeps color/attributes. (2) **color-doesn't-move-layout**
+— the pad trim is display-width-aware, so stripping the colored render of its
+ANSI yields byte-for-byte the Ascii render (the `assertColorLayout` invariant).
+The document/paragraph base color is cleared so plain prose emits no ANSI at all
+(only genuine elements — headings, code — are colored), which keeps the
+styled-golden `TagANSI` harness — it recognizes only the marker palette — valid
+for prose fixtures. (3) **cost** — glamour re-parses on every `Render` (~80µs)
+and the transcript re-renders on every keystroke, so each distinct text (a
+settled message, or a streaming message's every complete block) is rendered once
+and memoized by `(width, text)`; the memo lives on a pointer field shared across
+`Model`'s copy-on-write copies and is cleared on a width change.
+`internal/tui/markdown_internal_test.go` covers all three plus the block splitter
+(`TestSplitMarkdownBlocks`), the progressive complete-vs-raw contract, and
+code-block verbatim selection; the `markdown_rendered` golden locks the settled
+plain layout and `markdown_streaming_progressive` the mid-stream frame.
 
 **`tui.autoscroll`** (settings.go, default true/unset) controls whether new
 streaming events pull the attach view down toward the tail: enabled (the
@@ -353,7 +788,15 @@ Both the highlight and the copy are clamped to `App.transcriptRegion` —
 the active screen's own scrollable content, computed via the same
 `frameLayout` row-budget arithmetic `render` uses (so the two can't drift
 apart): the attach transcript (plus whatever of its identity header is
-still scrolled into view) or the overview roster body. A drag that runs off
+still scrolled into view) or the overview roster body. On the attach screen
+that measurement now goes through the *same* `App.attachModel` helper `render`
+draws from — the fully composed model with the background-agents and `!`/`!!`
+shell-run blocks appended to the transcript — so those tail blocks are inside
+the selectable region and a `$ ls` shell block (or a background-agents line)
+can be selected and copied like any other transcript row. Before that shared
+helper, `render` drew the composed blocks but `transcriptRegion` measured the
+bare `a.sess` without them, so the tail blocks fell below the computed region
+and could not be selected. A drag that runs off
 the transcript into the input box and its framing rules, off the bottom
 into the usage/status footer, past the top into the identity header, or
 over a command panel/menu never paints or copies those rows — a row the
@@ -456,8 +899,12 @@ first line on a `└`, up to two more indented, and any remainder collapsed to
 start-of-block seed — an empty `{}` when a provider streams the arguments as
 `input_json_delta` fragments, so building the header from it rendered every call
 as `bash({})`). A command-shaped input is summarized to its own text
-(`bash(find . -type f | wc -l)` rather than `bash({"command":"…"})`); unknown
-tool shapes fall back to compact JSON. While a call is still running its input is
+(`bash(find . -type f | wc -l)` rather than `bash({"command":"…"})`); the
+`ask_user` call summarizes to its question(s) — the first question's title (or
+its text), or `N questions` for a batch, so the block reads
+`ask_user(Choose a task)` over its answer line, never the raw
+`{"questions":[…]}` payload; other unknown tool shapes fall back to compact
+JSON. While a call is still running its input is
 usually just the empty seed, so the header shows the **bare tool name** (yellow
 `● bash`) until the real command lands on finish. `ToolCallDelta` is ignored —
 it carries input fragments, not result text (it used to be mis-appended to the
@@ -478,6 +925,22 @@ Because a tool item spans several lines and the gaps are ordinary lines, the
 three transcript renderers (`View`, `TailView`, `FullTranscript`) share one
 `transcriptLines` helper that flattens every item to its lines — with the gaps
 between — before width-truncating and height-windowing.
+
+**One block renderer.** The tool call, the background-agents summary, and a
+`!`/`!!` shell run all render through a single `Model.renderBlock` (model.go) —
+the one place the Claude-Code tool-block grammar lives: a marker glyph +
+header, then a `└`-gutter body (`   └ ` on the first row, `     ` on every
+continuation) with an optional `… +N lines` collapse. A `contentBlock`
+describes one block (marker style, glyph, header, per-row-styled `blockRow`s,
+and an optional `maxBody` collapse budget); each caller builds one and hands it
+over, so the shell block adopts the same `└` gutter the tool tree always had
+(only its `$` glyph stays, a meaningful shell affordance). Shell output is
+byte-bounded already and the user needs to select/copy it whole, so it sets
+`maxBody = 0` and never collapses; the tool block keeps `maxBody = 3`. Because
+every block built through `renderBlock` is an ordinary transcript item, it lands
+inside `App.transcriptRegion` and is therefore drag-selectable and
+OSC 52-copyable for free — a future tool-style block gets the grammar *and* its
+selection participation with no extra wiring.
 
 ## Two trees, one renderer
 
@@ -512,42 +975,130 @@ open — whether the change substrate is gofer-native atop the JSONL journal or
 leans on a task/checkpoint seam from the SDK; see the agent-sdk-go design
 backlog.
 
-## Subagent sessions (M7, not yet built)
+## Subagent sessions (M7 · ecosystem)
 
-Design intent only — lands with M6's subagents-first-class work. A subagent
-is **not a black box within a turn** — it is a real child session
-with its own journal, cost, and transcript, linked to its parent
-(`session.spawned` event + `parent_id`; depth ≤ 5). The overview renders the
-parent with its children indented beneath it, each child row carrying its own
-description, run duration, and cumulative token/cost tally — the same
-one-line-per-session shape as a top-level row:
+A subagent is **not a black box within a turn** — it is a real child session
+with its own journal, cost, and transcript, linked to its parent.
+
+**Built (the primitive).** `supervisor.CreateOptions{ParentID, Agent}` creates
+one: Create resolves the parent (live roster first, then the store root on
+disk), derives `Depth = parent + 1`, and refuses an unknown parent
+(`ErrNoParent`) or an over-deep chain (`ErrDepthExceeded`). The cap is config,
+not a literal — `session.max_subagent_depth`, default 5. The link is durable and
+gofer-native: it is written beside the journal as
+`<root>/sessions/<slug>/<id>.meta.json` (`{parentId, agent, depth}`), so
+`List` reports it for offline sessions and `Resume` restores a child's
+attribution. Only a session that has a parent or an agent writes a sidecar, so
+nothing changes for a root session. `ParentID`/`Agent`/`Depth` ride the roster
+wire (`parentId`/`agent`/`depth`, all omitempty) through to `tui.SessionInfo`;
+`session/new` carries the request half in ACP's `_meta` (`gofer/parent`,
+`gofer/agent`) and reports what it assigned back (plus `gofer/depth`).
+`gofer run --parent <id> --agent <name>` is the CLI spawner. WHO spawns children
+from inside a turn is still open — there is deliberately no agent-facing spawn
+tool.
+
+**Built (the render).** The overview renders the parent at the root with its
+children indented beneath it — a depth-first tree, siblings by the usual recency
+rule — each child row the same one-line-per-session shape as a top-level row,
+carrying its own summary, run duration, and token tally:
 
 ```
-● main
-  ○ tui-inline-perm-owner   Own the M3 TUI change…      5m 9s · ↓ 214.7k tokens
-  ○ sandbox-shell-fix-owner Own the M3 sandbox fix…      5m 30s · ↓ 185.3k tokens
-  ○ go-developer            Editing model.go doc comment 6m 47s · ↓ 128.0k tokens
-  ↑/↓ to select · enter to view
+~/orchestration
+▸!ship the subagent roster      Working · two workers…     41m · ↓ 214.7k tokens
+ !  tui-inline-perm-owner       Working · editing ove…   5m 9s · ↓ 214.7k tokens
+ !    go-reviewer               Needs input · reviewi…       42s · ↓ 8.4k tokens
+    go-developer                Working · running the…  6m 47s · ↓ 128.0k tokens
 ```
 
-`↑`/`↓` selects a child; `enter` navigates *into* that child's full session —
-its complete transcript, tool blocks, and approvals — exactly as if it were a
-top-level session (`esc`/`←` returns to the parent). So a supervisor watching
-one task drills into any subagent's whole history without losing the parent
-context, and an approval waiting deep in the tree still surfaces as a
-`Needs input` state on the ancestor row. This is the fan-out tree above made navigable: the tree shows
-*who is working*; entering a node shows *what they did*. It reuses the shared
-row renderer and the id-tracked selection/windowing the M2 roster already
-established — a child session is just a session, so no new navigation model is
-needed, only the parent→child link and the indent.
+- **Indent inside the title column** (2 cells per level), so every other column
+  stays aligned however deep the tree goes. A child is labelled by its **agent**
+  (`go-developer`) rather than by the title derived from its parent's prompt.
+- **Right column.** A roster holding any subagent swaps the bare age for
+  `<elapsed> · ↓ <N> tokens`; one with none renders byte-identically to before.
+  The width is one decision per render, not per row — an ordinary roster keeps
+  its full-width summary column rather than losing half of it to a tally nobody
+  asked for.
+- **Blocked rollup.** The `!` gutter marks a row whose session *or any
+  descendant* awaits the user, so an approval three levels down is visible
+  without descending. Computed once per render, not per row.
+- **Overflow.** When the tree outgrows its row budget the last visible line
+  reads `↓ N more`.
+- **The grouped view (tab) stays flat.** Its sections are status buckets and a
+  child's status is independent of its parent's, so nesting there would
+  contradict the section label; children keep their own section and are
+  identified by the agent label instead.
+- **Orphans render as roots.** The roster is a polled snapshot, so a parent can
+  legitimately be missing — no row is ever dropped or indented under a parent
+  that isn't on screen.
 
-**Tool-call attribution (SDK-gated).** When a tool event carries an
-originating-agent id, its transcript block should name the source —
-`ToolName(args) · from the <agent> agent` — alongside the existing human
-caption, so a transcript that interleaves a parent's and its subagents' calls
-reads unambiguously. It falls back to the current un-attributed rendering when
-the event carries no agent id, so it is purely additive; surfacing that id on
-the tool event is an SDK change — see the agent-sdk-go design backlog.
+The render reuses the shared row renderer and the id-tracked
+selection/windowing the M2 roster already established — a child session is just
+a session, so it needed no new navigation model, only the parent→child link and
+the indent.
+
+**Built (the navigation).** The fan-out tree is navigable: the tree shows *who
+is working*, entering a node shows *what they did*, so a supervisor drills into
+any subagent's whole history without losing the parent context.
+
+- **Drill in.** `↑`/`↓` selects a child (a child row is an ordinary roster row),
+  and `enter`/`→` opens *that child's* full session — its complete transcript,
+  tool blocks, and approvals, exactly as for a top-level session. This needed no
+  new code beyond the tree ordering; it is pinned by a test rather than
+  reimplemented.
+- **Drill out.** `←` on an empty attach input returns to the **parent's**
+  session, one level per press, walking a chain back to its root. A root session
+  — and a child whose parent is absent from the polled snapshot, the same orphan
+  case the roster renders as a root — keeps backing out to the overview. The
+  roster selection follows the drill-out, so the header, the panel's session
+  views, and the next `←` all agree on where you are.
+- **Drill sideways — `↓`.** `↓` on an empty attach input returns to the overview
+  with the attached session's **first spawned child** selected; with no children
+  it does nothing. This is the key the background-agents block advertises
+  ("`↓ to manage`") and it is bound so that caption is literally true: `←` goes
+  *up* to the parent, which is not where children are managed — the roster tree
+  is, since peek, attach, `ctrl-x` and `ctrl-t` all live there. The empty-input
+  guard mirrors `←`'s, but sits in the case expression rather than the body: `←`
+  has an editing meaning to fall back on and `↓` has none, so with text pending
+  the key is left to the shared input keymap instead of being claimed here.
+- **`esc` is NOT a return key — deliberately.** The issue text asked for
+  "`esc`/`←` returns to parent"; `esc` on the attach screen is an established,
+  tested contract (**interrupt the in-flight turn**) and it is the only
+  interrupt binding there is. Hijacking it for navigation would silently delete
+  the ability to stop a running turn — a regression dressed as a feature. The
+  return path is `←` only. Do not "fix" this.
+- **Bulk stop — `ctrl-t`.** On the roster, `ctrl-t` stops every subagent
+  *below* the selected row (the whole subtree, one `Supervisor.Kill` per
+  descendant), leaving the selected session itself running; `ctrl-x` remains the
+  way to stop one session. Kill interrupts and terminates — journals are never
+  deleted (invariant #4). A failing kill does not abort the sweep: every
+  descendant is attempted and the first error surfaces on the status line. The
+  binding avoids `ctrl-s`/`ctrl-q` (flow control), `ctrl-z` (suspend), `ctrl-b`
+  (tmux prefix), `ctrl-a`/`e`/`w`/`u`/`k`/`d` (the shared input keymap) and bare
+  letters (the dispatch bar is always typeable). The hint line gains
+  `ctrl-t stop agents` **only on a tree roster**, in place of `? shortcuts` —
+  the flat hint already spends 67 of its 80 cells, and `?` is the one entry
+  naming a key nothing handles.
+
+**Built (the transcript blocks).** Two additions, both purely additive — a
+session with no subagents renders byte-for-byte what it always did:
+
+- **Background agents.** A session that has spawned children ends its
+  transcript with `N background agents launched (↓ to manage)`, then one line
+  per child naming it and the agent it runs as. The children are a **roster**
+  fact, not an event on this session's stream (a subagent is a separate session
+  with its own journal), so the block is composed per frame from the current
+  poll (`Model.WithBackgroundAgents`) instead of ingested once and left to go
+  stale.
+- **Tool-call attribution.** `runner.Options.Agent` (SDK v0.17.0) stamps the
+  originating-agent id onto every `tool.call.*` event a session's loop emits and
+  the supervisor forwards `CreateOptions.Agent` into it, so a tool block names
+  its source: `ToolName(args) · from the <agent> agent`, alongside the existing
+  caption, and a transcript interleaving a parent's and its subagents' calls
+  reads unambiguously. An event with no agent id renders the un-attributed block
+  exactly as before — no placeholder. The attribution rides the transcript item,
+  so it outlives the per-call correlation map the approval prompt reads (that
+  map is dropped when the call finishes); the two surfaces read the same SDK
+  field independently.
 
 ## Monitor / background tasks (M8 — goal)
 
@@ -645,8 +1196,11 @@ tui/
 - **Virtualized transcript with a frozen-item cache**: items expose
   `Version()` + `Finished()`; finished items render from cache verbatim,
   only the streaming tail re-renders.
-- **Streaming-markdown stable-prefix cache**: render the settled prefix
-  once; re-render only past the last safe markdown boundary.
+- **Streaming-markdown block cache** (shipped): a streaming message glamours
+  each COMPLETE markdown block once (memoized by its text) and re-renders only
+  the incomplete tail block — the block-level realization of "render the settled
+  prefix once, re-render only past the last safe markdown boundary". See
+  `renderStreaming`/`splitMarkdownBlocks` in `markdown.go`.
 - **Dialog grace-period absorption**: async-opened dialogs swallow in-flight
   keystrokes (200ms-quiet / 1500ms-max window) — the approval-pops-mid-
   keystroke race.
@@ -691,7 +1245,8 @@ Four layers, each catching what the one below can't:
 3. **`ansi.Strip(colored) == plain` = ANSI-width.** Neither golden layer above
    catches a styling bug that changes *display width* (the #61 color-scatter: a
    styled pane measured wider than its cells and tore the layout). The color
-   tests (`color_layout_test.go`, `dialog_color_test.go`) render the same
+   tests (`color_layout_test.go`, `dialog_color_test.go`,
+   `decision_golden_test.go`, `decision_multi_test.go`) render the same
    component twice — once plain, once through `testkit.ColorTheme()` — and
    assert that stripping ANSI from the colored render reproduces the plain one
    exactly, and that no line exceeds its width. Every render change here ships
@@ -829,13 +1384,15 @@ color by construction and would assert nothing here.
 routed with the same precedence as the approval overlay — `panel > approval >
 active screen > global` — and closed by Esc, sized to whatever the active
 tab's body actually renders (`commandPanel.Height`) rather than always a
-worst-case max. Five builtins register now and open the panel on their tab —
-the M4 trio (`/status`, `/config`, `/model`) plus the M5 read-only pair
-(`/usage`, `/stats`); each opened on a one-line placeholder body until its own
-step landed the real view (`/status` in step 2, `/config` in step 3, `/model`
-in step 4, `/usage` + `/stats` in the M5 usage-panels step — see below). `@`
-and `!` are not implemented — the intercept only switches on a leading `/` so
-they can slot in later.
+worst-case max. Six builtins register now and open the panel on their tab —
+the M4 trio (`/status`, `/config`, `/model`), the M5 read-only pair
+(`/usage`, `/stats`), the SDK-catch-up `/thinking`, and `/resume`; each opened
+on a one-line placeholder body until its own step landed the real view
+(`/status` in step 2, `/config` in step 3, `/model` in step 4, `/usage` +
+`/stats` in the M5 usage-panels step, `/thinking` with `Runner.SetEffort`,
+`/resume` with the session-lifecycle commands — all below). The first-rune
+switch the intercept is built on now carries `!` / `!!` and `@` beside `/` —
+see **Built (input prefixes)** below.
 
 **Built (M4 step 2)**: `env.go` adds `CommandEnv` — the panel's read-only
 data seam: `Version`/`Cwd`/`Root` plus `Auth`/`Config` closures wrapping the
@@ -978,14 +1535,77 @@ model the daemon ASSIGNED in ACP's reserved `_meta`, under the
 gofer-namespaced key `gofer/model`, so `daemonbridge.Create` reports what the
 session actually runs instead of echoing the (normally empty) requested model.
 
-Effort-adjust (←/→) stays deferred (no SDK backing) —
-and has no room on the Model tab regardless, since ←/→ are already claimed by
-the panel host for tab switching. The concrete dependency is a runtime
-`Runner.SetEffort` paralleling the `Runner.SetModel` that `Supervisor.SetModel`
-already rides on; once the SDK grows it (see the agent-sdk-go design backlog)
-the control becomes actionable — a persisted `session.effort` default plus a
-same-session hot-swap on the same terms as the model — needing only a spot on
-the tab that ←/→ don't already own.
+**Built (SDK catch-up): `/thinking`, the reasoning-effort adjuster.** The
+dependency this was waiting on — a runtime `Runner.SetEffort` paralleling the
+`Runner.SetModel` that `Supervisor.SetModel` rides on — arrived in agent-sdk-go
+v0.17.0, so effort now travels the same road as the model, hop for hop:
+`Supervisor.SetEffort` → `gofer/set_effort` (gofer-native JSON-RPC, like
+`gofer/set_model`, forwarded router→worker) → `Runner.SetEffort`, with the
+level surfaced on the roster row (`SessionInfo.Effort`) and persisted as the
+`session.effort` config default. That road stops at the runner, though —
+see "Reasoning effort does not reach the provider yet" below before reading
+this as an end-to-end feature.
+
+It is its own **Thinking** tab (effortpicker.go) rather than a ←/→ modifier on
+the Model tab: ←/→ are claimed by the panel host for tab switching, and effort
+is an orthogonal axis. `/thinking` (alias `/effort`) opens it; `/thinking
+low|medium|high|off` applies a level directly through the same commit path a
+picked row takes — `off` (or `none`/`default`) is the empty level, i.e. "clear
+it and let the provider decide". Unlike `/model` there is **no cross-provider
+branch**: a provider client is fixed at session creation, which is what
+constrains a model swap, but effort is provider-agnostic vocabulary each
+backend projects onto its own wire format, so a live session always takes the
+change.
+
+What the tab *does* reason about is **model capability**, which is the
+"toggle vs effort-picker by model capability" the roadmap asked for. The rule
+is the SDK's own, applied client-side so the UI never disagrees with the
+runner: reject a **non-empty** level only on **positive registry evidence**
+that the active model cannot reason (`provider.Lookup` found it AND
+`Reasoning` is false). An unregistered model — anything newer than this binary
+— is UNKNOWN, not incapable, so its levels are offered and the runner gets the
+final word. The tab issues **no vendor request** on open: unlike the Model
+tab's catalog, the level list is a closed four-value enum.
+
+**Clearing is never gated.** `Runner.SetEffort("")` is admitted for any model
+whatsoever — the SDK's capability branch sits inside `if effort != ""` —
+because asking for no reasoning is coherent everywhere. So on a non-reasoning
+model the tab keeps the `off` row selectable and renders the other three muted
+rather than collapsing to a bare warning: a session that carried `high` into
+that model still has it, and a screen that hides both the level and the way to
+drop it is a dead end. `/thinking off` stays legal there too; only
+`/thinking low|medium|high` refuses, by name, without writing anything.
+
+### Reasoning effort does not reach the provider yet (SDK gap)
+
+Everything above is real gofer-side state — the roster row, the runner's
+`SetEffort`, the wire method — but **no provider request currently changes**,
+so `/thinking` cannot yet make a model think harder. Three facts compose:
+
+1. gofer never populates `provider.Params` on any create path, so every runner
+   is built with `Thinking{Enabled: false}`.
+2. `Runner.Prompt`'s per-turn overlay sets `params.Thinking.Effort` and
+   **never** `params.Thinking.Enabled` (agent-sdk-go v0.17.0
+   `runner/runner.go`), so `SetEffort` cannot flip it.
+3. Both adapters emit reasoning config **only** when `Enabled` is true —
+   `provider/openai/request.go` (`if req.Params.Thinking.Enabled`) and
+   `provider/anthropic/convert.go` (same).
+
+gofer cannot close this from its side without forcing `Thinking.Enabled: true`
+at session creation, which would switch Anthropic extended thinking on (minimum
+budget, temperature forbidden) for every affected session — a behavior change
+no user asked for — and would *still* leave mid-session `/thinking` inert on
+any session created before a default existed. Per invariant #1 it is the
+SDK's contract to fix: `SetEffort`'s own doc promises a mid-session effect it
+cannot currently deliver.
+
+Consequently the persisted `session.effort` default is **not read at session
+creation** (like `session.permission_mode`), and the Thinking tab's ✓
+deliberately does **not** fall back to it — the ✓ claims what is *in force*,
+and a config default reaches no runner. `/thinking` from the overview says only
+"Default reasoning effort saved", claiming nothing about sessions that do not
+exist yet. When the SDK gap closes, wire the default into
+`Params.Thinking` and restore the config rung in `activeEffort`.
 
 **Built (M5 usage panels)**: `/usage` (usage.go) and `/stats` (stats.go) are two
 more read-only tabs cut from the same cloth as `/status` — pure, stateless
@@ -1006,6 +1626,124 @@ time like every other tab — `sess` off `App.currentSessionInfo`, and `/stats`
 additionally the overview's reference `Now()` (so elapsed output stays
 deterministic in goldens) and `Roster()` (the snapshot it sums).
 
+**Built (M5 markdown commands)**: `internal/usercmd` turns a saved prompt file
+into a slash command. It walks `<store-root>/commands/` (user scope — the
+resolved `--root`, not a hardcoded `~/.gofer`) and `<cwd>/.gofer/commands/`
+(project scope), both threaded in from `CommandEnv`, taking every `.md` file
+recursively; a nested file is namespaced with `:`, so
+`commands/git/review.md` is `/git:review`. An optional `---`-delimited header
+carries two keys — `description` (the popup's summary) and `argument-hint`
+(the `[arg]` beside the name); unknown keys are ignored and a malformed header
+degrades to "no frontmatter" plus a warning rather than losing the command.
+Running one submits its expanded body through `App.doSend` — the same
+`Supervisor.Send` a hand-typed prompt takes, never a second send path — and
+refuses with a status note (rather than silently dropping the prompt) when
+there is no attached session, or when the body expands to nothing. The
+no-session refusal is checked first: when both apply, "attach a session" is
+the message the user can act on.
+
+Arguments substitute into the body at dispatch time, in a **single pass**: a
+substituted value is never rescanned, so an argument containing `$ARGUMENTS`
+is inserted literally instead of injecting tokens into the prompt.
+
+| Token | Expands to |
+|---|---|
+| `$ARGUMENTS` | every argument, space-joined, in order |
+| `$N` / `${N}` | the Nth argument (1-based); missing → empty |
+| `${N:-default}` | the Nth argument, or `default` when missing or empty |
+| `${@:N}` | arguments N through the end, space-joined |
+| `$$` | a literal `$` |
+
+Tokens are recognized inside a word (`internal/$1/doc.go`), `$N` consumes a
+maximal digit run (`$12` is the twelfth argument — brace it as `${1}2` for the
+other reading), and any `$` that doesn't start a recognized token stays
+literal. `internal/usercmd`'s package doc is the full contract, including the
+`${@:0}` and out-of-range answers.
+
+`Registry` became **layered** to hold this: `CommandSource` ranks
+`extension > markdown > builtin` (docs' long-standing intended order), each
+layer is replaceable wholesale, and a name resolves by rank — so a
+`status.md` genuinely overrides the builtin `/status`, taking its aliases with
+it, and a project file overrides a same-named user file. The extension tier is
+reserved and asserted but not populated (plugin `registerCommand` is P1).
+
+**The two scopes are not the same trust level.** `<store-root>/commands` holds
+files the *user* wrote, so overriding a builtin there is the feature.
+`<cwd>/.gofer/commands` holds whatever a *cloned repository* shipped, so a
+project file may **not** claim a builtin's name or alias — a checked-in
+`model.md` silently turning `/model` into "send this text to the agent" is
+refused at load time and reported on the status line, while the same file in
+the user directory still applies. `Registry.builtinNames()` is the reserved
+set; `usercmd.Options.ReservedForProject` is the seam, so the builtin list
+stays internal/tui's business.
+
+The markdown layer is loaded once in `NewApp` — before `tea.NewProgram`, where
+there is no loop to block — and refreshed on the closed→open edge of the
+autocomplete popup, once per `/` typed, never per keystroke and never inside
+`Registry.matching`. That refresh is a `tea.Cmd` (`loadUserCommandsCmd` →
+`userCommandsMsg`, the same shape as `discoverModelsCmd`): the walk is
+unbounded in time on a network-mounted cwd, so the popup opens instantly on
+the registry as it stands and the fresh layer replaces it in place when it
+lands. **`tui.max_command_file_bytes`** (default 256 KiB, `0` = unlimited)
+caps a single command file; an over-cap file is skipped with a status note,
+never truncated — half a prompt is not a prompt, and the body goes to a model
+verbatim. Same `config.json`-knob-not-`/config`-row reasoning as
+`tui.max_paste_bytes`.
+
+**Built (`/yolo`)**: the guardrail toggle, dual-bound as `/yolo` and **ctrl+y**
+— both routed through one commit path (`yolo.go`'s `applyPermissionMode`) so
+they cannot drift. Bare `/yolo` flips; `/yolo on|off` states the posture
+outright. It writes `session.permission_mode` through the same
+`CommandEnv.Config`/`SaveConfig` pair `/model` uses (a failed READ aborts rather
+than overwriting config.json with a zero value), and that value is now
+**consumed**: `supervisor.Config.PermissionMode` resolves it PER SESSION
+CREATION — `cmd/gofer`'s `permissionModeResolver` re-reads `config.json` on each
+create, the same shape as the daemon's `ResolveDefaultModel` — so the next
+session a running gofer starts gets the new posture with no restart, on every
+backend (daemon, worker, local in-process). `ask` builds the SDK's
+`loop.RuleGuard` over the sandbox container (contain-or-ask); `yolo` builds
+`supervisor`'s `yoloGuard` over the same engine plus the **unwrapped** builtin
+registry — no prompt, no containment, but **config `deny` rules still block** (a
+rule written as "never" is not repealed by a second knob). It is deliberately
+NOT a `Config.Engine` change: the engine's vocabulary is allow/ask/deny and its
+allow already means contain-or-ask, so the mode selects the *guard*, not the
+ruleset.
+
+**It does not change a session that is already running**, and both status notes
+say so ("… for NEW sessions; running sessions keep theirs"). The SDK fixes a
+session's guard at construction (`runner.Options.Guard`) and carries no op to
+swap it — there is no `session.set_permission_mode` beside `session.set_model`,
+and `Runner` exposes no `SetGuard` — so plumbing a live swap would mean reaching
+past the Event/Op contract, which invariant #1 forbids. Turning guardrails OFF
+is a `sevWarn` (yellow), never a bare `sevOK`: the action succeeded, but the
+posture it leaves the user in is the one thing in the TUI that most deserves to
+be visible. Turning them back on is `sevOK`.
+
+**Built (`/help`)**: the last command-panel tab (`help.go`), scrollable with
+↑/↓/PgUp/PgDn because the whole table is far longer than `panelBodyRows` and a
+silently truncated help screen is worse than none. Its **Commands** section
+renders straight from `Registry.List()` — the same registry the dispatcher
+resolves against, across every layer — so a command registered anywhere (a
+builtin, a user's markdown file, a plugin's runtime registration in M7) appears
+with no edit to `help.go`; that is pinned by a test that registers a command the
+file has never heard of and expects to find it. Aliases ride on the summary
+column rather than the name column, since the name column is padded to its
+widest entry and one long `ArgHint` would otherwise truncate every other row's
+summary. Its **Keys** section renders from `keymap.go`, a new declarative table.
+That table is honestly two-tier: its **global** rows (`ctrl+c`, `ctrl+y`) are
+LIVE — `App.handleKey` dispatches through `dispatchGlobalKey`, replacing the
+per-screen `ctrl+c` copies — while the per-screen rows are **descriptive only
+and can drift**, because several of those bindings are conditional on state a
+table can't express (a bare → attaches only from an *empty* dispatch bar) and
+routing them all through the table is a whole-TUI key refactor, not this
+change. `keymap.go` says so at the top; a collision test sweeps every key the
+package binds against the global rows so a future global can't silently steal
+one. The table also carries an **Input prefixes** section (`/name`, `!cmd`,
+`!!cmd`, `@path`): those are a submit-time grammar rather than bindings, but
+they are the part of the input surface a user is least likely to find unaided.
+`?` on an empty dispatch bar also opens the panel — the roster footer has
+advertised "? shortcuts" since M2 with nothing behind it.
+
 Deferred (issue #175): true per-message / per-tool-call token attribution
 (needs SDK per-item usage granularity absent from v0.14.2, which reports usage
 only at the turn and session level — rendering a synthesized per-message
@@ -1014,17 +1752,175 @@ line ("read N files, ran M commands") the issue flags as M8 polish (needs
 per-tool-call tallying off the event stream this roster-snapshot projection
 doesn't consume).
 
-- **P0**: user markdown commands (`~/.gofer/commands` + project
-  `.gofer/commands`, with `$1`, `$ARGUMENTS`, `${1:-def}`, `${@:N}`
-  substitution + frontmatter description/argument-hint) ·
-  `/new` · `/quit` · `/resume` (picker) · `/compact [instructions]`
-  (block-if-busy) · `/yolo` permission-mode toggle (dual-bound command +
-  key; ships before autonomous tool use) · `/help` rendered from the live
-  keymap · `!` / `!!` shell escape (`!!` runs but excludes output from model
-  context) · `@`-file mention.
+**Built (session-lifecycle commands)**: `/quit` (alias `/exit`), `/new`, and
+`/resume` — the three of the P0 session-lifecycle set the SDK can back today.
+
+`/quit` returns exactly `tea.Quit`, the same one line ctrl-c is bound to on
+every screen and over the panel; the daemon connection, the subscription, and
+the reconstruction core are owned and closed by `cmd/gofer` once the program
+returns, so there is no teardown for the command to duplicate (and no
+confirmation, which would make it more ceremonious than the key it mirrors).
+
+`/new` starts a fresh session — new id, new journal — through the same
+`Supervisor.Create` seam a prompt typed into the dispatch bar takes, and lands
+on the same `createdMsg` attach. The previous session is untouched: still
+running, still on the roster, journal intact (invariant #4). It is **not**
+`/clear`, which resets the transcript view of the session you are in and is a
+separate command. It takes no arguments and declares no `ArgHint`: every string
+is a valid prompt, so a prompt argument can never be "unusable", and
+`TestArgHintCommandsConsumeArgs` requires every hint-declaring command to reject
+an unusable argument with a danger note naming it. Stray arguments are reported
+rather than swallowed.
+
+`/resume` follows `/model`'s bare-opens-the-picker / argument-applies-directly
+shape. Bare, it opens a sixth panel tab (`resumepicker.go`) listing **every
+session on disk, live and offline alike** — the roster answers "what is running
+now", which is the wrong question for a resume picker, so the list comes from a
+new `Supervisor.ListSessions`: ACP `session/list` on the daemon path (paginated,
+every page walked) and `supervisor.List` in process. Rows are newest-first with
+a live mark, short id, relative last-active, and project directory, filtered by
+type-to-search and windowed so the highlight stays on screen. It opens on an
+explicit "Loading sessions…" line — there is no offline floor to guess from, and
+a failed listing says why rather than rendering as "no sessions". Enter resumes
+the highlighted row **into that session's own cwd**; `/resume <id>` resumes
+directly into the client's, matching what `gofer resume` sends. Both land in
+`App.resumeSession`, which skips the op entirely for a session the roster
+already holds — a redundant `session/load` replays the whole history onto the
+reconstruction broker a second time and would double the attach transcript. A
+typed id is admitted on shape alone (non-empty, usable as a single path
+component); whether it exists is the backend's answer, and an unknown one lands
+on the same `sevDanger` status line every other failed op does.
+
+The plumbing is ACP-standard, not gofer-native: `session/load` already existed
+end to end (it is how `gofer resume` reaches a daemon), so the only thing
+missing was the TUI trigger — `tui.Supervisor` gains `Resume`/`ListSessions`,
+mirrored in `internal/tuibridge` and `internal/daemonbridge`.
+
+**Built (input prefixes)**: `/` is no longer the only sigil the submit
+intercept switches on. `hasInputPrefix`/`App.dispatchInput` (shell.go) are the
+single first-rune switch **both** text-entry surfaces route through, so a
+prefix cannot mean one thing in the dispatch bar and another in the attach
+input — and it is **leading-only**, so `that worked!` and
+`mail me@example.com` submit as ordinary prompts.
+
+- **`!` / `!!` shell escape** (shell.go). `!cmd` runs cmd under `$SHELL -c`
+  (falling back to `/bin/sh`) in the session's cwd, off the Update loop.
+  **`!!` output never reaches the model; `!` output does.** That exclusion is
+  structural, not cosmetic: `App.composePrompt` — the one place local content
+  becomes model input — walks the run list and skips any run flagged
+  not-in-context, so no rendering, copy, or re-submit path can leak it. A `!!`
+  run is marked consumed without contributing, so a later prompt can't pick it
+  up either.
+
+  **Reply-now vs queue (ask #2).** A `!` run's DEFAULT on the attach screen is
+  *reply-now*: the instant it finishes it flushes everything pending through
+  `composePrompt` and fires a turn, so the agent replies immediately — "add it
+  as a message" without a separate typed prompt. **ctrl+r** toggles a sticky
+  *queue* mode where a `!` run instead waits for the user's next Enter, so they
+  can stack more commands (or a plain-text message) before the agent responds —
+  the old fold-into-your-next-prompt behavior, now opt-in. The startup default
+  is persisted in `tui.shell_reply_mode` (`reply` — the default — or `queue`;
+  seeded into `App.shellQueue` at construction), so a user who always wants queue
+  mode isn't re-pressing ctrl+r every session; ctrl+r flips it for the running
+  session without rewriting config, and `/config` edits the persisted default.
+  The mode is captured per-run at dispatch (`shellRun.queued`), so a later
+  toggle never rewrites a
+  run already in flight, and it governs `!` alone: `!!` is never sent regardless
+  of the mode, so the reconciliation is that the toggle only ever moves a `!`
+  run between "reply now" and "wait", never in or out of context. The `!`
+  auto-send is gated on `inContext` exactly as `composePrompt`'s exclusion is,
+  so a `!!` run fires no turn even in reply-now mode. Output is bounded
+  (`tui.shell_max_output_bytes`, default 64 KiB, with a visible truncation
+  marker) and so is runtime (`tui.shell_timeout_ms`, default 30s); a non-zero
+  exit is reported as an exit code with the command's own stderr retained,
+  stdout and stderr interleave in arrival order, and a bare `!` runs nothing.
+  It is **not** a tool call and deliberately touches no part of the
+  permission/approval path — the user typed it themselves, and nothing the
+  model emits can reach it.
+
+  **Presentation — the sigil is the signal (round-5).** Three things make the
+  escape legible, all keyed on the `!` / `!!` sigil:
+  - **Input line.** While a `!` / `!!` command is being *typed*, the sigil IS
+    the prompt: the `> ` / `❯ ` glyph is dropped and the line starts with the
+    accented sigil (`!! rm -rf /tmp/scratch▏`), under a plain (unlabeled) framing
+    rule. A single **display-only space** separates the sigil from the command
+    (`! ls docs`, not `!ls docs`), present from the first keystroke — a bare `!`
+    renders `! ▏`. The space is rendering only: `parseShellEscape` reads the
+    buffer, not this line, so `!ls` and `! ls` run byte-identical commands
+    (`shellInputLine`, `inputLine`). A non-shell buffer keeps its `> ` / `❯ `
+    prompt byte-for-byte as before. The reply-now/queue mode has **no rule
+    label** (an earlier verbose `── shell · … ──` label was reverted): ctrl+r
+    still flips it (default `tui.shell_reply_mode`), and the tell is the thinking
+    indicator below — a reply fired vs. its absence (queued). The empty overview
+    dispatch bar carries a subtle `! for shell mode` discoverability hint so a
+    user learns the sigil before typing it.
+  - **In the transcript, not a pane.** On the attach screen a run renders as a
+    transcript block: the **sigil as the block marker** (`! command` /
+    `!! command`), the output under the `└` gutter, and its outcome (`exit N` iff
+    non-zero, a timeout/failure note, a truncation marker). It reads as part of
+    the conversation rather than a dismissible overlay below it. A **pending**
+    run (running, or finished but not yet folded) renders render-local at the
+    tail (`Model.WithShellRuns`, the background-agents pattern). When it is
+    **consumed** — folded into a submitted prompt (which the reply-now default
+    does the instant it fires) — it is pinned into the transcript as a persistent
+    `itemShellRun` at that position (`Model.CommitShellRuns`, from
+    `App.composePrompt`), so it keeps showing as `! command` rather than vanishing
+    or re-appearing as the echoed prompt. **The `$ cmd` fold is ONLY the model's
+    copy, never on screen**: the daemon echoes the folded prompt verbatim as the
+    user message, so the matching `MessageFinished{User}` echo is stripped of the
+    fold (a byte-exact prefix match against the queued fold — never `$`-parsing;
+    a miss degrades to rendering the echo verbatim). A pure `!` turn strips to
+    nothing (the sigil block IS the turn); a `!`+typed submit shows the sigil
+    block(s) plus the typed message. Screens with no transcript (the overview
+    dispatch bar, peek) acknowledge a finished run on the status line instead
+    (`shellRun.shellRunStatus`).
+    - **Limitation:** the strip needs the fold this process recorded at submit,
+      so a run consumed on a submit that **switches sessions** (typing `!cmd` at
+      the overview to create a new session) and any run in a session **resumed**
+      from the journal (no in-memory fold record) still show the `$` fold in the
+      echo. The clean long-term fix is persisting shell-run structure in the
+      journal; tracked as a follow-up.
+  - **Private-run signal is the marker.** A `!!` run's marker is a DISTINCT color
+    from a `!` run's — `!` accent, `!!` warn (`Model.shellMarker`) — and that,
+    with the doubled glyph, is the ONLY at-a-glance "the agent can't see this"
+    signal: there is no `· not sent to the agent` text line. Losing it would be a
+    safety regression, so the marker must stay unmistakable. The marker is read
+    off `shellRun.inContext` for DISPLAY only; `composePrompt` remains the SOLE
+    decider of what reaches the model, so no view change can move a byte in or out
+    of context. The transcript-less status ack (`shellRun.shellRunStatus`,
+    overview/peek) still spells `sent with your next message` / `not sent to the
+    agent` in words, since there is no marker there to carry it.
+- **Thinking indicator** (`Model.WithThinking`, model.go). A turn in flight shows
+  a muted `⋯ working…` at the transcript tail; a queued shell command shows
+  nothing — the absence of the indicator means nothing is pending. It is derived
+  from `Model.turnActive` (set on `event.TurnStarted`, cleared on `TurnFinished`
+  / `SessionError`) and suppressed while an approval or decision prompt owns the
+  footer (that is "awaiting you", not "working"). Composed render-local and last
+  in `App.attachModel`, so it never enters the durable transcript.
+- **`@` file mention** (filemention.go). Typing `@` at a token boundary opens
+  the same popup the slash commands use, sourced from the paths under the
+  session's cwd — `git ls-files` inside a repository (which is what makes it
+  honor `.gitignore` and skip `.git/`), a bounded `filepath.WalkDir`
+  otherwise, enumerated off the Update loop once per mention and bounded by
+  `tui.file_mention_max_entries` / `tui.file_mention_max_depth`. Tab or Enter
+  splices the path into the buffer. **A submitted `@path` passes the PATH
+  through as text — it does NOT inline the file's contents.** So a mention
+  costs the length of a path, not a file's worth of tokens; the agent reads
+  it with its own file tools if it wants more. The trigger is a token
+  boundary, so an email address never opens the popup.
+
+- **P0**: `/compact [instructions]` (block-if-busy) — **blocked on the SDK**: `v0.17.0`
+  ships the `session.compact` op and `session.compacted` event as data types and
+  a `session.NewCompactionEntry` journal entry, but no way for an embedder to
+  TRIGGER compaction. There is no `Runner.Compact`, no compaction option on
+  `runner.Options` or the loop, and `Runner` keeps its `*session.Journal`
+  unexported with no accessor — so gofer cannot summarize-and-append without
+  reaching around the contract (invariant #1). Unblocked by a runner-level
+  entrypoint, e.g. `func (r *Runner) Compact(ctx context.Context, instructions
+  string) error` that folds the history, appends the compaction entry, and emits
+  `session.compacted`.
 - **P1**: `/init` (first-run project context) · `/fork` · `/tree` ·
-  `/export html|jsonl` · `/login` · `/thinking` (toggle vs effort-picker by
-  model capability) · runtime `registerCommand` from plugins ·
+  `/export html|jsonl` · `/login` · runtime `registerCommand` from plugins ·
   `/skill:name` · `/name` · `/session` (id, path, per-model tokens/cost).
 - **P2**: model-cycling key · `/mcp` management · `/debug` (hidden commands
   share the dispatcher, skip autocomplete).

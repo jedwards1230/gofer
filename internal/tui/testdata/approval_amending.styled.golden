@@ -1,0 +1,24 @@
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+<yellow>bash command</yellow>
+
+  rm -rf /tmp/x
+
+Why you're being asked
+
+  No permission rule matched this `bash` call, so gofer is asking before it
+  runs. It also cannot be sandboxed on this host, so an allow rule alone will
+  not let it run unattended.
+<muted>  … esc, then ctrl+e to explain</muted>
+
+Amending `cmd`:
+  rm -rf /tmp/x▏
+
+<yellow>Warning: an amended command does not go back through the permission rules.</yellow>
+<yellow>Approving it is a manual override — the call runs exactly what you leave here.</yellow>
+<yellow>Remember is on, so the standing grant will pin the edited command, not the</yellow>
+<yellow>model's original.</yellow>
+
+<muted>ctrl+s approve edited · esc cancel · enter newline · remember: on</muted>

@@ -1,0 +1,5 @@
+<yellow>claude-no-think-1 doesn't support reasoning effort — switch with /model.</yellow>
+<accent>▸ ✓ off — no explicit level; the provider decides</accent>
+<muted>    low — least reasoning, fastest turns</muted>
+<muted>    medium — balanced reasoning</muted>
+<muted>    high — most reasoning, slowest and priciest turns</muted>

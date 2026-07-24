@@ -83,6 +83,15 @@ type Session interface {
 	// call while a turn is in flight — the change takes effect on the next
 	// turn.
 	SetModel(model string) error
+	// SetEffort changes the reasoning effort this session uses for its next
+	// turn — the effort-axis parallel to SetModel. It rejects a level outside
+	// the unified vocabulary ([provider.ValidEffort]) and a non-empty level on
+	// a model the registry KNOWS cannot reason; "" clears back to the
+	// provider's default and is always accepted. Unlike SetModel it carries NO
+	// same-provider constraint (effort is provider-agnostic — each backend
+	// projects a level onto its own wire format). Safe to call while a turn is
+	// in flight — the change takes effect on the next turn.
+	SetEffort(effort string) error
 	// Close shuts the session down, releasing its broker and journal.
 	Close() error
 }
@@ -102,6 +111,7 @@ type SessionInfo struct {
 	Summary   string // M2: "" (reserved)
 	Status    SessionStatus
 	Model     string
+	Effort    string // reasoning effort: "", "low", "medium", or "high"
 	Cost      provider.Cost
 	Usage     provider.Usage
 	Pending   int // approvals; 0 in M2
@@ -123,6 +133,21 @@ type SessionInfo struct {
 	// empty, as does the in-process supervisor (there is no second binary to
 	// distinguish). Additive — a consumer that ignores it is unaffected.
 	BinaryVersion string
+
+	// ParentID is the id of the session that SPAWNED this one — "" for a root
+	// session, which every session predating subagents is. A subagent session is
+	// a real session with its own journal, cost and transcript; this link is what
+	// makes it a child rather than a sibling. It is gofer-native (the SDK has no
+	// session-parent concept) and durable: it is persisted beside the journal, so
+	// a disk-only entry from [Supervisor.List] carries it too.
+	ParentID string
+	// Agent is the session's agent type/identity (e.g. "go-developer"), the same
+	// value forwarded to [runner.Options.Agent] so its tool-call events carry the
+	// attribution field. "" is un-attributed. Independent of ParentID.
+	Agent string
+	// Depth is the session's depth in the subagent tree: 0 for a root session,
+	// parent+1 for a child, capped by [Config.MaxSubagentDepth].
+	Depth int
 
 	// Cwd is the working directory the session was created/resumed into.
 	// Live sessions carry it from their [managed] bookkeeping; a disk-only

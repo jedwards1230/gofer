@@ -95,11 +95,50 @@ type Session struct {
 	// Model is the default model id for new sessions. Empty means
 	// credential-driven (see runner.DefaultModel) rather than a fixed model.
 	Model string `json:"model,omitempty"`
+
+	// Effort is the default reasoning effort for new sessions: "low",
+	// "medium", "high", or empty for the provider's own default (the SDK's
+	// unified vocabulary — see provider.ValidEffort). Empty is a real,
+	// supported value here rather than merely "unset": there is no separate
+	// "no opinion" state to distinguish, since clearing the level IS asking
+	// for the provider default. Written by the TUI's `/thinking` command,
+	// which spells the empty value "off".
+	//
+	// NOT YET CONSUMED at session creation — the same status
+	// [Session.PermissionMode] carries, and the reason the /thinking picker's
+	// ✓ deliberately does NOT read it (internal/tui's effortPickerView.
+	// activeEffort): nothing populates a session's Params.Thinking, so a level
+	// stored here reaches no runner and claiming it as active would be a
+	// fiction. Wiring it in is blocked on more than plumbing — see docs/TUI.md's
+	// "reasoning effort" note: the SDK's per-turn overlay sets
+	// Params.Thinking.Effort but never Params.Thinking.Enabled, and both
+	// provider adapters emit reasoning config only when Enabled is true.
+	Effort string `json:"effort,omitempty"`
 	// PermissionMode is the default guardrail mode for new sessions: "ask"
-	// (contain-or-ask, the default) or "yolo". Not yet consumed by
-	// [Config.Engine] — it is a settings-registry knob today; wiring it into
-	// session creation lands with /yolo (see docs/TUI.md).
+	// (contain-or-ask, the default) or "yolo" (run tools without asking, and
+	// without the sandbox). Read through [Session.Mode], which resolves the
+	// empty and unrecognized cases to the fail-safe "ask".
+	//
+	// It is deliberately NOT consumed by [Config.Engine]: the engine's
+	// vocabulary is allow/ask/deny, and its allow means "contain or ask" once
+	// [loop.RuleGuard] sees it — there is no engine verdict that spells "run it
+	// uncontained". The mode therefore selects the GUARD, not the ruleset (see
+	// internal/supervisor's sessionGuard and Config.PermissionMode), and it is
+	// applied when a session is CREATED — a live session's guard is fixed at
+	// construction by runner.Options.Guard, which the SDK exposes no way to
+	// swap.
 	PermissionMode string `json:"permission_mode,omitempty"`
+
+	// MaxSubagentDepth caps how deep a subagent session tree may nest: a root
+	// session is depth 0, its child 1, and a Create naming a parent already at
+	// this depth is refused with [supervisor.ErrDepthExceeded]. It is the one
+	// guard against a runaway spawn chain, and it is config rather than a
+	// literal because the useful depth is a workflow opinion, not a property of
+	// gofer. Unset (0) — and any negative value, which is meaningless as a cap —
+	// resolves to [DefaultMaxSubagentDepth]; zero deliberately does NOT mean "no
+	// children allowed", so an existing config file keeps working unchanged. See
+	// [Session.SubagentDepthLimit].
+	MaxSubagentDepth int `json:"max_subagent_depth,omitempty"`
 
 	// LoadSettleTimeoutMS bounds, in milliseconds, how long session/load waits
 	// for a live session's in-flight turn to finish journaling before it folds
@@ -114,6 +153,33 @@ type Session struct {
 	// e.g. one blocked on a permission, which never settles). See
 	// [Session.LoadSettleTimeout].
 	LoadSettleTimeoutMS *int `json:"load_settle_timeout_ms,omitempty"`
+}
+
+// PermissionMode is the guardrail posture a new session is created with — the
+// resolved form of [Session.PermissionMode]'s free-text config value.
+type PermissionMode string
+
+const (
+	// PermissionModeAsk is gofer's default contain-or-ask posture: an
+	// allow-matched tool call runs inside the sandbox when the host can contain
+	// it, and escalates to a human when it can't.
+	PermissionModeAsk PermissionMode = "ask"
+	// PermissionModeYolo runs every tool call that no deny rule blocks, with no
+	// human in the loop and no containment. It is the /yolo toggle's on state
+	// (docs/TUI.md) and the reason [Session.Mode] fails safe: anything that
+	// isn't literally "yolo" is ask.
+	PermissionModeYolo PermissionMode = "yolo"
+)
+
+// Mode resolves [Session.PermissionMode] to a [PermissionMode]. Unset — and
+// any value this binary doesn't recognize, e.g. a mode written by a newer
+// gofer or a typo — resolves to [PermissionModeAsk]: a guardrail knob must
+// fail toward asking, never toward running unattended.
+func (s Session) Mode() PermissionMode {
+	if PermissionMode(s.PermissionMode) == PermissionModeYolo {
+		return PermissionModeYolo
+	}
+	return PermissionModeAsk
 }
 
 // DefaultLoadSettleTimeout is [Session.LoadSettleTimeoutMS]'s default: 2s. The
@@ -132,6 +198,21 @@ func (s Session) LoadSettleTimeout() time.Duration {
 		return DefaultLoadSettleTimeout
 	}
 	return time.Duration(*s.LoadSettleTimeoutMS) * time.Millisecond
+}
+
+// DefaultMaxSubagentDepth is [Session.MaxSubagentDepth]'s default: 5. Deep
+// enough for the delegation chains a supervising agent actually builds
+// (owner → worker → helper), shallow enough that a spawn loop is caught within
+// a handful of sessions rather than after it has filled the store.
+const DefaultMaxSubagentDepth = 5
+
+// SubagentDepthLimit resolves [Session.MaxSubagentDepth]'s effective value:
+// [DefaultMaxSubagentDepth] when unset or non-positive, else the explicit cap.
+func (s Session) SubagentDepthLimit() int {
+	if s.MaxSubagentDepth <= 0 {
+		return DefaultMaxSubagentDepth
+	}
+	return s.MaxSubagentDepth
 }
 
 // TUI holds gofer's own interface preferences, distinct from Session's
@@ -184,6 +265,198 @@ type TUI struct {
 	// absent" (use the default) from an explicit 0 ("no limit"). See
 	// [TUI.PasteLimitBytes] for the resolved value every caller should read.
 	MaxPasteBytes *int `json:"max_paste_bytes,omitempty"`
+
+	// ShellTimeoutMS bounds, in milliseconds, how long a child process the
+	// TUI spawns for an INPUT PREFIX may run before it is killed: the `!` /
+	// `!!` shell escape's command, and the `git ls-files` enumeration `@`
+	// file-mention completion uses (see internal/tui's shell.go and
+	// filemention.go). A shell escape is a foreground affordance — the user
+	// is staring at a TUI that cannot repaint the result until the command
+	// exits — so an unbounded `!` is a wedged UI, not a long job. nil (unset)
+	// or a non-positive value resolves to [DefaultShellTimeout]. See
+	// [TUI.ShellTimeout].
+	ShellTimeoutMS *int `json:"shell_timeout_ms,omitempty"`
+
+	// ShellMaxOutputBytes caps how much combined stdout+stderr one `!` / `!!`
+	// shell escape may retain: nil (unset) is [DefaultShellMaxOutputBytes],
+	// an explicit 0 is "no limit", and any other value is a byte cap. Output
+	// past the cap is dropped with a visible truncation marker rather than
+	// silently — and the child keeps running (its writes are accepted and
+	// discarded) rather than dying on a broken pipe. The cap exists for two
+	// reasons at once: the pane re-renders the retained output on every
+	// frame, and a `!` run's output is folded into the NEXT prompt's context
+	// (context-cost discipline — a stray `!cat huge.log` must not silently
+	// buy the user a megabyte of tokens). Same *int rationale as
+	// [TUI.MaxPasteBytes]. See [TUI.ShellOutputLimitBytes].
+	ShellMaxOutputBytes *int `json:"shell_max_output_bytes,omitempty"`
+
+	// ShellReplyMode is the STARTUP default for the `!` shell escape's sticky
+	// reply-now/queue disposition (internal/tui's shell.go): "reply" (the
+	// default) fires an agent turn the instant a `!` command finishes, "queue"
+	// holds its output for the user's next Enter so they can stack more before
+	// the agent responds. It seeds [App.shellQueue] at TUI startup; the in-session
+	// ctrl+r toggle flips that for the running session WITHOUT rewriting config,
+	// so this is the "which mode do I launch in" opinion, not a live mirror of the
+	// toggle. A plain string (not a *bool) because it mirrors [TUI.RosterView]'s
+	// enum shape and reads self-documenting in config.json; empty (unset) and any
+	// unrecognized value resolve to reply-now. It governs `!` alone — `!!` is
+	// never sent regardless. See [TUI.ShellQueueDefault].
+	ShellReplyMode string `json:"shell_reply_mode,omitempty"`
+
+	// FileMentionMaxEntries bounds how many paths the `@` file-mention
+	// completion's directory walk collects before it stops: nil (unset) or a
+	// non-positive value resolves to [DefaultFileMentionMaxEntries]. The
+	// bound is what keeps `@` usable in a tree the walk has no business
+	// enumerating in full (a vendored monorepo, a home directory); the
+	// enumeration runs off the Update loop either way, so this bounds memory
+	// and match time, not responsiveness. See [TUI.FileMentionEntryLimit].
+	FileMentionMaxEntries *int `json:"file_mention_max_entries,omitempty"`
+
+	// FileMentionMaxDepth bounds how deep below the session's cwd the `@`
+	// file-mention completion's fallback directory walk descends (1 = the cwd's
+	// own entries only): nil (unset) or a non-positive value resolves to
+	// [DefaultFileMentionMaxDepth]. It applies to the WalkDir fallback only —
+	// inside a git repository the candidates come from `git ls-files`, which
+	// has no depth notion (and honors .gitignore, which the walk cannot). See
+	// [TUI.FileMentionDepthLimit].
+	FileMentionMaxDepth *int `json:"file_mention_max_depth,omitempty"`
+
+	// ApprovalBodyLines caps how many rows the inline approval prompt spends
+	// on the gated call's own body — the command text plus the residual
+	// spec `k=v` lines (see internal/tui's renderApprovalPrompt): nil (unset)
+	// is the default [DefaultApprovalBodyLines], and any positive value is a
+	// row cap, with the overflow collapsed into a single "… +N more lines"
+	// row. The cap exists because the prompt commandeers the whole footer:
+	// a pasted 200-line heredoc would otherwise push the question and the
+	// action row off the top of the frame, leaving an operator staring at a
+	// wall of script with no visible way to answer it. A *int, not a plain
+	// int, for the same reason [TUI.Autoscroll] is a *bool — a plain int
+	// can't distinguish "field absent" from an explicit 0. See
+	// [TUI.ApprovalBodyLineLimit] for the resolved value every caller should
+	// read.
+	ApprovalBodyLines *int `json:"approval_body_lines,omitempty"`
+
+	// ApprovalMinTranscriptRows is how many transcript rows the inline
+	// approval prompt must leave visible above itself: nil (unset) is the
+	// default [DefaultApprovalMinTranscriptRows], and any positive value is a
+	// floor. When the full prompt would leave fewer rows than this, its
+	// rationale collapses to the opening paragraph plus a "… ctrl+e to
+	// explain" pointer (see internal/tui's renderApprovalPrompt); the header,
+	// the gated call's body, the question, and the action row never collapse.
+	// The floor exists because the prompt commandeers the whole footer: at a
+	// 24-row terminal the full block leaves a two-line transcript, so the
+	// conversation that led to the gated call — the context a decision is
+	// actually made on — scrolls out of view exactly when it is needed. A
+	// *int, not a plain int, for the same reason [TUI.Autoscroll] is a *bool.
+	// See [TUI.ApprovalMinTranscriptRowFloor] for the resolved value every
+	// caller should read.
+	ApprovalMinTranscriptRows *int `json:"approval_min_transcript_rows,omitempty"`
+
+	// MaxCommandFileBytes caps how large one user markdown command file
+	// (`<root>/commands/*.md`, `<cwd>/.gofer/commands/*.md` — see
+	// internal/usercmd) may be: nil (unset) is the default
+	// [DefaultMaxCommandFileBytes], an explicit 0 is "no limit", and any other
+	// value is a byte cap. A file over the cap is skipped with a status note,
+	// never truncated — half a prompt is not a prompt, and a command's body is
+	// submitted to the model verbatim. The cap exists because the commands
+	// directories are walked and read whole on the `/` keypress, so one
+	// stray multi-megabyte file (a log accidentally saved as `.md`) would
+	// otherwise be read into memory on every popup open and, if run, sent to a
+	// provider. A *int, not a plain int, for the same reason
+	// [TUI.Autoscroll] is a *bool: a plain int can't distinguish "field
+	// absent" from an explicit 0. See [TUI.CommandFileLimitBytes] for the
+	// resolved value every caller should read.
+	MaxCommandFileBytes *int `json:"max_command_file_bytes,omitempty"`
+}
+
+// DefaultMaxCommandFileBytes is [TUI.MaxCommandFileBytes]'s default: 256 KiB.
+// Far above any hand-written prompt file (a 256 KiB prompt is already past
+// most models' context windows) and far below the size at which reading one
+// on a keypress is noticeable.
+const DefaultMaxCommandFileBytes = 256 << 10
+
+// CommandFileLimitBytes resolves [TUI.MaxCommandFileBytes]'s effective value:
+// [DefaultMaxCommandFileBytes] when unset, else the explicit stored value
+// (0 = no limit). A negative stored value is meaningless as a cap and
+// resolves to the default rather than skipping every command file.
+func (t TUI) CommandFileLimitBytes() int {
+	if t.MaxCommandFileBytes == nil || *t.MaxCommandFileBytes < 0 {
+		return DefaultMaxCommandFileBytes
+	}
+	return *t.MaxCommandFileBytes
+}
+
+// DefaultShellTimeout is [TUI.ShellTimeoutMS]'s default: 30s. Long enough for
+// the builds, greps, and git commands a `!` escape is actually for, short
+// enough that a command that will never exit (an accidental `!tail -f`, a
+// process waiting on stdin the TUI does not give it one of) frees the pane
+// on its own instead of stranding it "running…" forever.
+const DefaultShellTimeout = 30 * time.Second
+
+// ShellTimeout resolves [TUI.ShellTimeoutMS]'s effective value:
+// [DefaultShellTimeout] when unset or non-positive, else the explicit
+// millisecond bound.
+func (t TUI) ShellTimeout() time.Duration {
+	if t.ShellTimeoutMS == nil || *t.ShellTimeoutMS <= 0 {
+		return DefaultShellTimeout
+	}
+	return time.Duration(*t.ShellTimeoutMS) * time.Millisecond
+}
+
+// DefaultShellMaxOutputBytes is [TUI.ShellMaxOutputBytes]'s default: 64 KiB.
+// Comfortably more than the screenful a human reads back off a `!` escape,
+// and already a four-figure token count if the run is folded into the next
+// prompt — which is the side that sets the ceiling, not the rendering.
+const DefaultShellMaxOutputBytes = 64 << 10
+
+// ShellOutputLimitBytes resolves [TUI.ShellMaxOutputBytes]'s effective value:
+// [DefaultShellMaxOutputBytes] when unset, else the explicit stored value
+// (0 = no limit). A negative stored value is meaningless as a cap and
+// resolves to the default rather than discarding all output.
+func (t TUI) ShellOutputLimitBytes() int {
+	if t.ShellMaxOutputBytes == nil || *t.ShellMaxOutputBytes < 0 {
+		return DefaultShellMaxOutputBytes
+	}
+	return *t.ShellMaxOutputBytes
+}
+
+// ShellQueueDefault resolves [TUI.ShellReplyMode] to the boolean
+// [App.shellQueue] seeds from at TUI startup: true only for the explicit
+// "queue" spelling, false for reply-now — the default, unset, and any
+// unrecognized value. Reply-now is the safe default because it is the
+// discoverable one (a `!` run visibly fires a reply), and an unknown value
+// falling through to it never silently withholds a run the user meant to send.
+func (t TUI) ShellQueueDefault() bool {
+	return t.ShellReplyMode == "queue"
+}
+
+// DefaultFileMentionMaxEntries is [TUI.FileMentionMaxEntries]'s default:
+// 5000 paths — more than the file count of most single projects, and small
+// enough that filtering it per keystroke stays imperceptible.
+const DefaultFileMentionMaxEntries = 5000
+
+// FileMentionEntryLimit resolves [TUI.FileMentionMaxEntries]'s effective
+// value: [DefaultFileMentionMaxEntries] when unset or non-positive.
+func (t TUI) FileMentionEntryLimit() int {
+	if t.FileMentionMaxEntries == nil || *t.FileMentionMaxEntries <= 0 {
+		return DefaultFileMentionMaxEntries
+	}
+	return *t.FileMentionMaxEntries
+}
+
+// DefaultFileMentionMaxDepth is [TUI.FileMentionMaxDepth]'s default: 8
+// directory levels below the cwd, which reaches the leaves of an ordinary
+// source tree without descending into the arbitrarily deep nesting a
+// dependency directory can carry.
+const DefaultFileMentionMaxDepth = 8
+
+// FileMentionDepthLimit resolves [TUI.FileMentionMaxDepth]'s effective value:
+// [DefaultFileMentionMaxDepth] when unset or non-positive.
+func (t TUI) FileMentionDepthLimit() int {
+	if t.FileMentionMaxDepth == nil || *t.FileMentionMaxDepth <= 0 {
+		return DefaultFileMentionMaxDepth
+	}
+	return *t.FileMentionMaxDepth
 }
 
 // DefaultMaxPasteBytes is [TUI.MaxPasteBytes]'s default: 128 KiB, comfortably
@@ -201,6 +474,44 @@ func (t TUI) PasteLimitBytes() int {
 		return DefaultMaxPasteBytes
 	}
 	return *t.MaxPasteBytes
+}
+
+// DefaultApprovalBodyLines is [TUI.ApprovalBodyLines]'s default: 12 rows.
+// Enough to read a realistic multi-line shell command or a short heredoc
+// whole, while leaving the rationale, the question, and the action row on
+// screen at the 24-row terminal height gofer's own golden renders assume.
+const DefaultApprovalBodyLines = 12
+
+// ApprovalBodyLineLimit resolves [TUI.ApprovalBodyLines]'s effective value:
+// [DefaultApprovalBodyLines] when unset, and also for a stored value <= 0 —
+// unlike [TUI.PasteLimitBytes]'s 0-means-unlimited, a zero-row body would
+// render the prompt with the gated call itself invisible, which is never what
+// an operator means.
+func (t TUI) ApprovalBodyLineLimit() int {
+	if t.ApprovalBodyLines == nil || *t.ApprovalBodyLines <= 0 {
+		return DefaultApprovalBodyLines
+	}
+	return *t.ApprovalBodyLines
+}
+
+// DefaultApprovalMinTranscriptRows is [TUI.ApprovalMinTranscriptRows]'s
+// default: 8 rows. Enough for the last exchange that led to the gated call to
+// stay readable beside the prompt on the 24-row terminal gofer's own golden
+// renders assume, and small enough that a comfortable terminal never collapses
+// the rationale at all.
+const DefaultApprovalMinTranscriptRows = 8
+
+// ApprovalMinTranscriptRowFloor resolves [TUI.ApprovalMinTranscriptRows]'s
+// effective value: [DefaultApprovalMinTranscriptRows] when unset, and also for
+// a negative stored value. An explicit 0 IS honored — unlike
+// [TUI.ApprovalBodyLineLimit]'s zero-means-default, "reserve no transcript" is
+// a coherent preference (always show the whole prompt, whatever the frame
+// height), so a user who asks for it gets it.
+func (t TUI) ApprovalMinTranscriptRowFloor() int {
+	if t.ApprovalMinTranscriptRows == nil || *t.ApprovalMinTranscriptRows < 0 {
+		return DefaultApprovalMinTranscriptRows
+	}
+	return *t.ApprovalMinTranscriptRows
 }
 
 // AutoscrollEnabled resolves [TUI.Autoscroll]'s effective value: true (the
@@ -344,6 +655,9 @@ func (c Config) validate() error {
 // A catch-all allow rule is seeded FIRST, so a call no config rule matches
 // resolves to allow — which the guard's [loop.RuleGuard] then routes through the
 // sandbox Container (run-contained when containable, else ask a human). The
+// [Session.PermissionMode] is NOT applied here — see its doc for why the
+// guardrail posture selects a guard rather than a ruleset.
+//
 // config's own rules are appended after; because the engine evaluates deny
 // before ask before allow, a config deny or ask rule for a given tool+specifier
 // wins over the default catch-all allow, while unmatched calls keep the

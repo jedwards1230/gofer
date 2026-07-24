@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jedwards1230/gofer/internal/daemon"
+	"github.com/jedwards1230/gofer/internal/versionskew"
 )
 
 // daemonDialTimeout bounds how long a command waits to find out whether a
@@ -167,33 +168,57 @@ func dialDaemon(ctx context.Context, f *daemonFlags, root string, stderr io.Writ
 		// nothing running to compare versions against, so don't warn.
 		return nil, err
 	}
-	// Only after a successful dial: if the daemon we discovered advertised a
-	// build version (f.epVersion, set by resolve ONLY when addr came from the
-	// endpoint file) and it differs from ours, warn loudly. This is warn-only —
-	// we never refuse the connection or restart the daemon on skew.
-	// Compare effectiveVersion() against effectiveVersion(): the daemon stamps
-	// its endpoint file with the SAME derived identifier (see runDaemon), so
+	// Only after a successful dial: compare our build against the running
+	// daemon's and warn — never refuse or restart — when the daemon is out of
+	// date. This is warn-only: gofer never auto-restarts the daemon (that would
+	// kill live sessions and can't touch a manually-run foreground daemon).
+	//
+	// The daemon's version comes AUTHORITATIVELY from the gofer/hello handshake
+	// (the same source the router trusts — see internal/router/skew.go), which
+	// works regardless of how addr was discovered. The endpoint-file hint
+	// (f.epVersion, set by resolve ONLY when addr came from the file) is the
+	// fallback for a daemon that predates gofer/hello or reports no version.
+	// Compare against effectiveVersion(): a daemon stamps BOTH its endpoint file
+	// and its gofer/hello with the SAME derived identifier (see runDaemon), so
 	// comparing against the raw ldflags sentinel would report skew ("dev" vs
 	// "dev-<sha>") on every local build.
-	if cliVersion := effectiveVersion(); f.epVersion != "" && f.epVersion != cliVersion {
-		warnVersionSkew(stderr, cliVersion, f.epVersion)
+	daemonVersion := f.epVersion
+	if hello, herr := c.Hello(dctx); herr == nil && hello.BinaryVersion != "" {
+		daemonVersion = hello.BinaryVersion
+	}
+	if cliVersion := effectiveVersion(); daemonVersion != "" {
+		switch versionskew.Classify(cliVersion, daemonVersion) {
+		case versionskew.Older:
+			warnVersionSkew(stderr, cliVersion, daemonVersion, true)
+		case versionskew.Differs:
+			warnVersionSkew(stderr, cliVersion, daemonVersion, false)
+		case versionskew.None:
+			// Equal, indeterminate, or the daemon is NEWER than this CLI — in the
+			// last case restarting the daemon is the wrong advice (the CLI is the
+			// stale side), so stay silent rather than nag with a misdirected fix.
+		}
 	}
 	return c, nil
 }
 
-// warnVersionSkew prints a loud, unmistakable stderr warning when the CLI's
-// build version (cliVersion) differs from the running daemon's (daemonVersion,
-// read from the endpoint file — see [daemonFlags.epVersion]). It names both
+// warnVersionSkew prints a loud, unmistakable stderr warning when this CLI's
+// build (cliVersion) differs from the running daemon's (daemonVersion). When
+// older is true the daemon is provably out of date (older semver); otherwise it
+// is a different build of undetermined direction. Either way it names both
 // versions and how to restart the daemon, then leaves the caller to proceed:
 // gofer never auto-restarts the daemon (that would kill live sessions and can't
 // touch a manually-run foreground daemon) — it warns and continues.
-func warnVersionSkew(stderr io.Writer, cliVersion, daemonVersion string) {
-	_, _ = fmt.Fprintf(stderr, `gofer: WARNING: version skew — CLI is %s but the daemon is %s.
+func warnVersionSkew(stderr io.Writer, cliVersion, daemonVersion string, older bool) {
+	lead := fmt.Sprintf("the daemon is a different build (%s) than this CLI (%s)", daemonVersion, cliVersion)
+	if older {
+		lead = fmt.Sprintf("the daemon (%s) is older than this CLI (%s)", daemonVersion, cliVersion)
+	}
+	_, _ = fmt.Fprintf(stderr, `gofer: WARNING: version skew — %s.
 The running daemon is out of date; restart it to pick up the new build:
   • foreground daemon: stop it (Ctrl-C) and re-run `+"`gofer daemon`"+`
   • service-managed:   `+"`gofer daemon uninstall && gofer daemon install`"+`
 Continuing with the running daemon.
-`, cliVersion, daemonVersion)
+`, lead)
 }
 
 // daemonUnreachable reports whether err is [dialDaemon] reporting no daemon at

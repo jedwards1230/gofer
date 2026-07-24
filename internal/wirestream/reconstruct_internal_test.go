@@ -211,6 +211,79 @@ func TestHandleNotificationReplaysGoferEventKinds(t *testing.T) {
 	}
 }
 
+// TestHandleGoferEventCarriesToolCallAgent asserts the tool-call kinds carry
+// their originating agent id across the daemon hop. The daemon forwards event
+// JSON verbatim, so "agent" IS on the wire (event.ToolCallStarted.Agent,
+// omitempty); reconstruction has to copy it onto the rebuilt event, because
+// the SDK sets it post-construction rather than through the New* constructors.
+// Losing it silently un-attributes every subagent call for a remote client —
+// there is no error, just a prompt that can no longer say which agent asked.
+// An absent "agent" key must decode to "" (the un-attributed case), not to
+// some other call's leftover value.
+func TestHandleGoferEventCarriesToolCallAgent(t *testing.T) {
+	const sid = "sess-1"
+
+	tests := []struct {
+		name      string
+		params    json.RawMessage
+		wantAgent string
+	}{
+		{
+			name:      "started with an agent",
+			params:    json.RawMessage(`{"type":"tool.call.started","session_id":"sess-1","id":"tc-1","name":"bash","input":{"cmd":"ls"},"agent":"researcher"}`),
+			wantAgent: "researcher",
+		},
+		{
+			name:   "started without an agent",
+			params: json.RawMessage(`{"type":"tool.call.started","session_id":"sess-1","id":"tc-1","name":"bash","input":{"cmd":"ls"}}`),
+		},
+		{
+			name:      "delta with an agent",
+			params:    json.RawMessage(`{"type":"tool.call.delta","session_id":"sess-1","id":"tc-1","delta":"{\"cmd","agent":"researcher"}`),
+			wantAgent: "researcher",
+		},
+		{
+			name:      "finished with an agent",
+			params:    json.RawMessage(`{"type":"tool.call.finished","session_id":"sess-1","id":"tc-1","result":"ok","agent":"researcher"}`),
+			wantAgent: "researcher",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newReconstructTestReconstructor()
+			r.RegisterFresh(sid)
+			sub, err := r.Subscribe(context.Background(), sid)
+			if err != nil {
+				t.Fatalf("Subscribe: %v", err)
+			}
+			defer sub.Close()
+
+			r.handleNotification(daemon.Notification{Method: methodGoferEvent, Params: tc.params})
+
+			select {
+			case ev := <-sub.C:
+				var agent string
+				switch e := ev.(type) {
+				case event.ToolCallStarted:
+					agent = e.Agent
+				case event.ToolCallDelta:
+					agent = e.Agent
+				case event.ToolCallFinished:
+					agent = e.Agent
+				default:
+					t.Fatalf("got %T, want a tool-call event", ev)
+				}
+				if agent != tc.wantAgent {
+					t.Errorf("%s Agent = %q, want %q", ev.Kind(), agent, tc.wantAgent)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for the reconstructed tool-call event")
+			}
+		})
+	}
+}
+
 // TestHandleNotificationIgnoresPermissionKindsViaGoferEvent asserts that a
 // permission.requested/permission.resolved envelope arriving via the
 // gofer/event method (which should never happen — see methodGoferEvent's

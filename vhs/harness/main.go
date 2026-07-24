@@ -28,10 +28,12 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/jedwards1230/agent-sdk-go/acp"
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
 	"github.com/jedwards1230/gofer/internal/config"
+	"github.com/jedwards1230/gofer/internal/decision"
 	"github.com/jedwards1230/gofer/internal/tui"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
@@ -156,7 +158,13 @@ func approvalScene() []step {
 		{event.NewMessageStarted(sid, event.MessageText), 0},
 		{event.NewMessageFinished(sid, event.MessageText, "One package failed. I need to remove a stale fixture before re-running."), beat},
 		{event.NewTurnFinished(sid, "end_turn", provider.Usage{InputTokens: 88, OutputTokens: 41}), beat},
-		{event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"command": "rm -rf /tmp/session-fixtures"}, []string{"no rule"}), beat},
+		// The trace is the exact two-entry shape loop.RuleGuard emits for an
+		// unmatched, un-sandboxable call — the prompt DERIVES its rationale
+		// paragraphs from it (see internal/tui's rationaleLines), so a made-up
+		// trace string would record a demo of the "could not determine why"
+		// fallback rather than of the feature.
+		{event.NewPermissionRequested(sid, "perm-1", "bash", map[string]any{"command": "rm -rf /tmp/session-fixtures"},
+			[]string{"rule: unmatched", "containable: false (no container configured)"}), beat},
 	}
 }
 
@@ -300,8 +308,8 @@ func daemonRefreshCommandEnv() tui.CommandEnv {
 // broker so attaching into a session doesn't error — nothing publishes to it,
 // so the transcript underneath the panel stays empty, which is fine: these
 // scenes are about the command panel, not the transcript. The write ops
-// (Create/Send/Interrupt/Kill/Archive/SetModel/Reply) are no-ops; none of
-// these tapes exercises them.
+// (Create/Send/Interrupt/Kill/Archive/SetModel/SetEffort/Reply/AnswerDecision)
+// are no-ops; none of these tapes exercises them.
 type vhsSupervisor struct {
 	sessions []tui.SessionInfo
 	broker   *event.Broker
@@ -323,6 +331,12 @@ func (s *vhsSupervisor) Create(context.Context, string, tui.CreateOptions) (tui.
 	return tui.SessionInfo{}, nil
 }
 
+func (s *vhsSupervisor) ListSessions(context.Context) ([]tui.SessionRef, error) {
+	return nil, nil
+}
+
+func (s *vhsSupervisor) Resume(context.Context, string, string) error { return nil }
+
 func (s *vhsSupervisor) Send(context.Context, string, string) error { return nil }
 
 func (s *vhsSupervisor) Interrupt(context.Context, string) error { return nil }
@@ -333,4 +347,31 @@ func (s *vhsSupervisor) Archive(context.Context, string) error { return nil }
 
 func (s *vhsSupervisor) SetModel(context.Context, string, string) error { return nil }
 
-func (s *vhsSupervisor) Reply(context.Context, string, string, bool, bool) error { return nil }
+func (s *vhsSupervisor) SetEffort(context.Context, string, string) error { return nil }
+
+func (s *vhsSupervisor) Reply(context.Context, string, string, tui.PermissionDecision) error {
+	return nil
+}
+
+// ExplainPermission answers with a canned rationale: no tape drives ctrl+e
+// (these scenes are about the command panel), and a scene that later does
+// should render an explained prompt rather than an error banner.
+func (s *vhsSupervisor) ExplainPermission(context.Context, string, string) (acp.PermissionRationale, error) {
+	return acp.PermissionRationale{
+		Reason: "No permission rule matched this call, so gofer is asking before it runs.",
+		Policy: "unmatched",
+		Trace:  []string{"rule: unmatched"},
+	}, nil
+}
+
+// Decisions hands back an already-closed subscription — no tape drives a
+// structured decision, and a closed stream keeps the app's decision pump idle.
+func (s *vhsSupervisor) Decisions(context.Context, string) (*decision.Subscription, error) {
+	sub := decision.NewGate("").Subscribe(0)
+	sub.Close()
+	return sub, nil
+}
+
+func (s *vhsSupervisor) AnswerDecision(context.Context, string, string, []acp.DecisionAnswer) error {
+	return nil
+}

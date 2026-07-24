@@ -14,20 +14,28 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/acp"
 	"github.com/jedwards1230/agent-sdk-go/event"
 
+	"github.com/jedwards1230/gofer/internal/permrationale"
 	"github.com/jedwards1230/gofer/internal/supervisor"
 )
 
 // gofer-native control methods, namespaced so they never collide with an ACP
 // method name. They serve the CLI client (a later PR): roster/ps mirror
 // [supervisor.Supervisor.Roster]/[supervisor.Supervisor.List], kill/archive
-// mirror the lifecycle operations, and set_model mirrors
-// [supervisor.Supervisor.SetModel].
+// mirror the lifecycle operations, and set_model / set_effort mirror
+// [supervisor.Supervisor.SetModel] / [supervisor.Supervisor.SetEffort].
 const (
 	methodGoferRoster   = "gofer/roster"
 	methodGoferPS       = "gofer/ps"
 	methodGoferKill     = "gofer/kill"
 	methodGoferArchive  = "gofer/archive"
 	methodGoferSetModel = "gofer/set_model"
+
+	// methodGoferSetEffort is the effort-axis twin of gofer/set_model: it
+	// changes a session's reasoning effort for its next turn. Deliberately
+	// gofer-native (not the SDK's session.set_effort op) so it mirrors
+	// set_model's shape hop for hop — model- and effort-setting are the same
+	// kind of control-plane mutation and travel the same road.
+	methodGoferSetEffort = "gofer/set_effort"
 
 	// methodGoferFleet is gofer-native fleet-wide usage: the summed Cost/Usage
 	// across every LIVE session, aggregated by the hosted supervisor (see
@@ -76,6 +84,24 @@ const (
 	methodGoferPermissionRequested = "gofer/permission_requested"
 	methodGoferPermissionResolved  = "gofer/permission_resolved"
 
+	// methodGoferDecisionRequested / methodGoferDecisionResolved are the
+	// structured-decision twins of the permission pair: the gofer-native
+	// notifications the daemon fans a session's OPEN and RESOLVED ask_user
+	// requests out to every attached peer with. They exist for the same reason —
+	// ACP models a decision as a client-answered REQUEST
+	// (acp.MethodSessionRequestDecision, which the daemon also sends, see
+	// [Daemon.requestDecisionFromPeers]), and a request does not fit a
+	// must-deliver fan-out to N peers where the first answer wins.
+	//
+	// Their source is different, though, and that is the whole shape of this
+	// relay: a permission is an event.Event the prompt handler observes on the
+	// session's stream, while a decision rides no stream at all (the SDK's Event
+	// union is closed and carries no decision kind — see internal/decision), so
+	// the ONLY observer is the supervisor's standing per-session gate watcher.
+	// See decision_relay.go.
+	methodGoferDecisionRequested = "gofer/decision_requested"
+	methodGoferDecisionResolved  = "gofer/decision_resolved"
+
 	// methodGoferEvent is the gofer-native, full-fidelity notification the M3
 	// lossless-attach work fans a session's ENTIRE non-permission event stream
 	// out through: its params are the source [event.Event]'s own MarshalJSON
@@ -97,6 +123,16 @@ const (
 	// permission request (contract: JSON-RPC method "permission.reply", params
 	// {id, verdict, remember?}). It is a notification — no result.
 	methodPermissionReply = "permission.reply"
+
+	// methodDecisionAnswer is the inbound op a client sends to answer a
+	// structured-decision request: JSON-RPC method "decision.answer", params
+	// {sessionId, id, answers}. Named for the permission.reply convention (a
+	// bare, dotted, gofer-native op rather than a gofer/ notification), and a
+	// notification too — no result.
+	//
+	// Unlike permission.reply it carries a sessionId, because a decision request
+	// id is unique only within its session (see [decisionKey]).
+	methodDecisionAnswer = "decision.answer"
 )
 
 // methodHandler answers one JSON-RPC method call. params is the raw request
@@ -116,7 +152,8 @@ var methodTable = map[string]methodHandler{
 	acp.MethodSessionCancel: handleSessionCancel,
 	acp.MethodSessionList:   handleSessionList,
 
-	acp.MethodSessionSetConfigOption: handleSessionSetConfigOption,
+	acp.MethodSessionSetConfigOption:   handleSessionSetConfigOption,
+	acp.MethodSessionExplainPermission: handleExplainPermission,
 
 	methodGoferRoster:   handleGoferRoster,
 	methodGoferPS:       handleGoferPS,
@@ -127,7 +164,10 @@ var methodTable = map[string]methodHandler{
 	methodGoferModels:   handleGoferModels,
 	methodGoferHello:    handleGoferHello,
 
+	methodGoferSetEffort: handleGoferSetEffort,
+
 	methodPermissionReply: handlePermissionReply,
+	methodDecisionAnswer:  handleDecisionAnswer,
 }
 
 // decodeOp decodes method's params via acp.DecodeOp and asserts the result to
@@ -271,7 +311,7 @@ func handleSessionNew(d *Daemon, ctx context.Context, _ *peer, params json.RawMe
 	if rerr != nil {
 		return nil, rerr
 	}
-	var req acp.NewSessionRequest
+	var req NewSessionRequest
 	if err := json.Unmarshal(params, &req); err != nil {
 		return nil, invalidParams(fmt.Errorf("acp: decode %s params: %w", acp.MethodSessionNew, err))
 	}
@@ -301,45 +341,43 @@ func handleSessionNew(d *Daemon, ctx context.Context, _ *peer, params json.RawMe
 			return nil, appError(fmt.Errorf("session limit reached (max %d)", d.cfg.MaxSessions))
 		}
 	}
-	info, err := d.sup.Create(ctx, "", supervisor.CreateOptions{Cwd: cwd, Model: model})
+	parentID, agentID, _ := req.Meta.SubagentLink()
+	info, err := d.sup.Create(ctx, "", supervisor.CreateOptions{
+		Cwd:      cwd,
+		Model:    model,
+		ParentID: parentID,
+		Agent:    agentID,
+	})
 	if err != nil {
+		// A gofer/parent naming no session is a bad client PARAMETER, so it
+		// answers -32602 rather than a generic application error — the same
+		// treatment an unresolvable cwd already gets above. ErrDepthExceeded
+		// deliberately stays an application error: the parameter is well-formed and
+		// names a real session; it is the daemon's own policy that refuses.
+		if errors.Is(err, supervisor.ErrNoParent) {
+			return nil, invalidParams(err)
+		}
 		return nil, appError(err)
 	}
-	d.log.Info("session created", "session", info.ID)
-	return newSessionResult{
+	// Only log the subagent keys when there IS a link: every ordinary root create
+	// would otherwise carry two empty attributes on every line.
+	logArgs := []any{"session", info.ID}
+	if info.ParentID != "" {
+		logArgs = append(logArgs, "parent", info.ParentID)
+	}
+	if info.Agent != "" {
+		logArgs = append(logArgs, "agent", info.Agent)
+	}
+	d.log.Info("session created", logArgs...)
+	return NewSessionResponse{
 		NewSessionResponse: acp.NewSessionResponse{SessionID: info.ID},
-		Meta:               &newSessionMeta{Model: info.Model},
+		Meta: &NewSessionMeta{
+			Model:    info.Model,
+			ParentID: info.ParentID,
+			Agent:    info.Agent,
+			Depth:    info.Depth,
+		},
 	}, nil
-}
-
-// newSessionResult is the session/new response: ACP's own
-// [acp.NewSessionResponse] plus gofer's `_meta` extension. ACP reserves `_meta`
-// for exactly this — implementation-specific data an unaware client ignores —
-// so carrying the assigned model there keeps the response conformant, needs no
-// change to the SDK's shared wire types, and honors the repo's contract-only
-// consumption invariant.
-//
-// It exists because the ACP response carries only the session id. A client that
-// let the daemon choose the model — the NORMAL path, session/new with no model
-// — therefore had no way to learn what it actually got, so
-// internal/daemonbridge's Create could only echo back the model it had
-// REQUESTED (the empty string), and the roster row it returned could never
-// carry the real one (issue #162, defect 2).
-type newSessionResult struct {
-	acp.NewSessionResponse
-	Meta *newSessionMeta `json:"_meta,omitempty"`
-}
-
-// newSessionMeta is [newSessionResult]'s `_meta` payload. The key is namespaced
-// the same way gofer's own methods are (gofer/*), so it cannot collide with
-// another ACP implementation's extension data.
-type newSessionMeta struct {
-	// Model is the model the daemon ASSIGNED to the new session: the client's
-	// requested model when it sent one, else the daemon's own resolved default
-	// (see the resolution above). Empty only when the daemon could not resolve
-	// one at all. A client that sees no `_meta` at all is talking to a daemon
-	// predating this field and falls back to whatever it requested.
-	Model string `json:"gofer/model,omitempty"`
 }
 
 // handleSessionLoad reopens a persisted session and replays its folded
@@ -488,6 +526,37 @@ func handleSessionLoad(d *Daemon, ctx context.Context, p *peer, params json.RawM
 			if werr := p.notify(ctx, methodGoferPermissionRequested, req); werr != nil {
 				return nil, internalErr(fmt.Errorf("session/load %s: replay pending permission: %w", op.SessionID, werr))
 			}
+		}
+	}
+
+	// Re-surface any STILL-OPEN structured-decision request, UNCONDITIONALLY —
+	// not behind [Config.ReplayPendingPermissionsOnAttach], and this is the one
+	// deliberate asymmetry between the two relays.
+	//
+	// A permission has two other ways to reach a late peer: it is an event, so it
+	// sits in the session broker's retained must-deliver backlog and rides the
+	// gofer/event replay above, and it leaves a transcript badge a client renders
+	// from history. A decision has NEITHER — it is not an event, and nothing about
+	// it is journaled — so this notification is the only path by which a peer that
+	// attaches after the question was asked can ever learn a turn is blocked on
+	// one. Gating it would mean an ordinary `gofer daemon` shows a TUI attaching
+	// mid-question an idle-looking session whose agent waits forever. That is not
+	// a knob anyone would want to turn off, so it is not one.
+	//
+	// Sent as gofer/decision_requested — the same notification a live ask fans out
+	// on — before the response, so it rides the same notifications-before-response
+	// ordering the replays above rely on and a client reconstructs it exactly as a
+	// live one. A peer that already saw this request live and re-loads receives it
+	// twice; the client-side stream folds a duplicate id in place (see
+	// decision.Stream.Apply), so it re-renders the prompt it is already showing
+	// rather than stacking a second.
+	openDecisions := d.pendingDecisionsForSession(op.SessionID)
+	if len(openDecisions) > 0 {
+		d.log.Debug("session load open-decision replay", "session", op.SessionID, "requests", len(openDecisions))
+	}
+	for _, req := range openDecisions {
+		if werr := p.notify(ctx, methodGoferDecisionRequested, req); werr != nil {
+			return nil, internalErr(fmt.Errorf("session/load %s: replay open decision: %w", op.SessionID, werr))
 		}
 	}
 	return acp.LoadSessionResponse{}, nil
@@ -642,6 +711,60 @@ func handleSessionSetConfigOption(d *Daemon, ctx context.Context, _ *peer, param
 	return acp.SetConfigOptionResponse{
 		ConfigOptions: []acp.ConfigOption{modelConfigOption(current, d.authedProviders())},
 	}, nil
+}
+
+// handleExplainPermission answers the ACP session/explain_permission request:
+// why is THIS tool call being gated? It is decoded directly rather than via
+// [decodeOp] because acp.DecodeOp deliberately projects no op for it (it is a
+// question about daemon-held state, not an instruction to the session) — the
+// same shape handleSessionSetConfigOption has.
+//
+// The answer comes from the daemon's OWN retained requests
+// ([Daemon.pendingPerm]), which both topologies populate: the in-process
+// prompt handler records one as it broadcasts a permission.requested, and the
+// M6 router relay records one for an adopted session's worker-side request
+// (see permission_relay.go). So this needs nothing from the hosted supervisor
+// — no new [Supervisor] method, no router forwarding — and works identically
+// on a daemon, a worker, and a router.
+//
+// It is READ-ONLY, and that is the whole contract of the method (see
+// [acp.ExplainPermissionResponse]: "the pending permission request is left
+// unresolved"). It clears no route, drops no retained request, and touches no
+// gate: after any number of explains the request is still pending and the
+// human's reply still resolves it. A test pins exactly that
+// (TestExplainPermissionIsReadOnly).
+//
+// Failure modes are errors, never a zero rationale: a client must be able to
+// tell "that request is no longer pending" from "it was gated for no stated
+// reason". An unknown/already-resolved id — and a known id whose session does
+// not match the one asked about, which must not leak another session's
+// rationale — are both [appError]s rather than invalid-params: the request is
+// perfectly well-formed, it is the daemon's live state that cannot satisfy it,
+// exactly like sessionModel's "not found in roster" (the -32602 codes below
+// stay for genuinely malformed params).
+func handleExplainPermission(d *Daemon, _ context.Context, _ *peer, params json.RawMessage) (any, *rpcError) {
+	req, err := acp.DecodeExplainPermission(params)
+	if err != nil {
+		return nil, invalidParams(err)
+	}
+	if req.SessionID == "" {
+		return nil, invalidParamsMsg(acp.MethodSessionExplainPermission + ": sessionId is required")
+	}
+	if req.ToolCallID == "" {
+		return nil, invalidParamsMsg(acp.MethodSessionExplainPermission + ": toolCallId is required")
+	}
+
+	p, ok := d.pendingPerm(req.ToolCallID)
+	if !ok {
+		return nil, appError(fmt.Errorf("%s: tool call %s has no pending permission request (it may already have been answered)", acp.MethodSessionExplainPermission, req.ToolCallID))
+	}
+	if p.SessionID != req.SessionID {
+		// Deliberately does NOT name the session the call actually belongs to:
+		// the caller asked about a session it named, and the honest answer is
+		// that this call is not that session's.
+		return nil, appError(fmt.Errorf("%s: tool call %s does not belong to session %s", acp.MethodSessionExplainPermission, req.ToolCallID, req.SessionID))
+	}
+	return acp.ExplainPermissionResponse{Rationale: permrationale.Derive(p.Tool, p.Trace)}, nil
 }
 
 // sessionModel returns sessionID's current model, read from the live roster —
@@ -985,6 +1108,174 @@ func (d *Daemon) broadcastPermission(sessionID, method string, params any) {
 	}
 }
 
+// broadcastDecision fans a structured-decision notification out to EVERY peer
+// attached to sessionID. It is [Daemon.broadcastPermission]'s exact twin — same
+// context ownership (see [relayWriteTimeout]), same snapshot-then-notify, same
+// rule that a write failure to any single peer is non-fatal and only logged,
+// since a turn blocked on a question must not be affected by one observer's
+// wedged socket.
+//
+// It is a separate function rather than a shared generic so each keeps the
+// redaction note for what it actually sends: a permission's params carry tool
+// input, a decision's carry the model's own question and option text. Both are
+// content — never logged (see handleFrame's redaction rule).
+func (d *Daemon) broadcastDecision(sessionID, method string, params any) {
+	ctx, cancel := context.WithTimeout(d.ctx, relayWriteTimeout)
+	defer cancel()
+	for _, pr := range d.peersForSession(sessionID) {
+		if werr := pr.notify(ctx, method, params); werr != nil {
+			// Session id + method only — never the params (the question text).
+			d.log.Debug("decision broadcast: peer notify failed", "session", sessionID, "method", method, "err", werr)
+		}
+	}
+}
+
+// requestDecisionFromPeers fans the spec-ACP session/request_decision REQUEST
+// out to every attached ACP peer, alongside the gofer-native
+// gofer/decision_requested notification the caller already broadcast. Each
+// request runs on its own goroutine — a request BLOCKS awaiting the client's
+// answer, and the caller here is the supervisor's decision watcher, which must
+// keep draining its gate subscription (chiefly for the eventual resolution that
+// cancels the losers). reqCtx is keyed in decisionReqCancels so
+// [Daemon.cancelDecisionRequest] retracts them all at once when the request
+// resolves by any path.
+//
+// It derives from the daemon's base context, not a request context: there is no
+// per-turn handler owning this fan-out's lifetime (unlike
+// [Daemon.requestPermissionFromPeers], scoped to the driving session/prompt).
+// Nothing dangles as a result — the gate publishes a resolution for EVERY exit
+// path (answered, interrupted, session closed), and each one lands here as
+// [Daemon.ResolveDecision], which cancels.
+//
+// gofer-native peers are skipped for the same reason the permission fan-out
+// skips them: they answer via the decision.answer notification and consume
+// gofer/decision_requested, so a request would only ever time out at them. A
+// peer not yet classified defaults to ACP, the safe direction — see
+// [peer.goferNative].
+func (d *Daemon) requestDecisionFromPeers(key decisionKey, questions []acp.DecisionQuestion) {
+	reqCtx, cancel := context.WithCancel(d.ctx)
+	d.registerDecisionCancel(key, cancel)
+
+	req := acp.ToRequestDecision(key.session, questions)
+	for _, pr := range d.peersForSession(key.session) {
+		if pr.goferNative.Load() {
+			continue
+		}
+		go d.askPeerDecision(reqCtx, pr, key, req)
+	}
+}
+
+// askPeerDecision sends one session/request_decision request to pr and routes
+// the answers it returns into the session's decision gate — the same gate the
+// gofer-native decision.answer path resolves (see handleDecisionAnswer), so the
+// first answer from EITHER surface wins and the gate makes any later one a
+// no-op (it rejects an id that is no longer open).
+//
+// The response's answers are passed through VERBATIM, including each answer's
+// free-text Notes: the gate validates them against the question set and
+// normalizes what the client left out, and the tool renders the notes into the
+// model-facing result. Dropping or reshaping them here would silently discard
+// what the human actually said — TestACPDecisionRoundTrip is the guard, and
+// asserts the note the ACP peer attached reaches the tool result, not just the
+// option it selected.
+//
+// A transport error, a ctx cancellation (the request resolved elsewhere), an
+// undecodable response, or a gate rejection are all no-ops — logged at DEBUG,
+// session id only, never the payload.
+func (d *Daemon) askPeerDecision(ctx context.Context, pr *peer, key decisionKey, req acp.RequestDecisionRequest) {
+	raw, err := pr.request(ctx, acp.MethodSessionRequestDecision, req)
+	if err != nil {
+		// Routine: resolved elsewhere (ctx cancelled), the client disconnected,
+		// or it cannot answer this request.
+		d.log.Debug("session/request_decision: no answer from peer", "session", key.session, "err", err)
+		return
+	}
+	var resp acp.RequestDecisionResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		d.log.Debug("session/request_decision: decode response failed", "session", key.session, "err", err)
+		return
+	}
+	// Skip an answer that lost the race — the request already resolved and its
+	// route is gone. The gate is first-wins regardless, so this only avoids a
+	// pointless late Answer; it is not required for correctness.
+	if !d.decisionRouteOpen(key) {
+		return
+	}
+	if err := d.answerDecision(key, resp.Answers); err != nil {
+		d.log.Debug("session/request_decision: routing answer to gate failed", "session", key.session, "err", err)
+	}
+}
+
+// answerDecision routes answers into key's session gate through the hosted
+// supervisor's optional [DecisionAnswerer] capability, and performs the eager
+// cleanup a successful answer implies: drop the route (closing the window
+// before the gate's resolution reaches the standing watcher) and retract the
+// outstanding ACP requests at every other peer. Both are idempotent, so the
+// resolution repeating them is a no-op. There is no ordering hazard behind the
+// word "eager": decision.Gate.Answer publishes its UpdateResolved synchronously,
+// under the same lock that removes the request, before it returns — what is
+// asynchronous is only the standing watcher's delivery of that update back here
+// as [Daemon.ResolveDecision], which is exactly the window these two close.
+//
+// Neither runs on the error path, deliberately. A rejected answer resolves
+// nothing: Gate.Answer leaves the request open so the client can correct and
+// retry (Supervisor.AnswerDecision only wraps that error), so the route and the
+// outstanding ACP requests must SURVIVE the failure. Clearing the route would
+// make the still-blocked request unanswerable — every answer path gates on
+// [Daemon.decisionRouteOpen] — and cancelling would retract the question from
+// the peers while the turn stays blocked on it.
+//
+// A supervisor that does not implement the capability — the M6 router, whose
+// sessions live in worker processes — is reported as a plain, actionable error
+// rather than a silent success, so a client is never told a turn was unblocked
+// that is in fact still waiting. See [DecisionAnswerer].
+func (d *Daemon) answerDecision(key decisionKey, answers []acp.DecisionAnswer) error {
+	answerer, ok := d.sup.(DecisionAnswerer)
+	if !ok {
+		return fmt.Errorf("%s: this daemon's supervisor does not carry structured decisions", methodDecisionAnswer)
+	}
+	if err := answerer.AnswerDecision(key.session, key.request, answers); err != nil {
+		return err
+	}
+	d.clearDecisionRoute(key)
+	d.cancelDecisionRequest(key)
+	return nil
+}
+
+// handleDecisionAnswer answers a client's "decision.answer" op: it routes the
+// answers to the session's decision gate, unblocking the ask_user tool call
+// waiting on them. It is a notification (no result); every rejection below
+// surfaces as an error the router logs but sends nowhere.
+//
+// Unlike handlePermissionReply it takes the session id from the params rather
+// than from a route table, because a decision request id does not identify a
+// request on its own (see [decisionKey]). The route table is still consulted —
+// as the "is this request actually open?" check — so an unknown, stale, or
+// already-answered id becomes a descriptive error instead of a silent drop or a
+// confusing gate-level one.
+func handleDecisionAnswer(d *Daemon, _ context.Context, _ *peer, params json.RawMessage) (any, *rpcError) {
+	var req decisionAnswerParams
+	if err := json.Unmarshal(params, &req); err != nil {
+		return nil, invalidParams(err)
+	}
+	if req.SessionID == "" {
+		return nil, invalidParamsMsg(methodDecisionAnswer + ": sessionId is required")
+	}
+	if req.ID == "" {
+		return nil, invalidParamsMsg(methodDecisionAnswer + ": id is required")
+	}
+	key := decisionKey{session: req.SessionID, request: req.ID}
+	if !d.decisionRouteOpen(key) {
+		return nil, invalidParamsMsg(fmt.Sprintf("%s: session %q has no outstanding decision request with id %q",
+			methodDecisionAnswer, req.SessionID, req.ID))
+	}
+	if err := d.answerDecision(key, req.Answers); err != nil {
+		return nil, appError(err)
+	}
+	d.log.Debug("decision answer routed", "session", req.SessionID, "request", req.ID)
+	return struct{}{}, nil
+}
+
 // permissionOptions is the fixed option set every session/request_permission
 // request offers: the four ACP permission-option kinds. Their ids are the kind
 // strings, which is how askPeerPermission maps a client's chosen optionId back
@@ -1041,8 +1332,26 @@ func (d *Daemon) requestPermissionFromPeers(ctx context.Context, sessionID strin
 	}
 }
 
+// answeredOptionID returns the [acp.PermissionOption] id an answered outcome
+// chose, and false for a non-answer (a cancellation, or an outcome variant
+// this daemon does not model). An "amended" outcome answers exactly like a
+// "selected" one — the chosen option's kind still decides allow/deny and
+// remember — and differs only in the replacement input riding along, which
+// [acp.ToPermissionReply] projects onto the reply for the caller.
+func answeredOptionID(outcome acp.PermissionOutcome) (string, bool) {
+	switch o := outcome.(type) {
+	case acp.PermissionOutcomeSelected:
+		return o.OptionID, true
+	case acp.PermissionOutcomeAmended:
+		return o.OptionID, true
+	default:
+		return "", false
+	}
+}
+
 // askPeerPermission sends one session/request_permission request to pr and, on
-// a "selected" answer, routes it into the session's gate — the same call-id
+// a "selected" or "amended" answer, routes it into the session's gate — the
+// same call-id
 // routing the gofer-native permission.reply path uses (see handlePermissionReply),
 // so the first answer from EITHER surface wins and the gate makes any later one a
 // no-op. A "cancelled" outcome is a non-answer (the client declined to decide,
@@ -1063,11 +1372,11 @@ func (d *Daemon) askPeerPermission(ctx context.Context, pr *peer, sessionID, cal
 		d.log.Debug("session/request_permission: decode response failed", "session", sessionID, "err", err)
 		return
 	}
-	sel, ok := resp.Outcome.(acp.PermissionOutcomeSelected)
+	optionID, ok := answeredOptionID(resp.Outcome)
 	if !ok {
 		return // a cancelled outcome is a non-answer — ignore it
 	}
-	chosen, ok := findPermissionOption(options, sel.OptionID)
+	chosen, ok := findPermissionOption(options, optionID)
 	if !ok {
 		d.log.Debug("session/request_permission: unknown optionId in answer", "session", sessionID)
 		return
@@ -1200,6 +1509,11 @@ func (d *Daemon) broadcastConfigOptionUpdate(sessionID string, notif any) {
 // [Daemon.recordPermRoute]). It is a notification (no result); an unknown id or
 // an already-resolved/gone session surfaces as an error the router logs but
 // sends nowhere.
+//
+// An amended allow's replacement input (params.input) is forwarded verbatim,
+// unexamined: the daemon is a relay here, and the SDK deliberately does not
+// re-run the guard over it — the human's edit IS the decision (see
+// loop.awaitApproval).
 func handlePermissionReply(d *Daemon, _ context.Context, _ *peer, params json.RawMessage) (any, *rpcError) {
 	var req permissionReplyParams
 	if err := json.Unmarshal(params, &req); err != nil {
@@ -1212,7 +1526,12 @@ func handlePermissionReply(d *Daemon, _ context.Context, _ *peer, params json.Ra
 	if !ok {
 		return nil, invalidParamsMsg(fmt.Sprintf("%s: no outstanding permission request with id %q", methodPermissionReply, req.ID))
 	}
-	if err := d.sup.Reply(sessionID, event.PermissionReply{ID: req.ID, Verdict: req.Verdict, Remember: req.Remember}); err != nil {
+	if err := d.sup.Reply(sessionID, event.PermissionReply{
+		ID:       req.ID,
+		Verdict:  req.Verdict,
+		Remember: req.Remember,
+		Input:    req.Input,
+	}); err != nil {
 		return nil, appError(err)
 	}
 	// Clean up eagerly, mirroring the PermissionResolved event-stream path
@@ -1340,5 +1659,29 @@ func handleGoferSetModel(d *Daemon, ctx context.Context, _ *peer, params json.Ra
 	// unreadable model just suppresses the advertisement (see advertiseModelChange).
 	current, _ := d.sessionModel(ctx, req.SessionID)
 	d.advertiseModelChange(req.SessionID, prevModel, current)
+	return struct{}{}, nil
+}
+
+// handleGoferSetEffort answers gofer/set_effort {sessionId, effort}, changing
+// the session's reasoning effort for its next turn (see
+// [supervisor.Supervisor.SetEffort]). [supervisor.ErrNotLive] (unknown session),
+// [supervisor.ErrInvalidEffort] (a level outside the unified vocabulary), and
+// the SDK's own non-reasoning-model rejection all surface as clear application
+// errors naming the offending value — the concrete sentinel types do not cross
+// the wire (see internal/daemonbridge's SetEffort doc), the messages do.
+//
+// Unlike [handleGoferSetModel] it advertises nothing afterwards: effort is not
+// one of the ACP config options this daemon publishes (see
+// [handleSessionSetConfigOption], which offers "model" only), so there is no
+// config_option_update for a client to reconcile against.
+func handleGoferSetEffort(d *Daemon, ctx context.Context, _ *peer, params json.RawMessage) (any, *rpcError) {
+	req, rerr := decodeSetEffortParams(params)
+	if rerr != nil {
+		return nil, rerr
+	}
+	if err := d.sup.SetEffort(ctx, req.SessionID, req.Effort); err != nil {
+		return nil, appError(err)
+	}
+	d.log.Info("session effort set", "session", req.SessionID, "effort", req.Effort)
 	return struct{}{}, nil
 }

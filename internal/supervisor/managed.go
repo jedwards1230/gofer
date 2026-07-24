@@ -6,10 +6,13 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/loop"
+
+	"github.com/jedwards1230/gofer/internal/decision"
 )
 
 // managed is one live session's supervisor-side bookkeeping: the Session it
@@ -24,11 +27,20 @@ import (
 // *Supervisor) always take it before mu here, so the two locks have one fixed
 // order and cannot deadlock.
 type managed struct {
-	sess      Session
-	id        string
-	project   string
-	model     string
-	cwd       string
+	sess    Session
+	id      string
+	project string
+	model   string
+	cwd     string
+	// parentID/agent/depth are this session's subagent link (see [sessionMeta]):
+	// the spawning session's id, the agent identity its tool events are stamped
+	// with, and its depth in the tree. Set once in newManaged — from Create's
+	// resolved options or, on resume, from the on-disk sidecar — and never
+	// mutated afterward, so (like id/project/cwd above) they are read without
+	// holding mu.
+	parentID  string
+	agent     string
+	depth     int
 	createdAt time.Time
 	clock     func() time.Time
 	// notify pushes a fresh roster snapshot to WatchRoster subscribers. The
@@ -51,10 +63,27 @@ type managed struct {
 	// [Supervisor.Reply] routes a human's inbound reply into it. One per session,
 	// never nil.
 	gate *loop.Gate
+	// decisions is this session's structured-decision Gate: its ask_user tool
+	// blocks on it, [Supervisor.SubscribeDecisions] watches it, and
+	// [Supervisor.AnswerDecision] resolves through it. One per session, never
+	// nil, and — like gate — immutable after construction, so it needs no lock.
+	decisions *decision.Gate
 	// permDone is closed by the watchPermissions goroutine when it returns, so
 	// stop joins it alongside the pump — leaving no subscription goroutine
 	// behind on shutdown.
 	permDone chan struct{}
+	// decisionOnce guards starting the decision watcher, which two racing
+	// callers can reach: [Supervisor.register] (for a session created after a
+	// relay was installed) and [Supervisor.SetDecisionRelay] (for a session that
+	// already existed when one was). Exactly one wins; the loser is a no-op.
+	decisionOnce sync.Once
+	// decisionStarted reports that decisionOnce actually started a watcher, so
+	// stop knows whether decisionDone will ever close. Set INSIDE the once,
+	// before the goroutine is spawned.
+	decisionStarted atomic.Bool
+	// decisionDone is closed by the watchDecisions goroutine when it returns,
+	// joined by stop the same way permDone is.
+	decisionDone chan struct{}
 	// teardown is the func returned by Config.OnRegister (nil if unset or if
 	// OnRegister itself returned nil), joined by stop after the pump and
 	// permission watcher have both exited. Set once, in newManaged, before m
@@ -68,6 +97,13 @@ type managed struct {
 	submitCh chan struct{}
 
 	mu sync.Mutex
+	// effort is the session's current reasoning effort ("", "low", "medium",
+	// "high"), seeded from the runner's construction-time
+	// Params.Thinking.Effort and updated by [Supervisor.SetEffort]. It is
+	// bookkeeping only — the runner owns the value it actually sends — kept
+	// here for the same reason model is: the [Session] interface exposes no
+	// accessor, and info must be able to report it.
+	effort string
 	// state is the session's current pump run-state, read by info (which
 	// derives SessionStatus) and by Archive to reject archiving a running
 	// session.
@@ -96,6 +132,15 @@ type managed struct {
 	// session's event.PermissionRequested, −1 on event.PermissionResolved,
 	// maintained by watchPermissions and surfaced as SessionInfo.Pending.
 	pending int
+	// pendingPerms holds the SAME outstanding requests pending counts, keyed by
+	// call id and carrying each one's full payload (tool, spec, decision
+	// trace). The count alone answers "how many?"; this answers "why was THAT
+	// one gated?" — the question [Supervisor.ExplainPermission] exists for, and
+	// which a daemonless TUI has no other source for (the daemon path answers
+	// it from its own retained requests; see internal/daemon's pendingPerms).
+	// Added and removed at the exact two points pending is adjusted, under the
+	// same mutex, so the two can never disagree about what is outstanding.
+	pendingPerms map[string]event.PermissionRequested
 	// lastErr is the most recent turn's Prompt error, kept for diagnostics
 	// only (see [Supervisor.LastError]). It is a snapshot, not a delivery
 	// mechanism: the pump emits a session.error onto the session's own stream
@@ -115,25 +160,33 @@ type managed struct {
 // join later. Calling it here, rather than after publish, closes the race
 // where a concurrent Kill/Archive could otherwise observe a live session
 // with no teardown stashed yet (see Config.OnRegister's doc).
-func newManaged(sess Session, model string, now time.Time, clock func() time.Time, notify func(), cwd string, gate *loop.Gate, onRegister func(sess Session) (stop func())) *managed {
+func newManaged(sess Session, model, effort string, now time.Time, clock func() time.Time, notify func(), cwd string, gate *loop.Gate, decisions *decision.Gate, meta sessionMeta, onRegister func(sess Session) (stop func())) *managed {
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &managed{
-		sess:       sess,
-		id:         sess.ID(),
-		project:    filepath.Base(filepath.Dir(sess.JournalPath())),
-		model:      model,
-		cwd:        cwd,
-		createdAt:  now,
-		updated:    now,
-		clock:      clock,
-		notify:     notify,
-		baseCtx:    ctx,
-		baseCancel: cancel,
-		done:       make(chan struct{}),
-		gate:       gate,
-		permDone:   make(chan struct{}),
-		submitCh:   make(chan struct{}, 1),
-		state:      stateIdle,
+		sess:         sess,
+		id:           sess.ID(),
+		project:      filepath.Base(filepath.Dir(sess.JournalPath())),
+		model:        model,
+		effort:       effort,
+		cwd:          cwd,
+		parentID:     meta.ParentID,
+		agent:        meta.Agent,
+		depth:        meta.Depth,
+		createdAt:    now,
+		updated:      now,
+		clock:        clock,
+		notify:       notify,
+		baseCtx:      ctx,
+		baseCancel:   cancel,
+		done:         make(chan struct{}),
+		gate:         gate,
+		decisions:    decisions,
+		permDone:     make(chan struct{}),
+		decisionDone: make(chan struct{}),
+		submitCh:     make(chan struct{}, 1),
+		state:        stateIdle,
+
+		pendingPerms: make(map[string]event.PermissionRequested),
 	}
 	if onRegister != nil {
 		m.teardown = onRegister(sess)
@@ -163,6 +216,7 @@ func (m *managed) info() SessionInfo {
 		Title:       title,
 		Status:      status,
 		Model:       m.model,
+		Effort:      m.effort,
 		Cost:        report.Cost,
 		Usage:       report.Usage,
 		Pending:     m.pending,
@@ -173,6 +227,9 @@ func (m *managed) info() SessionInfo {
 		Queued:      len(m.queue),
 		Live:        true,
 		Cwd:         m.cwd,
+		ParentID:    m.parentID,
+		Agent:       m.agent,
+		Depth:       m.depth,
 	}
 }
 
@@ -307,14 +364,75 @@ func (m *managed) watchPermissions(sub *event.Subscription) {
 			if !ok {
 				return
 			}
-			switch e.(type) {
+			switch pe := e.(type) {
 			case event.PermissionRequested:
+				m.retainPerm(pe)
 				m.adjustPending(1)
 			case event.PermissionResolved:
+				m.releasePerm(pe.ID)
 				m.adjustPending(-1)
 			}
 		case <-m.baseCtx.Done():
 			return
+		}
+	}
+}
+
+// decisionWatchBuffer sizes the decision subscription the standing watcher
+// holds. A session has one outstanding decision at a time in practice, so this
+// is pure headroom: the gate DROPS (and counts) rather than blocking when a
+// subscriber's buffer fills, and a dropped update here would mean a request the
+// host never relays — a turn blocked on a question no client is ever shown. The
+// headroom is what makes that unreachable while the watcher is briefly busy
+// inside a relay call.
+//
+// It is distinct from the CLIENT-side decision buffers (internal/tuibridge's
+// decisionBuffer, internal/wirestream's decisionSubBuffer), which size
+// subscriptions a client holds and can afford to be smaller: a client that
+// misses a prompt still gets it replayed on its next attach. This one sizes the
+// HOST's subscription to the gate itself — the one hop no replay covers, since
+// the daemon's retained payload is written from this very update.
+const decisionWatchBuffer = 64
+
+// startDecisionWatch subscribes to this session's decision gate and starts the
+// standing watcher that drives relay. It is idempotent — see decisionOnce — so
+// [Supervisor.register] and [Supervisor.SetDecisionRelay] can both call it for
+// the same session without racing two watchers onto one gate (which would
+// double every relayed request).
+//
+// Subscribing here is also what satisfies [decision.Gate.Request]'s
+// "is any client watching?" check under a host, so it must happen before the
+// session's first turn can run — see [Supervisor.register].
+func (m *managed) startDecisionWatch(relay DecisionRelay) {
+	m.decisionOnce.Do(func() {
+		m.decisionStarted.Store(true)
+		go m.watchDecisions(m.decisions.Subscribe(decisionWatchBuffer), relay)
+	})
+}
+
+// watchDecisions relays this session's structured-decision updates to the host
+// (see [DecisionRelay]) for the session's whole lifetime.
+//
+// Unlike watchPermissions it does NOT exit on baseCtx cancellation, and that is
+// the load-bearing difference: cancelling baseCtx is step one of teardown, and
+// the resolutions that release the host's per-request bookkeeping (its route
+// table, its retained replay payload, its outstanding client requests) are
+// published by [decision.Gate.Close] in step three. A watcher that quit at step
+// one would leave every open request of a killed session leaked in the host,
+// and every attached client rendering a prompt nothing will ever resolve. So it
+// exits only when the subscription closes — which Close guarantees, after it has
+// published a resolution for every request still open.
+//
+// sub is closed on exit so the gate drops it.
+func (m *managed) watchDecisions(sub *decision.Subscription, relay DecisionRelay) {
+	defer close(m.decisionDone)
+	defer sub.Close()
+	for u := range sub.C {
+		switch u.Kind {
+		case decision.UpdateRequested:
+			relay.RequestDecision(m.id, u.Request.ID, u.Request.Questions)
+		case decision.UpdateResolved:
+			relay.ResolveDecision(m.id, u.Request.ID)
 		}
 	}
 }
@@ -334,11 +452,49 @@ func (m *managed) adjustPending(delta int) {
 	m.notify()
 }
 
+// retainPerm records an outstanding permission request's full payload, so
+// [Supervisor.ExplainPermission] can answer why that call was gated for as
+// long as it IS outstanding. Called from watchPermissions beside the pending
+// bump; no notify, because nothing on the roster snapshot changes.
+func (m *managed) retainPerm(pe event.PermissionRequested) {
+	m.mu.Lock()
+	m.pendingPerms[pe.ID] = pe
+	m.mu.Unlock()
+}
+
+// releasePerm drops a resolved request's retained payload. Idempotent — a
+// stray resolved with no matching request (the same case adjustPending clamps
+// at zero) simply deletes nothing.
+func (m *managed) releasePerm(id string) {
+	m.mu.Lock()
+	delete(m.pendingPerms, id)
+	m.mu.Unlock()
+}
+
+// pendingPerm returns the still-outstanding request with this call id, or
+// ok=false once it has resolved (or if it never existed on this session).
+func (m *managed) pendingPerm(id string) (event.PermissionRequested, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	pe, ok := m.pendingPerms[id]
+	return pe, ok
+}
+
 // stop marks m closing, cancels its base context (interrupting any in-flight
 // turn, waking an idle pump, and waking watchPermissions), waits for both its
-// pump and permission-watcher goroutines to exit, and finally joins the
-// OnRegister teardown (if any) — mirroring the permDone discipline above, so
-// no observer goroutine outlives the session.
+// pump and permission-watcher goroutines to exit, closes the decision gate,
+// joins the decision watcher the close unwinds, and finally joins the
+// OnRegister teardown (if any) — mirroring the permDone discipline above, so no
+// observer goroutine outlives the session.
+//
+// The gate is closed here rather than left to the caller for the same reason
+// the session's broker is closed on the way out: a client watching this
+// session's decisions has a goroutine parked on its subscription's channel, and
+// only the gate can end that stream. Closing it also clears any prompt still on
+// a client's screen (each open request publishes its resolution first) and
+// releases an ask_user call that somehow outlived the ctx cancel above. It is
+// done AFTER the pump has exited so the ordering is unambiguous: the turn is
+// already gone by the time the gate reports it closed.
 func (m *managed) stop() {
 	m.mu.Lock()
 	m.closing = true
@@ -346,6 +502,19 @@ func (m *managed) stop() {
 	m.baseCancel()
 	<-m.done
 	<-m.permDone
+	m.decisions.Close()
+	// Joined AFTER the gate closes, because closing it is what ends the
+	// watcher's subscription (see watchDecisions): waiting first would deadlock.
+	// The started check keeps a relay-less supervisor — where no watcher was ever
+	// spawned and decisionDone will never close — from blocking here. A
+	// startDecisionWatch racing this teardown (SetDecisionRelay snapshotting the
+	// roster just before a Kill takes the session out of it) is safe either way:
+	// it either wins and is joined here, or it loses and subscribes to an already
+	// closed gate, which hands back an already-closed subscription its watcher
+	// returns from immediately.
+	if m.decisionStarted.Load() {
+		<-m.decisionDone
+	}
 	if m.teardown != nil {
 		m.teardown()
 	}

@@ -15,8 +15,10 @@ package tuibridge
 import (
 	"context"
 
+	"github.com/jedwards1230/agent-sdk-go/acp"
 	"github.com/jedwards1230/agent-sdk-go/event"
 
+	"github.com/jedwards1230/gofer/internal/decision"
 	"github.com/jedwards1230/gofer/internal/supervisor"
 	"github.com/jedwards1230/gofer/internal/tui"
 )
@@ -87,11 +89,48 @@ func (a Adapter) Create(ctx context.Context, prompt string, opts tui.CreateOptio
 	if model == "" && a.defaultModel != nil {
 		model = a.defaultModel(ctx)
 	}
-	info, err := a.sup.Create(ctx, prompt, supervisor.CreateOptions{Model: model, Cwd: opts.Cwd})
+	info, err := a.sup.Create(ctx, prompt, supervisor.CreateOptions{
+		Model:    model,
+		Cwd:      opts.Cwd,
+		ParentID: opts.ParentID,
+		Agent:    opts.Agent,
+	})
 	if err != nil {
 		return tui.SessionInfo{}, err
 	}
 	return toTUI(info), nil
+}
+
+// ListSessions maps the supervisor's store-wide enumeration — every session on
+// disk, live and offline alike ([supervisor.Supervisor.List]) — to the TUI's
+// resume-picker row. Only the four fields a disk-only session can honestly
+// answer cross over; the operational extras a live row also carries (Status,
+// Cost, Usage) are deliberately dropped rather than shown as zeroes for the
+// offline majority (see [tui.SessionRef]).
+func (a Adapter) ListSessions(ctx context.Context) ([]tui.SessionRef, error) {
+	infos, err := a.sup.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]tui.SessionRef, len(infos))
+	for i, info := range infos {
+		out[i] = tui.SessionRef{ID: info.ID, Title: info.Title, Cwd: info.Cwd, Updated: info.Updated}
+	}
+	return out, nil
+}
+
+// Resume reopens sessionID as a live session in cwd. The model is resolved the
+// same per-call way [Adapter.Create] resolves it — the supervisor requires one
+// on every Resume (the journal does not persist it, see
+// [supervisor.ResumeOptions]) and reading it now rather than at construction
+// keeps a `/model` write made since made effective here too.
+func (a Adapter) Resume(ctx context.Context, sessionID, cwd string) error {
+	var model string
+	if a.defaultModel != nil {
+		model = a.defaultModel(ctx)
+	}
+	_, err := a.sup.Resume(ctx, sessionID, supervisor.ResumeOptions{Cwd: cwd, Model: model})
+	return err
 }
 
 // Send submits prompt as sessionID's next turn.
@@ -123,18 +162,73 @@ func (a Adapter) SetModel(ctx context.Context, sessionID, model string) error {
 	return a.sup.SetModel(ctx, sessionID, model)
 }
 
+// SetEffort passes through to the supervisor's own SetEffort. An in-process
+// caller gets back the real [supervisor.ErrInvalidEffort] sentinel unwrapped
+// (errors.Is works directly), unlike a daemon-backed
+// [daemonbridge.Supervisor], which only ever sees a plain messaged error.
+func (a Adapter) SetEffort(ctx context.Context, sessionID, effort string) error {
+	return a.sup.SetEffort(ctx, sessionID, effort)
+}
+
 // Reply answers a pending permission request by routing straight to the
 // supervisor's own Reply, which resolves the session's loop.Gate — see
 // internal/supervisor's Reply doc. ctx is accepted to satisfy
 // [tui.Supervisor] (every other method here takes one), though the
 // supervisor's own Reply is synchronous and never blocks on I/O (routing to
 // an in-memory Gate), so there is nothing for it to cancel.
-func (a Adapter) Reply(_ context.Context, sessionID, id string, allow, remember bool) error {
+//
+// d.Input rides along verbatim as [event.PermissionReply.Input] — the
+// amended tool input an in-process session runs with instead of the model's
+// original arguments. It is nil for a plain allow/deny, leaving that path
+// byte-identical to before amend existed.
+func (a Adapter) Reply(_ context.Context, sessionID, id string, d tui.PermissionDecision) error {
 	verdict := event.VerdictDeny
-	if allow {
+	if d.Allow {
 		verdict = event.VerdictAllow
 	}
-	return a.sup.Reply(sessionID, event.PermissionReply{ID: id, Verdict: verdict, Remember: remember})
+	return a.sup.Reply(sessionID, event.PermissionReply{ID: id, Verdict: verdict, Remember: d.Remember, Input: d.Input})
+}
+
+// ExplainPermission passes through to the supervisor's own read-only
+// rationale lookup — the in-process counterpart of the ACP
+// session/explain_permission round trip [daemonbridge.Supervisor] makes, and
+// the same [permrationale] grammar behind both, so a daemonless TUI explains a
+// gated call exactly as an attached one does.
+//
+// It is called DIRECTLY on the concrete supervisor rather than through any
+// capability interface: the daemon answers explains from its own retained
+// requests (see internal/daemon's handleExplainPermission), so nothing about
+// this method belongs on [daemon.Supervisor]. ctx is accepted to satisfy
+// [tui.Supervisor] and unused for the same reason [Adapter.Reply]'s is — the
+// lookup is an in-memory map read with nothing to cancel.
+func (a Adapter) ExplainPermission(_ context.Context, sessionID, callID string) (acp.PermissionRationale, error) {
+	return a.sup.ExplainPermission(sessionID, callID)
+}
+
+// decisionBuffer sizes the decision subscription this adapter hands the TUI.
+// A session has one outstanding decision at a time in practice, so the buffer
+// exists only to absorb a burst while the TUI is mid-frame; the gate drops
+// (and counts) rather than blocking when it fills, so an over-small buffer
+// would cost a missed prompt, not a wedged turn.
+const decisionBuffer = 8
+
+// Decisions subscribes to sessionID's open structured-decision requests
+// straight through the supervisor's own gate — the in-process path shares
+// memory with it, so no reconstruction is needed (contrast
+// internal/daemonbridge). ctx is accepted to satisfy [tui.Supervisor]; the
+// subscribe itself is an in-memory registration with nothing to cancel, and
+// the returned subscription's lifetime is the caller's (Close it).
+func (a Adapter) Decisions(_ context.Context, sessionID string) (*decision.Subscription, error) {
+	return a.sup.SubscribeDecisions(sessionID, decisionBuffer)
+}
+
+// AnswerDecision resolves an outstanding decision request by routing to the
+// supervisor's own AnswerDecision, which validates the answers against the
+// request and unblocks the ask_user tool call waiting on it. As with [Reply],
+// ctx is accepted for interface conformance only — the call is synchronous
+// in-memory routing.
+func (a Adapter) AnswerDecision(_ context.Context, sessionID, requestID string, answers []acp.DecisionAnswer) error {
+	return a.sup.AnswerDecision(sessionID, requestID, answers)
 }
 
 // toTUI copies the fields the TUI renders from a supervisor snapshot. The
@@ -147,6 +241,7 @@ func toTUI(s supervisor.SessionInfo) tui.SessionInfo {
 		Summary:   s.Summary,
 		Status:    tui.SessionStatus(s.Status),
 		Model:     s.Model,
+		Effort:    s.Effort,
 		Cwd:       s.Cwd,
 		Cost:      s.Cost,
 		Usage:     s.Usage,
@@ -158,5 +253,11 @@ func toTUI(s supervisor.SessionInfo) tui.SessionInfo {
 		// no separate worker process to have its own build), a router stamps it
 		// from the owning worker's gofer/hello.
 		BinaryVersion: s.BinaryVersion,
+		// The subagent link. Zero for a root session — which is every session
+		// created without an explicit parent, so this mapping is inert for the
+		// existing roster.
+		ParentID: s.ParentID,
+		Agent:    s.Agent,
+		Depth:    s.Depth,
 	}
 }

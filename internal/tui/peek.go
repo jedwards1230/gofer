@@ -100,7 +100,7 @@ func (p Peek) View(width, height int) string {
 	}
 
 	footer := truncate(p.theme.MutedStyle().Render(
-		"enter to open · space to close · ctrl+x to delete"), width)
+		"enter to open · space/esc to close · ctrl+x×2 to delete"), width)
 
 	out := strings.Split(p.over.Rail(width, railH), "\n")
 	out = append(out, rule, title, truncate(waiting, width), truncate(replyLine, width), rule, footer)

@@ -1,8 +1,10 @@
 <muted>Search settings…</muted>
 <accent>▸ Default model … </accent>
+  Reasoning effort … off
   Permission mode … ask
   Roster view … flat
   Auto-scroll transcript … true
   Mouse capture (scroll + selection) … true
+  Shell reply mode … reply
   Telemetry enabled … false
   Telemetry endpoint … 

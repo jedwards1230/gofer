@@ -14,8 +14,10 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/jedwards1230/agent-sdk-go/acp"
 	"github.com/jedwards1230/agent-sdk-go/event"
 
+	"github.com/jedwards1230/gofer/internal/decision"
 	"github.com/jedwards1230/gofer/internal/tui"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
@@ -39,6 +41,47 @@ type fakeSup struct {
 	// /model select would otherwise report (see model_select_probe_test.go).
 	// The call is still recorded in ops either way.
 	setModelErr error
+
+	// listed/listErr are what ListSessions answers with, and resumeErr what
+	// Resume returns — the /resume picker's list, its load-failure path, and
+	// the unknown-session path respectively. The Resume call is recorded in ops
+	// either way.
+	listed    []tui.SessionRef
+	listErr   error
+	resumeErr error
+	listN     int
+
+	// setEffortErr is setModelErr's effort-axis twin: what SetEffort returns,
+	// for the failed-op path. The call is still recorded in ops either way.
+	setEffortErr error
+}
+
+// createdPrompts, sentPrompts, recordedOps, and listCalls read the recorded
+// call log under the mutex — the assertion surface for tests that drive
+// Supervisor ops asynchronously (through a tea.Cmd resolved on another
+// goroutine's behalf) rather than touching the fields directly.
+func (f *fakeSup) createdPrompts() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.created...)
+}
+
+func (f *fakeSup) sentPrompts() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.sent...)
+}
+
+func (f *fakeSup) recordedOps() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.ops...)
+}
+
+func (f *fakeSup) listCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.listN
 }
 
 func newFakeSup(roster []tui.SessionInfo) *fakeSup {
@@ -76,6 +119,29 @@ func (f *fakeSup) Create(_ context.Context, prompt string, opts tui.CreateOption
 	return info, nil
 }
 
+// ListSessions returns the canned resumable-session list the /resume picker
+// renders. It is nil by default, so a test that never touches /resume sees the
+// honest "no sessions on disk" state rather than a fabricated one.
+func (f *fakeSup) ListSessions(context.Context) ([]tui.SessionRef, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.listN++
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return append([]tui.SessionRef(nil), f.listed...), nil
+}
+
+// Resume records the call (id and cwd, so a test can assert BOTH reached the
+// supervisor) and returns resumeErr — the unknown-session path /resume's error
+// reporting is built on.
+func (f *fakeSup) Resume(_ context.Context, id, cwd string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ops = append(f.ops, "resume:"+id+":"+cwd)
+	return f.resumeErr
+}
+
 func (f *fakeSup) Send(_ context.Context, id, prompt string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -111,11 +177,44 @@ func (f *fakeSup) SetModel(_ context.Context, id, model string) error {
 	return f.setModelErr
 }
 
+// SetEffort records the call the same way SetModel does. The effort is
+// recorded verbatim, so the CLEAR call ("") is distinguishable from no call at
+// all — it shows up as a trailing-colon "set-effort:<id>:" entry rather than
+// being invisible.
+func (f *fakeSup) SetEffort(_ context.Context, id, effort string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ops = append(f.ops, "set-effort:"+id+":"+effort)
+	return f.setEffortErr
+}
+
 // Reply is a no-op here: the approval prompt it answers needs the unexported
 // sessEventMsg to trigger (see app_internal_test.go, package tui, for the
 // behavioral Reply-emission tests), which this package (tui_test) has no
 // access to.
-func (f *fakeSup) Reply(_ context.Context, _, _ string, _, _ bool) error { return nil }
+func (f *fakeSup) Reply(_ context.Context, _, _ string, _ tui.PermissionDecision) error { return nil }
+
+// ExplainPermission answers with an empty rationale: this package's black-box
+// tests drive navigation, not the approval prompt's ctrl+e (which
+// app_internal_test.go covers against a recording fake).
+func (f *fakeSup) ExplainPermission(_ context.Context, _, _ string) (acp.PermissionRationale, error) {
+	return acp.PermissionRationale{}, nil
+}
+
+// Decisions hands back an already-closed subscription: the decision prompt's
+// behavioral tests need a real gate and the unexported decision messages, so
+// they live in app_internal_test.go (package tui) like the approval ones. A
+// closed stream keeps App's decision pump a no-op here.
+func (f *fakeSup) Decisions(context.Context, string) (*decision.Subscription, error) {
+	sub := decision.NewGate("").Subscribe(0)
+	sub.Close()
+	return sub, nil
+}
+
+// AnswerDecision is a no-op here for the same reason as Reply above.
+func (f *fakeSup) AnswerDecision(context.Context, string, string, []acp.DecisionAnswer) error {
+	return nil
+}
 
 // content renders m the way a real frame would, returning just the string
 // content for substring assertions.
@@ -169,14 +268,27 @@ func type_(t *testing.T, m tea.Model, s string) tea.Model {
 
 const ctrl = tea.ModCtrl
 
-// TestNavEnterPeeksSelected verifies enter, with an empty dispatch input,
-// peeks the selected session rather than dispatching a new one.
-func TestNavEnterPeeksSelected(t *testing.T) {
+// TestNavEnterAttachesSelected verifies enter, with an empty dispatch input,
+// opens (attaches) the selected session rather than dispatching a new one or
+// peeking. This is the mutation anchor for the enter→attach branch: neutralize
+// it and this test goes red.
+func TestNavEnterAttachesSelected(t *testing.T) {
 	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 
-	if got := content(m); !strings.Contains(got, "space to close") {
-		t.Fatalf("expected the peek screen after enter, got:\n%s", got)
+	if got := content(m); !strings.Contains(got, "> ▏") {
+		t.Fatalf("expected the attach screen (empty input line) after enter, got:\n%s", got)
+	}
+}
+
+// TestNavSpacePeeksSelected verifies space, with an empty dispatch input,
+// peeks the selected session (the roster-only card that does not subscribe).
+func TestNavSpacePeeksSelected(t *testing.T) {
+	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeySpace})
+
+	if got := content(m); !strings.Contains(got, "space/esc to close") {
+		t.Fatalf("expected the peek screen after space, got:\n%s", got)
 	}
 }
 
@@ -184,11 +296,38 @@ func TestNavEnterPeeksSelected(t *testing.T) {
 // buffer, closes peek back to the overview.
 func TestNavPeekSpaceClosesToOverview(t *testing.T) {
 	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // enter peek
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeySpace}) // peek
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeySpace}) // empty reply: close
 
-	if got := content(m); !strings.Contains(got, "enter peek") {
+	if got := content(m); !strings.Contains(got, "space peek") {
 		t.Fatalf("expected space with an empty reply to back out to the overview, got:\n%s", got)
+	}
+}
+
+// TestNavPeekEscClosesToOverview verifies esc closes peek back to the overview
+// — the primary close key (space is the toggle partner). Mutation anchor for
+// the peek-esc branch.
+func TestNavPeekEscClosesToOverview(t *testing.T) {
+	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeySpace})  // peek
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEscape}) // close
+
+	if got := content(m); !strings.Contains(got, "space peek") {
+		t.Fatalf("expected esc to back out of peek to the overview, got:\n%s", got)
+	}
+}
+
+// TestNavPeekEscClosesWithReplyText verifies esc closes peek even with an
+// in-progress reply (esc, unlike space, is unconditional — the reply is
+// discarded, mirroring the overview's esc-clears-the-bar).
+func TestNavPeekEscClosesWithReplyText(t *testing.T) {
+	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeySpace}) // peek
+	m = type_(t, m, "half a reply")
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEscape}) // close, discarding the reply
+
+	if got := content(m); !strings.Contains(got, "space peek") {
+		t.Fatalf("expected esc to close peek even with reply text, got:\n%s", got)
 	}
 }
 
@@ -196,7 +335,7 @@ func TestNavPeekSpaceClosesToOverview(t *testing.T) {
 // attaches the peeked session.
 func TestNavPeekEnterAttaches(t *testing.T) {
 	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // enter peek
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeySpace}) // peek
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // empty reply: attach
 
 	if got := content(m); !strings.Contains(got, "> ▏") {
@@ -210,7 +349,7 @@ func TestNavPeekReplySends(t *testing.T) {
 	sup := newFakeSup(tui.GoldenRoster())
 	m := newTestApp(t, sup)
 
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // enter peek
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeySpace}) // peek
 	m = type_(t, m, "status?")
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // send the reply
 
@@ -218,34 +357,29 @@ func TestNavPeekReplySends(t *testing.T) {
 	if len(sup.sent) != 1 || sup.sent[0] != want {
 		t.Fatalf("sup.sent = %v; want one entry %q", sup.sent, want)
 	}
-	if got := content(m); !strings.Contains(got, "space to close") {
+	if got := content(m); !strings.Contains(got, "space/esc to close") {
 		t.Fatalf("expected to stay on the peek screen after sending a reply, got:\n%s", got)
 	}
 }
 
-// TestNavPeekKillsSelected verifies ctrl-x on the peek screen kills the
-// selected (non-finished) session.
+// TestNavPeekKillsSelected verifies the two-press ctrl-x confirm on the PEEK
+// screen: the first press arms (no supervisor call), the second kills the
+// selected (non-finished) session. Peek shares the roster selection with the
+// overview, so ctrl-x acts on the same session either screen shows.
 func TestNavPeekKillsSelected(t *testing.T) {
 	sup := newFakeSup(tui.GoldenRoster())
 	m := newTestApp(t, sup)
 
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // enter peek
-	press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl})
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeySpace})   // peek
+	m = press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl}) // arm
+	if len(sup.ops) != 0 {
+		t.Fatalf("first ctrl-x on peek must not call the supervisor; sup.ops = %v", sup.ops)
+	}
+	press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl}) // confirm
 
 	want := "kill:0192a1b2-app0-7000-8000-000000000001"
 	if len(sup.ops) != 1 || sup.ops[0] != want {
 		t.Fatalf("sup.ops = %v; want one entry %q", sup.ops, want)
-	}
-}
-
-// TestNavRightAttachesSelected verifies → attaches the selected session
-// directly, skipping peek.
-func TestNavRightAttachesSelected(t *testing.T) {
-	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
-
-	if got := content(m); !strings.Contains(got, "> ▏") {
-		t.Fatalf("expected the attach screen (empty input line) after →, got:\n%s", got)
 	}
 }
 
@@ -288,7 +422,7 @@ func TestNavAttachSendsPrompt(t *testing.T) {
 	sup := newFakeSup(tui.GoldenRoster())
 	m := newTestApp(t, sup)
 
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach the selected (working) session
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the selected (working) session
 	m = type_(t, m, "status?")
 	press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 
@@ -298,17 +432,136 @@ func TestNavAttachSendsPrompt(t *testing.T) {
 	}
 }
 
-// TestNavKillWorkingSession verifies ctrl-x on a working (non-finished)
-// session kills it rather than archiving it.
+// TestNavCtrlXFirstPressArmsNoAction is the mutation anchor for the two-press
+// confirm's FIRST half: one ctrl-x on the roster must NOT touch the supervisor
+// (no kill, no archive) and must show the confirm line naming the verb the
+// selected (working) row's state calls for. Neutralize confirmDestroy's
+// arm-instead-of-act branch and this goes red.
+func TestNavCtrlXFirstPressArmsNoAction(t *testing.T) {
+	sup := newFakeSup(tui.GoldenRoster())
+	m := newTestApp(t, sup)
+
+	m = press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl})
+
+	if len(sup.ops) != 0 {
+		t.Fatalf("first ctrl-x must not call the supervisor; sup.ops = %v", sup.ops)
+	}
+	if got := content(m); !strings.Contains(got, `Press ctrl+x again to kill "wire the app root"`) {
+		t.Fatalf("expected the arm/confirm line naming kill for the working row; got:\n%s", got)
+	}
+}
+
+// TestNavKillWorkingSession verifies the SECOND press acts: two ctrl-x on a
+// working (non-finished) session kills it rather than archiving it, and issues
+// exactly one Supervisor call.
 func TestNavKillWorkingSession(t *testing.T) {
 	sup := newFakeSup(tui.GoldenRoster())
 	m := newTestApp(t, sup)
 
-	press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl})
+	m = press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl}) // arm
+	press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl})     // confirm
 
 	want := "kill:0192a1b2-app0-7000-8000-000000000001"
 	if len(sup.ops) != 1 || sup.ops[0] != want {
 		t.Fatalf("sup.ops = %v; want one entry %q", sup.ops, want)
+	}
+}
+
+// TestNavCtrlXArchivesFinishedSession pins the verb-matches-state contract for
+// the OTHER state: a finished session's confirm line names "archive", and the
+// second press archives (never kills) it.
+func TestNavCtrlXArchivesFinishedSession(t *testing.T) {
+	sup := newFakeSup([]tui.SessionInfo{{
+		ID:     "fin-1",
+		Title:  "done and dusted",
+		Status: tui.StatusFinished,
+	}})
+	m := newTestApp(t, sup)
+
+	m = press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl}) // arm
+	if got := content(m); !strings.Contains(got, `Press ctrl+x again to archive "done and dusted"`) {
+		t.Fatalf("expected the confirm line to name archive for the finished row; got:\n%s", got)
+	}
+	press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl}) // confirm
+
+	if want := "archive:fin-1"; len(sup.ops) != 1 || sup.ops[0] != want {
+		t.Fatalf("sup.ops = %v; want one entry %q (archive, not kill)", sup.ops, want)
+	}
+}
+
+// TestNavCtrlXSelectionMoveResetsConfirm is the SAFETY test — the load-bearing
+// one. The canonical hazard is a stale arm surviving a selection change: arm on
+// A, move the selection AWAY (to B) and BACK (to A), then press ctrl-x. That
+// press must RE-ARM A (show a fresh confirm), not act, because the round trip
+// cancelled the arm. A confirm that survived the move would kill A on this press
+// with no fresh confirm — the exact wrong-moment destruction this feature exists
+// to prevent. Removing the central disarm turns this red (it records a kill
+// immediately instead of re-arming).
+func TestNavCtrlXSelectionMoveResetsConfirm(t *testing.T) {
+	const idA = "0192a1b2-app0-7000-8000-00000000000a"
+	const idB = "0192a1b2-app0-7000-8000-00000000000b"
+	sup := newFakeSup([]tui.SessionInfo{
+		{ID: idA, Title: "session A", Status: tui.StatusWorking},
+		{ID: idB, Title: "session B", Status: tui.StatusWorking},
+	})
+	m := newTestApp(t, sup)
+
+	m = press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl}) // arm on A (selected)
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyDown})    // -> B (disarms)
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyUp})      // -> A (still disarmed)
+	m = press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl}) // must RE-ARM A, not act
+
+	if len(sup.ops) != 0 {
+		t.Fatalf("a selection round-trip must cancel the armed confirm; sup.ops = %v (expected none)", sup.ops)
+	}
+	if got := content(m); !strings.Contains(got, `Press ctrl+x again to kill "session A"`) {
+		t.Fatalf("expected ctrl-x after the round trip to re-arm A fresh, not act; got:\n%s", got)
+	}
+
+	press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl}) // genuine second press: acts
+
+	if want := "kill:" + idA; len(sup.ops) != 1 || sup.ops[0] != want {
+		t.Fatalf("sup.ops = %v; want exactly one entry %q after a clean two-press", sup.ops, want)
+	}
+}
+
+// TestNavCtrlXArmedSessionMoveActsOnNewSelectionOnly is the sibling safety case:
+// once the selection moves off the armed session A onto B, ctrl-x arms B and a
+// further press kills B — session A is never in the recorded ops. This pins the
+// "never acts on the wrong session" half directly.
+func TestNavCtrlXArmedSessionMoveActsOnNewSelectionOnly(t *testing.T) {
+	const idA = "0192a1b2-app0-7000-8000-00000000000a"
+	const idB = "0192a1b2-app0-7000-8000-00000000000b"
+	sup := newFakeSup([]tui.SessionInfo{
+		{ID: idA, Title: "session A", Status: tui.StatusWorking},
+		{ID: idB, Title: "session B", Status: tui.StatusWorking},
+	})
+	m := newTestApp(t, sup)
+
+	m = press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl}) // arm A
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyDown})    // -> B (disarms A)
+	m = press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl}) // arms B, does not act on A
+	press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl})     // acts on B only
+
+	if want := "kill:" + idB; len(sup.ops) != 1 || sup.ops[0] != want {
+		t.Fatalf("sup.ops = %v; want exactly one entry %q — A must never be touched", sup.ops, want)
+	}
+}
+
+// TestNavCtrlXArmDoesNotCarryOverviewToPeek verifies a confirm armed on the
+// overview does not silently carry into peek: opening peek (space) is an
+// intervening key that disarms, so the first ctrl-x on peek re-arms rather than
+// acting.
+func TestNavCtrlXArmDoesNotCarryOverviewToPeek(t *testing.T) {
+	sup := newFakeSup(tui.GoldenRoster())
+	m := newTestApp(t, sup)
+
+	m = press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl}) // arm on the overview
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeySpace})   // open peek — disarms
+	press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl})     // must re-arm, not act
+
+	if len(sup.ops) != 0 {
+		t.Fatalf("opening peek must cancel the overview's armed confirm; sup.ops = %v (expected none)", sup.ops)
 	}
 }
 
@@ -323,7 +576,7 @@ func TestAttachOpenStartsOnAttach(t *testing.T) {
 	var m tea.Model = tui.NewApp(theme.Test(), sup, meta, tui.GoldenCommandEnv())
 	m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 
-	if got := content(m); !strings.Contains(got, "> ▏") || strings.Contains(got, "enter peek") {
+	if got := content(m); !strings.Contains(got, "> ▏") || strings.Contains(got, "space peek") {
 		t.Fatalf("expected the attach screen on open, got:\n%s", got)
 	}
 	if cmd := tui.NewApp(theme.Test(), sup, meta, tui.GoldenCommandEnv()).Init(); cmd == nil {
@@ -331,7 +584,7 @@ func TestAttachOpenStartsOnAttach(t *testing.T) {
 	}
 
 	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
-	if got := content(m); !strings.Contains(got, "enter peek") {
+	if got := content(m); !strings.Contains(got, "space peek") {
 		t.Fatalf("expected ← to back out to the overview, got:\n%s", got)
 	}
 }
@@ -340,7 +593,7 @@ func TestAttachOpenStartsOnAttach(t *testing.T) {
 // out to the overview only when the input buffer is empty.
 func TestNavAttachLeftBacksOutWhenEmpty(t *testing.T) {
 	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // attach
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach
 
 	if got := content(m); !strings.Contains(got, "> ▏") {
 		t.Fatalf("expected the attach screen before ←, got:\n%s", got)
@@ -348,7 +601,7 @@ func TestNavAttachLeftBacksOutWhenEmpty(t *testing.T) {
 
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyLeft})
 
-	if got := content(m); !strings.Contains(got, "enter peek") {
+	if got := content(m); !strings.Contains(got, "space peek") {
 		t.Fatalf("expected ← with an empty input to back out to the overview, got:\n%s", got)
 	}
 }

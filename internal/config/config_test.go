@@ -321,6 +321,168 @@ func TestSessionLoadSettleTimeout(t *testing.T) {
 	}
 }
 
+// TestTUICommandFileLimitBytes covers the resolver for the user markdown
+// command file cap: unset and negative fall back to the default, an explicit
+// 0 is "no limit" (matching tui.max_paste_bytes, unlike the approval row caps
+// where 0 would hide the thing being capped), and any positive value is the
+// cap. The round trip pins that an explicit value survives on disk.
+// TestTUIShellQueueDefault covers the resolver seeding App.shellQueue at TUI
+// startup: only the explicit "queue" spelling is queue mode; unset, "reply", and
+// any unrecognized value fall through to reply-now (false), so a stray value
+// never silently launches in the withholding mode. The Save/Load round trip
+// pins that an explicit "queue" survives on disk.
+func TestTUIShellQueueDefault(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"unset resolves to reply-now", "", false},
+		{"reply is reply-now", "reply", false},
+		{"queue is queue mode", "queue", true},
+		{"unrecognized falls through to reply-now", "banana", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tui := config.TUI{ShellReplyMode: tt.in}
+			if got := tui.ShellQueueDefault(); got != tt.want {
+				t.Fatalf("ShellQueueDefault() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+
+	dir := t.TempDir()
+	path := config.DefaultPath(dir)
+	if err := config.Save(path, config.Config{TUI: config.TUI{ShellReplyMode: "queue"}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !got.TUI.ShellQueueDefault() {
+		t.Fatalf("ShellQueueDefault() after Save/Load = false, want true")
+	}
+}
+
+func TestTUICommandFileLimitBytes(t *testing.T) {
+	n := func(v int) *int { return &v }
+	tests := []struct {
+		name string
+		in   *int
+		want int
+	}{
+		{"unset resolves to default", nil, config.DefaultMaxCommandFileBytes},
+		{"negative resolves to default", n(-1), config.DefaultMaxCommandFileBytes},
+		{"zero is no limit", n(0), 0},
+		{"explicit value is the cap", n(4096), 4096},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tui := config.TUI{MaxCommandFileBytes: tt.in}
+			if got := tui.CommandFileLimitBytes(); got != tt.want {
+				t.Fatalf("CommandFileLimitBytes() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+
+	dir := t.TempDir()
+	path := config.DefaultPath(dir)
+	if err := config.Save(path, config.Config{TUI: config.TUI{MaxCommandFileBytes: n(2048)}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if limit := got.TUI.CommandFileLimitBytes(); limit != 2048 {
+		t.Fatalf("CommandFileLimitBytes() after Save/Load = %d, want 2048", limit)
+	}
+}
+
+// TestTUIApprovalBodyLineLimit covers the resolver for the inline approval
+// prompt's body row cap: unset and non-positive values fall back to the
+// default (a zero-row body would hide the very call being approved — unlike
+// tui.max_paste_bytes, 0 is NOT "unlimited" here), an explicit positive value
+// is taken as the cap. The round trip through Save/Load pins that an explicit
+// value actually survives on disk.
+func TestTUIApprovalBodyLineLimit(t *testing.T) {
+	n := func(v int) *int { return &v }
+	tests := []struct {
+		name string
+		in   *int
+		want int
+	}{
+		{"unset resolves to default", nil, config.DefaultApprovalBodyLines},
+		{"zero resolves to default", n(0), config.DefaultApprovalBodyLines},
+		{"negative resolves to default", n(-5), config.DefaultApprovalBodyLines},
+		{"explicit value is the cap", n(4), 4},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tui := config.TUI{ApprovalBodyLines: tt.in}
+			if got := tui.ApprovalBodyLineLimit(); got != tt.want {
+				t.Fatalf("ApprovalBodyLineLimit() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+
+	dir := t.TempDir()
+	path := config.DefaultPath(dir)
+	if err := config.Save(path, config.Config{TUI: config.TUI{ApprovalBodyLines: n(30)}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if limit := got.TUI.ApprovalBodyLineLimit(); limit != 30 {
+		t.Fatalf("ApprovalBodyLineLimit() after Save/Load = %d, want 30", limit)
+	}
+}
+
+// TestTUIApprovalMinTranscriptRowFloor covers the resolver for the approval
+// prompt's transcript floor: unset and negative values fall back to the
+// default, an explicit positive value is the floor — and an explicit 0 is
+// HONORED (unlike tui.approval_body_lines' 0), because "never collapse the
+// rationale, show me the whole prompt" is a coherent thing to ask for. The
+// round trip through Save/Load pins that an explicit 0 survives on disk rather
+// than being erased by omitempty (the *int is why).
+func TestTUIApprovalMinTranscriptRowFloor(t *testing.T) {
+	n := func(v int) *int { return &v }
+	tests := []struct {
+		name string
+		in   *int
+		want int
+	}{
+		{"unset resolves to default", nil, config.DefaultApprovalMinTranscriptRows},
+		{"negative resolves to default", n(-5), config.DefaultApprovalMinTranscriptRows},
+		{"zero means never collapse", n(0), 0},
+		{"explicit value is the floor", n(3), 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tui := config.TUI{ApprovalMinTranscriptRows: tt.in}
+			if got := tui.ApprovalMinTranscriptRowFloor(); got != tt.want {
+				t.Fatalf("ApprovalMinTranscriptRowFloor() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+
+	dir := t.TempDir()
+	path := config.DefaultPath(dir)
+	if err := config.Save(path, config.Config{TUI: config.TUI{ApprovalMinTranscriptRows: n(0)}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if floor := got.TUI.ApprovalMinTranscriptRowFloor(); floor != 0 {
+		t.Fatalf("ApprovalMinTranscriptRowFloor() after Save/Load = %d, want the explicit 0 to survive", floor)
+	}
+}
+
 // TestDaemonDrainTimeout covers the resolver for the graceful-shutdown drain
 // bound: unset and non-positive values fall back to the default, an explicit
 // positive value is taken as a millisecond bound.
@@ -343,6 +505,48 @@ func TestDaemonDrainTimeout(t *testing.T) {
 				t.Fatalf("DrainTimeout() = %s, want %s", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestSessionSubagentDepthLimit covers the subagent depth cap's resolver.
+// Unset (0) MUST mean "use the default", never "no children allowed" — an
+// existing config file has no such key, and reading it as a zero cap would
+// refuse every subagent create on upgrade.
+func TestSessionSubagentDepthLimit(t *testing.T) {
+	tests := []struct {
+		name string
+		in   int
+		want int
+	}{
+		{"unset resolves to default", 0, config.DefaultMaxSubagentDepth},
+		{"negative resolves to default", -3, config.DefaultMaxSubagentDepth},
+		{"explicit cap wins", 2, 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := config.Session{MaxSubagentDepth: tt.in}
+			if got := s.SubagentDepthLimit(); got != tt.want {
+				t.Fatalf("SubagentDepthLimit() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestLoadParsesSubagentDepth pins the config KEY itself: an operator raising
+// the cap edits session.max_subagent_depth, so a rename would silently return
+// every daemon to the default.
+func TestLoadParsesSubagentDepth(t *testing.T) {
+	dir := t.TempDir()
+	path := config.DefaultPath(dir)
+	if err := os.WriteFile(path, []byte(`{"session":{"max_subagent_depth":9}}`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	c, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := c.Session.SubagentDepthLimit(); got != 9 {
+		t.Fatalf("SubagentDepthLimit() = %d, want 9", got)
 	}
 }
 

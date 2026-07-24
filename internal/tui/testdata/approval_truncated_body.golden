@@ -1,0 +1,28 @@
+────────────────────────────────────────────────────────────────────────────────
+bash command
+
+  echo step-00
+  echo step-01
+  echo step-02
+  echo step-03
+  echo step-04
+  echo step-05
+  echo step-06
+  echo step-07
+  echo step-08
+  echo step-09
+  echo step-10
+  … +9 more lines
+
+Why you're being asked
+
+  No permission rule matched this `bash` call, so gofer is asking before it
+  runs. It also cannot be sandboxed on this host, so an allow rule alone will
+  not let it run unattended.
+  … ctrl+e to explain
+
+Do you want to proceed?
+▸ [a] Yes
+  [d] No
+
+enter/↑↓ select · [r] remember: off · [tab] amend · ctrl+e explain · esc cancel

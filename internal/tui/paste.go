@@ -36,10 +36,13 @@ import (
 // swallowed by an overlay that owns the keyboard, so is a paste. That is the
 // command panel (its own filter/edit line has no cursor-aware buffer to
 // insert into) and the attach screen's pending-approval prompt (a modal
-// answer-y/n gate where typing does nothing either). Anything a typed rune
-// would edit, a paste edits.
+// answer-y/n gate where typing does nothing either) — EXCEPT while that
+// prompt's amend editor is open, which is a real text surface a typed rune
+// edits, so a paste edits it too. Anything a typed rune would edit, a paste
+// edits.
 func (a App) handlePaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
-	if a.panel != nil || (a.scr == screenAttach && a.sess.HasPendingApproval()) {
+	amending := a.scr == screenAttach && a.sess.AmendingApproval()
+	if a.panel != nil || (a.scr == screenAttach && a.sess.HasPendingApproval() && !amending) {
 		return a, nil
 	}
 
@@ -54,10 +57,12 @@ func (a App) handlePaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
-	switch a.scr {
-	case screenPeek:
+	switch {
+	case amending:
+		a.sess = a.sess.InsertApprovalAmendText(text)
+	case a.scr == screenPeek:
 		a.peekReply += text
-	case screenAttach:
+	case a.scr == screenAttach:
 		a.sess = a.sess.InsertText(text)
 	default:
 		a.over = a.over.InsertText(text)
@@ -67,10 +72,12 @@ func (a App) handlePaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
 		// A caveat, not a failure: the paste DID land, just truncated.
 		a.setStatus(sevWarn, fmt.Sprintf("paste clipped to %d bytes (tui.max_paste_bytes)", a.pasteLimitBytes()))
 	}
-	// A pasted "/mod" is as much an active command token as a typed one, so
-	// the autocomplete menu re-syncs off a paste exactly as it does after
-	// every per-screen key handler (see Update).
-	return a.syncMenu(), nil
+	// A pasted "/mod" (or "@internal/") is as much an active token as a typed
+	// one, so the autocomplete menu re-syncs off a paste exactly as it does
+	// after every per-screen key handler (see Update) — carrying syncMenu's
+	// own follow-on command, which is the off-loop markdown-command reload
+	// for a `/` token and the cwd enumeration (filemention.go) for an `@` one.
+	return a.syncMenu()
 }
 
 // pasteLimitBytes reports the effective tui.max_paste_bytes cap

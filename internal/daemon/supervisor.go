@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 
+	"github.com/jedwards1230/agent-sdk-go/acp"
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
@@ -53,6 +54,9 @@ type Supervisor interface {
 	Roster(ctx context.Context) ([]supervisor.SessionInfo, error)
 	// SetModel changes a session's model for its next turn.
 	SetModel(ctx context.Context, sessionID, model string) error
+	// SetEffort changes a session's reasoning effort for its next turn. An
+	// empty effort clears the level back to the provider's default.
+	SetEffort(ctx context.Context, sessionID, effort string) error
 	// SubscribeLive returns a session's event stream without the retained
 	// must-deliver backlog, for a caller about to drive a fresh turn.
 	SubscribeLive(ctx context.Context, sessionID string) (*event.Subscription, error)
@@ -89,3 +93,31 @@ type FleetUsager interface {
 	// FleetUsage returns the summed Cost and Usage of every live session.
 	FleetUsage() (provider.Cost, provider.Usage)
 }
+
+// DecisionAnswerer is an OPTIONAL [Supervisor] capability: routing a client's
+// answers into a session's structured-decision gate, unblocking the ask_user
+// tool call waiting on them (see internal/decision). The in-process supervisor
+// implements it — it owns the gates; the M6 router does NOT, because its
+// sessions live in worker processes and the decision relay does not yet cross
+// the router↔worker hop (see the package doc's "Structured decisions" note).
+//
+// It is a separate interface rather than a method on [Supervisor] for exactly
+// the reason [FleetUsager] is: so a supervisor that cannot serve it stays
+// untouched, and so the gap is explicit. handleDecisionAnswer type-asserts for
+// it and reports a clear "this daemon's supervisor does not carry structured
+// decisions" error when it is absent — never a silent success, which would tell
+// a client an agent turn had been unblocked while it is in fact still waiting.
+//
+// The signature is the supervisor's own, verbatim. requestID is unique only
+// within its session (the gate mints it per session), which is why sessionID is
+// a parameter rather than something a route table could recover.
+type DecisionAnswerer interface {
+	// AnswerDecision resolves sessionID's outstanding request requestID with one
+	// answer per question, returning the gate's validation error for an answer
+	// that does not fit its question or names a request that is no longer open.
+	AnswerDecision(sessionID, requestID string, answers []acp.DecisionAnswer) error
+}
+
+// The in-process supervisor satisfies the decision capability — a drift in
+// either package fails the build here rather than at the type assertion.
+var _ DecisionAnswerer = (*supervisor.Supervisor)(nil)

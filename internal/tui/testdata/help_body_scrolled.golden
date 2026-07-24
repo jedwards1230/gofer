@@ -1,0 +1,11 @@
+  /usage                           Show this session's token and cost consumpti…
+  /yolo [on|off]                   Toggle guardrails for new sessions
+Global
+  ctrl+c  Quit gofer
+  ctrl+y  Toggle guardrails for new sessions (same as /yolo)
+  ctrl+r  Toggle reply-on-run for shell commands (reply now / queue)
+Roster
+  ↑/↓        Move the roster selection
+  enter      Open the selected session, or run what's typed
+  space      Peek the selected session (empty dispatch bar)
+↑ 10 more · ↓ 60 more

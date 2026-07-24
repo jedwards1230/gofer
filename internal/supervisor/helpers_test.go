@@ -2,6 +2,7 @@ package supervisor_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -32,6 +33,10 @@ type fakeSession struct {
 	// runner.Options.Approver, captured by the harness's New/Resume seam. A
 	// permission-driving Prompt (permReq set) blocks on it.
 	approver loop.Approver
+	// tools is the per-session registry the supervisor injects via
+	// runner.Options.Tools, captured the same way. A decision-driving Prompt
+	// (askInput set) resolves ask_user out of it.
+	tools loop.ToolRegistry
 
 	mu     sync.Mutex
 	calls  []string
@@ -41,12 +46,33 @@ type fakeSession struct {
 	// this call id and block on approver.Await instead of the generic advance
 	// channel — the seam the approval tests use to exercise the real gate.
 	permReq string
+	// askInput, when non-empty, makes Prompt resolve the ask_user tool out of
+	// the injected registry and run it with this JSON input instead of
+	// blocking on advance — the seam the decision tests use to drive a REAL
+	// tool call (and therefore the real WrapRegistry + decision.Gate wiring)
+	// rather than poking the gate directly.
+	askInput string
+	// askResult/askErr record what that ask_user call returned, for the test
+	// to assert on once the turn has unwound.
+	askResult loop.ToolResult
+	askErr    error
 
 	// setModelCalls records every model argument SetModel was called with, in
 	// order — the seam TestSetModel-family tests use to assert the
 	// supervisor actually reaches the SDK setter (and, for the
 	// cross-provider case, that it does NOT).
 	setModelCalls []string
+
+	// setEffortCalls records every effort argument SetEffort was called with,
+	// in order — setModelCalls' effort-axis twin, and the seam the
+	// TestSetEffort-family tests use to assert the supervisor reaches (or,
+	// for a rejected level, does NOT reach) the SDK setter.
+	setEffortCalls []string
+	// setEffortErr, when non-nil, is what SetEffort returns — standing in for
+	// the SDK runner's own rejections (an unknown level, a non-reasoning
+	// model), which the supervisor must surface rather than swallow. The call
+	// is still recorded either way.
+	setEffortErr error
 
 	// started delivers the prompt text each time Prompt is entered — one
 	// receive per dispatched turn. Buffered generously; a test only ever
@@ -122,9 +148,25 @@ func (f *fakeSession) Prompt(ctx context.Context, text string) error {
 	f.mu.Lock()
 	f.calls = append(f.calls, text)
 	permReq := f.permReq
+	askInput := f.askInput
 	f.mu.Unlock()
 
 	f.started <- text
+
+	if askInput != "" {
+		// Run the real ask_user tool out of the registry the supervisor built,
+		// exactly as the SDK loop would on a model tool call. A cancelled turn
+		// surfaces here as the tool's own ctx error.
+		tl, ok := f.tools.Get("ask_user")
+		if !ok {
+			return fmt.Errorf("ask_user not registered")
+		}
+		res, err := tl.Run(ctx, json.RawMessage(askInput))
+		f.mu.Lock()
+		f.askResult, f.askErr = res, err
+		f.mu.Unlock()
+		return err
+	}
 
 	if permReq != "" {
 		// Emit a real permission.requested onto the broker (so watchPermissions
@@ -154,6 +196,22 @@ func (f *fakeSession) setPermReq(id string) {
 	f.mu.Lock()
 	f.permReq = id
 	f.mu.Unlock()
+}
+
+// setAskInput arms this fake to run the ask_user tool with input on its next
+// Prompt (see Prompt).
+func (f *fakeSession) setAskInput(input string) {
+	f.mu.Lock()
+	f.askInput = input
+	f.mu.Unlock()
+}
+
+// askOutcome returns what the armed ask_user call returned. It is only
+// meaningful once the turn has unwound (waitForStatus back to needs-input).
+func (f *fakeSession) askOutcome() (loop.ToolResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.askResult, f.askErr
 }
 
 // finish releases the currently-blocked Prompt call, letting it return err.
@@ -214,6 +272,45 @@ func (f *fakeSession) lastSetModel() string {
 	return f.setModelCalls[len(f.setModelCalls)-1]
 }
 
+// SetEffort records effort onto setEffortCalls and returns setEffortErr —
+// [SetModel]'s twin. The fake never validates a level itself: what the tests
+// exercise is [supervisor.Supervisor.SetEffort]'s own ValidEffort pre-check
+// (which must reject BEFORE reaching this seam) and its propagation of an SDK
+// rejection (which setEffortErr stands in for).
+func (f *fakeSession) SetEffort(effort string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.setEffortCalls = append(f.setEffortCalls, effort)
+	return f.setEffortErr
+}
+
+// setEffortCallCount returns how many times SetEffort was called.
+func (f *fakeSession) setEffortCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.setEffortCalls)
+}
+
+// lastSetEffort returns the most recent SetEffort argument, or "" if it was
+// never called. Note the ambiguity that forces every caller to pair it with
+// setEffortCallCount: "" is also a legitimate ARGUMENT (clear the level).
+func (f *fakeSession) lastSetEffort() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.setEffortCalls) == 0 {
+		return ""
+	}
+	return f.setEffortCalls[len(f.setEffortCalls)-1]
+}
+
+// failEffort makes the fake's SetEffort return err, standing in for an SDK
+// runner rejection.
+func (f *fakeSession) failEffort(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.setEffortErr = err
+}
+
 // harness wires a *supervisor.Supervisor to fakeSession construction, so
 // tests get a handle on the exact fake backing each roster entry and can
 // assert how many times the New/Resume seams were invoked.
@@ -246,12 +343,14 @@ func newHarness(t *testing.T) *harness {
 			id := fmt.Sprintf("sess-%d", atomic.AddInt64(&h.nextID, 1))
 			fs := h.register(id, opts.Cwd)
 			fs.approver = opts.Approver
+			fs.tools = opts.Tools
 			return fs, nil
 		},
 		ResumeSession: func(_ context.Context, id string, opts runner.Options) (supervisor.Session, error) {
 			h.resN.Add(1)
 			fs := h.register(id, opts.Cwd)
 			fs.approver = opts.Approver
+			fs.tools = opts.Tools
 			return fs, nil
 		},
 	}
