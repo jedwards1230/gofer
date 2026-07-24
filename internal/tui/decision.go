@@ -172,16 +172,6 @@ func (p pendingDecision) draft() decisionDraft {
 	return p.drafts[p.tab]
 }
 
-// questionIDs returns every question id in the request, in question order —
-// what App.cancelDecision names when esc withdraws from the whole batch.
-func (p pendingDecision) questionIDs() []string {
-	ids := make([]string, len(p.questions))
-	for i, q := range p.questions {
-		ids[i] = q.QuestionID
-	}
-	return ids
-}
-
 // answeredCount is how many questions carry a chosen outcome — the numerator
 // the Submit tab reports.
 func (p pendingDecision) answeredCount() int {

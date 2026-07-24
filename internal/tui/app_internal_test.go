@@ -43,6 +43,11 @@ type internalFakeSup struct {
 	gates   map[string]*decision.Gate
 	answers []answerCall
 
+	// interrupts records every Supervisor.Interrupt invocation (session id), so
+	// a test can assert that Esc under the default "turn" prompt-esc-scope stops
+	// the whole turn rather than resolving the prompt.
+	interrupts []string
+
 	// sessionRefs is what ListSessions answers with — the /resume picker's
 	// source list, seeded per test.
 	sessionRefs []SessionRef
@@ -158,7 +163,12 @@ func (f *internalFakeSup) Send(_ context.Context, id, prompt string) error {
 	f.sends = append(f.sends, sendCall{id: id, prompt: prompt})
 	return nil
 }
-func (f *internalFakeSup) Interrupt(context.Context, string) error         { return nil }
+func (f *internalFakeSup) Interrupt(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.interrupts = append(f.interrupts, id)
+	return nil
+}
 func (f *internalFakeSup) Kill(context.Context, string) error              { return nil }
 func (f *internalFakeSup) Archive(context.Context, string) error           { return nil }
 func (f *internalFakeSup) SetModel(context.Context, string, string) error  { return nil }
@@ -772,23 +782,49 @@ func TestAppApprovalDialogDenyWithRememberSendsReply(t *testing.T) {
 	}
 }
 
-// TestAppApprovalDialogEscDismissesWithoutReply verifies esc hides the
-// prompt without sending any reply — the underlying request stays pending.
-func TestAppApprovalDialogEscDismissesWithoutReply(t *testing.T) {
+// TestAppApprovalDialogEscStopsTurnByDefault verifies esc under the DEFAULT
+// ("turn") prompt-esc-scope clears the prompt AND interrupts the whole turn —
+// never leaving the permission pending server-side with no prompt on screen,
+// which silently hung the turn. No reply is sent (interrupt, not deny), and the
+// Supervisor is asked to Interrupt exactly once.
+func TestAppApprovalDialogEscStopsTurnByDefault(t *testing.T) {
 	sup := newInternalFakeSup(GoldenRoster())
 	a := attachForDialogTest(t, sup)
 	a = requestApproval(t, a, "perm-1")
 
-	mdl, cmd := a.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
-	a = mdl.(App)
+	a = pressDecision(t, a, tea.KeyPressMsg{Code: tea.KeyEscape})
 	if a.sess.HasPendingApproval() {
 		t.Fatal("expected the pending approval cleared after esc")
 	}
-	if cmd != nil {
-		t.Error("expected esc to issue no Cmd — no reply is sent")
-	}
 	if len(sup.replies) != 0 {
-		t.Errorf("sup.replies = %+v, want none after esc", sup.replies)
+		t.Errorf("sup.replies = %+v, want none after esc — turn-scope Esc interrupts, it does not reply", sup.replies)
+	}
+	if len(sup.interrupts) != 1 || sup.interrupts[0] != a.sessID {
+		t.Errorf("sup.interrupts = %+v, want exactly one Interrupt for %q", sup.interrupts, a.sessID)
+	}
+}
+
+// TestAppApprovalDialogEscDeniesWhenScoped verifies esc under the opt-in
+// ("prompt") scope denies the gated call (Allow:false) and lets the turn
+// continue — the approval analog of cancelling an ask_user decision — rather
+// than interrupting the turn or leaving the request pending.
+func TestAppApprovalDialogEscDeniesWhenScoped(t *testing.T) {
+	sup := newInternalFakeSup(GoldenRoster())
+	a := attachForDialogTestEnv(t, sup, promptScopeEnv())
+	a = requestApproval(t, a, "perm-1")
+
+	a = pressDecision(t, a, tea.KeyPressMsg{Code: tea.KeyEscape})
+	if a.sess.HasPendingApproval() {
+		t.Fatal("expected the pending approval cleared after esc")
+	}
+	if len(sup.interrupts) != 0 {
+		t.Errorf("sup.interrupts = %+v, want none — prompt-scope Esc denies, it does not stop the turn", sup.interrupts)
+	}
+	if len(sup.replies) != 1 {
+		t.Fatalf("sup.replies = %+v, want exactly one deny reply", sup.replies)
+	}
+	if got := sup.replies[0]; got.sessionID != a.sessID || got.id != "perm-1" || got.allow {
+		t.Errorf("sup.replies[0] = %+v, want a deny (allow=false) for %q/perm-1", got, a.sessID)
 	}
 }
 

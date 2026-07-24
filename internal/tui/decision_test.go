@@ -58,7 +58,16 @@ type blockedRequest struct {
 // from the subscribeDecisions Cmd armed off subReadyMsg.
 func attachForDecisionTest(t *testing.T, sup *internalFakeSup) App {
 	t.Helper()
-	a := attachForDialogTest(t, sup)
+	return attachForDecisionTestEnv(t, sup, GoldenCommandEnv())
+}
+
+// attachForDecisionTestEnv is [attachForDecisionTest] with a caller-supplied
+// [CommandEnv] — the seam a test needs to drive Esc under the "prompt"
+// prompt-esc-scope (see promptScopeEnv), which the config read behind
+// App.promptEscScope resolves from.
+func attachForDecisionTestEnv(t *testing.T, sup *internalFakeSup, env CommandEnv) App {
+	t.Helper()
+	a := attachForDialogTestEnv(t, sup, env)
 	sub, err := sup.Decisions(context.Background(), a.sessID)
 	if err != nil {
 		t.Fatalf("Decisions(%s): %v", a.sessID, err)
@@ -347,11 +356,13 @@ func TestDecisionFreeTextSubmits(t *testing.T) {
 	}
 }
 
-// TestDecisionEscLeavesTypingThenCancels covers Esc's two-step contract: the
+// TestDecisionEscLeavesTypingThenStopsTurn covers Esc's two-step contract: the
 // first press leaves typing mode (discarding the half-typed answer) and only
-// the second cancels the request — so escape never throws away more than one
-// thing at a time.
-func TestDecisionEscLeavesTypingThenCancels(t *testing.T) {
+// the second resolves the prompt — so escape never throws away more than one
+// thing at a time. The second press resolves it the DEFAULT ("turn") way here:
+// it stops the whole turn (one Interrupt, no AnswerDecision) rather than
+// answering the request.
+func TestDecisionEscLeavesTypingThenStopsTurn(t *testing.T) {
 	sup := newInternalFakeSup(GoldenRoster())
 	a := attachForDecisionTest(t, sup)
 	a, req := openDecision(t, sup, a)
@@ -385,7 +396,13 @@ func TestDecisionEscLeavesTypingThenCancels(t *testing.T) {
 	if a.sess.HasPendingDecision() {
 		t.Fatal("expected the second Esc to clear the prompt")
 	}
-	cancelledAnswers(t, req.await(t), "q1")
+	if len(sup.answers) != 0 {
+		t.Errorf("sup.answers = %+v; want none — turn-scope Esc interrupts, it does not answer", sup.answers)
+	}
+	if len(sup.interrupts) != 1 || sup.interrupts[0] != a.sessID {
+		t.Errorf("sup.interrupts = %+v; want exactly one for %q", sup.interrupts, a.sessID)
+	}
+	req.stillBlocked(t)
 }
 
 // TestDecisionChatAnswersWithChat covers the "↳ Chat about this" escape hatch:
@@ -414,17 +431,12 @@ func TestDecisionChatAnswersWithChat(t *testing.T) {
 	}
 }
 
-// TestDecisionEscCancelsTheRequest is the esc contract's load-bearing half,
-// asserted against the GATE rather than just the widget: esc ANSWERS the
-// request cancelled — every question in it, not just the rendered one — the
-// blocked ask_user call is released with those answers, and nothing is left
-// open on the gate.
-//
-// The alternative (clear the prompt, leave the request open) is what this
-// replaced: a decision has no transcript badge and no event-stream replay, so
-// an orphaned request blocks the agent's turn forever with nothing on screen
-// pointing at it.
-func TestDecisionEscCancelsTheRequest(t *testing.T) {
+// TestDecisionEscStopsTurnByDefault pins the DEFAULT ("turn") prompt-esc-scope:
+// Esc on a decision prompt interrupts the whole turn rather than answering the
+// request. The prompt clears, the Supervisor is asked to Interrupt exactly once,
+// and no AnswerDecision is sent — the turn's own teardown releases the gate, so
+// the TUI must not also resolve it.
+func TestDecisionEscStopsTurnByDefault(t *testing.T) {
 	sup := newInternalFakeSup(GoldenRoster())
 	a := attachForDecisionTest(t, sup)
 	a, req := openDecision(t, sup, a)
@@ -433,7 +445,37 @@ func TestDecisionEscCancelsTheRequest(t *testing.T) {
 	if a.sess.HasPendingDecision() {
 		t.Fatal("expected the prompt cleared after esc")
 	}
+	if len(sup.answers) != 0 {
+		t.Errorf("sup.answers = %+v; want none — turn-scope Esc interrupts, it does not answer", sup.answers)
+	}
+	if len(sup.interrupts) != 1 || sup.interrupts[0] != a.sessID {
+		t.Errorf("sup.interrupts = %+v; want exactly one Interrupt for %q", sup.interrupts, a.sessID)
+	}
+	req.stillBlocked(t)
+}
 
+// TestDecisionEscCancelsPromptWhenScoped pins the opt-in ("prompt") scope: Esc
+// ANSWERS the request cancelled — every question in it, not just the rendered
+// one — the blocked ask_user call is released with those answers, nothing is
+// left open on the gate, and the turn is NOT interrupted (the agent is told the
+// user declined and carries on).
+//
+// The alternative (clear the prompt, leave the request open) is what this
+// replaced: a decision has no transcript badge and no event-stream replay, so
+// an orphaned request blocks the agent's turn forever with nothing on screen
+// pointing at it.
+func TestDecisionEscCancelsPromptWhenScoped(t *testing.T) {
+	sup := newInternalFakeSup(GoldenRoster())
+	a := attachForDecisionTestEnv(t, sup, promptScopeEnv())
+	a, req := openDecision(t, sup, a)
+
+	a = pressDecision(t, a, tea.KeyPressMsg{Code: tea.KeyEscape})
+	if a.sess.HasPendingDecision() {
+		t.Fatal("expected the prompt cleared after esc")
+	}
+	if len(sup.interrupts) != 0 {
+		t.Errorf("sup.interrupts = %+v; want none — prompt-scope Esc cancels the decision, it does not stop the turn", sup.interrupts)
+	}
 	if len(sup.answers) != 1 {
 		t.Fatalf("sup.answers = %+v; want exactly one AnswerDecision call — esc must resolve, not orphan", sup.answers)
 	}
@@ -450,14 +492,16 @@ func TestDecisionEscCancelsTheRequest(t *testing.T) {
 	}
 }
 
-// TestDecisionEscCancelsEveryQuestion pins the multi-question half of esc: the
-// agent is blocked on every question in the batch, so the cancel names every
-// question id in the request explicitly rather than leaning on the gate's
-// cancelled fill-in. (decision_multi_test.go asserts the same contract against
-// a batch the user has already drafted answers into — esc discards those too.)
+// TestDecisionEscCancelsEveryQuestion pins the multi-question half of the
+// opt-in ("prompt") scope: the agent is blocked on every question in the batch,
+// and with nothing drafted the cancel leans on the gate's cancelled fill-in —
+// the TUI sends only the (here empty) partial selection and the gate normalizes
+// every unanswered question to cancelled, so the agent still receives one
+// cancelled answer per question. (decision_multi_test.go asserts the
+// selection-preserving half against a batch the user HAS drafted answers into.)
 func TestDecisionEscCancelsEveryQuestion(t *testing.T) {
 	sup := newInternalFakeSup(GoldenRoster())
-	a := attachForDecisionTest(t, sup)
+	a := attachForDecisionTestEnv(t, sup, promptScopeEnv())
 
 	gate := sup.gate(a.sessID)
 	questions := append(decisionQuestions(), acp.DecisionQuestion{
@@ -483,9 +527,10 @@ func TestDecisionEscCancelsEveryQuestion(t *testing.T) {
 	if len(sup.answers) != 1 {
 		t.Fatalf("sup.answers = %+v; want exactly one AnswerDecision call from esc", sup.answers)
 	}
-	sent := sup.answers[0].answers
-	if len(sent) != 2 {
-		t.Fatalf("esc sent %d answers for a two-question request: %+v", len(sent), sent)
+	// Nothing was drafted, so the TUI sends an empty partial and the gate fills
+	// every question in as cancelled.
+	if sent := sup.answers[0].answers; len(sent) != 0 {
+		t.Fatalf("esc with no drafts sent %d answers: %+v; want the gate to fill them in", len(sent), sent)
 	}
 	select {
 	case got := <-answers:

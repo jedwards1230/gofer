@@ -57,6 +57,19 @@ func GoldenCommandEnv() CommandEnv {
 	}
 }
 
+// promptScopeEnv is GoldenCommandEnv with session.prompt_esc_scope set to
+// "prompt" — the opt-in where Esc cancels only the focused prompt (an ask_user
+// decision resolves cancelled, an approval is denied) instead of interrupting
+// the whole turn. The dialog tests that assert the opt-in behavior build
+// through it; every other test keeps the default (turn) scope.
+func promptScopeEnv() CommandEnv {
+	env := GoldenCommandEnv()
+	env.Config = func() (config.Config, error) {
+		return config.Config{Session: config.Session{PromptEscScope: string(config.PromptEscScopePrompt)}}, nil
+	}
+	return env
+}
+
 // GoldenRoster returns the two-session fixture the App golden and behavioral
 // tests navigate: a working session (selected first — most recently active)
 // and an idle one awaiting input.
