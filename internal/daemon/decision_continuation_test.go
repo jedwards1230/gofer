@@ -11,6 +11,7 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/provider"
 	"github.com/jedwards1230/agent-sdk-go/runner"
 
+	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/daemon"
 	"github.com/jedwards1230/gofer/internal/supervisor"
 )
@@ -80,6 +81,13 @@ func TestDaemonAskUserTurnContinuesAfterAnswer(t *testing.T) {
 	root := t.TempDir()
 	sup, err := supervisor.New(supervisor.Config{
 		Root: root,
+		// Yolo so the ask_user tool RUNS regardless of whether a sandbox backend
+		// is present: under contain-or-ask, a runner with no available backend
+		// (macOS has seatbelt; a bare Linux CI runner may lack bwrap) cannot
+		// contain any call, so the guard escalates ask_user to a permission "Ask"
+		// and the turn blocks on an approval nobody answers instead of surfacing
+		// the decision (CanContain = available && containable, see internal/sandbox).
+		PermissionMode: func() config.PermissionMode { return config.PermissionModeYolo },
 		NewSession: func(ctx context.Context, opts runner.Options) (supervisor.Session, error) {
 			opts.Provider = prov
 			return runner.New(ctx, opts)

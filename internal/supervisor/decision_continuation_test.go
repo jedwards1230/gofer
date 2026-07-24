@@ -11,9 +11,21 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/provider"
 	"github.com/jedwards1230/agent-sdk-go/runner"
 
+	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/decision"
 	"github.com/jedwards1230/gofer/internal/supervisor"
 )
+
+// yoloMode runs every tool call that no deny rule blocks, with no permission
+// gate. These tests inject it so the ask_user tool RUNS deterministically
+// regardless of whether a sandbox backend (seatbelt/bwrap) is present: under
+// the default contain-or-ask posture, a host with no available backend cannot
+// contain any call, so the RuleGuard escalates ask_user to a permission "Ask"
+// (CanContain = available && containable — see internal/sandbox) and the turn
+// blocks on an approval nobody answers instead of surfacing the decision. That
+// is a CI-only trap (macOS has seatbelt, a bare Linux runner may lack bwrap),
+// and it is orthogonal to what these tests exercise — the decision round trip.
+func yoloMode() config.PermissionMode { return config.PermissionModeYolo }
 
 // askUserContinuationProvider scripts a real runner turn that (1) calls
 // ask_user and stops for tool use, then (2) — after the tool returns the
@@ -86,7 +98,8 @@ func (p *askUserContinuationProvider) continuationCtxErr() error {
 func TestAskUserTurnContinuesAfterAnswer(t *testing.T) {
 	prov := &askUserContinuationProvider{}
 	sup, err := supervisor.New(supervisor.Config{
-		Root: t.TempDir(),
+		Root:           t.TempDir(),
+		PermissionMode: yoloMode,
 		NewSession: func(ctx context.Context, opts runner.Options) (supervisor.Session, error) {
 			opts.Provider = prov
 			return runner.New(ctx, opts)
