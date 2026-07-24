@@ -19,6 +19,8 @@ package tui
 
 import (
 	"strings"
+	"time"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -41,7 +43,26 @@ type selectionState struct {
 	dragging       bool
 	startX, startY int
 	curX, curY     int
+
+	// wordSelect is true when the selection was opened by a double-click: the
+	// initial click snapped to a whole word (the ANCHOR, anchorY/anchorX0..
+	// anchorX1 below), and a subsequent drag extends the selection
+	// WORD-BY-WORD — the moving end snaps to whole-word boundaries so the
+	// selection always covers complete words, like a native terminal/editor.
+	// A plain (single-click) drag leaves this false and selects per-character.
+	wordSelect bool
+	anchorY    int // the double-clicked row
+	anchorX0   int // the anchor word's start column (inclusive)
+	anchorX1   int // the anchor word's end column (exclusive)
 }
+
+// doubleClickWindow is the maximum gap between two clicks on the same cell for
+// the pair to count as a double-click (which promotes the selection to
+// whole-word mode). bubbletea v2's Mouse event carries no click count, so the
+// app reconstructs a double-click from click timing + position. 500ms is the
+// common desktop default; a documented default rather than a bare literal so it
+// can graduate to a config knob if a user ever needs to tune it.
+const doubleClickWindow = 500 * time.Millisecond
 
 // span normalizes the selection's start/current coordinates into
 // reading-order (top-left, bottom-right) — a drag can move up-left as
@@ -193,16 +214,67 @@ func (a App) mouseSelectable() bool {
 // Only a plain left-button click starts one; a right/middle click, or a
 // click while mouse capture wouldn't even be showing selectable content, is
 // a no-op.
-func (a App) handleMouseClick(msg tea.MouseClickMsg) App {
+// linkOpenMods are the modifier keys that turn a left click on a rendered link
+// into an open-in-browser (rather than starting a selection): Ctrl / Alt / Cmd
+// (Super) / Meta. Shift is deliberately excluded — it conventionally EXTENDS a
+// selection. Requiring a modifier keeps a plain click/drag and a double-click
+// purely selection, so link-open composes with both.
+const linkOpenMods = tea.ModCtrl | tea.ModAlt | tea.ModSuper | tea.ModMeta
+
+func (a App) handleMouseClick(msg tea.MouseClickMsg) (App, tea.Cmd) {
 	if !a.mouseSelectable() {
-		return a
+		return a, nil
 	}
 	m := msg.Mouse()
 	if m.Button != tea.MouseLeft {
-		return a
+		return a, nil
 	}
+
+	// A modifier+click on a rendered hyperlink opens it in the browser instead
+	// of starting a selection (the URL is recovered from the OSC 8 the render
+	// emitted). Terminals that honor OSC 8 under mouse capture handle this
+	// themselves and never deliver the event here; this is the fallback for
+	// those that don't.
+	if m.Mod&linkOpenMods != 0 {
+		if url, ok := linkAt(a.render(), m.X, m.Y); ok {
+			return a, openURLCmd(url)
+		}
+	}
+
+	// Double-click (two left clicks on the same cell within doubleClickWindow)
+	// promotes the selection to whole-word mode: snap it to the word under the
+	// cursor. bubbletea v2 reports no click count, so it is reconstructed from
+	// the previous click's time + cell (see [isDoubleClick]).
+	now := time.Now()
+	double := isDoubleClick(a.lastClickAt, now, a.lastClickX, a.lastClickY, m.X, m.Y)
+	a.lastClickAt, a.lastClickX, a.lastClickY = now, m.X, m.Y
+
+	if double {
+		if x0, x1, ok := a.wordBoundsAt(m.X, m.Y); ok {
+			a.sel = &selectionState{
+				dragging:   true,
+				wordSelect: true,
+				startX:     x0, startY: m.Y,
+				curX: x1 - 1, curY: m.Y,
+				anchorY: m.Y, anchorX0: x0, anchorX1: x1,
+			}
+			return a, nil
+		}
+	}
+
 	a.sel = &selectionState{dragging: true, startX: m.X, startY: m.Y, curX: m.X, curY: m.Y}
-	return a
+	return a, nil
+}
+
+// isDoubleClick reports whether a click at (x,y) at time now is the second of a
+// double-click, given the previous click at (px,py) at time prev: same cell,
+// within [doubleClickWindow]. A zero prev time (no prior click) is never a
+// double-click.
+func isDoubleClick(prev, now time.Time, px, py, x, y int) bool {
+	if prev.IsZero() {
+		return false
+	}
+	return x == px && y == py && now.Sub(prev) <= doubleClickWindow
 }
 
 // handleMouseMotion extends an in-progress selection to the pointer's
@@ -220,9 +292,90 @@ func (a App) handleMouseMotion(msg tea.MouseMotionMsg) App {
 		return a
 	}
 	sel := *a.sel
-	sel.curX, sel.curY = m.X, m.Y
+	if sel.wordSelect {
+		// Word-by-word extension: snap the moving end to the word under the
+		// cursor and keep the anchor word wholly covered, so a drag after a
+		// double-click always spans complete words (native editor behavior).
+		sel.extendWord(a, m.X, m.Y)
+	} else {
+		sel.curX, sel.curY = m.X, m.Y
+	}
 	a.sel = &sel
 	return a
+}
+
+// extendWord grows a word-mode selection to include the whole word under the
+// cursor (cx,cy) while always covering the anchor word. It picks whichever of
+// the two outer corners lands the cursor's word on the correct side: dragging
+// past the anchor extends the END to the cursor word's end; dragging before it
+// extends the START to the cursor word's start; a cursor within the anchor word
+// collapses back to the anchor alone.
+func (s *selectionState) extendWord(a App, cx, cy int) {
+	cs, ce, ok := a.wordBoundsAt(cx, cy)
+	if !ok {
+		// Off any selectable word (e.g. into the footer): fall back to the raw
+		// cell so the drag still tracks, without corrupting the anchor.
+		s.curX, s.curY = cx, cy
+		return
+	}
+	// Is the cursor word before the anchor word in reading order?
+	before := cy < s.anchorY || (cy == s.anchorY && ce <= s.anchorX0)
+	if before {
+		s.startX, s.startY = cs, cy
+		s.curX, s.curY = s.anchorX1-1, s.anchorY
+		return
+	}
+	s.startX, s.startY = s.anchorX0, s.anchorY
+	s.curX, s.curY = ce-1, cy
+}
+
+// wordBoundsAt returns the [start, end) visible-CELL span of the word under
+// cell (x,y) on the current frame, clamped to the transcript region. ok is
+// false when (x,y) is outside the selectable region or past the row's content.
+// It reads the same ANSI-stripped frame [App.selectedText] does, so the columns
+// it returns line up with the cell columns the selection/highlight math uses.
+func (a App) wordBoundsAt(x, y int) (start, end int, ok bool) {
+	top, bottom, regionOK := a.transcriptRegion()
+	if !regionOK || y < top || y > bottom {
+		return 0, 0, false
+	}
+	lines := strings.Split(ansi.Strip(a.render()), "\n")
+	if y < 0 || y >= len(lines) {
+		return 0, 0, false
+	}
+	return wordBoundsCells(lines[y], x)
+}
+
+// wordBoundsCells returns the [start, end) CELL span of the word at cell column
+// x in the (plain, ANSI-free) line. A "word" is a maximal run of cells whose
+// runes share the class of the rune at x — non-space (a token/URL/identifier)
+// or whitespace — so a double-click on any glyph selects the contiguous token
+// it belongs to. Cell-accurate (not rune-index) so a wide rune earlier in the
+// line doesn't shift the bounds relative to the mouse column. ok is false when x
+// is past the line's visible width.
+func wordBoundsCells(line string, x int) (start, end int, ok bool) {
+	runes := []rune(line)
+	cellStart := make([]int, len(runes)+1)
+	for i, r := range runes {
+		cellStart[i+1] = cellStart[i] + ansi.StringWidth(string(r))
+	}
+	if x < 0 || x >= cellStart[len(runes)] {
+		return 0, 0, false
+	}
+	// The rune index whose cell range [cellStart[ri], cellStart[ri+1]) covers x.
+	ri := 0
+	for ri < len(runes) && cellStart[ri+1] <= x {
+		ri++
+	}
+	wordy := !unicode.IsSpace(runes[ri])
+	lo, hi := ri, ri+1
+	for lo > 0 && (!unicode.IsSpace(runes[lo-1]) == wordy) {
+		lo--
+	}
+	for hi < len(runes) && (!unicode.IsSpace(runes[hi]) == wordy) {
+		hi++
+	}
+	return cellStart[lo], cellStart[hi], true
 }
 
 // handleMouseRelease ends the drag (the selection stays shown/copyable

@@ -114,6 +114,15 @@ func (r *markdownRenderer) render(text string, width int) []string {
 		return fallbackLines(text)
 	}
 	rows := postProcessMarkdown(out, r.profile == termenv.Ascii)
+	// Make the printed URLs clickable via OSC 8 — but never under the Ascii
+	// golden profile, where output is stripped to plain deterministic text (an
+	// OSC 8 escape would either churn the golden or, once stripped, do nothing).
+	// The sequence is zero-width and ANSI-stripped, so it changes no row width.
+	if r.profile != termenv.Ascii {
+		for i, row := range rows {
+			rows[i] = linkifyURLs(row)
+		}
+	}
 	r.cache[text] = rows
 	return rows
 }

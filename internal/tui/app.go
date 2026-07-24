@@ -236,6 +236,15 @@ type App struct {
 	// (see Update's tea.KeyPressMsg case) — never on scroll, so wheel/PgUp-
 	// PgDn scrolling during or after a selection leaves it in place.
 	sel *selectionState
+
+	// lastClickAt/lastClickX/lastClickY record the previous left-button click
+	// for double-click detection: bubbletea v2's Mouse event carries no click
+	// count, so a double-click is two clicks on the same cell within
+	// [doubleClickWindow] (see [App.handleMouseClick] and [isDoubleClick]). A
+	// double-click promotes the selection to whole-word mode (mouse.go).
+	lastClickAt time.Time
+	lastClickX  int
+	lastClickY  int
 }
 
 // NewApp returns an App rendering through th, driving sup, with its roster
@@ -757,7 +766,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !a.mouseEnabled() {
 			return a, nil
 		}
-		return a.handleMouseClick(msg), nil
+		return a.handleMouseClick(msg)
 
 	case tea.MouseMotionMsg:
 		if !a.mouseEnabled() {
