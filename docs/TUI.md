@@ -1022,6 +1022,15 @@ lives in one place — `Model.dotStyle` (`internal/tui/model.go`):
 | **Green** | **Completed successfully.** |
 | **Pink / red** | **Denied / error** — a failed or denied tool call. |
 
+**The `!` / `!!` shell sigil is the exception: it is colored by IDENTITY, not
+lifecycle.** A user-run local command is not an agent tool call, so its marker
+does not join the amber→green→pink progression — it is a fixed accent (`!`,
+sent) / warn (`!!`, private) that says *whose* command it is and whether the
+model can see it (`Model.shellMarker`). Its outcome (a running state, a non-zero
+exit, a timeout) shows in the block body, and a muted `· you ran this`
+attribution on the header (`shellRunAttribution`) states the user-run origin in
+words. The lifecycle dots below are the agent's; the shell sigil is the user's.
+
 **Green means completed, and only completed.** The one subtlety is a user
 **interrupt** (Esc / `session/cancel`): the SDK cancels the turn context and, on
 the way out, *flushes* the still-open streaming message as a `MessageFinished`
@@ -1936,6 +1945,25 @@ input — and it is **leading-only**, so `that worked!` and
   permission/approval path — the user typed it themselves, and nothing the
   model emits can reach it.
 
+  **What the model is told — the fold is framed.** A `!` run's output reaches
+  the model through `App.composePrompt` → `shellRun.contextBlock` as a small
+  **framed** block: a single header line — `[The shell command(s) below were run
+  by the USER in their terminal, not by you — output is shown for your
+  reference; do not re-run them.]` (`shellFoldHeader`) — ahead of the `$ cmd` +
+  output lines. The header frames the **whole** block once (several `!` runs in
+  one submit share it), never per-line. It is load-bearing because the reply-now
+  default fires a turn the instant a `!` run finishes carrying *only* that fold:
+  unframed, the agent reads `$ sleep 10` as a request and re-runs it as its own
+  `bash` tool call (the redundant re-run the frame exists to stop). A clean run
+  that printed nothing carries a `[no output]` marker (`shellNoOutputMarker`) so
+  a silent `! sleep 10` still reads as **completed**, not a command the agent
+  must run to see a result; abnormal outcomes keep their `[exit N]` /
+  `[timed out …]` / `[output truncated]` lines. A `!!` run contributes nothing
+  to the fold, and a `!!`-only submit takes no header either — the frame can
+  never annotate or leak a private run. *(This revises the earlier "contextBlock
+  is a bare shell transcript" design: the block is now framed — still small and
+  plain, but no longer a bare `$ cmd` dump.)*
+
   **Presentation — the sigil is the signal (round-5).** Three things make the
   escape legible, all keyed on the `!` / `!!` sigil:
   - **Input line.** While a `!` / `!!` command is being *typed*, the sigil IS
@@ -1954,9 +1982,13 @@ input — and it is **leading-only**, so `that worked!` and
     user learns the sigil before typing it.
   - **In the transcript, not a pane.** On the attach screen a run renders as a
     transcript block: the **sigil as the block marker** (`! command` /
-    `!! command`), the output under the `└` gutter, and its outcome (`exit N` iff
-    non-zero, a timeout/failure note, a truncation marker). It reads as part of
-    the conversation rather than a dismissible overlay below it. A **pending**
+    `!! command`), the command header carrying a muted **`· you ran this`**
+    attribution (`shellRunAttribution`) — the user-run counterpart of a tool
+    call's `· from the <agent> agent` clause, so a run reads unmistakably as a
+    command **you** ran locally, not an agent `bash` tool call — the output under
+    the `└` gutter, and its outcome (`exit N` iff non-zero, a timeout/failure
+    note, a truncation marker). It reads as part of the conversation rather than
+    a dismissible overlay below it. A **pending**
     run (running, or finished but not yet folded) renders render-local at the
     tail (`Model.WithShellRuns`, the background-agents pattern). When it is
     **consumed** — folded into a submitted prompt (which the reply-now default

@@ -1909,20 +1909,47 @@ func (m Model) shellMarker(r shellRun) (glyph string, style lipgloss.Style) {
 	return "!!", m.theme.WarnStyle()
 }
 
+// shellRunAttribution is the origin clause a `!` / `!!` transcript block wears —
+// the user-run counterpart of a tool call's `· from the <agent> agent`
+// ([attributeHeader]). It states, in words, that the command was run by YOU: the
+// sigil glyph already sets a shell run apart from an agent's `●` tool call, but
+// the attribution makes "you ran this locally, it is not an agent tool call"
+// explicit rather than leaving it to the reader to infer from the glyph.
+const shellRunAttribution = " · you ran this"
+
+// shellRunHeader is a run's command with [shellRunAttribution] appended to its
+// FIRST physical line, muted so it de-emphasizes below the command itself while
+// still reading as its own clause. A multi-line command (a heredoc, a pasted
+// multi-statement script) takes the clause on the first line only — the same
+// placement [attributeHeader] uses, since "who ran this?" belongs at the top of
+// the block, not buried at the end of a script. The muted styling is embedded in
+// the returned string and survives [plainRender] in [styledMarkerLines]; the
+// ascii golden pins the clause TEXT, the styled golden pins its color.
+func (m Model) shellRunHeader(r shellRun) string {
+	clause := m.theme.MutedStyle().Render(shellRunAttribution)
+	first, rest, multiline := strings.Cut(r.line, "\n")
+	if !multiline {
+		return first + clause
+	}
+	return first + clause + "\n" + rest
+}
+
 // renderShellRunLines renders one `!` / `!!` run (shell.go) as a transcript
-// block: the sigil marker + command header, the command's output under the
-// `└` gutter, and its outcome — a non-zero exit (`exit N`), a timeout/failure
-// note, or a truncation marker, each shown only when there is something
-// abnormal to say. A clean exit-0 run shows only its output; there is no
-// disposition line at all (round-5 dropped the `· not sent to the agent` text —
-// the `!!` marker carries that signal now, see [Model.shellMarker]).
+// block: the sigil marker + command header carrying a muted `· you ran this`
+// attribution ([Model.shellRunHeader]) so the run reads as a user-run local
+// command rather than an agent tool call, the command's output under the `└`
+// gutter, and its outcome — a non-zero exit (`exit N`), a timeout/failure note,
+// or a truncation marker, each shown only when there is something abnormal to
+// say. A clean exit-0 run shows only its output; there is no disposition line at
+// all (round-5 dropped the `· not sent to the agent` text — the `!!` marker
+// carries the private-run signal, see [Model.shellMarker]).
 //
 // A multi-line command (a heredoc, a pasted multi-statement script) splits the
 // same way the transcript's text items split, for the same one-slice-entry-per-
 // row height accounting (see styledMarkerLines' doc).
 func (m Model) renderShellRunLines(r shellRun) []string {
 	glyph, marker := m.shellMarker(r)
-	block := contentBlock{marker: marker, glyph: glyph, header: r.line}
+	block := contentBlock{marker: marker, glyph: glyph, header: m.shellRunHeader(r)}
 
 	muted := func(s string) string { return m.theme.MutedStyle().Render(s) }
 	danger := func(s string) string { return m.theme.DangerStyle().Render(s) }

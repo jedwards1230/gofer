@@ -1,4 +1,4 @@
-<accent>!</accent> ls docs
+<accent>!</accent> ls docs<muted> · you ran this</muted>
    └ doc1.md
      doc2.md
 
