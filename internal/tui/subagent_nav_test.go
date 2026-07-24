@@ -299,7 +299,7 @@ func TestRosterHintNamesStopBindingWithinWidth(t *testing.T) {
 	}
 
 	flat := hintOf(t, newOverview().WithSessions(tui.GoldenRoster()))
-	if want := "enter open · space peek · tab toggle view · ctrl-x kill · ? shortcuts"; flat != want {
+	if want := "enter open · space peek · tab toggle view · ctrl-x×2 kill · ? shortcuts"; flat != want {
 		t.Errorf("flat-roster hint = %q; want %q", flat, want)
 	}
 

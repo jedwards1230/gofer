@@ -362,14 +362,20 @@ func TestNavPeekReplySends(t *testing.T) {
 	}
 }
 
-// TestNavPeekKillsSelected verifies ctrl-x on the peek screen kills the
-// selected (non-finished) session.
+// TestNavPeekKillsSelected verifies the two-press ctrl-x confirm on the PEEK
+// screen: the first press arms (no supervisor call), the second kills the
+// selected (non-finished) session. Peek shares the roster selection with the
+// overview, so ctrl-x acts on the same session either screen shows.
 func TestNavPeekKillsSelected(t *testing.T) {
 	sup := newFakeSup(tui.GoldenRoster())
 	m := newTestApp(t, sup)
 
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeySpace}) // peek
-	press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl})
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeySpace})   // peek
+	m = press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl}) // arm
+	if len(sup.ops) != 0 {
+		t.Fatalf("first ctrl-x on peek must not call the supervisor; sup.ops = %v", sup.ops)
+	}
+	press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl}) // confirm
 
 	want := "kill:0192a1b2-app0-7000-8000-000000000001"
 	if len(sup.ops) != 1 || sup.ops[0] != want {
@@ -426,17 +432,136 @@ func TestNavAttachSendsPrompt(t *testing.T) {
 	}
 }
 
-// TestNavKillWorkingSession verifies ctrl-x on a working (non-finished)
-// session kills it rather than archiving it.
+// TestNavCtrlXFirstPressArmsNoAction is the mutation anchor for the two-press
+// confirm's FIRST half: one ctrl-x on the roster must NOT touch the supervisor
+// (no kill, no archive) and must show the confirm line naming the verb the
+// selected (working) row's state calls for. Neutralize confirmDestroy's
+// arm-instead-of-act branch and this goes red.
+func TestNavCtrlXFirstPressArmsNoAction(t *testing.T) {
+	sup := newFakeSup(tui.GoldenRoster())
+	m := newTestApp(t, sup)
+
+	m = press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl})
+
+	if len(sup.ops) != 0 {
+		t.Fatalf("first ctrl-x must not call the supervisor; sup.ops = %v", sup.ops)
+	}
+	if got := content(m); !strings.Contains(got, `Press ctrl+x again to kill "wire the app root"`) {
+		t.Fatalf("expected the arm/confirm line naming kill for the working row; got:\n%s", got)
+	}
+}
+
+// TestNavKillWorkingSession verifies the SECOND press acts: two ctrl-x on a
+// working (non-finished) session kills it rather than archiving it, and issues
+// exactly one Supervisor call.
 func TestNavKillWorkingSession(t *testing.T) {
 	sup := newFakeSup(tui.GoldenRoster())
 	m := newTestApp(t, sup)
 
-	press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl})
+	m = press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl}) // arm
+	press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl})     // confirm
 
 	want := "kill:0192a1b2-app0-7000-8000-000000000001"
 	if len(sup.ops) != 1 || sup.ops[0] != want {
 		t.Fatalf("sup.ops = %v; want one entry %q", sup.ops, want)
+	}
+}
+
+// TestNavCtrlXArchivesFinishedSession pins the verb-matches-state contract for
+// the OTHER state: a finished session's confirm line names "archive", and the
+// second press archives (never kills) it.
+func TestNavCtrlXArchivesFinishedSession(t *testing.T) {
+	sup := newFakeSup([]tui.SessionInfo{{
+		ID:     "fin-1",
+		Title:  "done and dusted",
+		Status: tui.StatusFinished,
+	}})
+	m := newTestApp(t, sup)
+
+	m = press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl}) // arm
+	if got := content(m); !strings.Contains(got, `Press ctrl+x again to archive "done and dusted"`) {
+		t.Fatalf("expected the confirm line to name archive for the finished row; got:\n%s", got)
+	}
+	press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl}) // confirm
+
+	if want := "archive:fin-1"; len(sup.ops) != 1 || sup.ops[0] != want {
+		t.Fatalf("sup.ops = %v; want one entry %q (archive, not kill)", sup.ops, want)
+	}
+}
+
+// TestNavCtrlXSelectionMoveResetsConfirm is the SAFETY test — the load-bearing
+// one. The canonical hazard is a stale arm surviving a selection change: arm on
+// A, move the selection AWAY (to B) and BACK (to A), then press ctrl-x. That
+// press must RE-ARM A (show a fresh confirm), not act, because the round trip
+// cancelled the arm. A confirm that survived the move would kill A on this press
+// with no fresh confirm — the exact wrong-moment destruction this feature exists
+// to prevent. Removing the central disarm turns this red (it records a kill
+// immediately instead of re-arming).
+func TestNavCtrlXSelectionMoveResetsConfirm(t *testing.T) {
+	const idA = "0192a1b2-app0-7000-8000-00000000000a"
+	const idB = "0192a1b2-app0-7000-8000-00000000000b"
+	sup := newFakeSup([]tui.SessionInfo{
+		{ID: idA, Title: "session A", Status: tui.StatusWorking},
+		{ID: idB, Title: "session B", Status: tui.StatusWorking},
+	})
+	m := newTestApp(t, sup)
+
+	m = press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl}) // arm on A (selected)
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyDown})    // -> B (disarms)
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyUp})      // -> A (still disarmed)
+	m = press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl}) // must RE-ARM A, not act
+
+	if len(sup.ops) != 0 {
+		t.Fatalf("a selection round-trip must cancel the armed confirm; sup.ops = %v (expected none)", sup.ops)
+	}
+	if got := content(m); !strings.Contains(got, `Press ctrl+x again to kill "session A"`) {
+		t.Fatalf("expected ctrl-x after the round trip to re-arm A fresh, not act; got:\n%s", got)
+	}
+
+	press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl}) // genuine second press: acts
+
+	if want := "kill:" + idA; len(sup.ops) != 1 || sup.ops[0] != want {
+		t.Fatalf("sup.ops = %v; want exactly one entry %q after a clean two-press", sup.ops, want)
+	}
+}
+
+// TestNavCtrlXArmedSessionMoveActsOnNewSelectionOnly is the sibling safety case:
+// once the selection moves off the armed session A onto B, ctrl-x arms B and a
+// further press kills B — session A is never in the recorded ops. This pins the
+// "never acts on the wrong session" half directly.
+func TestNavCtrlXArmedSessionMoveActsOnNewSelectionOnly(t *testing.T) {
+	const idA = "0192a1b2-app0-7000-8000-00000000000a"
+	const idB = "0192a1b2-app0-7000-8000-00000000000b"
+	sup := newFakeSup([]tui.SessionInfo{
+		{ID: idA, Title: "session A", Status: tui.StatusWorking},
+		{ID: idB, Title: "session B", Status: tui.StatusWorking},
+	})
+	m := newTestApp(t, sup)
+
+	m = press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl}) // arm A
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyDown})    // -> B (disarms A)
+	m = press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl}) // arms B, does not act on A
+	press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl})     // acts on B only
+
+	if want := "kill:" + idB; len(sup.ops) != 1 || sup.ops[0] != want {
+		t.Fatalf("sup.ops = %v; want exactly one entry %q — A must never be touched", sup.ops, want)
+	}
+}
+
+// TestNavCtrlXArmDoesNotCarryOverviewToPeek verifies a confirm armed on the
+// overview does not silently carry into peek: opening peek (space) is an
+// intervening key that disarms, so the first ctrl-x on peek re-arms rather than
+// acting.
+func TestNavCtrlXArmDoesNotCarryOverviewToPeek(t *testing.T) {
+	sup := newFakeSup(tui.GoldenRoster())
+	m := newTestApp(t, sup)
+
+	m = press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl}) // arm on the overview
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeySpace})   // open peek — disarms
+	press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl})     // must re-arm, not act
+
+	if len(sup.ops) != 0 {
+		t.Fatalf("opening peek must cancel the overview's armed confirm; sup.ops = %v (expected none)", sup.ops)
 	}
 }
 

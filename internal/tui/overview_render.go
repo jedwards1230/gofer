@@ -584,7 +584,7 @@ func (o Overview) dispatch(width int, hide bool) []string {
 // rule the tally column and the blocked gutter follow.
 //
 // The swap is a WIDTH decision, not a taste one: the flat hint already spends
-// 70 of the 80 cells this line is budgeted at, and "ctrl-t stop agents" needs
+// ~72 of the 80 cells this line is budgeted at, and "ctrl-t stop agents" needs
 // 18 more, so something has to yield. "? shortcuts" is the entry that yields
 // because it is the only one with a second way in: "?" on an empty dispatch bar
 // opens the /help panel (see [App.handleOverviewKey]), and so does typing
@@ -592,7 +592,11 @@ func (o Overview) dispatch(width int, hide bool) []string {
 // alternative and names a destructive binding an operator needs to be able to
 // find.
 func (o Overview) hintText() string {
-	const base = "enter open · space peek · tab toggle view · ctrl-x kill"
+	// "ctrl-x×2" signals the two-press confirm: the first ctrl-x arms, the second
+	// kills/archives (see [App.confirmDestroy]). The verb stays "kill" — the hint
+	// is state-blind, so it names the common case; the confirm LINE names the
+	// exact verb (archive for a finished session).
+	const base = "enter open · space peek · tab toggle view · ctrl-x×2 kill"
 	if o.layout().tree {
 		return base + " · ctrl-t stop agents"
 	}

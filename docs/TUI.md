@@ -42,7 +42,10 @@ A row may be a whole fan-out hierarchy; it collapses to aggregate state,
 agent count, and whether approvals are pending, and expands inline to the
 subagent tree. `↑`/`↓` move the selection · `tab` switches view · `enter`
 open (attach the full session) · `space` peek · `ctrl-x` kill (running; subtree
-interrupted) or archive (finished) · `ctrl-t` stop every subagent **below** the
+interrupted) or archive (finished) — a **two-press confirm**: the first `ctrl-x`
+arms the action and shows a status line naming the verb for that row's state
+(`kill` vs `archive`), the second `ctrl-x` (same session still selected) runs it;
+any other key cancels · `ctrl-t` stop every subagent **below** the
 selected row, acting immediately on the selected row. `enter`, `space`, `ctrl-x`
 and `ctrl-t` take these meanings only while the dispatch bar is empty; every
 other key types into it — so `space` on non-empty text is an ordinary space —
@@ -54,8 +57,9 @@ waiting/status line, and a `❯ reply` input. `up`/`down` move the roster
 selection (the card follows); `enter` opens (attaches) or, with reply text,
 sends the reply; `esc` closes back to the overview, and so does `space` with an
 empty reply (`space` is the toggle partner of the overview's `space`-to-peek);
-`ctrl+x` kills a running session or archives a finished one, as on the overview.
-Peek carries no transcript tail — it is a roster-only projection.
+`ctrl+x` kills a running session or archives a finished one, as on the overview —
+the same two-press confirm (first press arms, second press acts). Peek carries no
+transcript tail — it is a roster-only projection.
 
 **Attach** — full transcript + input. `esc` interrupts the in-flight turn;
 `←` on an empty input backs out — to the **parent session** when the attached
@@ -571,11 +575,12 @@ none (with text, it edits); `↓` in an **empty** attach input returns to the
 overview with the attached session's first spawned child selected, and does
 nothing when it has no children (with text, the key belongs to the input keymap,
 not to navigation); `ctrl-x` kills a running
-session or archives a finished one; `ctrl-t` stops the selected row's subagents;
+session or archives a finished one (a two-press confirm — press twice);
+`ctrl-t` stops the selected row's subagents;
 `ctrl-c` quits. In peek, `up`/`down` move
 the selection, `enter` opens the session (or sends the reply when the `❯` input
 has text), `esc` closes to the overview (and `space` does too with an empty
-reply), and `ctrl+x` deletes.
+reply), and `ctrl+x` deletes (press twice to confirm).
 
 The app root is a **client** like any other (repo invariant): it reads the
 roster by polling `Supervisor.Roster` on a timer (the supervisor's roster is

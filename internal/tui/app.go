@@ -194,6 +194,18 @@ type App struct {
 
 	status string // transient error/status line, cleared on the next key press
 
+	// ctrlXArmed is the session id a first ctrl+x has ARMED for its destructive
+	// kill/archive (roster + peek); "" = nothing armed. The action fires only on
+	// a SECOND ctrl+x while the SAME session is still selected — see
+	// [App.confirmDestroy]. Update's key handler disarms it (back to "") on EVERY
+	// key press before the per-screen handler runs, exactly as it clears
+	// a.status, so any intervening key — nav, typing, esc, opening peek, a screen
+	// switch — cancels a pending confirm and a stale arm can never act on a
+	// session the user has since moved off of. It is deliberately bound to the
+	// session ID, not the row position: a roster refresh that shuffles rows under
+	// a held selection leaves the arm pointing at the session it was armed on.
+	ctrlXArmed string
+
 	// statusSev is how a.status is COLORED (issue #161). The status line is
 	// the only feedback channel several actions have — notably /model — so
 	// rendering a success in the same red as an HTTP 400 actively tells the
@@ -946,6 +958,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyPressMsg:
 		a.clearStatus()
+		// Capture and disarm the ctrl+x two-press confirm. Snapshotting it here —
+		// before any overlay or per-screen handler — and clearing a.ctrlXArmed is
+		// what makes the confirm momentary: ANY key lands on a cleared arm, so
+		// only a SECOND ctrl+x (whose confirmDestroy re-reads this snapshot and
+		// finds the still-selected session) acts; everything else cancels. Mirrors
+		// clearStatus above — the confirm LINE lives in a.status and dies on the
+		// same key.
+		prevArmed := a.ctrlXArmed
+		a.ctrlXArmed = ""
 		// Any key press clears an active/frozen mouse selection — docs/TUI.md's
 		// "clear the selection on the next click / a key press" contract (a
 		// fresh click already clears it via handleMouseClick installing a new
@@ -981,7 +1002,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return next, cmd
 			}
 		}
-		next, cmd := a.handleKey(msg)
+		next, cmd := a.handleKey(msg, prevArmed)
 		if app, ok := next.(App); ok {
 			// tea.Batch collapses to the single non-nil Cmd, so this is
 			// exactly `cmd` on every key press except the two that open a
@@ -1025,9 +1046,21 @@ func (a App) handleWheel(msg tea.MouseWheelMsg) App {
 // each screen's switch used to carry its own ctrl+c copy), then the current
 // screen's handler for everything else. The order matches what those copies
 // had: ctrl+c was the first case in every screen's switch.
-func (a App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	if next, cmd, handled := dispatchGlobalKey(a, msg.Key()); handled {
+func (a App) handleKey(msg tea.KeyPressMsg, prevArmed string) (tea.Model, tea.Cmd) {
+	key := msg.Key()
+	if next, cmd, handled := dispatchGlobalKey(a, key); handled {
 		return next, cmd
+	}
+	// ctrl+x on the roster or peek is a two-press confirm, handled HERE — ahead
+	// of the per-screen switch — rather than in each screen's handler: the
+	// kill/archive action and its selected-session target are identical on both
+	// screens, so one definition keeps overview and peek from ever drifting apart
+	// (the attach screen has no ctrl+x). prevArmed carries the arm as of the
+	// START of this key press (Update snapshots then clears it), so confirmDestroy
+	// can tell a first press from a second.
+	if key.Mod.Contains(tea.ModCtrl) && key.Code == 'x' &&
+		(a.scr == screenOverview || a.scr == screenPeek) {
+		return a.confirmDestroy(prevArmed)
 	}
 	switch a.scr {
 	case screenPeek:
@@ -1039,9 +1072,45 @@ func (a App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
-// handleOverviewKey handles key presses on the roster screen: navigation,
-// the dispatch bar, and the kill/archive shortcut. The dispatch bar is
-// always typeable.
+// confirmDestroy runs the roster/peek ctrl+x two-press confirm against the
+// selected session. The FIRST press arms the action — it records the session's
+// id in a.ctrlXArmed and shows a confirm line naming the verb the session's
+// state calls for (kill for a running session, archive for a finished one) —
+// and does NOT touch the Supervisor. The SECOND press acts, but only when
+// prevArmed (the arm as of the start of this key press) still equals the
+// selected session's id: that single equality is the whole safety property. Any
+// intervening key press disarms via Update's central reset, and a selection that
+// moved to a different session no longer matches prevArmed, so the confirm can
+// never kill or archive a session other than the exact one it was armed on.
+func (a App) confirmDestroy(prevArmed string) (tea.Model, tea.Cmd) {
+	s, ok := a.over.Selected()
+	if !ok {
+		// Empty roster / nothing selected: nothing to arm or destroy.
+		return a, nil
+	}
+	if prevArmed == s.ID {
+		// Second press, same session still selected: act on its CURRENT state.
+		if s.Status == StatusFinished {
+			return a, a.doArchive(s.ID)
+		}
+		return a, a.doKill(s.ID)
+	}
+	// First press (or a fresh session, the previous arm having been disarmed):
+	// arm this session and name the action its state calls for, so the verb the
+	// user reads is the one the second press will actually run.
+	verb := "kill"
+	if s.Status == StatusFinished {
+		verb = "archive"
+	}
+	a.ctrlXArmed = s.ID
+	a.setStatus(sevWarn, fmt.Sprintf("Press ctrl+x again to %s %q.", verb, a.over.rowLabel(s)))
+	return a, nil
+}
+
+// handleOverviewKey handles key presses on the roster screen: navigation and
+// the dispatch bar. The dispatch bar is always typeable. ctrl+x (the two-press
+// kill/archive confirm) and ctrl+c/ctrl+y/ctrl+r are handled a rung up in
+// [App.handleKey] before this runs.
 func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.Key()
 	switch {
@@ -1132,15 +1201,6 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		a.over = a.over.SetInput("")
 		return a, nil
 
-	case key.Mod.Contains(tea.ModCtrl) && key.Code == 'x':
-		if s, ok := a.over.Selected(); ok {
-			if s.Status == StatusFinished {
-				return a, a.doArchive(s.ID)
-			}
-			return a, a.doKill(s.ID)
-		}
-		return a, nil
-
 	case key.Mod.Contains(tea.ModCtrl) && key.Code == 't':
 		// Bulk stop: kill every subagent BELOW the selected row, leaving the
 		// selected session itself running — ctrl-x is still the way to stop one
@@ -1187,8 +1247,9 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // with text sends it as a reply (via the same Send path attach uses) and stays;
 // esc closes peek back to the overview, and so does space with an empty reply
 // (space is the toggle partner of the overview's space-to-peek); space with
-// text types a space; ctrl+x deletes (kills a running session, archives a
-// finished one); backspace edits the reply.
+// text types a space; backspace edits the reply. ctrl+x (the two-press
+// kill/archive confirm) is handled a rung up in [App.handleKey] before this
+// runs, shared with the roster.
 func (a App) handlePeekKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.Key()
 	switch {
@@ -1231,15 +1292,6 @@ func (a App) handlePeekKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.peekReply += " "
-		return a, nil
-
-	case key.Mod.Contains(tea.ModCtrl) && key.Code == 'x':
-		if s, ok := a.over.Selected(); ok {
-			if s.Status == StatusFinished {
-				return a, a.doArchive(s.ID)
-			}
-			return a, a.doKill(s.ID)
-		}
 		return a, nil
 
 	case key.Code == tea.KeyBackspace:
