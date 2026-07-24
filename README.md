@@ -33,7 +33,7 @@ approvals reach your phone over ACP; see the [roadmap](#roadmap).)
 │ ● refactor-api  waiting   approval ⚠    $1.03  8m40s │
 │ ○ docs-pass     done      —             $0.11  1h02m │
 │                                                      │
-│ [enter] peek · [a] attach · [ctrl-x] kill · [n] new  │
+│ [enter] open · [space] peek · [ctrl-x] kill          │
 └──────────────────────────────────────────────────────┘
 ```
 

@@ -1680,9 +1680,9 @@ v0.17.0, so effort now travels the same road as the model, hop for hop:
 `Supervisor.SetEffort` → `gofer/set_effort` (gofer-native JSON-RPC, like
 `gofer/set_model`, forwarded router→worker) → `Runner.SetEffort`, with the
 level surfaced on the roster row (`SessionInfo.Effort`) and persisted as the
-`session.effort` config default. That road stops at the runner, though —
-see "Reasoning effort does not reach the provider yet" below before reading
-this as an end-to-end feature.
+`session.effort` config default. That road stopped at the runner until
+agent-sdk-go v0.19.0 closed the gap — see "Reasoning effort reaches the
+provider" below for what is and isn't end-to-end today.
 
 It is its own **Thinking** tab (effortpicker.go) rather than a ←/→ modifier on
 the Model tab: ←/→ are claimed by the panel host for tab switching, and effort
@@ -1714,36 +1714,42 @@ that model still has it, and a screen that hides both the level and the way to
 drop it is a dead end. `/thinking off` stays legal there too; only
 `/thinking low|medium|high` refuses, by name, without writing anything.
 
-### Reasoning effort does not reach the provider yet (SDK gap)
+### Reasoning effort reaches the provider (SDK gap closed in v0.19.0)
 
-Everything above is real gofer-side state — the roster row, the runner's
-`SetEffort`, the wire method — but **no provider request currently changes**,
-so `/thinking` cannot yet make a model think harder. Three facts compose:
+**Historical note — this section described a gap that is now fixed.** Through
+agent-sdk-go v0.18.x, `/thinking` changed no provider request: gofer never
+populated `provider.Params`, so every runner was built with
+`Thinking{Enabled: false}`; `Runner.Prompt`'s per-turn overlay set
+`params.Thinking.Effort` and never `.Enabled`; and both adapters emitted
+reasoning config only when `Enabled` was true. The effort was fully plumbed
+gofer-side and inert one hop below the last layer anyone tested.
 
-1. gofer never populates `provider.Params` on any create path, so every runner
-   is built with `Thinking{Enabled: false}`.
-2. `Runner.Prompt`'s per-turn overlay sets `params.Thinking.Effort` and
-   **never** `params.Thinking.Enabled` (agent-sdk-go v0.17.0
-   `runner/runner.go`), so `SetEffort` cannot flip it.
-3. Both adapters emit reasoning config **only** when `Enabled` is true —
-   `provider/openai/request.go` (`if req.Params.Thinking.Enabled`) and
-   `provider/anthropic/convert.go` (same).
+agent-sdk-go **v0.19.0** (issue #88, commit 83f0a2c) closed it by making a
+named effort self-enabling:
 
-gofer cannot close this from its side without forcing `Thinking.Enabled: true`
-at session creation, which would switch Anthropic extended thinking on (minimum
-budget, temperature forbidden) for every affected session — a behavior change
-no user asked for — and would *still* leave mid-session `/thinking` inert on
-any session created before a default existed. Per invariant #1 it is the
-SDK's contract to fix: `SetEffort`'s own doc promises a mid-session effect it
-cannot currently deliver.
+```go
+func (t Thinking) Active() bool { return t.Enabled || t.Effort != "" }
+```
 
-Consequently the persisted `session.effort` default is **not read at session
-creation** (like `session.permission_mode`), and the Thinking tab's ✓
-deliberately does **not** fall back to it — the ✓ claims what is *in force*,
-and a config default reaches no runner. `/thinking` from the overview says only
-"Default reasoning effort saved", claiming nothing about sessions that do not
-exist yet. When the SDK gap closes, wire the default into
-`Params.Thinking` and restore the config rung in `activeEffort`.
+Both adapters now gate on `Active()` rather than `.Enabled` —
+`provider/anthropic/convert.go:130` and `provider/openai/request.go:101` — so
+the `Effort` the runner overlay already set is sufficient on its own. gofer
+pins v0.19.0, so **mid-session `/thinking` now reaches the wire**: no
+gofer-side change was needed, and nothing has to force `Thinking.Enabled: true`
+at session creation (which would have switched Anthropic extended thinking on
+wholesale — the reason gofer deliberately refused to work around it locally).
+
+**Still open, gofer-side.** The persisted `session.effort` default is
+**not read at session creation** (unlike `session.permission_mode`), and the
+Thinking tab's ✓ deliberately does **not** fall back to it — the ✓ claims what
+is *in force*, and a config default still reaches no runner. `/thinking` from
+the overview says only "Default reasoning effort saved", claiming nothing about
+sessions that do not exist yet. The remaining work is to wire the default into
+`Params.Thinking` at creation and restore the config rung in `activeEffort`.
+
+Worth keeping in mind when that lands: gofer has no test asserting an effort
+reaches a *provider request body* — the original bug survived precisely because
+every test stopped at `runner.effort`. Assert the wire, not the field.
 
 **Built (M5 usage panels)**: `/usage` (usage.go) and `/stats` (stats.go) are two
 more read-only tabs cut from the same cloth as `/status` — pure, stateless
@@ -2070,7 +2076,8 @@ input — and it is **leading-only**, so `that worked!` and
   it with its own file tools if it wants more. The trigger is a token
   boundary, so an email address never opens the popup.
 
-- **P0**: `/compact [instructions]` (block-if-busy) — **blocked on the SDK**: `v0.17.0`
+- **P0**: `/compact [instructions]` (block-if-busy) — **still blocked on the
+  SDK** as of the pinned `v0.19.0` (tracked as agent-sdk-go#89). The SDK
   ships the `session.compact` op and `session.compacted` event as data types and
   a `session.NewCompactionEntry` journal entry, but no way for an embedder to
   TRIGGER compaction. There is no `Runner.Compact`, no compaction option on
