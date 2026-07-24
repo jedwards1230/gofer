@@ -17,6 +17,7 @@ package tui
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -43,6 +44,12 @@ const (
 	itemUser
 	itemTool
 	itemError
+	// itemInterrupted marks a turn the user deliberately stopped (Esc /
+	// session/cancel). The SDK surfaces an interrupt as a context-cancellation
+	// session.error, which would otherwise render as a red failure; Ingest
+	// reclassifies it to this benign, muted "stopped" indicator so a deliberate
+	// stop does not read as an error. A genuine failure keeps itemError.
+	itemInterrupted
 	itemApproval
 	itemApprovalResolved
 	// itemBackgroundAgents is the block naming the subagent sessions this
@@ -366,7 +373,18 @@ func (m Model) Ingest(e event.Event) Model {
 		// so it can't stick "working…" on after a failure that emits no
 		// TurnFinished.
 		m.turnActive = false
-		m.items = append(m.items, item{kind: itemError, text: ev.Err, done: true})
+		// A user interrupt (Esc / session/cancel) cancels the turn's context,
+		// which the SDK surfaces as a context-cancellation session.error — bare
+		// "context canceled" when the turn was cancelled between model calls (the
+		// ask_user/permission-prompt case), or wrapped like "openai: request:
+		// context canceled" when a model call was in flight. That is a deliberate
+		// stop, not a failure, so reclassify it to a muted "stopped" indicator
+		// rather than a red error. Anything else stays an error.
+		if isUserCancel(ev.Err) {
+			m.items = append(m.items, item{kind: itemInterrupted, done: true})
+		} else {
+			m.items = append(m.items, item{kind: itemError, text: ev.Err, done: true})
+		}
 
 	case event.PermissionRequested:
 		// m.pending is the transient interactive prompt state rendered beneath the
@@ -1476,6 +1494,18 @@ func markerBlockLines(style lipgloss.Style, glyph string, rows []string) []strin
 	return out
 }
 
+// isUserCancel reports whether a session-error message is a context
+// cancellation — the signature of a user interrupt (Esc / session/cancel)
+// stopping the turn, as opposed to a genuine failure. The SDK emits the cancel
+// as its error string: bare ("context canceled") when the turn was cancelled
+// between model calls, or wrapped ("openai: request: context canceled") when a
+// model call was in flight — so this matches the substring, not the whole
+// string. Tying the match to context.Canceled.Error() keeps it pinned to the
+// stdlib sentinel rather than a hand-copied literal.
+func isUserCancel(errText string) bool {
+	return strings.Contains(errText, context.Canceled.Error())
+}
+
 // renderItemLines renders a single transcript item to its display lines. A
 // tool item is a collapsed tree block spanning header + up to three
 // result lines; every text-bearing kind renders to one line per physical line
@@ -1505,6 +1535,13 @@ func (m Model) renderItemLines(it item, width int) []string {
 
 	case itemError:
 		return styledMarkerLines(m.theme.DangerStyle(), m.theme.GlyphAgent, it.text, plainRender)
+
+	case itemInterrupted:
+		// A deliberate stop (Esc / session/cancel), rendered as subdued chrome
+		// like itemThinking — a muted `⏹ stopped`, clearly reading as "you
+		// stopped this", not a failure.
+		muted := m.theme.MutedStyle()
+		return []string{markerLine(muted, "⏹", muted.Render("stopped"))}
 
 	case itemApproval:
 		return []string{markerLine(m.theme.WarnStyle(), m.theme.GlyphAgent, it.text)}
