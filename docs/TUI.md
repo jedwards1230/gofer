@@ -835,6 +835,32 @@ over a command panel/menu never paints or copies those rows — a row the
 clamped range still covers is painted/copied in full, not bounded by a
 click/release column that itself landed outside the region.
 
+**Word selection.** A **double-click** (two left clicks on the same cell within
+`doubleClickWindow`, 500ms — bubbletea v2 reports no click count, so the app
+reconstructs it from click timing + position) snaps the selection to the whole
+**word** under the cursor, and a **drag after a double-click** extends it
+**word-by-word** — the moving end snaps to whole-word boundaries so complete
+words are added/removed, like a native terminal/editor. A "word" is a maximal
+run of cells sharing the cursor cell's class (non-space token/URL, or a
+whitespace run), measured in the same cell columns the selection math uses
+(`wordBoundsCells`), so a wide rune earlier in the row doesn't shift the bounds.
+A plain single-click drag stays per-character.
+
+**Clickable links.** URLs in glamour-rendered markdown are wrapped in **OSC 8**
+hyperlink escapes (`linkifyURLs`) so a terminal makes them natively clickable.
+The sequence is emitted **only on a real color profile** — never under the Ascii
+golden profile, so golden files stay plain — and is zero-width and
+ANSI-stripped, so it changes no row width, no golden, and no selection/highlight
+math (`ansi.Strip`/`StringWidth`/`Cut` all treat it as zero-width). Because the
+app captures mouse events, a click can't always reach the terminal's own OSC 8
+handler, so a **modifier+click** (Ctrl / Alt / Cmd / Meta — not Shift, which
+extends a selection) on a link opens it via the platform opener (`open` on
+macOS, `xdg-open` on Linux/BSD, `rundll32` on Windows — chosen by
+`runtime.GOOS`, http(s) only). The URL under a cell is recovered straight from
+the OSC 8 the render already emitted (`linkAt`), so there is one source of link
+truth. Requiring a modifier keeps a plain click/drag and a double-click purely
+selection, so link-open composes with both.
+
 **`tui.mouse`** (settings.go, default true/unset) is the escape hatch for a
 terminal where OSC 52 or SGR mouse reporting misbehaves: off sets
 `View().MouseMode = tea.MouseModeNone` instead of `tea.MouseModeCellMotion`,
