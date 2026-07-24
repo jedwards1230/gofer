@@ -115,6 +115,11 @@ type item struct {
 type Model struct {
 	theme theme.Theme
 
+	// md renders a settled assistant message's markdown (markdown.go). It is a
+	// pointer so the memo it holds survives Model's copy-on-write recopying —
+	// every copy shares the one renderer created in New.
+	md *markdownRenderer
+
 	items []item
 
 	// openText/openReasoning index into items for the message currently
@@ -217,6 +222,7 @@ type Model struct {
 func New(th theme.Theme) Model {
 	return Model{
 		theme:                     th,
+		md:                        newMarkdownRenderer(th.Profile),
 		openText:                  -1,
 		openReasoning:             -1,
 		toolIndex:                 map[string]int{},
@@ -1148,7 +1154,7 @@ func (m Model) transcriptLines(width int) []string {
 			}
 		}
 		first = false
-		for _, line := range m.renderItemLines(it) {
+		for _, line := range m.renderItemLines(it, width) {
 			lines = append(lines, wrap(line, width)...)
 		}
 	}
@@ -1351,6 +1357,31 @@ func styledMarkerLines(style lipgloss.Style, glyph, text string, render func(str
 // item's own text.
 func plainRender(s string) string { return s }
 
+// markerBlockLines is [styledMarkerLines]' counterpart for already-rendered
+// rows (markdown out of [markdownRenderer.render], which carry their own ANSI
+// per row): it fronts the first row with the state marker and indents the
+// continuation rows under the glyph, exactly like styledMarkerLines, but takes
+// a pre-split []string instead of a "\n"-joined string and — crucially — keeps
+// a blank separator row ("") truly blank rather than indenting it to a run of
+// spaces, so a markdown block's inter-paragraph gaps stay clean empty rows (no
+// trailing whitespace in a golden, nothing stray for a selection to copy).
+func markerBlockLines(style lipgloss.Style, glyph string, rows []string) []string {
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]string, len(rows))
+	out[0] = markerLine(style, glyph, rows[0])
+	indent := strings.Repeat(" ", ansi.StringWidth(glyph)+1)
+	for i := 1; i < len(rows); i++ {
+		if rows[i] == "" {
+			out[i] = ""
+			continue
+		}
+		out[i] = indent + rows[i]
+	}
+	return out
+}
+
 // renderItemLines renders a single transcript item to its display lines. A
 // tool item is a collapsed tree block spanning header + up to three
 // result lines; every text-bearing kind renders to one line per physical line
@@ -1358,7 +1389,7 @@ func plainRender(s string) string { return s }
 // single-line case. Every kind is marker-only styled: the leading glyph
 // carries the state color, the text after it keeps its own styling (plain, or
 // muted for reasoning/status body).
-func (m Model) renderItemLines(it item) []string {
+func (m Model) renderItemLines(it item, width int) []string {
 	switch it.kind {
 	case itemAssistantReasoning:
 		// Some providers (Claude included) emit a reasoning/thinking block
@@ -1413,11 +1444,19 @@ func (m Model) renderItemLines(it item) []string {
 		if strings.TrimSpace(it.text) == "" {
 			return nil
 		}
-		style := m.theme.WarnStyle()
-		if it.done {
-			style = m.theme.OKStyle()
+		if !it.done {
+			// Streaming: render the raw deltas plainly. Markdown rendering waits
+			// for the message to settle (see markdown.go) — re-running glamour on
+			// every delta would flicker and lag, and a half-arrived fence or list
+			// renders as garbage anyway.
+			return styledMarkerLines(m.theme.WarnStyle(), m.theme.GlyphAgent, it.text, plainRender)
 		}
-		return styledMarkerLines(style, m.theme.GlyphAgent, it.text, plainRender)
+		// Settled: render the message's markdown, wrapped to leave room for the
+		// "● " marker glyph and the matching continuation indent so a wrapped
+		// row still lands within width.
+		glyph := m.theme.GlyphAgent
+		rows := m.md.render(it.text, width-(ansi.StringWidth(glyph)+1))
+		return markerBlockLines(m.theme.OKStyle(), glyph, rows)
 	}
 }
 

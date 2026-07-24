@@ -635,6 +635,33 @@ reproduces it end to end via incremental `MessageStarted`/`MessageDelta`
 events, the same shape a live daemon attach streams, before asserting the
 fix).
 
+**Markdown rendering (settled assistant text)**: once an assistant message
+*settles* (`MessageFinished`), its text is rendered as markdown — bold/italic,
+headings, lists, blockquotes, inline code, links, and fenced code blocks — via
+Charm's [glamour](https://github.com/charmbracelet/glamour) (the library behind
+`glow`), in `markdown.go`. A *streaming* (still-open) item keeps rendering its
+raw deltas plainly: re-running glamour on every delta flickers and lags, and a
+half-arrived fence renders as garbage — so the swap to rendered markdown happens
+exactly at settle. glamour emits one multi-line string that `markdownRenderer`
+splits into one entry per physical row (upholding the one-entry-one-row
+invariant above), each already wrapped to the transcript width (so it reflows on
+resize) and stripped of glamour's right-pad (so a selection copy — and a code
+block especially — carries the raw text, not filler spaces). Three seams keep it
+honest: (1) **determinism** — under `theme.Test`'s `termenv.Ascii` profile the
+output is ANSI-stripped, so golden files stay plain, byte-stable text; the live
+adapter's real profile keeps color/attributes. (2) **color-doesn't-move-layout**
+— the pad trim is display-width-aware, so stripping the colored render of its
+ANSI yields byte-for-byte the Ascii render (the `assertColorLayout` invariant).
+The document/paragraph base color is cleared so plain prose emits no ANSI at all
+(only genuine elements — headings, code — are colored), which keeps the
+styled-golden `TagANSI` harness — it recognizes only the marker palette — valid
+for prose fixtures. (3) **cost** — glamour re-parses on every `Render` (~80µs)
+and the transcript re-renders on every keystroke, so a settled message is
+rendered once and memoized by `(width, text)`; the memo lives on a pointer field
+shared across `Model`'s copy-on-write copies and is cleared on a width change.
+`internal/tui/markdown_internal_test.go` covers all three plus code-block
+verbatim selection; the `markdown_rendered` golden locks the plain layout.
+
 **`tui.autoscroll`** (settings.go, default true/unset) controls whether new
 streaming events pull the attach view down toward the tail: enabled (the
 default) behaves exactly as scroll always has — offset 0 always renders the

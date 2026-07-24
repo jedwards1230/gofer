@@ -1,0 +1,24 @@
+● # Release plan
+
+  Ship in two stages, carefully:
+
+  • cut the v2 tag
+  • publish the notes
+
+  func main() {
+      run()
+  }
+
+  See the runbook https://example.com/runbook.
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+> ▏
+────────────────────────────────────────────────────────────────────────────────
+usage=20in/40out
