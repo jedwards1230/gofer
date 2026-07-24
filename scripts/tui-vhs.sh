@@ -42,7 +42,7 @@ go build -o vhs/.bin/harness ./vhs/harness
 
 tapes=("$@")
 if [ ${#tapes[@]} -eq 0 ]; then
-	tapes=(transcript-tool-call transcript-approval roster-overview panel-status-overview panel-status panel-config panel-model panel-model-empty panel-model-daemon-refresh)
+	tapes=(transcript-tool-call transcript-approval roster-overview panel-status-overview panel-status panel-config panel-model panel-model-empty panel-model-daemon-refresh panel-thinking panel-usage panel-stats panel-help panel-resume)
 fi
 
 for name in "${tapes[@]}"; do
