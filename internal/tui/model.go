@@ -1148,13 +1148,25 @@ func (m Model) transcriptLines(width int) []string {
 		if m.pending != nil && i == m.pending.badgeIdx {
 			continue // shown by the pending prompt block, not inline
 		}
+		rendered := m.renderItemLines(it, width)
+		if len(rendered) == 0 {
+			// An item that renders nothing — a contentless reasoning block (which
+			// providers, Claude included, emit routinely after a tool call), an
+			// empty assistant-text item, an empty background-agents block — must
+			// NOT consume a gap: prepending the gap before it and another before
+			// the next rendered item stacks two blank rows where the reader sees
+			// one block flowing into the next (the "double blank after a tool/shell
+			// block" defect). Skip it entirely so the gap is only ever paid between
+			// two blocks that actually have lines.
+			continue
+		}
 		if !first {
 			for range transcriptGap {
 				lines = append(lines, "")
 			}
 		}
 		first = false
-		for _, line := range m.renderItemLines(it, width) {
+		for _, line := range rendered {
 			lines = append(lines, wrap(line, width)...)
 		}
 	}

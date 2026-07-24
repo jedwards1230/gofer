@@ -209,6 +209,40 @@ func TestEmptyReasoningRendersNoMarker(t *testing.T) {
 	}
 }
 
+// TestNoDoubleGapAroundEmptyItem pins the fix for the "double blank after a
+// tool/shell block" defect. A contentless reasoning block (Claude emits these
+// routinely after a tool call) renders nothing, but transcriptLines used to pay
+// a transcriptGap for it anyway — the gap before the empty item AND the gap
+// before the following reply stacked into TWO blank rows where the reader should
+// see one block flowing into the next. The block→reply boundary must carry
+// exactly one blank; the doubled form must be absent. Neutralizing the
+// zero-line skip in transcriptLines re-inserts the second blank and fails this.
+func TestNoDoubleGapAroundEmptyItem(t *testing.T) {
+	render(t, "tool_then_empty_reasoning",
+		event.NewToolCallStarted(sid, "call-1", "bash", json.RawMessage(`{"cmd":"echo hi"}`)),
+		event.NewToolCallFinished(sid, "call-1", json.RawMessage(`{"cmd":"echo hi"}`), "hi", false, nil),
+		event.NewMessageStarted(sid, event.MessageReasoning),
+		event.NewMessageFinished(sid, event.MessageReasoning, ""), // empty → renders nothing
+		event.NewMessageStarted(sid, event.MessageText),
+		event.NewMessageFinished(sid, event.MessageText, "Done."),
+	)
+
+	got := testkit.Render(ingest(
+		event.NewToolCallStarted(sid, "call-1", "bash", json.RawMessage(`{"cmd":"echo hi"}`)),
+		event.NewToolCallFinished(sid, "call-1", json.RawMessage(`{"cmd":"echo hi"}`), "hi", false, nil),
+		event.NewMessageStarted(sid, event.MessageReasoning),
+		event.NewMessageFinished(sid, event.MessageReasoning, ""),
+		event.NewMessageStarted(sid, event.MessageText),
+		event.NewMessageFinished(sid, event.MessageText, "Done."),
+	), testkit.Width, testkit.Height)
+	if !strings.Contains(got, "   └ hi\n\n● Done.") {
+		t.Errorf("want exactly one blank between the tool block and the reply:\n%s", got)
+	}
+	if strings.Contains(got, "   └ hi\n\n\n● Done.") {
+		t.Errorf("the empty reasoning item still stacked a second blank after the tool block:\n%s", got)
+	}
+}
+
 // TestEmptyAssistantTextRendersNoMarker is TestEmptyReasoningRendersNoMarker's
 // itemAssistantText counterpart — an assistant-text item that settles with no
 // content renders no marker line either.
