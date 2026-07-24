@@ -799,6 +799,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.setStatus(sevDanger, msg.err.Error())
 			return a, nil
 		}
+		// Close whatever we already hold before adopting: two subscribes for the
+		// same session can be in flight at once (Init subscribes, then an enter
+		// before subReadyMsg lands subscribes again). An overwritten subscription
+		// stays live and keeps replaying into Ingest, so a user message would
+		// render twice — see the decisionSubReadyMsg twin below for the same
+		// guard on the decision stream.
+		if a.sub != nil {
+			a.sub.Close()
+		}
 		a.sub = msg.sub
 		// Arm the decision stream alongside the event stream — see
 		// subscribeDecisions for why it hangs off this message rather than

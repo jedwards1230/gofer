@@ -509,6 +509,68 @@ func TestAppStaleEventGuard(t *testing.T) {
 	}
 }
 
+// TestSubReadySupersedesLiveSubscription is subReadyMsg's adopt-path guard, and
+// the event-stream twin of decision_test.go's
+// TestDecisionSubReadySupersedesLiveSubscription. Two subscribes for the same
+// session can be in flight at once — Init subscribes, then an Enter before the
+// first subReadyMsg lands subscribes again — so the handler must CLOSE the one
+// it already holds before adopting the new one. Without that close both
+// subscriptions stay live in the broker's subscriber set, both replay into
+// Ingest, and the user's message renders twice (Model.Ingest appends the user
+// item unconditionally). This reproduces the double-adopt and asserts the prior
+// subscription is closed and the user message is ingested exactly once.
+func TestSubReadySupersedesLiveSubscription(t *testing.T) {
+	a := NewApp(theme.Test(), &internalFakeSup{}, OverviewMeta{AttachSessionID: "sess-x"}, CommandEnv{})
+
+	broker := event.NewBroker()
+	first := broker.Subscribe(event.FilterAll, 16)
+	mdl, _ := a.Update(subReadyMsg{id: "sess-x", sub: first})
+	a = mdl.(App)
+	second := broker.Subscribe(event.FilterAll, 16)
+	mdl, _ = a.Update(subReadyMsg{id: "sess-x", sub: second})
+	a = mdl.(App)
+
+	if a.sub != second {
+		t.Fatalf("second event subscription not adopted: a.sub = %p, second = %p", a.sub, second)
+	}
+	if _, ok := <-first.C; ok {
+		t.Error("superseded subscription's channel was not closed")
+	}
+
+	// Root-cause property: with one live subscription, a user message published
+	// now must reach Ingest exactly once. Before the fix, first stayed in the
+	// broker's subscriber set, so both it and second delivered the same event
+	// and the user line doubled.
+	broker.Publish(event.NewMessageFinished("sess-x", event.MessageUser, "hello"))
+
+	drain := func(sub *event.Subscription) {
+		for {
+			select {
+			case ev, ok := <-sub.C:
+				if !ok {
+					return
+				}
+				m, _ := a.Update(sessEventMsg{id: "sess-x", ev: ev, sub: sub})
+				a = m.(App)
+			default:
+				return
+			}
+		}
+	}
+	drain(first)
+	drain(second)
+
+	got := 0
+	for _, it := range a.sess.items {
+		if it.kind == itemUser {
+			got++
+		}
+	}
+	if got != 1 {
+		t.Errorf("user message rendered %d times; want exactly 1 (superseded subscription still feeding Ingest)", got)
+	}
+}
+
 // attachForDialogTest attaches a into the roster's selected session (mirroring
 // TestGoldenAppAttach's opening moves) and returns the resulting App,
 // subscribed and ready to receive sessEventMsg directly — the shared setup
