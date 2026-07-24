@@ -96,10 +96,13 @@ func runAttach(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 
 	_, _ = fmt.Fprintf(stderr, "gofer attach: connected to daemon at %s\n", df.addr)
 	app := tui.NewApp(theme.Default(), b, tui.OverviewMeta{
-		App:             "gofer",
-		Version:         effectiveVersion(),
-		Cwd:             cwd,
-		Now:             time.Now(),
+		App:     "gofer",
+		Version: effectiveVersion(),
+		Cwd:     cwd,
+		Now:     time.Now(),
+		// The daemon's own build, so the roster header warns when attaching to a
+		// stale daemon — the stderr warning below is swallowed by the alt-screen.
+		DaemonVersion:   daemonBinaryVersion(ctx, c),
 		AttachSessionID: attachID,
 	}, buildCommandEnv(rootDir, cwd))
 

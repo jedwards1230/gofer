@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/jedwards1230/gofer/internal/tui/theme"
+	"github.com/jedwards1230/gofer/internal/versionskew"
 )
 
 // Row layout column budgets. The row is prefix + body(title, statusword ·
@@ -149,7 +150,11 @@ func identityHeaderLines(th theme.Theme, meta OverviewMeta, width int) []string 
 	}
 	title := th.AccentStyle().Render(app)
 	if meta.Version != "" {
-		title += " " + th.MutedStyle().Render("v"+meta.Version)
+		// Strip a leading "v" before re-adding one so a version that already
+		// carries it — every Go pseudo-version (vX.Y.Z-0.<ts>-<sha>) and release
+		// tag effectiveVersion() reports — renders "v0.3.1", not "vv0.3.1". A
+		// version without the prefix (the test fixtures' "0.3.0") is unchanged.
+		title += " " + th.MutedStyle().Render("v"+strings.TrimPrefix(meta.Version, "v"))
 	}
 
 	context := meta.Model
@@ -163,11 +168,59 @@ func identityHeaderLines(th theme.Theme, meta OverviewMeta, width int) []string 
 	return []string{truncate(title, width), truncate(th.MutedStyle().Render(context), width)}
 }
 
-// header renders the app identity, model·cwd context, and status counts.
+// header renders the app identity, model·cwd context, status counts, and a
+// fourth line that is normally the blank separator but carries the stale-daemon
+// banner when the roster came from an out-of-date daemon (see
+// [Overview.skewSeparator]). Reusing the separator slot keeps the header a fixed
+// [headerLines] tall — the banner costs no body rows and hit-testing/layout math
+// is unchanged — and a non-skewed roster renders byte-identically.
 func (o Overview) header(width int) []string {
 	working, needsInput, finished := o.counts()
 	counts := fmt.Sprintf("%d awaiting input · %d working · %d completed", needsInput, working, finished)
-	return append(identityHeaderLines(o.theme, o.meta, width), truncate(o.theme.MutedStyle().Render(counts), width), "")
+	return append(identityHeaderLines(o.theme, o.meta, width), truncate(o.theme.MutedStyle().Render(counts), width), o.skewSeparator(width))
+}
+
+// skewSeparator returns the header's fourth line: the stale-daemon banner when
+// the daemon this roster came from is out of date relative to the running CLI,
+// else the empty string the header has always ended on. The banner is the
+// TUI-visible counterpart of the CLI's stderr version-skew warning — a warning
+// printed before bubbletea takes the alt-screen is never seen, so a TUI user on
+// a stale daemon (silently missing whatever the new build added) gets no signal
+// without this. It renders every frame while skewed, so it persists rather than
+// flashing once. Classification is shared with the CLI path
+// (internal/versionskew), so the two surfaces never disagree on what counts as
+// skewed: unknown/equal/newer daemons stay silent.
+func (o Overview) skewSeparator(width int) string {
+	switch versionskew.Classify(o.meta.Version, o.meta.DaemonVersion) {
+	case versionskew.Older:
+		return truncate(o.theme.WarnStyle().Render(fmt.Sprintf(
+			"⚠ daemon is stale (%s < %s) — run: gofer daemon restart",
+			shortVersion(o.meta.DaemonVersion), shortVersion(o.meta.Version))), width)
+	case versionskew.Differs:
+		return truncate(o.theme.WarnStyle().Render(fmt.Sprintf(
+			"⚠ daemon is a different build (%s) — run: gofer daemon restart if it is stale",
+			shortVersion(o.meta.DaemonVersion))), width)
+	default:
+		return ""
+	}
+}
+
+// shortVersion collapses a Go pseudo-version (vX.Y.Z-0.<timestamp>-<sha>) to a
+// readable vX.Y.Z-<short-sha> so the banner fits one line without the 14-digit
+// timestamp; release tags (vX.Y.Z) and local "dev-<sha>" builds are already
+// short and pass through unchanged. It is display-only — the authoritative
+// comparison always runs on the full version (see [Overview.skewSeparator]).
+func shortVersion(v string) string {
+	i := strings.Index(v, "-0.")
+	if i <= 0 {
+		return v
+	}
+	base := v[:i]
+	sha := v[strings.LastIndex(v, "-")+1:]
+	if len(sha) > 7 {
+		sha = sha[:7]
+	}
+	return base + "-" + sha
 }
 
 // body renders the roster rows for the current view. With scroll at its

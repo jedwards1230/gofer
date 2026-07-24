@@ -114,3 +114,8 @@ go run ./cmd/gofer demo                            # offline faux-provider strea
   and the `$1`/`$ARGUMENTS`/`${1:-def}`/`${@:N}` substitution engine. A leaf
   (stdlib only) so the rules are table-tested without a terminal; the TUI only
   adapts a loaded command into a dispatcher entry.
+- `internal/versionskew/` — classifies how a daemon's build relates to the
+  client's (older / different / silent), the one comparison the CLI's stderr
+  version-skew warning (`cmd/gofer`) and the roster's stale-daemon banner
+  (`internal/tui`) share so the two surfaces never disagree. A leaf over
+  `x/mod/semver`.

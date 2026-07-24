@@ -44,6 +44,15 @@ type OverviewMeta struct {
 	Cwd     string
 	Now     time.Time
 
+	// DaemonVersion is the build version of the daemon this roster came from,
+	// read off the gofer/hello handshake (empty for the local in-process
+	// backend, or a daemon that predates the field). The header compares it
+	// against Version to warn when the roster is being served by a stale daemon
+	// — the TUI-visible twin of the CLI's stderr version-skew warning, since a
+	// warning printed before the alt-screen is never seen. See
+	// [Overview.skewSeparator] and internal/versionskew.
+	DaemonVersion string
+
 	// AttachSessionID, when set, opens the app directly on that session's
 	// attach screen instead of the overview — the `gofer attach <id>` entry
 	// point. Empty (the default) starts on the overview.
