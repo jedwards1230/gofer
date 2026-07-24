@@ -144,6 +144,7 @@ func screenKeymap() []keyBinding {
 	return []keyBinding{
 		{Keys: "↑/↓", Scope: scopeOverview, Desc: "Move the roster selection"},
 		{Keys: "enter", Scope: scopeOverview, Desc: "Open the selected session, or run what's typed"},
+		{Keys: "→", Scope: scopeOverview, Desc: "Open the selected session (empty dispatch bar)"},
 		{Keys: "space", Scope: scopeOverview, Desc: "Peek the selected session (empty dispatch bar)"},
 		{Keys: "tab", Scope: scopeOverview, Desc: "Switch flat / grouped roster view"},
 		{Keys: "esc", Scope: scopeOverview, Desc: "Clear the dispatch bar"},

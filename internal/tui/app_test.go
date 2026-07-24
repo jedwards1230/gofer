@@ -281,6 +281,21 @@ func TestNavEnterAttachesSelected(t *testing.T) {
 	}
 }
 
+// TestNavRightAttachesSelected verifies →, with an empty dispatch input, opens
+// (attaches) the selected session — the roster half of the attach screen's
+// ←/→ drill pair, mirroring enter. Mutation anchor for the right→attach branch:
+// neutralize it and this test goes red. (The input-keymap interplay — Right
+// stays a cursor-move once the bar holds text — is covered in
+// input_keymap_test.go.)
+func TestNavRightAttachesSelected(t *testing.T) {
+	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
+
+	if got := content(m); !strings.Contains(got, "> ▏") {
+		t.Fatalf("expected the attach screen (empty input line) after →, got:\n%s", got)
+	}
+}
+
 // TestNavSpacePeeksSelected verifies space, with an empty dispatch input,
 // peeks the selected session (the roster-only card that does not subscribe).
 func TestNavSpacePeeksSelected(t *testing.T) {

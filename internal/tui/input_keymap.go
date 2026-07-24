@@ -26,8 +26,9 @@ import tea "charm.land/bubbletea/v2"
 // caller rather than here is a bare (unmodified) Left on attach (back out to
 // the overview when the input is empty, else move the cursor left — see
 // handleAttachKey); this function is never reached for that key. Bare Right on
-// the overview reaches this keymap's KeyRight case as a plain cursor-move —
-// the overview's open/peek verbs live on enter/space, not the arrows.
+// the overview is the same shape: an EMPTY dispatch bar attaches the selected
+// session (handleOverviewKey's KeyRight case), so this keymap's KeyRight case
+// is reached — a plain cursor-move — only once the bar holds text.
 func applyInputKey(buf inputBuffer, key tea.Key) (inputBuffer, bool) {
 	switch {
 	case key.Code == tea.KeyLeft && key.Mod.Contains(tea.ModAlt):
