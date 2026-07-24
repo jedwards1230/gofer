@@ -430,22 +430,29 @@ func (r *Reconstructor) OverviewRoster(ctx context.Context) ([]SessionInfo, erro
 	return dtos, nil
 }
 
-// sessionCwd looks up sessionID's persisted working directory from the live
-// roster (the same gofer/roster wire call [Reconstructor.Roster] makes), for
+// sessionCwd looks up sessionID's persisted working directory for
 // [Reconstructor.loadHistory] to pass as session/load's required cwd. It
-// returns "" if the session isn't (yet, or ever) in the roster or the call
-// itself fails — not a guess at a real path, but exactly the fallback the
-// daemon's own resolveSessionCwd already applies to an empty session/load
-// cwd (its own working directory, see internal/daemon/handlers.go), so it is
-// a value the daemon is guaranteed to accept.
+// consults the live roster first (the gofer/roster wire call
+// [Reconstructor.Roster] makes, a running session's authoritative cwd) and then
+// the persistent overview roster ([Reconstructor.OverviewRoster], gofer/overview)
+// — because an OFFLINE (reloaded, not-yet-live) session isn't in gofer/roster at
+// all, yet the overview carries its cwd read back from its journal meta. Without
+// the overview fallback an offline session/load would send "", and the daemon's
+// resolveSessionCwd would then reopen it in the daemon's OWN working directory
+// (typically "/" under launchd/systemd) rather than the directory it was created
+// in. It returns "" only when neither roster resolves a non-empty cwd (the
+// daemon still accepts that — its own empty-cwd fallback applies — but now also
+// substitutes the persisted cwd itself; see internal/daemon/handlers.go).
 func (r *Reconstructor) sessionCwd(ctx context.Context, sessionID string) string {
-	dtos, err := r.Roster(ctx)
-	if err != nil {
-		return ""
-	}
-	for _, d := range dtos {
-		if d.ID == sessionID {
-			return d.Cwd
+	for _, rosterFn := range []func(context.Context) ([]SessionInfo, error){r.Roster, r.OverviewRoster} {
+		dtos, err := rosterFn(ctx)
+		if err != nil {
+			continue
+		}
+		for _, d := range dtos {
+			if d.ID == sessionID && d.Cwd != "" {
+				return d.Cwd
+			}
 		}
 	}
 	return ""

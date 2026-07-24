@@ -304,6 +304,51 @@ func resolveSessionCwd(raw string) (string, *rpcError) {
 	return cwd, nil
 }
 
+// resolveLoadCwd resolves the working directory to reload sessionID into for
+// session/load. A non-blank client-supplied cwd is authoritative (ACP v1
+// requires it) and validated exactly like session/new. When the client omits it
+// — gofer's daemonbridge sends "" for an offline session its live roster can't
+// resolve — the session's PERSISTED cwd (from its journal meta, discovered via
+// persistedCwd) is used instead of the daemon's own working directory, so the
+// reloaded session reopens in, and groups under, the directory it was created in
+// rather than the daemon's launch dir (typically "/" under launchd/systemd). If
+// the persisted directory has since been deleted, resolveSessionCwd would reject
+// it; rather than hard-fail a resume that used to succeed, this falls through to
+// the daemon's working directory (resolveSessionCwd's original empty-cwd path).
+func resolveLoadCwd(d *Daemon, ctx context.Context, sessionID, reqCwd string) (string, *rpcError) {
+	if strings.TrimSpace(reqCwd) != "" {
+		return resolveSessionCwd(reqCwd)
+	}
+	if pc := persistedCwd(d, ctx, sessionID); pc != "" {
+		if cwd, rerr := resolveSessionCwd(pc); rerr == nil {
+			return cwd, nil
+		}
+		// Persisted directory gone — fall through to the daemon-getwd default
+		// rather than failing the whole resume.
+	}
+	return resolveSessionCwd("")
+}
+
+// persistedCwd returns sessionID's working directory as persisted in its journal
+// meta, or "" if unknown/unreadable. It reuses the supervisor's List (which
+// enriches every session — live with its live cwd, offline/archived with its
+// journal cwd — see supervisor/router diskSessionInfo) so it covers BOTH the
+// in-process supervisor and the router deployment through the one seam the
+// daemon already holds, without a second disk-scan path. Read-only. Called only
+// on the cold blank-cwd resume path, so the List scan's cost is inconsequential.
+func persistedCwd(d *Daemon, ctx context.Context, sessionID string) string {
+	rows, err := d.sup.List(ctx)
+	if err != nil {
+		return ""
+	}
+	for _, r := range rows {
+		if r.ID == sessionID {
+			return r.Cwd
+		}
+	}
+	return ""
+}
+
 // handleSessionNew creates an idle session (no first turn — the prompt
 // arrives via a subsequent session/prompt) and replies its id.
 //
@@ -430,16 +475,17 @@ func handleSessionNew(d *Daemon, ctx context.Context, _ *peer, params json.RawMe
 // races a load) is left unguaranteed, and ACP does not require otherwise.
 //
 // Cwd precedence: ACP v1's LoadSessionRequest.cwd is REQUIRED and is the
-// working directory to reload the session into (src/v1/agent.rs), so the
+// working directory to reload the session into (src/v1/agent.rs), so a
 // client-supplied cwd is authoritative here — via resolveSessionCwd, same as
-// session/new — even though [supervisor.Supervisor.List] can now also read a
-// session's persisted cwd back from its journal (see [handleSessionList]).
-// The persisted cwd is for LISTING (so a client can discover/filter sessions
-// before it has picked one to load), not for overriding what the client
-// explicitly asks to load into; a client is expected to always send a cwd on
-// load per spec. When it sends none, resolveSessionCwd's existing empty-cwd
-// fallback (the daemon's own working directory) applies unchanged — that
-// fallback predates this change and is not replaced by the persisted cwd.
+// session/new. But when the client sends NONE, this reopens the session in the
+// directory it was CREATED in — the cwd persisted in its journal meta (read via
+// resolveLoadCwd) — rather than the daemon's own working directory. gofer's own
+// daemonbridge legitimately sends "" for an offline (journal-reloaded) session
+// its live roster can't resolve, and a launchd/systemd daemon's working
+// directory is typically "/", so the old empty-cwd fallback regrouped a resumed
+// session under a bogus "/" root and ran its agent there. The persisted cwd is
+// preferred only as the empty-cwd substitute; a client that DOES send a cwd
+// still overrides it. See [resolveLoadCwd].
 func handleSessionLoad(d *Daemon, ctx context.Context, p *peer, params json.RawMessage) (any, *rpcError) {
 	op, rerr := decodeOp[event.SessionResume](acp.MethodSessionLoad, params)
 	if rerr != nil {
@@ -452,7 +498,7 @@ func handleSessionLoad(d *Daemon, ctx context.Context, p *peer, params json.RawM
 	if err := json.Unmarshal(params, &req); err != nil {
 		return nil, invalidParams(fmt.Errorf("acp: decode %s params: %w", acp.MethodSessionLoad, err))
 	}
-	cwd, rerr := resolveSessionCwd(req.Cwd)
+	cwd, rerr := resolveLoadCwd(d, ctx, op.SessionID, req.Cwd)
 	if rerr != nil {
 		return nil, rerr
 	}
