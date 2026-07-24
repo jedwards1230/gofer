@@ -325,14 +325,13 @@ func (p pendingDecision) hint() string {
 	}
 }
 
-// The prompt's fixed vocabulary. The gutter is exactly as wide as the caret
-// plus its space, so focusing a row never shifts the columns beneath it; the
-// rationale indent puts the sub-line two cells past its option's label, which
-// is what makes it read as belonging to that option rather than to the list.
+// The prompt's fixed vocabulary. The focus caret and its gutter are the shared
+// [choiceCaret]/[choiceGutter] (choicelist.go) — the same selection marker the
+// approval prompt and every other list here use; the rationale indent puts the
+// sub-line two cells past its option's label, which is what makes it read as
+// belonging to that option rather than to the list.
 const (
 	decisionChip             = "decision"
-	decisionCaret            = "▸" // the same selection caret the roster, command menu, /config and /model rows use
-	decisionGutter           = "  "
 	decisionRationaleIndent  = "       "
 	decisionFreeTextGlyph    = "›"
 	decisionFreeTextLabel    = "Type something."
@@ -399,9 +398,15 @@ func renderDecisionPrompt(th theme.Theme, p pendingDecision, width int) []string
 		width = 1
 	}
 
+	// A "·" separator, not a run of spaces, joins the chip to its title: three
+	// spaces between two content words reads as two tab cells (the multi strip's
+	// own spacing), so a single-question header "decision   Choose a task" was
+	// being mistaken for a two-question strip. The bullet binds them as one
+	// "decision · <title>" label instead — and a single question still draws no
+	// tab strip at all (only p.multi() does, below).
 	header := th.WarnStyle().Render(decisionChip)
 	if title := p.chipTitle(); title != "" {
-		header += "   " + title
+		header += th.MutedStyle().Render(" · ") + title
 	}
 	lines := []string{
 		strings.Repeat("─", width),
@@ -491,7 +496,7 @@ func (p pendingDecision) tabCell(th theme.Theme, i int) string {
 	}
 	caret := " "
 	if i == p.tab {
-		caret = th.AccentStyle().Render(decisionCaret)
+		caret = th.AccentStyle().Render(choiceCaret)
 	} else {
 		label = th.MutedStyle().Render(label)
 	}
@@ -614,27 +619,24 @@ func (p pendingDecision) panelLines(th theme.Theme, width int) []string {
 	return section(out, decisionPanelNotes, p.draft().notes)
 }
 
-// rowLines renders the prompt's selectable rows at the given width, each row
-// wrapping onto continuation lines indented under its own label rather than
-// being truncated — an option whose label or rationale runs past the column is
-// the normal case once the side panel takes a third of the frame, and a choice
-// you can't read in full is a choice you can't make.
+// rowLines renders the prompt's selectable rows at the given width through the
+// shared [choiceListLines] — the same vertical caret list the approval prompt
+// answers through — after composing each row's leader, label, and sub-lines.
+// Each row wraps onto continuation lines indented under its own label rather
+// than being truncated: an option whose label or rationale runs past the column
+// is the normal case once the side panel takes a third of the frame, and a
+// choice you can't read in full is a choice you can't make.
 func (p pendingDecision) rowLines(th theme.Theme, width int) []string {
 	q := p.question()
 	rows := p.rows()
-	out := make([]string, 0, len(rows)*2)
+	crows := make([]choiceRow, 0, len(rows))
 	for i, row := range rows {
-		// One blank row separates the numbered options from the escape
-		// hatches beneath them, per the mockup. Emitted at the boundary rather
-		// than unconditionally, so a question with no options at all (free
-		// text only) doesn't open with two blank rows.
-		if row.kind != decisionRowOption && i > 0 && rows[i-1].kind == decisionRowOption {
-			out = append(out, "")
-		}
-
-		gutter := decisionGutter
-		if i == p.cursor {
-			gutter = th.AccentStyle().Render(decisionCaret) + " "
+		cr := choiceRow{
+			// One blank row separates the numbered options from the escape
+			// hatches beneath them, per the mockup. Emitted at the boundary
+			// rather than unconditionally, so a question with no options at all
+			// (free text only) doesn't open with two blank rows.
+			sepBefore: row.kind != decisionRowOption && i > 0 && rows[i-1].kind == decisionRowOption,
 		}
 
 		switch row.kind {
@@ -649,10 +651,11 @@ func (p pendingDecision) rowLines(th theme.Theme, width int) []string {
 			}
 			// The digit is the option's own 1-based position, which is also
 			// what the 1-9 keys select — see App.selectDecisionOption.
-			out = append(out, hangingIndent(fmt.Sprintf("%s%d  ", gutter, row.opt+1), label, width)...)
+			cr.leader = fmt.Sprintf("%d  ", row.opt+1)
+			cr.label = label
 			if opt.Rationale != "" {
 				for _, l := range wrap(opt.Rationale, width-len(decisionRationaleIndent)) {
-					out = append(out, th.MutedStyle().Render(decisionRationaleIndent+l))
+					cr.sublines = append(cr.sublines, th.MutedStyle().Render(decisionRationaleIndent+l))
 				}
 			}
 
@@ -670,21 +673,24 @@ func (p pendingDecision) rowLines(th theme.Theme, width int) []string {
 				// to type it again.
 				body = text + "  " + th.AccentStyle().Render(decisionAnsweredGlyph)
 			}
-			out = append(out, hangingIndent(gutter+decisionFreeTextGlyph+" ", body, width)...)
+			cr.leader = decisionFreeTextGlyph + " "
+			cr.label = body
 
 		case decisionRowChat:
 			label := decisionChatLabel
 			if _, chat := p.draft().outcome.(acp.DecisionOutcomeChat); chat {
 				label += "  " + th.AccentStyle().Render(decisionAnsweredGlyph)
 			}
-			out = append(out, hangingIndent(gutter+decisionChatGlyph+" ", label, width)...)
+			cr.leader = decisionChatGlyph + " "
+			cr.label = label
 
 		case decisionRowSubmit:
-			out = append(out, hangingIndent(gutter+th.AccentStyle().Render(decisionAnsweredGlyph)+" ",
-				fmt.Sprintf("%s %d of %d", decisionSubmitLabel, p.answeredCount(), len(p.questions)), width)...)
+			cr.leader = th.AccentStyle().Render(decisionAnsweredGlyph) + " "
+			cr.label = fmt.Sprintf("%s %d of %d", decisionSubmitLabel, p.answeredCount(), len(p.questions))
 		}
+		crows = append(crows, cr)
 	}
-	return out
+	return choiceListLines(th, crows, p.cursor, width)
 }
 
 // draftText returns the focused question's drafted free-text answer, if it has
@@ -725,7 +731,7 @@ func (p pendingDecision) submitBody(th theme.Theme, width int) []string {
 		if draft.outcome != nil {
 			box = th.AccentStyle().Render(decisionAnsweredGlyph)
 		}
-		head := decisionGutter + box + " " + padTo(label, labelWidth) + "  "
+		head := choiceGutter + box + " " + padTo(label, labelWidth) + "  "
 		body = append(body, hangingIndent(head, th.MutedStyle().Render(p.summarize(i, draft)), width)...)
 	}
 

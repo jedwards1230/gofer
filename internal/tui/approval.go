@@ -35,6 +35,14 @@ type pendingApproval struct {
 	session  string
 	remember bool
 
+	// cursor is the focused answer row in the vertical choice list: 0 = Yes
+	// (allow), 1 = No (deny). ↑/↓ move it and Enter takes the focused row (see
+	// App.handleApprovalKey); the a/y and d/n quick keys resolve directly
+	// without moving it. It opens on Yes to match the decision prompt's "first
+	// row focused" model and the left-to-right Yes/No order — a deliberate
+	// affirmative default, since Enter's alternative is always one arrow away.
+	cursor int
+
 	// agent is the originating agent id from the tool call's event.Agent, or
 	// "" when the call is un-attributed (no subagent, or a stream that never
 	// carried one).
@@ -87,24 +95,25 @@ var commandKeys = []string{"command", "cmd", "script", "file_path", "path"}
 // block at the given width: a full-width rule, an attributed "<tool> command"
 // title, the call's own description and body, a plain-English rationale
 // (the agent's own once an explain has answered, else derived locally from the
-// guard's decision trace), the question with its numbered action row, and a
-// dim footer hint carrying the cancel key, the explain key, and the session
-// id. bodyLimit caps the body's rows (config.TUI.ApprovalBodyLineLimit — the
-// gated call's text must never push the question off the frame), and caps the
-// amend editor's visible rows too when one is open.
+// guard's decision trace), the question, its vertical Yes/No choice list, and a
+// dim footer hint carrying the remember/amend/explain/cancel keys and the
+// session id. bodyLimit caps the body's rows (config.TUI.ApprovalBodyLineLimit
+// — the gated call's text must never push the question off the frame), and caps
+// the amend editor's visible rows too when one is open.
 //
-// `[tab] amend` rides the ACTION row rather than the hint line beneath it, for
-// two reasons: amending IS a decision affordance — the middle option between
-// allowing something slightly wrong and denying it — and the hint line has no
-// room left. At width 80 "esc cancel · ctrl+e explain · session <uuid>" is 75
-// cells; a fourth key would push the session id past the edge and
-// [Model.promptLines] would clip it mid-uuid. The action row has ~30 cells
-// spare, so both keys stay fully visible at the default terminal size.
+// The answer is a vertical choice list (choicelist.go) — the same one the
+// structured-decision prompt uses — rather than a side-by-side "1. [a] Yes  2.
+// [d] No" row: [a]/[d] stay live as quick keys (shown as each row's leader),
+// and ↑/↓ + Enter select the focused row, so the two interactive prompts answer
+// the same way. The remaining affordances (remember, amend, explain, cancel)
+// and the session id ride the muted hint line beneath the list, wrapped to the
+// frame — freed from the old action row's one-line budget, which was why they
+// used to be crammed onto it.
 //
-// With p.amend set (Tab — see amend.go) the numbered action row and the hint
-// line are replaced by the inline editor, its cursor line, and its warning;
-// everything above them — header, attribution, body, and whichever rationale
-// applies — renders identically either way.
+// With p.amend set (Tab — see amend.go) the choice list and the hint line are
+// replaced by the inline editor, its cursor line, and its warning; everything
+// above them — header, attribution, body, and whichever rationale applies —
+// renders identically either way.
 //
 // collapsed drops the rationale to its opening paragraph plus a pointer at
 // ctrl+e, for a frame too short to show the whole block without squeezing the
@@ -160,14 +169,42 @@ func renderApprovalPrompt(th theme.Theme, p pendingApproval, width, bodyLimit in
 	if p.amend != nil {
 		return append(lines, amendLines(th, p, width, bodyLimit)...)
 	}
-	lines = append(lines,
-		"",
-		"Do you want to proceed?",
-		fmt.Sprintf("  1. [a] Yes   2. [d] No   ·   [r] remember: %s   ·   [tab] amend", rememberLabel(p.remember)),
-		"",
-		th.MutedStyle().Render("esc cancel · ctrl+e explain · session "+p.session),
-	)
+	// "Do you want to proceed?" sits directly above its Yes/No choices as their
+	// label — no blank between — which also keeps the whole block within a
+	// standard 80x24 frame's floor-0 (never-collapse) budget.
+	lines = append(lines, "", "Do you want to proceed?")
+	lines = append(lines, choiceListLines(th, approvalChoiceRows(), p.cursor, width)...)
+	lines = append(lines, "")
+	for _, l := range wrap(approvalHint(p), width) {
+		lines = append(lines, th.MutedStyle().Render(l))
+	}
 	return lines
+}
+
+// approvalChoiceRows is the approval prompt's two-row answer list: Yes over No,
+// each led by the quick key that also resolves it ([a]/[d]). The order is fixed
+// — Yes first — so p.cursor (0 = Yes, 1 = No) indexes it directly and the
+// affirmative row is the one Enter opens on.
+func approvalChoiceRows() []choiceRow {
+	return []choiceRow{
+		{leader: "[a] ", label: "Yes"},
+		{leader: "[d] ", label: "No"},
+	}
+}
+
+// approvalChoiceCount is the number of answer rows the cursor walks — the clamp
+// bound for [Model.moveApprovalCursor]. It tracks [approvalChoiceRows].
+const approvalChoiceCount = 2
+
+// approvalHint is the muted footer beneath the choice list: how to navigate it,
+// the remember toggle's live state, and the amend/explain/cancel keys. It fits
+// one line at the standard 80-cell width so the whole block stays within a
+// non-collapsing 80x24 frame — which is also why the session id is NOT repeated
+// here (the attach identity header already carries it); a second wrapped line
+// would push the full prompt past the frame and force the rationale to collapse.
+func approvalHint(p pendingApproval) string {
+	return fmt.Sprintf("enter/↑↓ select · [r] remember: %s · [tab] amend · ctrl+e explain · esc cancel",
+		rememberLabel(p.remember))
 }
 
 // The amend editor's two warning sentences. They are the UI half of a real

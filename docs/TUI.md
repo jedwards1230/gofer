@@ -104,10 +104,13 @@ the real `● bash(args)` block beside an empty `● bash` bullet. A standalone
 `itemApproval` badge now survives only as the fallback for a request that has
 no matching tool block.) It reads as a confirm prompt — a rule, an attributed `<tool> command`
 header, the call's own description and body, a plain-English rationale, the
-question, and the action row, keyed `a`/`d`/`r` (`r` toggles remember, `1`/`2`
-alias allow/deny), `tab` amends the call before allowing and `ctrl+e` explains
-why it was gated (read-only — both below), `esc` dismisses without answering
-(the request stays pending; a re-attach re-surfaces it):
+question, and a **vertical Yes/No choice list** (the same one the `ask_user`
+prompt uses), keyed `↑`/`↓` to move the focused row and `enter` to take it,
+`a`/`d` as quick keys (shown as each row's `[a]`/`[d]` leader; `y`/`n` and the
+un-advertised `1`/`2` alias them), `r` toggles remember, `tab` amends the call
+before allowing and `ctrl+e` explains why it was gated (read-only — both below),
+`esc` dismisses without answering (the request stays pending; a re-attach
+re-surfaces it):
 
 ```
  ────────────────────────────────────────────────
@@ -132,10 +135,20 @@ why it was gated (read-only — both below), `esc` dismisses without answering
    being asked.
 
  Do you want to proceed?
-   1. [a] Yes   2. [d] No   ·   [r] remember: off   ·   [tab] amend
+ ▸ [a] Yes
+   [d] No
 
- esc cancel · ctrl+e explain · session 0192a1b2-…
+ enter/↑↓ select · [r] remember: off · [tab] amend · ctrl+e explain · esc cancel
 ```
+
+The answer is a caret-navigable list rather than a side-by-side `1. [a] Yes  2.
+[d] No` row, so the two interactive prompts share one selection model
+(choicelist.go): the same `▸` caret marks the focused row, `↑`/`↓` move it, and
+`enter` takes it, while the quick keys stay live. It opens focused on **Yes**,
+the affirmative default a confirm prompt trains, one arrow from the deny. The
+footer hint fits one line at 80 cells so the whole block stays within a
+non-collapsing 80x24 frame; the session id lives in the identity header rather
+than being repeated here.
 
 The header's attribution clause is omitted entirely for an un-attributed call
 (no subagent, or a stream that never carried one) — never a placeholder. The
@@ -324,7 +337,7 @@ to the conversation:
 
 ```
  ────────────────────────────────────────────────
- decision   Pick a migration strategy
+ decision · Pick a migration strategy
 
  Which approach should I take?
 
@@ -339,13 +352,21 @@ to the conversation:
  Enter to select · ↑/↓ to navigate · Esc to cancel
 ```
 
-The focused row carries the same `▸` caret every other list in this TUI uses,
-in the gutter, so focusing a row never shifts the columns beneath it. Only the
-state-bearing tokens are colored (marker-only styling): the `decision` chip
-takes the approval header's warn style, the caret and `(Recommended)` take the
-accent, the rationale and the key hint are muted. A rationale-less option
-renders no sub-line at all, and a row the question opted out of is simply
-absent.
+The header joins the `decision` chip to its title with a `·` separator, **not**
+a run of spaces: three spaces between two content words read as two tab cells
+(the multi-question strip's own spacing), so `decision   Choose a task` was
+being mistaken for a two-question strip. The bullet binds them as one label, and
+a single question draws **no tab strip at all** — that strip is a multi-question
+affordance only.
+
+The options are the shared vertical choice list (choicelist.go) — the same one
+the approval prompt answers through — so the focused row carries the same `▸`
+caret every other list in this TUI uses, in the gutter, and focusing a row never
+shifts the columns beneath it. Only the state-bearing tokens are colored
+(marker-only styling): the `decision` chip takes the approval header's warn
+style, the caret and `(Recommended)` take the accent, the rationale and the key
+hint are muted. A rationale-less option renders no sub-line at all, and a row the
+question opted out of is simply absent.
 
 **Keys** — `↑`/`↓` move the focused row (clamped, never wrapping: wrapping from
 the last row onto option 1 is how a stray press sends the wrong answer);
@@ -385,7 +406,7 @@ tab, or a Submit tab for one answer, would be noise on the common case.
 
 ```
  ────────────────────────────────────────────────────────────────────────────────
- decision   2 questions
+ decision · 2 questions
  ←   ▸ □ M4 slicing     ✔ Views v1 scope     □ Submit   →
 
  How should the M4 milestone be sliced?

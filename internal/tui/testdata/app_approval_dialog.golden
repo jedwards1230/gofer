@@ -5,7 +5,6 @@ claude-sonnet-5 · ~/orchestration
 
 
 
-
 ────────────────────────────────────────────────────────────────────────────────
 bash command
 
@@ -19,6 +18,7 @@ Why you're being asked
   … ctrl+e to explain
 
 Do you want to proceed?
-  1. [a] Yes   2. [d] No   ·   [r] remember: off   ·   [tab] amend
+▸ [a] Yes
+  [d] No
 
-esc cancel · ctrl+e explain · session 0192a1b2-app0-7000-8000-000000000001
+enter/↑↓ select · [r] remember: off · [tab] amend · ctrl+e explain · esc cancel

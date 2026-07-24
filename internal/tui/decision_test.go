@@ -188,7 +188,7 @@ func TestDecisionPromptOpensOnRequest(t *testing.T) {
 	}
 	got := a.render()
 	for _, want := range []string{
-		"decision   Pick a migration strategy",
+		"decision · Pick a migration strategy",
 		"Which approach should I take?",
 		"1  In-place ALTER",
 		"2  Shadow table + backfill  (Recommended)",

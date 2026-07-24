@@ -1,3 +1,8 @@
+● bash(go test -race ./...)
+
+
+
+
 ────────────────────────────────────────────────────────────────────────────────
 bash command
   Run the test suite with race detection
@@ -10,15 +15,10 @@ Why you're being asked
   No permission rule matched this `bash` call, so gofer is asking before it
   runs. It also cannot be sandboxed on this host, so an allow rule alone will
   not let it run unattended.
-
-  Policy: unmatched · containable: false (no container configured)
-
-  Press `r` before allowing to remember this exact call for the rest of the
-  session. Add a rule to the `permissions` array in `config.json` — e.g.
-  `{"verdict": "allow", "tool": "bash", "specifier": "go *"}` — to stop being
-  asked.
+  … ctrl+e to explain
 
 Do you want to proceed?
-  1. [a] Yes   2. [d] No   ·   [r] remember: off   ·   [tab] amend
+▸ [a] Yes
+  [d] No
 
-esc cancel · ctrl+e explain · session 0192a1b2-c3d4-7e5f-8a90-000000000001
+enter/↑↓ select · [r] remember: off · [tab] amend · ctrl+e explain · esc cancel
