@@ -267,18 +267,22 @@ func TestDoubleHopPermissionRoundTrip(t *testing.T) {
 	}
 
 	// message.started(user), message.finished(user), turn.started,
-	// tool.call.started, turn.finished(tool_use), permission.requested — after
-	// the leading session.info title event, exactly as TestPermissionRelayEndToEnd.
-	before := drainFirstTurnEvents(t, sub, "read a.txt", 6)
+	// tool.call.started, tool.call.delta (v0.19.0's synthetic assembled input),
+	// turn.finished(tool_use), permission.requested — after the leading
+	// session.info title event, exactly as TestPermissionRelayEndToEnd.
+	before := drainFirstTurnEvents(t, sub, "read a.txt", 7)
 	if _, ok := before[3].(event.ToolCallStarted); !ok {
 		t.Fatalf("event 3 = %+v, want ToolCallStarted", before[3])
 	}
-	if tf, ok := before[4].(event.TurnFinished); !ok || tf.StopReason != "tool_use" {
-		t.Fatalf("event 4 = %+v, want TurnFinished(stop_reason=tool_use)", before[4])
+	if delta, ok := before[4].(event.ToolCallDelta); !ok || delta.Delta != `{"path":"a.txt"}` {
+		t.Fatalf("event 4 = %+v, want ToolCallDelta(Delta=%q)", before[4], `{"path":"a.txt"}`)
 	}
-	pr, ok := before[5].(event.PermissionRequested)
+	if tf, ok := before[5].(event.TurnFinished); !ok || tf.StopReason != "tool_use" {
+		t.Fatalf("event 5 = %+v, want TurnFinished(stop_reason=tool_use)", before[5])
+	}
+	pr, ok := before[6].(event.PermissionRequested)
 	if !ok {
-		t.Fatalf("event 5 = %+v, want PermissionRequested", before[5])
+		t.Fatalf("event 6 = %+v, want PermissionRequested", before[6])
 	}
 	if pr.Tool != "read_file" {
 		t.Errorf("PermissionRequested.Tool = %q, want %q", pr.Tool, "read_file")
@@ -341,10 +345,10 @@ func TestDoubleHopAmendedPermissionSurvivesTheWorkerHop(t *testing.T) {
 		t.Fatalf("Send: %v", err)
 	}
 
-	before := drainFirstTurnEvents(t, sub, "read a.txt", 6)
-	pr, ok := before[5].(event.PermissionRequested)
+	before := drainFirstTurnEvents(t, sub, "read a.txt", 7)
+	pr, ok := before[6].(event.PermissionRequested)
 	if !ok {
-		t.Fatalf("event 5 = %+v, want PermissionRequested", before[5])
+		t.Fatalf("event 6 = %+v, want PermissionRequested", before[6])
 	}
 
 	amended := json.RawMessage(`{"path":"b.txt"}`)

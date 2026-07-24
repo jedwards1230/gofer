@@ -40,10 +40,13 @@ func pendingGatedCall(t *testing.T, b *daemonbridge.Supervisor) (sessionID strin
 		t.Fatalf("Send: %v", err)
 	}
 
-	before := drainFirstTurnEvents(t, sub, "read a.txt", 6)
-	pr, ok := before[5].(event.PermissionRequested)
+	// 7 events (not 6): SDK v0.19.0 inserts a synthetic tool.call.delta carrying
+	// the assembled input right after tool.call.started — see
+	// TestPermissionRelayEndToEnd — so permission.requested lands at index 6.
+	before := drainFirstTurnEvents(t, sub, "read a.txt", 7)
+	pr, ok := before[6].(event.PermissionRequested)
 	if !ok {
-		t.Fatalf("event 5 = %+v, want PermissionRequested", before[5])
+		t.Fatalf("event 6 = %+v, want PermissionRequested", before[6])
 	}
 	return info.ID, sub, pr
 }
