@@ -1303,8 +1303,8 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return a, a.doKillTree(ids)
 
 	case key.Text == "R" && a.over.InputEmpty() && a.over.daemonStale():
-		// Restart a stale daemon in place — the TUI counterpart of the banner's
-		// "run: gofer daemon restart" hint. Gated three ways so it never
+		// Restart a stale daemon in place — the action the banner itself
+		// advertises ("press R to restart"). Gated three ways so it never
 		// surprises: only on an EMPTY dispatch bar (with text, "R" is an ordinary
 		// character and falls through to the input keymap, like "?" and the bare
 		// → above), only while the stale-daemon banner is actually showing (so

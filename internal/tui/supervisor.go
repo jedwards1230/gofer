@@ -33,7 +33,7 @@ type SessionStatus int
 const (
 	// StatusWorking is a session with a turn in flight.
 	StatusWorking SessionStatus = iota
-	// StatusNeedsInput is an idle session awaiting the user — either it
+	// StatusNeedsInput is a session at rest awaiting the user — either it
 	// finished its turn and is waiting for the next prompt, or a permission
 	// request is pending.
 	StatusNeedsInput

@@ -11,7 +11,7 @@ package tui
 // line instead of a wall of zeros.
 //
 // deferred (#175): true per-message / per-tool-call token attribution is out
-// of scope — it needs SDK per-item usage granularity absent from v0.14.2,
+// of scope — it needs SDK per-item usage granularity still absent as of v0.19.0,
 // which reports usage only at the turn and session level (the accumulated
 // [provider.Usage] this view reads). Rendering a synthesized per-message
 // estimate as fact is exactly what the issue forbids, so this view shows only

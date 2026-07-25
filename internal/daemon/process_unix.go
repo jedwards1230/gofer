@@ -16,10 +16,12 @@ import (
 // Unix-only: os.FindProcess always succeeds on Unix regardless of liveness, so
 // signal 0 is the portable probe.
 //
-// TODO(m6 slice 2 integration): cmd/gofer/daemon.go:pidAlive is an exact
-// duplicate of this and should be collapsed onto it once the router adoption
-// path lands (that swap touches cmd/gofer, deferred here to keep this PR
-// zero-conflict with the in-flight critical-path work).
+// TODO: cmd/gofer/daemon.go:pidAlive (line ~622) is an exact duplicate of this
+// and should be collapsed onto it. The stated blocker has cleared — the router
+// adoption path landed and already consumes ProcessAlive (internal/router/
+// adopt.go, methods.go) — so this is actionable now rather than deferred; it
+// was only held back to keep the original PR zero-conflict with then-in-flight
+// critical-path work. Tracked as jedwards1230/gofer#254.
 func ProcessAlive(pid int) bool {
 	if pid <= 0 {
 		return false

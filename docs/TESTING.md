@@ -32,8 +32,8 @@ The SDK owns loop/provider/session/permission testing (see agent-sdk-go's
 Fast PR lane on every PR (`.github/workflows/ci.yml`): `go build ./...`,
 `go vet ./...`, `go test ./...`, a separate `go vet -tags workerbench ./...`
 for the benchmark-tagged files, and `golangci-lint`. `go test -race ./...`
-runs only on push to main and release tags, so a race can pass the PR lane
-and still block a release.
+runs on **every PR** and on push to main / release tags — gofer is a
+concurrency-heavy repo, so a data race blocks the PR, not merely the release.
 
 **Visual capture (advisory).** A separate lane
 (`.github/workflows/vhs-capture.yml`) fires on PRs touching `internal/tui/**`,

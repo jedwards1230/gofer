@@ -79,8 +79,11 @@ make install                                       # local install, truthfully v
   output (the `gofer demo`/line renderer); dependency-light and stateless.
 - `internal/config/` — gofer's native on-disk config (JSON at
   `<root>/config.json`, written via `config.Save` — indented, mode 0600,
-  atomic); sections are the permissions ruleset (M3) plus `Session`/`TUI`
-  (M4). See its package doc.
+  atomic); sections are the permissions ruleset (M3), `Session`/`TUI` (M4),
+  `Telemetry`, and `Daemon` (incl. `drain_timeout_ms`). See its package doc.
+- `internal/permrationale/` — the gating rationale behind a permission
+  request (matched rule, policy, source, trace) that `ctrl+e` surfaces and
+  `session/explain_permission` answers.
 - `internal/sandbox/` — OS containment backends (seatbelt / bwrap+seccomp)
   behind the SDK's permission guard.
 - `internal/decision/` — gofer's structured-decision round trip: the

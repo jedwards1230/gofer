@@ -11,9 +11,11 @@ approvals reach your phone over ACP; see the [roadmap](#roadmap).)
 > router daemon, so the daemon and CLI can be upgraded in place while live
 > turns finish on the binary that started them. It is opt-in and **off by
 > default** — enable it with `gofer daemon --workers`. M5 (ACP v1 featureset
-> expansion) is in progress alongside it: `usage_update` and the `diff`/`plan`
-> pass-throughs are on the ACP surface; rich content blocks, resume, and model
-> discovery are still landing. Earlier milestones stand: M3's permission engine
+> expansion) is in progress alongside it: `usage_update`, the `diff`/`plan`
+> pass-throughs, resume (`session/load` with full-history replay), and model
+> discovery (`gofer/models`) are all on the ACP surface; the `image`/`resource`
+> content blocks and the Agmente client legs are still landing. Earlier
+> milestones stand: M3's permission engine
 > + approvals relay and M4's slash dispatcher and command panel — `/status`
 > (per-provider auth), `/config` (a settings registry backed by `config.Save`),
 > and `/model` (a picker that hot-swaps a live session's model), with
@@ -33,7 +35,7 @@ approvals reach your phone over ACP; see the [roadmap](#roadmap).)
 │ ● refactor-api  waiting   approval ⚠    $1.03  8m40s │
 │ ○ docs-pass     done      —             $0.11  1h02m │
 │                                                      │
-│ [enter] peek · [a] attach · [ctrl-x] kill · [n] new  │
+│ [enter] open · [space] peek · [ctrl-x] kill          │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -115,8 +117,8 @@ stream, so scripts and CI never hit the TUI.
 | **M3 · guardrails** ✅ | permission engine + approvals UX, sandboxed exec, headless mode |
 | **M4 · command views** ✅ | slash dispatcher, `/status`/`/config`/`/model` panels, autocomplete, TUI redesign |
 | **M5 · ACP v1 featureset expansion** 🚧 in flight | cross-repo ACP conformance push — `usage_update` on `session/update`, `diff` and `plan` pass-through, `session/set_config_option` + `session/list` (shipped); rich content blocks, resume, model discovery + `set_model`, capability stretch (titles, commands/mode) still landing |
-| **M6 · process isolation** ✅ Phases 0-3 | detached per-session `gofer session-worker` processes behind a thin router daemon; upgrade the binary mid-turn without interrupting live sessions. Opt-in, off by default (`gofer daemon --workers`). Phase 4 (offline resume, cost aggregation, graceful drain) still open |
-| M7 · ecosystem | MCP servers, SKILL.md skills, out-of-process plugins, subagents first-class |
+| **M6 · process isolation** ✅ Phases 0-3 | detached per-session `gofer session-worker` processes behind a thin router daemon; upgrade the binary mid-turn without interrupting live sessions. Opt-in, off by default (`gofer daemon --workers`). Phase 4 (offline resume, cost aggregation, graceful drain) has since shipped too — #139 and #140 are closed |
+| M7 · ecosystem | MCP servers, SKILL.md skills, out-of-process plugins, subagents first-class (the parent/child primitive + roster tree already landed — `gofer run --parent/--agent`; remaining is linked journals and the wider plugin UX) |
 | M8 · auto + polish | auto mode with reviewer pipeline, CC-asset import, multi-machine discovery |
 
 ## Contributing

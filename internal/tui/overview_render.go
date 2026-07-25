@@ -416,11 +416,10 @@ func (o Overview) row(s SessionInfo, width int, showStatus bool, lay rosterLayou
 	// string still emits escape codes, which would change every unblocked row's
 	// bytes.
 	//
-	// On a SELECTED blocked row the marker's own color ends the accent run that
-	// wraps the line (lipgloss does not re-open a style after a nested reset —
-	// the same reason the existing status word ends it further along the row).
-	// That is the intended trade: the caret still marks the selection, while the
-	// marker is the one signal that must survive a glance across the roster.
+	// The marker ends in a reset, like the status word further along the row.
+	// On a SELECTED row that no longer punches a hole in the highlight bar:
+	// [Overview.highlightLine] re-opens the background after every interior
+	// reset, so the bar covers the whole row past the marker.
 	prefix := padTo(caret, rowPrefixW)
 	if lay.blocked[s.ID] {
 		prefix = padTo(caret+o.theme.WarnStyle().Render(blockedMark), rowPrefixW)

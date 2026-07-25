@@ -99,3 +99,29 @@ bot has no memory across pull requests, but this file does.
 
 Keep documentation current as part of the change, not as a follow-up — update
 the README and `docs/` in the same PR.
+
+## Releases
+
+Releases are **opt-in per PR, via a label** — merging without one ships
+nothing, silently. Before merging, label the PR with exactly one of:
+
+| Label | Bump |
+|---|---|
+| `semver:major` | major |
+| `semver:minor` | minor |
+| `semver:patch` | patch |
+
+On push to `main`, `.github/workflows/release.yml` reads the merged PR's
+labels. With no `semver:*` label it logs *"No semver:\* label — skipping
+release"* and stops; that is the intended default for docs/chore merges, so
+omit the label deliberately rather than by accident. If several are present the
+highest wins (major > minor > patch).
+
+The git tag is the single source of truth for the version — `build` stamps it
+into the binary via ldflags, so a release always reports its own tag. Version
+and AI release notes come from the shared
+`jedwards1230/release-workflows/ai-release.yml`.
+
+To release without merging anything (or to preview), use the workflow's
+`workflow_dispatch` entry: pick a `bump_type`, and set `dry_run` to compute the
+version and notes without tagging or publishing.

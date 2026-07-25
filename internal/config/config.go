@@ -110,10 +110,11 @@ type Session struct {
 	// ✓ deliberately does NOT read it (internal/tui's effortPickerView.
 	// activeEffort): nothing populates a session's Params.Thinking, so a level
 	// stored here reaches no runner and claiming it as active would be a
-	// fiction. Wiring it in is blocked on more than plumbing — see docs/TUI.md's
-	// "reasoning effort" note: the SDK's per-turn overlay sets
-	// Params.Thinking.Effort but never Params.Thinking.Enabled, and both
-	// provider adapters emit reasoning config only when Enabled is true.
+	// fiction. Wiring it in is now PLUMBING ONLY: agent-sdk-go v0.19.0 made a
+	// named effort self-enabling ([provider.Thinking.Active] — both adapters
+	// gate on it, not on Enabled), so populating a session's Params.Thinking
+	// .Effort at creation is sufficient; nothing needs to set Enabled. All
+	// that remains is for a create path to read this field.
 	Effort string `json:"effort,omitempty"`
 	// PermissionMode is the default guardrail mode for new sessions: "ask"
 	// (contain-or-ask, the default) or "yolo" (run tools without asking, and

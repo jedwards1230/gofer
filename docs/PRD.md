@@ -34,9 +34,11 @@ would need it unchanged.
 ## Core UX
 
 - **Overview**: every session — state, model, cost, elapsed, pending
-  approvals. `enter` peek, `a` attach, `ctrl-x` kill (running, confirm;
-  subtree interrupted) or archive (finished), `n` new.
-- **Peek**: read-only live stream of one session without stealing input.
+  approvals. `enter`/`→` open (attach), `space` peek, `ctrl-x` kill (running,
+  confirm; subtree interrupted) or archive (finished), `/new` new.
+- **Peek**: a read-only summary card for one session without stealing input.
+  It subscribes to no event stream — the card is a pure projection of the
+  roster snapshot, so moving the selection never re-subscribes.
 - **Attach**: full interactive session; detach returns to overview.
 - **Approvals**: `permission.requested` renders wherever the client is — TUI
   dialog, phone push via ACP — and `permission.reply` may carry a
@@ -67,6 +69,10 @@ would need it unchanged.
 
 ```
 gofer                       # TUI: health-probe daemon → auto-spawn if absent → overview
+gofer run [-p prompt] [-m model] [--parent <id>] [--agent <name>] [--root dir]
+                            # one session, daemon-routed when one is reachable, else
+                            #   in-process. --parent/--agent spawn it as a subagent
+gofer resume [<session>]    # pick up an existing session (same routing as `run`)
 gofer attach [<session>]    # daemon roster TUI; with <session>, attach straight into it
 gofer agents [<session>]    # alias for `gofer attach` (M2)
 gofer demo                  # M0: offline faux-provider stream
@@ -78,14 +84,19 @@ gofer daemon install|uninstall|status   # launchd/systemd unit for the daemon (M
                             #   install [--listen addr] [--root dir] [--token tok] [-m model]
 gofer daemon stop|restart [--root dir]  # stop a running daemon (driving its service manager
                             #   when one owns it, so the stop sticks), or stop-then-start it
-gofer acp serve             # ACP over stdio (editors, stdio→ws bridges)
+gofer session-worker        # single-session daemon on a unix socket; spawned by the router
+                            #   (M6), not meant to be run directly
+gofer acp serve             # ACP over stdio (editors, stdio→ws bridges) — NOT IMPLEMENTED
 gofer ps [--all]            # roster (--all includes archived; later: fleet)
 gofer kill|archive <id>     # stop running / clear finished (journal kept)
+gofer login|logout|auth     # provider credentials (API key + subscription OAuth)
+gofer version               # build version (git-describe stamped via `make build/install`)
 gofer skills|plugins        # list what's composed; `plugins install <module>` (M7)
 gofer import claude         # idempotent import of CC skills/commands (M8)
                             #   (settings.json permissions via the vendor-format adapter, M8)
-gofer doctor                # providers, LSP servers on PATH, daemon, sandbox
-gofer config get|set …      # global or project config
+gofer doctor                # providers, LSP servers on PATH, daemon, sandbox — NOT IMPLEMENTED
+gofer config get|set …      # global or project config — NOT IMPLEMENTED (the TUI's
+                            #   /config panel is the current surface)
 ```
 
 **Daemon discovery** (`ps`/`kill`/`archive`/`attach`/`agents`, and
@@ -272,8 +283,8 @@ phone-home.
 | **M2 · the daemon** ✅ shipped 2026-07-13 | supervisor + roster + overview⇄peek⇄attach + native ACP | an ACP client on a phone drives a session on a laptop |
 | **M3 · guardrails** ✅ shipped 2026-07-14 | **① daemon session→peers fan-out registry** (every registered peer gets every `session/update`; echo/dedup so prompts don't double-render) → **② sandbox** (seatbelt / bwrap+seccomp) → **③ approvals relay + phone approval UX**; then headless exec, daemon-as-service ([#42](https://github.com/jedwards1230/gofer/issues/42), first-use install prompt), lossless attach (daemonbridge reconstruction → lossless path), OTel | a phone approves a laptop tool call; a TUI attached to the same session watches the turn stream live |
 | **M4 · command views** ✅ shipped 2026-07-15 | slash dispatcher + command panel (`/status`, `/config`, `/model`) + autocomplete + settings registry (`config.Save`) + a TUI redesign wave (global header, bottom-anchored layout, mouse-wheel scroll, cursor-aware input, click-drag selection + OSC 52 copy) | an operator opens `/status`/`/config`/`/model` from the dispatcher and swaps a session's model without leaving the TUI |
-| **M5 · ACP v1 featureset expansion** 🚧 in flight (branch `milestone/m5-acp-featureset`) | cross-repo ACP conformance push (SDK models the blocks, gofer emits them, Agmente decodes) driven by an internal conformance matrix: `usage_update` on `session/update` (SDK v0.6.0 pass-through, [#97](https://github.com/jedwards1230/gofer/pull/97), merged) → rich content/tool-call blocks (plumbed, dormant) → session methods (`session/list`, resume, `set_config_option`, `cwd`) → model discovery + `set_model` → capability stretch (`session_info_update`, `plan`, `available_commands_update`/`current_mode_update`/`config_option_update`). Detail: [ACP v1 featureset expansion](#acp-v1-featureset-expansion-m5) | an ACP client renders live token cost, tool-call blocks, and a model picker — all off the daemon's spec-general `session/update` surface, no client-specific path |
-| **M6 · process isolation** ✅ Phases 0-3 shipped 2026-07-19, behind the opt-in, off-by-default `gofer daemon --workers`; Phase 4 (lifecycle polish) open as [#139](https://github.com/jedwards1230/gofer/issues/139) + [#140](https://github.com/jedwards1230/gofer/issues/140) | thin router daemon + detached per-session `gofer session-worker` processes (worker owns runner + pump + gate + journal + broker; router owns roster/fan-out/discovery/ACP surface); `setsid` detachment + endpoint-file adoption on restart; versioned router↔worker wire (the existing client wire + `gofer/hello`) with in-flight-only skew tolerance; `-local` stays in-process. Design: [docs/milestones/M6-process-isolation.md](milestones/M6-process-isolation.md) | upgrade the daemon binary mid-turn — the running session finishes uninterrupted on the old worker binary, the next session runs the new one; `session/list` shows mixed binary versions |
+| **M5 · ACP v1 featureset expansion** 🚧 in flight (on `main`; the `milestone/m5-acp-featureset` integration branch has merged and been deleted) | cross-repo ACP conformance push (SDK models the blocks, gofer emits them, Agmente decodes) driven by an internal conformance matrix: `usage_update` on `session/update` (SDK v0.6.0 pass-through, [#97](https://github.com/jedwards1230/gofer/pull/97), merged) → rich content/tool-call blocks (plumbed, dormant) → session methods (`session/list`, resume, `set_config_option`, `cwd`) → model discovery + `set_model` → capability stretch (`session_info_update`, `plan`, `available_commands_update`/`current_mode_update`/`config_option_update`). Detail: [ACP v1 featureset expansion](#acp-v1-featureset-expansion-m5) | an ACP client renders live token cost, tool-call blocks, and a model picker — all off the daemon's spec-general `session/update` surface, no client-specific path |
+| **M6 · process isolation** ✅ Phases 0-3 shipped 2026-07-19 and Phase 4 (lifecycle polish) since — [#139](https://github.com/jedwards1230/gofer/issues/139) (offline resume spawns a fresh worker) and [#140](https://github.com/jedwards1230/gofer/issues/140) (cost/usage aggregation + graceful drain) are both closed; only roster reconciliation edge cases remain unverified. Behind the opt-in, off-by-default `gofer daemon --workers` | thin router daemon + detached per-session `gofer session-worker` processes (worker owns runner + pump + gate + journal + broker; router owns roster/fan-out/discovery/ACP surface); `setsid` detachment + endpoint-file adoption on restart; versioned router↔worker wire (the existing client wire + `gofer/hello`) with in-flight-only skew tolerance; `-local` stays in-process. Design: [docs/milestones/M6-process-isolation.md](milestones/M6-process-isolation.md) | upgrade the daemon binary mid-turn — the running session finishes uninterrupted on the old worker binary, the next session runs the new one; `session/list` shows mixed binary versions |
 | M7 · ecosystem | MCP on by default (tool-search index-first) + subagents first-class (roster tree, peek/attach into children, linked journals) + skills + plugin UX | a third-party plugin adds a tool with one config line |
 | M8 · auto + polish | auto mode (reviewer pipeline), CC-asset import, mDNS pairing | auto mode survives a week of real ops without a bad allow |
 

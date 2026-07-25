@@ -184,7 +184,7 @@ Commands:
             "daemon stop|restart" stop or replace a running one, and
             "daemon install|uninstall|status" manage a launchd/systemd unit so it
             starts on login
-  session-worker  Single-session daemon on a loopback ephemeral port; prints a
+  session-worker  Single-session daemon on a unix-domain socket; prints a
             handshake line to stdout. Spawned by the daemon (M6 process isolation),
             not meant to be run directly.
   ps        List sessions on a running daemon's roster (--all: include archived)
