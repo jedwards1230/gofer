@@ -283,9 +283,9 @@ phone-home.
 | **M2 · the daemon** ✅ shipped 2026-07-13 | supervisor + roster + overview⇄peek⇄attach + native ACP | an ACP client on a phone drives a session on a laptop |
 | **M3 · guardrails** ✅ shipped 2026-07-14 | **① daemon session→peers fan-out registry** (every registered peer gets every `session/update`; echo/dedup so prompts don't double-render) → **② sandbox** (seatbelt / bwrap+seccomp) → **③ approvals relay + phone approval UX**; then headless exec, daemon-as-service ([#42](https://github.com/jedwards1230/gofer/issues/42), first-use install prompt), lossless attach (daemonbridge reconstruction → lossless path), OTel | a phone approves a laptop tool call; a TUI attached to the same session watches the turn stream live |
 | **M4 · command views** ✅ shipped 2026-07-15 | slash dispatcher + command panel (`/status`, `/config`, `/model`) + autocomplete + settings registry (`config.Save`) + a TUI redesign wave (global header, bottom-anchored layout, mouse-wheel scroll, cursor-aware input, click-drag selection + OSC 52 copy) | an operator opens `/status`/`/config`/`/model` from the dispatcher and swaps a session's model without leaving the TUI |
-| **M5 · ACP v1 featureset expansion** 🚧 in flight (on `main`; the `milestone/m5-acp-featureset` integration branch has merged and been deleted) | cross-repo ACP conformance push (SDK models the blocks, gofer emits them, Agmente decodes) driven by an internal conformance matrix: `usage_update` on `session/update` (SDK v0.6.0 pass-through, [#97](https://github.com/jedwards1230/gofer/pull/97), merged) → rich content/tool-call blocks (plumbed, dormant) → session methods (`session/list`, resume, `set_config_option`, `cwd`) → model discovery + `set_model` → capability stretch (`session_info_update`, `plan`, `available_commands_update`/`current_mode_update`/`config_option_update`). Detail: [ACP v1 featureset expansion](#acp-v1-featureset-expansion-m5) | an ACP client renders live token cost, tool-call blocks, and a model picker — all off the daemon's spec-general `session/update` surface, no client-specific path |
+| **M5 · ACP v1 featureset expansion** ✅ shipped 2026-07-25 (on `main`; the `milestone/m5-acp-featureset` integration branch has merged and been deleted). Every committed slice is live end-to-end across SDK → gofer → Agmente; the two carve-outs are image/audio/resource content blocks (modeled, no producer in any repo) and the `available_commands_update`/`current_mode_update` registries, both descoped rather than pending — see the slice list below | cross-repo ACP conformance push (SDK models the blocks, gofer emits them, Agmente decodes) driven by an internal conformance matrix: `usage_update` on `session/update` (SDK v0.6.0 pass-through, [#97](https://github.com/jedwards1230/gofer/pull/97), merged) → rich content/tool-call blocks (`diff` live; image/audio/resource modeled, no producer) → session methods (`session/list`, resume, `set_config_option`, `cwd`) → model discovery + `set_model` → capability stretch (`session_info_update`, `plan`, `available_commands_update`/`current_mode_update`/`config_option_update`). Detail: [ACP v1 featureset expansion](#acp-v1-featureset-expansion-m5) | an ACP client renders live token cost, tool-call blocks, and a model picker — all off the daemon's spec-general `session/update` surface, no client-specific path |
 | **M6 · process isolation** ✅ Phases 0-3 shipped 2026-07-19 and Phase 4 (lifecycle polish) since — [#139](https://github.com/jedwards1230/gofer/issues/139) (offline resume spawns a fresh worker) and [#140](https://github.com/jedwards1230/gofer/issues/140) (cost/usage aggregation + graceful drain) are both closed; only roster reconciliation edge cases remain unverified. Behind the opt-in, off-by-default `gofer daemon --workers` | thin router daemon + detached per-session `gofer session-worker` processes (worker owns runner + pump + gate + journal + broker; router owns roster/fan-out/discovery/ACP surface); `setsid` detachment + endpoint-file adoption on restart; versioned router↔worker wire (the existing client wire + `gofer/hello`) with in-flight-only skew tolerance; `-local` stays in-process. Design: [docs/milestones/M6-process-isolation.md](milestones/M6-process-isolation.md) | upgrade the daemon binary mid-turn — the running session finishes uninterrupted on the old worker binary, the next session runs the new one; `session/list` shows mixed binary versions |
-| M7 · ecosystem | MCP on by default (tool-search index-first) + subagents first-class (roster tree, peek/attach into children, linked journals) + skills + plugin UX | a third-party plugin adds a tool with one config line |
+| **M7 · ecosystem** 🚧 in flight — the current milestone | MCP on by default (tool-search index-first) + subagents first-class (roster tree, peek/attach into children, linked journals) + skills + plugin UX. **Subagents are partly shipped**: the parent/child primitive, roster tree, drill-in, and per-tool-call agent attribution landed 2026-07-21 ([#204](https://github.com/jedwards1230/gofer/pull/204)/[#207](https://github.com/jedwards1230/gofer/pull/207)/[#208](https://github.com/jedwards1230/gofer/pull/208)), operator-driven only via `gofer run --parent/--agent`. Agent-initiated spawn ([#260](https://github.com/jedwards1230/gofer/issues/260)) is blocked on the SDK spawn seam (agent-sdk-go#90). MCP, skills, and plugin UX are not started | a third-party plugin adds a tool with one config line |
 | M8 · auto + polish | auto mode (reviewer pipeline), CC-asset import, mDNS pairing | auto mode survives a week of real ops without a bad allow |
 
 ## ACP v1 featureset expansion (M5)
@@ -317,18 +317,27 @@ stabilizes. Applied:
 
 **Vertical slices, by state:**
 
-1. **`usage_update`** — SDK ✅ + gofer ✅ ([#97](https://github.com/jedwards1230/gofer/pull/97),
-   merged; agent-sdk-go v0.6.0). Agmente decode is the remaining leg.
-2. **Rich content / tool-call blocks** — **plumbed but dormant.** The types are
-   modeled in the SDK and pass through gofer untouched, but no producer emits
-   them yet, so no client renders them. M5 adds the producers (gofer emits) and
-   the client render.
-3. **Session methods** — `session/list`, resume, `set_config_option`, `cwd`.
-4. **Model discovery + `set_model`** — the native list-models endpoint + the
-   picker; `set_model` stays gofer-native per the policy above.
-5. **Capability stretch** (net-new) — `session_info_update` (session titles),
-   `plan`, and the `available_commands_update` / `current_mode_update` /
-   `config_option_update` surface.
+1. **`usage_update`** — ✅ **done all three legs.** SDK (v0.6.0 pass-through) +
+   gofer ([#97](https://github.com/jedwards1230/gofer/pull/97)) + Agmente
+   (context-window usage and cost rendered, on `fork`).
+2. **Rich content / tool-call blocks** — ✅ **done for `diff`**, the only block a
+   builtin tool naturally produces: the SDK emits it from the edit/write tools
+   (v0.7.0), gofer passes it through, and Agmente decodes and renders it.
+   `image`/`audio`/`resource` stay **modeled with no producer** in any of the
+   three repos — descoped from M5 rather than pending, since no builtin tool
+   emits them. `terminal` likewise.
+3. **Session methods** — ✅ **done.** `session/list`, full-history resume via
+   `session/load`, `set_config_option`, and `cwd` are live in gofer
+   (`internal/daemon/handlers.go`) and handled by Agmente's response dispatcher.
+4. **Model discovery + `set_model`** — ✅ **done.** gofer's native
+   `gofer/models` endpoint feeds the picker, which Agmente has merged;
+   `set_model` stays gofer-native per the policy above.
+5. **Capability stretch** (net-new) — ✅ **done** for `session_info_update`
+   (session titles), `plan`, and `config_option_update` — all three emitted by
+   gofer and decoded by Agmente. The `available_commands_update` /
+   `current_mode_update` registries were never firmly committed ("decide
+   subset") and are **not built** in any repo; treat them as descoped from M5,
+   to be picked up only if a client needs them.
 
 ## Fleet & multi-machine (design-ahead)
 
