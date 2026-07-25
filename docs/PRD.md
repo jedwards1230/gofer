@@ -69,6 +69,10 @@ would need it unchanged.
 
 ```
 gofer                       # TUI: health-probe daemon → auto-spawn if absent → overview
+gofer run [-p prompt] [-m model] [--parent <id>] [--agent <name>] [--root dir]
+                            # one session, daemon-routed when one is reachable, else
+                            #   in-process. --parent/--agent spawn it as a subagent
+gofer resume [<session>]    # pick up an existing session (same routing as `run`)
 gofer attach [<session>]    # daemon roster TUI; with <session>, attach straight into it
 gofer agents [<session>]    # alias for `gofer attach` (M2)
 gofer demo                  # M0: offline faux-provider stream
@@ -80,14 +84,19 @@ gofer daemon install|uninstall|status   # launchd/systemd unit for the daemon (M
                             #   install [--listen addr] [--root dir] [--token tok] [-m model]
 gofer daemon stop|restart [--root dir]  # stop a running daemon (driving its service manager
                             #   when one owns it, so the stop sticks), or stop-then-start it
-gofer acp serve             # ACP over stdio (editors, stdio→ws bridges)
+gofer session-worker        # single-session daemon on a unix socket; spawned by the router
+                            #   (M6), not meant to be run directly
+gofer acp serve             # ACP over stdio (editors, stdio→ws bridges) — NOT IMPLEMENTED
 gofer ps [--all]            # roster (--all includes archived; later: fleet)
 gofer kill|archive <id>     # stop running / clear finished (journal kept)
+gofer login|logout|auth     # provider credentials (API key + subscription OAuth)
+gofer version               # build version (git-describe stamped via `make build/install`)
 gofer skills|plugins        # list what's composed; `plugins install <module>` (M7)
 gofer import claude         # idempotent import of CC skills/commands (M8)
                             #   (settings.json permissions via the vendor-format adapter, M8)
-gofer doctor                # providers, LSP servers on PATH, daemon, sandbox
-gofer config get|set …      # global or project config
+gofer doctor                # providers, LSP servers on PATH, daemon, sandbox — NOT IMPLEMENTED
+gofer config get|set …      # global or project config — NOT IMPLEMENTED (the TUI's
+                            #   /config panel is the current surface)
 ```
 
 **Daemon discovery** (`ps`/`kill`/`archive`/`attach`/`agents`, and
