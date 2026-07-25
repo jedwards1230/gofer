@@ -1889,7 +1889,7 @@ they are the part of the input surface a user is least likely to find unaided.
 advertised "? shortcuts" since M2 with nothing behind it.
 
 Deferred (issue #175): true per-message / per-tool-call token attribution
-(needs SDK per-item usage granularity absent from v0.14.2, which reports usage
+(needs SDK per-item usage granularity still absent as of v0.19.0, which reports usage
 only at the turn and session level — rendering a synthesized per-message
 estimate as fact is what the issue forbids), and the per-turn activity roll-up
 line ("read N files, ran M commands") the issue flags as M8 polish (needs

@@ -18,7 +18,8 @@ import (
 )
 
 // runSessionWorker implements `gofer session-worker`: a single-session daemon
-// that binds a loopback ephemeral port, prints a machine-readable handshake
+// that binds a unix-domain socket ([daemon.WorkerSocketPath]), prints a
+// machine-readable handshake
 // line to stdout (the only thing it ever writes there — all logs go to
 // stderr), and serves the existing daemon wire until interrupted. It is the
 // per-session process the M6 router spawns (docs/milestones/M6-process-
@@ -158,7 +159,7 @@ func runSessionWorker(ctx context.Context, args []string, stdout, stderr io.Writ
 	ctx, stop := interruptCtx(ctx)
 	defer stop()
 
-	// worker.Serve binds the loopback listener, writes the handshake to stdout,
+	// worker.Serve binds the unix socket, writes the handshake to stdout,
 	// serves the wire, and closes the supervisor on shutdown.
 	return worker.Serve(ctx, worker.Options{
 		Supervisor:   sup,

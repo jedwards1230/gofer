@@ -422,7 +422,7 @@ func (o Overview) flatGroups() (order []string, groups map[string][]SessionInfo)
 // ([Overview.resolveSelection]) step through precisely the rows on screen.
 //
 // The grouped view already renders in [Overview.ordered] order (its rows() arm
-// iterates the same Working/Needs input/Finished sections). The flat view
+// iterates the same Working/Needs input/Idle/Finished sections). The flat view
 // re-buckets that order by cwd (see [Overview.flatGroups]) — the order the
 // operator actually sees — which is where navigating the raw [Overview.ordered]
 // sequence diverged from the screen.
