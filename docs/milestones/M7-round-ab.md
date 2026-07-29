@@ -18,7 +18,7 @@ them. The permission/actor security cluster is a deliberate follow-up.
 
 | # | Piece | Repo | State | PR |
 |---|---|---|---|---|
-| 0 | Re-pin `agent-sdk-go` v0.19.0 → v0.21.0 | gofer | in flight | — |
+| 0 | Re-pin `agent-sdk-go` v0.19.0 → v0.21.0 | gofer | **merged** | [#267](https://github.com/jedwards1230/gofer/pull/267) |
 | 0 | Config schema: all new sections, one writer | gofer | pending | — |
 | 0 | Index-first tool-registry contract | both | pending | — |
 | 1 | `Runner.Compact` seam | SDK | in flight | — |
@@ -51,9 +51,19 @@ otherwise independent.
 Recorded as they settle.
 
 - **SDK pin**: v0.21.0 is an annotated tag on SDK `main` (`389a829`), so the
-  re-pin is to a real tag, not a pseudo-version. At the milestone boundary, cut a
-  fresh SDK release tag and re-pin again — a squash-merge of the SDK integration
-  PR deletes the branch and orphans a pseudo-version (M2 lesson, repeated at M3).
+  re-pin is to a real tag, not a pseudo-version. Note `git rev-parse v0.21.0`
+  returns the *tag object*; dereference with `v0.21.0^{commit}` to compare against
+  a branch. At the milestone boundary, cut a fresh SDK release tag and re-pin
+  again — a squash-merge of the SDK integration PR deletes the branch and orphans
+  a pseudo-version (M2 lesson, repeated at M3).
+- **The re-pin was not test-only.** `event.NewSessionForked` gained `at`/`label`
+  between v0.19.0 and v0.21.0, so `internal/wirestream` had to carry both fields
+  in its envelope to keep reconstruction lossless. Covered by
+  `TestHandleNotificationReplaysGoferEventKinds`, which asserts field-for-field
+  equality through the notification path.
+- **Merge method for this round is squash**, so each piece lands as one commit on
+  the integration branch and the eventual integration→`main` PR reads as one
+  commit per workstream.
 
 ## Definition of done
 
@@ -64,6 +74,16 @@ alone, a search provider answers from both Brave and SearXNG, a skill loads on
 demand, and LSP signal is demonstrated live.
 
 Auto-compaction must be **visible** in the transcript — never silent.
+
+## Found along the way
+
+- [#268](https://github.com/jedwards1230/gofer/issues/268) —
+  `TestResumeOfflineSpawnsFreshWorker` duplicates history under full-suite
+  `-race`. Load-sensitive: fails only in a full `-race ./...` run, never
+  package-isolated. Ruled out as caused by the SDK re-pin (base fails the same way
+  under load; the bump touches neither resume nor the router's rebuild). Filed
+  rather than tolerated because the assertion describes a correctness property,
+  so it may be a real race in offline resume.
 
 ## Deferred
 
