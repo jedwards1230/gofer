@@ -149,7 +149,7 @@ func TestHandleNotificationReplaysGoferEventKinds(t *testing.T) {
 	cases := []event.Event{
 		event.NewSessionCreated(sid),
 		event.NewSessionResumed(sid),
-		event.NewSessionForked(sid),
+		event.NewSessionForked(sid, "entry-7", "before-refactor"),
 		event.NewSessionCompacted(sid),
 		event.NewSessionKilled(sid),
 		event.NewSessionArchived(sid),
