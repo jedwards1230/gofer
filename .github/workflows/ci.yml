@@ -91,13 +91,22 @@ jobs:
       - run: go test -count=1 -v -run 'TestLive_|LSP' ./internal/lspdiag/ ./internal/supervisor/ 2>&1 | tee lsp.log
       # Guard against the tests silently reverting to skipped: assert at least
       # one live test actually ran, and that none were skipped.
+      #
+      # The PASS pattern deliberately mirrors the -run filter above rather than
+      # naming one test's prefix. Both live tests are real coverage
+      # (TestLive_* at package level, *LSP* through the Supervisor wiring), so
+      # requiring specifically a TestLive_ prefix would fail on a legitimate
+      # rename while proving nothing extra — and the natural "fix" for that
+      # false failure is to weaken the guard, which is the outcome to avoid.
+      # Keep filter and assertion in sync if either changes.
       - name: Assert the live tests ran rather than skipped
         run: |
           if grep -q '^--- SKIP' lsp.log; then
             echo "::error::an LSP live test SKIPPED — gopls missing or guard regressed"; exit 1
           fi
-          if ! grep -q '^--- PASS: TestLive_' lsp.log; then
-            echo "::error::no TestLive_* test ran — the live coverage has gone missing"; exit 1
+          passed=$(grep -cE '^--- PASS: (TestLive_|.*LSP)' lsp.log || true)
+          if [ "${passed:-0}" -eq 0 ]; then
+            echo "::error::no live LSP test ran — coverage for a user-requested 'verified working' feature has gone missing"; exit 1
           fi
-          echo "LSP live coverage confirmed running:"
-          grep '^--- PASS' lsp.log
+          echo "LSP live coverage confirmed running ($passed test(s)):"
+          grep -E '^--- PASS: (TestLive_|.*LSP)' lsp.log
