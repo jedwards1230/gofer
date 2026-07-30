@@ -45,11 +45,13 @@ func (f *editSession) Events() *event.Subscription {
 func (f *editSession) EventsLive() *event.Subscription {
 	return f.broker.SubscribeLive(event.FilterAll, 64)
 }
-func (f *editSession) Emit(e event.Event)       { f.broker.Publish(e) }
-func (f *editSession) Cost() session.CostReport { return session.CostReport{} }
-func (f *editSession) Close() error             { f.broker.Close(); return nil }
-func (f *editSession) SetModel(string) error    { return nil }
-func (f *editSession) SetEffort(string) error   { return nil }
+func (f *editSession) Emit(e event.Event)                        { f.broker.Publish(e) }
+func (f *editSession) Cost() session.CostReport                  { return session.CostReport{} }
+func (f *editSession) Compact(context.Context, string) error     { return runner.ErrNothingToCompact }
+func (f *editSession) LastUsage() (string, provider.Usage, bool) { return "", provider.Usage{}, false }
+func (f *editSession) Close() error                              { f.broker.Close(); return nil }
+func (f *editSession) SetModel(string) error                     { return nil }
+func (f *editSession) SetEffort(string) error                    { return nil }
 
 func (f *editSession) Prompt(_ context.Context, _ string) error {
 	input := json.RawMessage(`{"path":"main.go"}`)

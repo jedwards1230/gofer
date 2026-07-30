@@ -180,6 +180,8 @@ func (f *internalFakeSup) Archive(context.Context, string) error           { ret
 func (f *internalFakeSup) SetModel(context.Context, string, string) error  { return nil }
 func (f *internalFakeSup) SetEffort(context.Context, string, string) error { return nil }
 
+func (f *internalFakeSup) Compact(context.Context, string, string) error { return nil }
+
 func (f *internalFakeSup) RestartDaemon(context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

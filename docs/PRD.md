@@ -285,6 +285,56 @@ symlinked) is never swallowed: `sessionGuard` emits it as a non-fatal
 `session.error` on the session's own event stream once, at creation — the
 same "visible artifact, never silent" treatment a failed turn gets.
 
+## Context compaction (M7)
+
+The SDK ships the seam (`runner.Runner.Compact`, `event.SessionCompacted`)
+with no policy — no threshold, no automatic trigger, no summarization prompt
+opinion. gofer supplies all three:
+
+- **Automatic trigger — POST-FLIGHT.** `internal/supervisor`'s pump checks
+  pressure once a turn settles cleanly (not pre-flight, before the next call):
+  gofer has no tokenizer, so a just-finished turn's real `Usage.InputTokens (+
+  CacheReadTokens)` — what the provider actually tokenized to answer that call
+  — is a measured number, where a pre-flight estimate over the folded context
+  would be a guess. The cost is one turn of lag (the turn that crosses the
+  threshold runs at full size; the trigger compacts the *next* one down),
+  which `config.Compaction`'s 85% default threshold gives headroom for.
+  `ContextWindow == 0` (an unregistered model) never triggers — an unknown
+  window is never treated as full. `config.Compaction.Disabled` turns the
+  trigger off entirely; `/compact` stays available either way.
+- **Visibility is the hard constraint.** `event.SessionCompacted` is
+  must-deliver and renders as a durable transcript block (`itemSessionCompacted`,
+  accent-styled like the background-agents summary — a structural event, not
+  a success/failure state): message count, a `~before → after` token line
+  explicitly labeled an *estimate* (the summarizer's own call measures
+  context-plus-instructions-overhead, not context alone), the model, and the
+  summary text itself. The line renderer (`gofer demo`) and the JSONL renderer
+  render it too — no client-side surface swallows it. Over the daemon/websocket
+  backend specifically, compaction's session.compacted can fire with **no**
+  `session/prompt` call in flight (the trigger fires between turns; `/compact`
+  requires the session to be idle) — the one gap this closes: a per-session
+  out-of-turn watcher (`cmd/gofer/daemon.go`'s `OnRegister` hook) relays such
+  events through the same guarded broadcast the M6 router relay already used,
+  so a remote peer sees them too. The M6 `--workers` path does not yet wire
+  this watcher — a known follow-up, not silently left.
+- **`/compact [instructions]`** — explicit, idle-only (mirrors `/kill`/
+  `/archive`'s precondition), forwards free-text instructions verbatim ("" is
+  the SDK's own default). No `ArgHint`: like `/new`'s prompt, every string is
+  a valid instruction, so there is no "unusable argument" to reject.
+- **`/context`** (gofer#177) — context-window pressure, legible before it
+  bites. Reads the SAME measured figures the trigger uses
+  (`SessionInfo.LastUsage`/`ContextWindow`), not a tokenizer-derived category
+  breakdown — issue #177's full per-category grid (system prompt / tools /
+  skills / messages) stays blocked on the tokenizer primitive it names as a
+  hard prerequisite, which this round does not build. A fill bar + in-use/free
+  counts + the configured auto-compaction threshold is what the accessors
+  available today can answer honestly.
+- **Config**: `compaction.threshold_fraction` (fraction of the context window,
+  default 0.85) and `compaction.disabled`. Only the bool is a `/config` row
+  (`compaction.enabled`) — `SettingKind` has no numeric affordance yet, and a
+  free-text edit of a (0,1) fraction risked a confusing, unvalidated UI for a
+  knob most operators won't touch; the fraction stays config-file-only.
+
 ## System prompt composition (M7)
 
 No hardcoded prompt: `config.Prompt.Files` is an ordered list of markdown

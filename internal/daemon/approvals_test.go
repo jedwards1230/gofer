@@ -58,8 +58,12 @@ func (f *approvalSession) Events() *event.Subscription {
 func (f *approvalSession) EventsLive() *event.Subscription {
 	return f.broker.SubscribeLive(event.FilterAll, 64)
 }
-func (f *approvalSession) Emit(e event.Event)       { f.broker.Publish(e) }
-func (f *approvalSession) Cost() session.CostReport { return session.CostReport{} }
+func (f *approvalSession) Emit(e event.Event)                    { f.broker.Publish(e) }
+func (f *approvalSession) Cost() session.CostReport              { return session.CostReport{} }
+func (f *approvalSession) Compact(context.Context, string) error { return runner.ErrNothingToCompact }
+func (f *approvalSession) LastUsage() (string, provider.Usage, bool) {
+	return "", provider.Usage{}, false
+}
 
 // SetModel is a no-op: this fake's Prompt scripts a fixed permission
 // round-trip and never reads a model, so nothing observes the change.

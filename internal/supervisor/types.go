@@ -107,6 +107,20 @@ type Session interface {
 	// projects a level onto its own wire format). Safe to call while a turn is
 	// in flight — the change takes effect on the next turn.
 	SetEffort(effort string) error
+	// Compact replaces the session's history up to HEAD with a summary (see
+	// [runner.Runner.Compact]): the SDK folds the current context, summarizes
+	// it, appends a compaction entry, and publishes the must-deliver
+	// session.compacted event carrying what happened. Returns
+	// [runner.ErrNothingToCompact] when there is no folded context to
+	// summarize (a fresh session, or one already fully compacted).
+	Compact(ctx context.Context, instructions string) error
+	// LastUsage returns the model and token usage of the most recently
+	// completed turn in the session's CURRENT folded context (see
+	// [runner.Runner.LastUsage]) — the closest available measurement of how
+	// big that context is right now, with no local tokenizer needed (the
+	// provider tokenized exactly that content to answer the call). ok is
+	// false when no turn in the current context carries usage yet.
+	LastUsage() (model string, usage provider.Usage, ok bool)
 	// Close shuts the session down, releasing its broker and journal.
 	Close() error
 }
@@ -182,4 +196,22 @@ type SessionInfo struct {
 	// [session.EntryMeta] root entry (see [diskSessionInfo]) and leaves it ""
 	// only for a legacy journal written before the SDK persisted it.
 	Cwd string
+
+	// LastUsage is the token usage of the most recently completed turn in the
+	// session's CURRENT folded context (see [Session.LastUsage]) — the
+	// measured proxy for how full the context window is right now. Unlike
+	// Usage (the session's ACCUMULATED total across every journaled turn,
+	// which only grows and shrinks nowhere), this reflects the size of the
+	// NEXT call gofer would make, and drops back down the turn after a
+	// compaction. Zero when no turn in the current context has settled yet
+	// (a fresh or freshly-resumed session, or a disk-only entry from
+	// [Supervisor.List], which this field is not populated for).
+	LastUsage provider.Usage
+	// ContextWindow is the active model's total context-window size in
+	// tokens, resolved via [provider.Lookup] at snapshot time — 0 when the
+	// model is unregistered (unknown, never "no window"; a consumer must not
+	// divide by it). Pairs with LastUsage to build a pressure ratio, the same
+	// derivation a live turn.finished event's ContextWindow already performs
+	// server-side.
+	ContextWindow int
 }

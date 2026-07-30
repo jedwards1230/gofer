@@ -85,10 +85,14 @@ func (f *decisionSession) Events() *event.Subscription {
 func (f *decisionSession) EventsLive() *event.Subscription {
 	return f.broker.SubscribeLive(event.FilterAll, 64)
 }
-func (f *decisionSession) Emit(e event.Event)       { f.broker.Publish(e) }
-func (f *decisionSession) Cost() session.CostReport { return session.CostReport{} }
-func (f *decisionSession) SetModel(string) error    { return nil }
-func (f *decisionSession) SetEffort(string) error   { return nil }
+func (f *decisionSession) Emit(e event.Event)                    { f.broker.Publish(e) }
+func (f *decisionSession) Cost() session.CostReport              { return session.CostReport{} }
+func (f *decisionSession) Compact(context.Context, string) error { return runner.ErrNothingToCompact }
+func (f *decisionSession) LastUsage() (string, provider.Usage, bool) {
+	return "", provider.Usage{}, false
+}
+func (f *decisionSession) SetModel(string) error  { return nil }
+func (f *decisionSession) SetEffort(string) error { return nil }
 
 func (f *decisionSession) Close() error {
 	f.broker.Close()

@@ -122,6 +122,10 @@ func runSessionWorker(ctx context.Context, args []string, stdout, stderr io.Writ
 		// snapshot above, keeping one answer to "what posture does a new session
 		// get" across every supervisor gofer builds.
 		PermissionMode: permissionModeResolver(rootDir),
+		// Same re-read-per-turn shape as PermissionMode above, for the
+		// automatic-compaction trigger — the worker process is where a turn
+		// actually settles, so it is the one that must observe a live edit.
+		Compaction: compactionResolver(rootDir),
 		// Same reasoning for lsp.* — see lspConfigResolver.
 		LSP: lspConfigResolver(rootDir),
 		// Same reasoning for skills.* — see skillsConfigResolver.

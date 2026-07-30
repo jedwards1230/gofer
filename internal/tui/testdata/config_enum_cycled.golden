@@ -6,6 +6,7 @@ Search settings…
   Auto-scroll transcript … true
   Mouse capture (scroll + selection) … true
   Shell reply mode … reply
+  Automatic compaction … true
   LSP diagnostics … true
   Telemetry enabled … false
   Telemetry endpoint … 

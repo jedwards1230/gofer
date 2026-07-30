@@ -74,6 +74,21 @@ type fakeSession struct {
 	// is still recorded either way.
 	setEffortErr error
 
+	// compactCalls records every instructions argument Compact was called
+	// with, in order — the seam TestCompact/TestAutoCompact-family tests use
+	// to assert the supervisor (or the pump's own trigger) actually reaches
+	// the SDK seam, and with what instructions.
+	compactCalls []string
+	// compactErr, when non-nil, is what Compact returns — see failCompact.
+	compactErr error
+
+	// lastUsageModel/lastUsageValue/lastUsageOk back LastUsage — armed by
+	// setLastUsage to script the "most recently settled turn" pressure figure
+	// a real session.Journal.LastUsage would report.
+	lastUsageModel string
+	lastUsageValue provider.Usage
+	lastUsageOk    bool
+
 	// started delivers the prompt text each time Prompt is entered — one
 	// receive per dispatched turn. Buffered generously; a test only ever
 	// needs to drain it in step with its own submissions.
@@ -311,6 +326,70 @@ func (f *fakeSession) failEffort(err error) {
 	f.setEffortErr = err
 }
 
+// Compact records instructions onto compactCalls and, on success, publishes a
+// real event.SessionCompacted onto the fake's own broker — mirroring
+// [runner.Runner.Compact]'s own observable effect closely enough that a test
+// subscribed to this session's Events() sees exactly what a live compaction
+// would deliver, without reimplementing the SDK's summarizer. Returns
+// compactErr when set (the seam [fakeSession.failCompact] arms), standing in
+// for an SDK rejection such as runner.ErrNothingToCompact.
+func (f *fakeSession) Compact(_ context.Context, instructions string) error {
+	f.mu.Lock()
+	f.compactCalls = append(f.compactCalls, instructions)
+	err := f.compactErr
+	f.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	f.broker.Publish(event.NewSessionCompacted(f.id, "entry-head", 1, "test-model",
+		provider.Usage{InputTokens: 1, OutputTokens: 1}, "condensed summary"))
+	return nil
+}
+
+// failCompact makes the fake's Compact return err instead of succeeding —
+// [fakeSession.SetEffort]'s Compact-axis twin.
+func (f *fakeSession) failCompact(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.compactErr = err
+}
+
+// compactCallCount returns how many times Compact was called.
+func (f *fakeSession) compactCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.compactCalls)
+}
+
+// lastCompactInstructions returns the most recent Compact argument, or "" if
+// it was never called.
+func (f *fakeSession) lastCompactInstructions() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.compactCalls) == 0 {
+		return ""
+	}
+	return f.compactCalls[len(f.compactCalls)-1]
+}
+
+// LastUsage returns the scripted (model, usage) pair set by setLastUsage, or
+// the zero value with ok=false until one is armed — mirroring
+// [session.Journal.LastUsage]'s "no turn has settled yet" case.
+func (f *fakeSession) LastUsage() (string, provider.Usage, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastUsageModel, f.lastUsageValue, f.lastUsageOk
+}
+
+// setLastUsage arms the fake's LastUsage seam — the TestAutoCompact-family
+// tests use it to script the "just-settled turn" pressure figure a real
+// journal would report.
+func (f *fakeSession) setLastUsage(model string, usage provider.Usage) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastUsageModel, f.lastUsageValue, f.lastUsageOk = model, usage, true
+}
+
 // harness wires a *supervisor.Supervisor to fakeSession construction, so
 // tests get a handle on the exact fake backing each roster entry and can
 // assert how many times the New/Resume seams were invoked.
@@ -328,6 +407,21 @@ type harness struct {
 }
 
 func newHarness(t *testing.T) *harness {
+	t.Helper()
+	return newHarnessWithConfig(t, nil)
+}
+
+// newHarnessWithConfig is [newHarness] with mutate applied to the
+// supervisor.Config after its usual fake-session wiring is set but before
+// construction — the seam the TestAutoCompact-family tests use to install a
+// scripted [config.Compaction] resolver, and skills_wiring_test.go uses to
+// install a [config.Skills] resolver (mutate(&cfg) sets cfg.Skills directly;
+// an earlier, skills-only version of this seam took `func() config.Skills`
+// instead of the general mutate callback — generalized here rather than kept
+// as a second declaration, since a plain field-mutator callback can express
+// any one-off Config knob a test needs without a new helper per section).
+// mutate may be nil.
+func newHarnessWithConfig(t *testing.T, mutate func(*supervisor.Config)) *harness {
 	t.Helper()
 	h := &harness{t: t, root: t.TempDir(), sessions: make(map[string]*fakeSession)}
 
@@ -353,6 +447,9 @@ func newHarness(t *testing.T) *harness {
 			fs.tools = opts.Tools
 			return fs, nil
 		},
+	}
+	if mutate != nil {
+		mutate(&cfg)
 	}
 
 	sup, err := supervisor.New(cfg)

@@ -1,6 +1,10 @@
+● Context compacted — 12 messages replaced with a summary
+   └ ~45200 in (est., incl. overhead) → 512 out · claude-sonnet-5
+     Decisions made: use pgx over database/sql. Open TODO: wire the retry
+policy.
 
-gofer v0.3.0
-claude-sonnet-5 · ~/orchestration
+
+
 
 
 
@@ -16,9 +20,5 @@ claude-sonnet-5 · ~/orchestration
 
 
 ────────────────────────────────────────────────────────────────────────────────
-▸ /compact  Summarize this session's history and replace it with the summary
-  /config   View and edit settings
-  /context  Show how full this session's context window is
-────────────────────────────────────────────────────────────────────────────────
-> /c▏
+> ▏
 ────────────────────────────────────────────────────────────────────────────────

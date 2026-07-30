@@ -27,6 +27,7 @@ const (
 	methodGoferArchive   = "gofer/archive"
 	methodGoferSetModel  = "gofer/set_model"
 	methodGoferSetEffort = "gofer/set_effort"
+	methodGoferCompact   = "gofer/compact"
 )
 
 // methodPermissionReply is the JSON-RPC method literal the daemon exposes to
@@ -209,6 +210,8 @@ func toTUISessionInfo(d sessionInfoDTO) tui.SessionInfo {
 		Depth:         d.Depth,
 		Created:       d.Created,
 		Updated:       d.Updated,
+		LastUsage:     d.LastUsage,
+		ContextWindow: d.ContextWindow,
 	}
 }
 
@@ -442,6 +445,20 @@ func (s *Supervisor) SetModel(ctx context.Context, sessionID, model string) erro
 func (s *Supervisor) SetEffort(ctx context.Context, sessionID, effort string) error {
 	if _, err := s.cur().client.Call(ctx, methodGoferSetEffort, map[string]string{"sessionId": sessionID, "effort": effort}); err != nil {
 		return fmt.Errorf("daemonbridge: set effort %s: %w", sessionID, err)
+	}
+	return nil
+}
+
+// Compact calls gofer/compact. Like SetModel/SetEffort, every supervisor-side
+// sentinel ([supervisor.ErrRunning], [runner.ErrNothingToCompact]) arrives
+// here as a plain, messaged JSON-RPC application error — the concrete types
+// do not survive the wire. Success carries no payload: the client learns what
+// happened from the session.compacted event this call causes the daemon to
+// publish, delivered through the normal reconstruction path like any other
+// event, not from this call's return value.
+func (s *Supervisor) Compact(ctx context.Context, sessionID, instructions string) error {
+	if _, err := s.cur().client.Call(ctx, methodGoferCompact, map[string]string{"sessionId": sessionID, "instructions": instructions}); err != nil {
+		return fmt.Errorf("daemonbridge: compact %s: %w", sessionID, err)
 	}
 	return nil
 }

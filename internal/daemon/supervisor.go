@@ -62,6 +62,10 @@ type Supervisor interface {
 	// SetEffort changes a session's reasoning effort for its next turn. An
 	// empty effort clears the level back to the provider's default.
 	SetEffort(ctx context.Context, sessionID, effort string) error
+	// Compact replaces a session's history up to HEAD with a summary,
+	// publishing session.compacted. Idle-only — see
+	// [supervisor.Supervisor.Compact]'s doc.
+	Compact(ctx context.Context, sessionID, instructions string) error
 	// SubscribeLive returns a session's event stream without the retained
 	// must-deliver backlog, for a caller about to drive a fresh turn.
 	SubscribeLive(ctx context.Context, sessionID string) (*event.Subscription, error)

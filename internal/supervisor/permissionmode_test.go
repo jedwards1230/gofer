@@ -44,12 +44,14 @@ func (s *stubSession) Events() *event.Subscription { return s.broker.Subscribe(e
 func (s *stubSession) EventsLive() *event.Subscription {
 	return s.broker.SubscribeLive(event.FilterAll, 64)
 }
-func (s *stubSession) Prompt(context.Context, string) error { return nil }
-func (s *stubSession) Emit(e event.Event)                   { s.broker.Publish(e) }
-func (s *stubSession) Cost() session.CostReport             { return session.CostReport{} }
-func (s *stubSession) SetModel(string) error                { return nil }
-func (s *stubSession) SetEffort(string) error               { return nil }
-func (s *stubSession) Close() error                         { s.broker.Close(); return nil }
+func (s *stubSession) Prompt(context.Context, string) error      { return nil }
+func (s *stubSession) Emit(e event.Event)                        { s.broker.Publish(e) }
+func (s *stubSession) Cost() session.CostReport                  { return session.CostReport{} }
+func (s *stubSession) SetModel(string) error                     { return nil }
+func (s *stubSession) SetEffort(string) error                    { return nil }
+func (s *stubSession) Compact(context.Context, string) error     { return runner.ErrNothingToCompact }
+func (s *stubSession) LastUsage() (string, provider.Usage, bool) { return "", provider.Usage{}, false }
+func (s *stubSession) Close() error                              { s.broker.Close(); return nil }
 
 // guardCapture builds a supervisor whose NewSession seam records the guard the
 // supervisor injected for each created session, with mode resolved through the
