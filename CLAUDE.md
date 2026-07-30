@@ -86,6 +86,12 @@ make install                                       # local install, truthfully v
   `session/explain_permission` answers.
 - `internal/sandbox/` — OS containment backends (seatbelt / bwrap+seccomp)
   behind the SDK's permission guard.
+- `internal/lspdiag/` — wraps the session tool registry (the same seam
+  `internal/sandbox.WrapRegistry` uses) so a successful edit/write is
+  followed by a bounded, best-effort round trip through a real language
+  server (the SDK's `agent-sdk-go/lsp`), appending diagnostics to both the
+  tool's model-facing content and its client-facing metadata. Advisory only —
+  every failure mode degrades silently to the unmodified tool result.
 - `internal/decision/` — gofer's structured-decision round trip: the
   `ask_user` tool (gofer's first tool of its own) plus the per-session `Gate`
   it blocks on, carrying `acp` decision types over a gofer-native transport
