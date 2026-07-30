@@ -71,6 +71,8 @@ github.com/jedwards1230/agent-sdk-go v0.21.0 h1:1e2/FbuF/teOGuhQaV/WWltO5nb/ys7t
 github.com/jedwards1230/agent-sdk-go v0.21.0/go.mod h1:YwVFv8OhivgxEBTYzX9D8JMTdFcQxEz5/gOACV91GFY=
 github.com/jedwards1230/agent-sdk-go v0.21.1-0.20260730004426-322f8e20ee4c h1:/6Cg4UNz7YSA5Mgb4lND6kM1UMUo5+qDjd82MdNtaWo=
 github.com/jedwards1230/agent-sdk-go v0.21.1-0.20260730004426-322f8e20ee4c/go.mod h1:YwVFv8OhivgxEBTYzX9D8JMTdFcQxEz5/gOACV91GFY=
+github.com/jedwards1230/agent-sdk-go v0.21.1-0.20260730115402-3d9dea3c557c h1:jiT/6sA7ykp+TIf17OcAZ3Hy+wwo6MQEijk3ywlPRN4=
+github.com/jedwards1230/agent-sdk-go v0.21.1-0.20260730115402-3d9dea3c557c/go.mod h1:YwVFv8OhivgxEBTYzX9D8JMTdFcQxEz5/gOACV91GFY=
 github.com/kr/pretty v0.3.1 h1:flRD4NNwYAUpkphVc1HcthR4KEIFJ65n8Mw5qdRn3LE=
 github.com/kr/pretty v0.3.1/go.mod h1:hoEshYVHaxMs3cyo3Yncou5ZscifuDolrwPKZanG3xk=
 github.com/kr/text v0.2.0 h1:5Nx0Ya0ZqY2ygV366QzturHI13Jq95ApcVaJBhpS+AY=
