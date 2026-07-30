@@ -51,16 +51,29 @@ type Skills struct {
 }
 
 // Directories resolves [Skills.Dirs]'s effective value: the configured list
-// when non-empty, else the two conventional locations — <root>/skills and
-// <cwd>/.gofer/skills — mirroring internal/usercmd's <root>/commands +
-// <cwd>/.gofer/commands split between shared and project-local discovery.
+// when non-empty, else the two conventional locations — <cwd>/.gofer/skills
+// (project) and <root>/skills (global) — the same two directories
+// internal/usercmd splits shared vs. project-local discovery across.
+//
+// Order here IS precedence, and it is deliberately the opposite of
+// internal/usercmd.Load's directory order. usercmd.Load loads user scope
+// then project scope into a map keyed by name, so the LAST write wins —
+// project overrides user. The SDK's skill.Load has no such scope concept: it
+// is PATH-style, and the FIRST directory to define a name wins (see its
+// package doc). Returning [root, cwd] here — mirroring usercmd's literal
+// build order instead of its OUTCOME — would hand skill.Load's first-wins
+// semantics to the GLOBAL directory, so a global skill would silently
+// shadow a same-named project skill: the opposite of how project commands
+// behave. Listing the project directory first makes skill.Load's precedence
+// land on the same outcome usercmd's does — project beats global — even
+// though the two loaders reach it by opposite mechanisms.
 func (s Skills) Directories(root, cwd string) []string {
 	if len(s.Dirs) > 0 {
 		return s.Dirs
 	}
 	return []string{
-		filepath.Join(root, DefaultSkillDirName),
 		filepath.Join(cwd, ".gofer", DefaultSkillDirName),
+		filepath.Join(root, DefaultSkillDirName),
 	}
 }
 

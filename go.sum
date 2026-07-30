@@ -67,10 +67,6 @@ github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0 h1:5VipnvEpbqr2gA2VbM+nYVbkIF2
 github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0/go.mod h1:Hyl3n6Twe1hvtd9XUXDec4pTvgMSEixRuQKPTMH2bNs=
 github.com/hexops/gotextdiff v1.0.3 h1:gitA9+qJrrTCsiCl7+kh75nPqQt1cx4ZkudSTLoUqJM=
 github.com/hexops/gotextdiff v1.0.3/go.mod h1:pSWU5MAI3yDq+fZBTazCSJysOMbxWL1BSow5/V2vxeg=
-github.com/jedwards1230/agent-sdk-go v0.21.0 h1:1e2/FbuF/teOGuhQaV/WWltO5nb/ys7te87ZHupsU+I=
-github.com/jedwards1230/agent-sdk-go v0.21.0/go.mod h1:YwVFv8OhivgxEBTYzX9D8JMTdFcQxEz5/gOACV91GFY=
-github.com/jedwards1230/agent-sdk-go v0.21.1-0.20260730004426-322f8e20ee4c h1:/6Cg4UNz7YSA5Mgb4lND6kM1UMUo5+qDjd82MdNtaWo=
-github.com/jedwards1230/agent-sdk-go v0.21.1-0.20260730004426-322f8e20ee4c/go.mod h1:YwVFv8OhivgxEBTYzX9D8JMTdFcQxEz5/gOACV91GFY=
 github.com/jedwards1230/agent-sdk-go v0.21.1-0.20260730115402-3d9dea3c557c h1:jiT/6sA7ykp+TIf17OcAZ3Hy+wwo6MQEijk3ywlPRN4=
 github.com/jedwards1230/agent-sdk-go v0.21.1-0.20260730115402-3d9dea3c557c/go.mod h1:YwVFv8OhivgxEBTYzX9D8JMTdFcQxEz5/gOACV91GFY=
 github.com/kr/pretty v0.3.1 h1:flRD4NNwYAUpkphVc1HcthR4KEIFJ65n8Mw5qdRn3LE=
