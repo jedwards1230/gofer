@@ -360,6 +360,8 @@ func (s *vhsSupervisor) SetModel(context.Context, string, string) error { return
 
 func (s *vhsSupervisor) SetEffort(context.Context, string, string) error { return nil }
 
+func (s *vhsSupervisor) Compact(context.Context, string, string) error { return nil }
+
 func (s *vhsSupervisor) Reply(context.Context, string, string, tui.PermissionDecision) error {
 	return nil
 }

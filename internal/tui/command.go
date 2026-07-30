@@ -272,6 +272,24 @@ func newBuiltinRegistry() Registry {
 		Run:     runThinking,
 	})
 	r.register(Command{
+		// No ArgHint, deliberately — same reasoning as /new's (see runNew's
+		// doc): every string is a valid summarization instruction, so an
+		// "unusable argument" TestArgHintCommandsConsumeArgs could assert
+		// against does not exist for this command, and advertising a slot
+		// the args-consumption guard can never observe rejecting anything
+		// would weaken that guard for every command, not strengthen this
+		// one. Instructions are still accepted and forwarded — see
+		// runCompact — just not invited via autocomplete.
+		Name:    "compact",
+		Summary: "Summarize this session's history and replace it with the summary",
+		Run:     runCompact,
+	})
+	r.register(Command{
+		Name:    "context",
+		Summary: "Show how full this session's context window is",
+		Run:     openPanel(panelContext),
+	})
+	r.register(Command{
 		Name:    "yolo",
 		ArgHint: "[on|off]",
 		Summary: "Toggle guardrails for new sessions",

@@ -61,11 +61,13 @@ func (f *gatedSession) Events() *event.Subscription { return f.broker.Subscribe(
 func (f *gatedSession) EventsLive() *event.Subscription {
 	return f.broker.SubscribeLive(event.FilterAll, 64)
 }
-func (f *gatedSession) Emit(e event.Event)       { f.broker.Publish(e) }
-func (f *gatedSession) Cost() session.CostReport { return session.CostReport{} }
-func (f *gatedSession) SetModel(string) error    { return nil }
-func (f *gatedSession) SetEffort(string) error   { return nil }
-func (f *gatedSession) Close() error             { f.broker.Close(); return nil }
+func (f *gatedSession) Emit(e event.Event)                        { f.broker.Publish(e) }
+func (f *gatedSession) Cost() session.CostReport                  { return session.CostReport{} }
+func (f *gatedSession) Compact(context.Context, string) error     { return runner.ErrNothingToCompact }
+func (f *gatedSession) LastUsage() (string, provider.Usage, bool) { return "", provider.Usage{}, false }
+func (f *gatedSession) SetModel(string) error                     { return nil }
+func (f *gatedSession) SetEffort(string) error                    { return nil }
+func (f *gatedSession) Close() error                              { f.broker.Close(); return nil }
 
 func (f *gatedSession) Prompt(ctx context.Context, text string) error {
 	f.broker.Publish(event.NewPermissionRequested(f.id, f.callID, "bash", map[string]any{"command": text}, []string{"rule: ask"}))

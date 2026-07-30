@@ -1,3 +1,5 @@
+  /usage                           Show this session's token and cost consumpti…
+  /yolo [on|off]                   Toggle guardrails for new sessions
 Global
   ctrl+c  Quit gofer
   ctrl+y  Toggle guardrails for new sessions (same as /yolo)
@@ -8,6 +10,4 @@ Roster
   →          Open the selected session (empty dispatch bar)
   space      Peek the selected session (empty dispatch bar)
   tab        Switch flat / grouped roster view
-  esc        Clear the dispatch bar
-  ctrl+x     Kill a running session, archive a finished one (press twice to con…
-↑ 12 more · ↓ 58 more
+↑ 12 more · ↓ 60 more

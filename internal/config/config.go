@@ -72,6 +72,9 @@ type Config struct {
 	// LSP configures gofer's language-server diagnostics integration. See
 	// [LSP].
 	LSP LSP `json:"lsp,omitempty"`
+	// Compaction configures gofer's automatic context-compaction trigger. See
+	// [Compaction].
+	Compaction Compaction `json:"compaction,omitempty"`
 }
 
 // Daemon holds daemon-process lifecycle preferences, distinct from Session's

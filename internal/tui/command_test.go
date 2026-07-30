@@ -230,7 +230,7 @@ func TestPanelConfigEditPersistsViaSaveConfig(t *testing.T) {
 	rowOrder := []string{
 		"session.model", "session.effort", "session.permission_mode",
 		"tui.roster_view", "tui.autoscroll", "tui.mouse", "tui.shell_reply_mode",
-		"lsp.enabled", "tools.schema_mode", "search.provider",
+		"compaction.enabled", "lsp.enabled", "tools.schema_mode", "search.provider",
 		"telemetry.enabled", "telemetry.endpoint",
 	}
 	if got, want := len(rowOrder), tui.SettingsRegistryLen(); got != want {

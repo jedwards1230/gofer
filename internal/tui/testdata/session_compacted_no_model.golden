@@ -1,6 +1,10 @@
+● Context compacted — 4 messages replaced with a summary
+   └ terse deterministic summary
 
-gofer v0.3.0
-claude-sonnet-5 · ~/orchestration
+
+
+
+
 
 
 
@@ -16,9 +20,5 @@ claude-sonnet-5 · ~/orchestration
 
 
 ────────────────────────────────────────────────────────────────────────────────
-▸ /compact  Summarize this session's history and replace it with the summary
-  /config   View and edit settings
-  /context  Show how full this session's context window is
-────────────────────────────────────────────────────────────────────────────────
-> /c▏
+> ▏
 ────────────────────────────────────────────────────────────────────────────────

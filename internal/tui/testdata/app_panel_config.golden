@@ -6,7 +6,7 @@ claude-sonnet-5 · ~/orchestration
 
 
 ────────────────────────────────────────────────────────────────────────────────
-Status  [Config]  Model  Thinking  Usage  Stats  Resume  Help
+Status  [Config]  Model  Thinking  Usage  Stats  Context  Resume  Help
 ────────────────────────────────────────────────────────────────────────────────
 Search settings…
   Default model … 
@@ -16,9 +16,9 @@ Search settings…
   Auto-scroll transcript … true
   Mouse capture (scroll + selection) … true
   Shell reply mode … reply
+  Automatic compaction … true
   LSP diagnostics … true
   Tool schema mode … preload
   Web search provider … none
   Telemetry enabled … false
-  Telemetry endpoint … 
 Type to filter · Enter/↓ to select · ↑ to tabs · Esc to clear

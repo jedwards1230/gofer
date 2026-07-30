@@ -394,6 +394,18 @@ type SessionInfo struct {
 	ParentID string `json:"parentId,omitempty"`
 	Agent    string `json:"agent,omitempty"`
 	Depth    int    `json:"depth,omitempty"`
+	// LastUsage mirrors internal/daemon/wire.go's field of the same name: the
+	// most recently completed turn's token usage in the session's current
+	// folded context — the measured proxy for how full the context window is
+	// right now, distinct from the ACCUMULATED Usage above. Additive: an
+	// older daemon never sends it and this decodes to the zero value, which
+	// also correctly describes a session with no settled turn yet.
+	LastUsage provider.Usage `json:"lastUsage"`
+	// ContextWindow mirrors internal/daemon/wire.go's field of the same name:
+	// the active model's context-window size in tokens, resolved server-side
+	// — 0 when unknown. Additive and omitempty: an older daemon never sends
+	// it and 0 is also the correct "unknown" value.
+	ContextWindow int `json:"contextWindow,omitempty"`
 }
 
 // Roster calls gofer/roster and decodes the raw wire rows. Consumers map the
