@@ -128,6 +128,8 @@ func runSessionWorker(ctx context.Context, args []string, stdout, stderr io.Writ
 		// searchConfigResolver.
 		Tools:  toolsConfigResolver(rootDir),
 		Search: searchConfigResolver(rootDir),
+		// Same reasoning for skills.* — see skillsConfigResolver.
+		Skills: skillsConfigResolver(rootDir),
 		// Pin the sole session's id to --session (design Option A) through the
 		// SDK's pre-assigned-session-id seam: runner.New creates the session with
 		// this exact id, leaving entry-id generation on the store default.

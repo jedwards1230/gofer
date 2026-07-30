@@ -83,10 +83,11 @@ make install                                       # local install, truthfully v
   `Telemetry`, `Daemon` (incl. `drain_timeout_ms`), and M7's `Prompt`/
   `Tools`/`MCP`/`Search`/`Skills`/`LSP` sections, plus the shared `SecretRef`
   (`env:`/`file:`, resolved at use time, never inlined). `Prompt` is read by
-  `internal/prompt`; `LSP`/`Tools`/`Search` by `internal/supervisor`'s session
-  wiring (`internal/websearch` and the SDK's `toolindex` consume `Search`/
-  `Tools` respectively); `MCP`/`Skills` are still schema only — each wired up
-  by its own feature PR. See its package doc.
+  `internal/prompt`; `LSP`/`Tools`/`Search`/`Skills` by `internal/supervisor`'s
+  session wiring (`internal/websearch` and the SDK's `toolindex` consume
+  `Search`/`Tools` respectively; `internal/skillset` consumes `Skills`);
+  `MCP` is still schema only — wired up by its own feature PR. See its
+  package doc.
 - `internal/prompt/` — composes a session's system prompt from
   `config.Prompt.Files` (the replacement for cmd/gofer's old
   `defaultSystemPrompt` string constant): `builtin:`/absolute/`~/`/cwd-then-
@@ -106,6 +107,15 @@ make install                                       # local install, truthfully v
   server (the SDK's `agent-sdk-go/lsp`), appending diagnostics to both the
   tool's model-facing content and its client-facing metadata. Advisory only —
   every failure mode degrades silently to the unmodified tool result.
+- `internal/skillset/` — wires the SDK's `agent-sdk-go/skill` package
+  (`SKILL.md` discovery with progressive disclosure) into a session:
+  resolves `config.Skills` into a `skill.Load` call, applies
+  `skills.disabled` (which the SDK's `skill.Set` has no notion of), and
+  exposes the single `skill` tool `internal/supervisor.sessionGuard`
+  registers into the base tool registry, omitted when nothing survives
+  disabling. Also the seam that fixes the project-vs-global skill precedence
+  bug (`config.Skills.Directories` lists the project directory first, since
+  the SDK's `skill.Load` is first-directory-wins).
 - `internal/decision/` — gofer's structured-decision round trip: the
   `ask_user` tool (gofer's first tool of its own) plus the per-session `Gate`
   it blocks on, carrying `acp` decision types over a gofer-native transport

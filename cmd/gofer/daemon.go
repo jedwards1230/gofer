@@ -278,6 +278,8 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 			// toolsConfigResolver/searchConfigResolver.
 			Tools:  toolsConfigResolver(rootDir),
 			Search: searchConfigResolver(rootDir),
+			// Same reasoning, for skills.* — see skillsConfigResolver.
+			Skills: skillsConfigResolver(rootDir),
 			// Attach a per-session telemetry observer at registration, before the
 			// session's first turn — subscribing here (rather than after a turn
 			// has already started) means Events' replay backlog is still empty,
@@ -613,6 +615,26 @@ func searchConfigResolver(root string) func() config.Search {
 			return config.Search{}
 		}
 		return cfg.Search
+	}
+}
+
+// skillsConfigResolver is [supervisor.Config.Skills] for a process rooted at
+// root: it RE-READS <root>/config.json every time a session is created, so a
+// `skills.*` write governs the next session this process starts rather than
+// only the next process. Same shape as lspConfigResolver, for the same
+// reason.
+//
+// A config that won't load resolves to the zero [config.Skills] — the two
+// conventional directories, at the package defaults — matching the
+// fail-safe [supervisor.New] itself falls back to when Config.Skills is
+// nil.
+func skillsConfigResolver(root string) func() config.Skills {
+	return func() config.Skills {
+		cfg, err := config.Load(config.DefaultPath(root))
+		if err != nil {
+			return config.Skills{}
+		}
+		return cfg.Skills
 	}
 }
 

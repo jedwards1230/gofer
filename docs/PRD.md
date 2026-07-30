@@ -253,10 +253,37 @@ error can produce dozens of diagnostics, and only a bounded, current-file
 slice enters context) with the same `… +N more` collapse the TUI's approval
 body uses.
 
-**Not yet config-driven.** `lsp.enabled` / `lsp.timeout_ms` /
-`lsp.max_diagnostics` are fixed defaults at the wiring site pending a
-`config.LSP` section (tracked with the M7 config-schema work); see the
-`TODO(config)` in `sessionGuard`.
+Config-driven via `config.LSP` (`lsp.enabled` / `lsp.timeout_ms` /
+`lsp.max_diagnostics`), read per session by `internal/supervisor.sessionGuard`
+so a `/config` edit reaches the next session a running gofer starts.
+
+## Skills (M7)
+
+`SKILL.md` discovery follows the same progressive-disclosure discipline as
+tool/MCP indexing: only a skill's name and (budget-truncated) description
+enter context up front, via the SDK's `agent-sdk-go/skill` package
+(`skill.Load`/`Set.Index`); the body is read from disk once, on invocation
+(`Set.Body`), never cached. `internal/skillset` is gofer's seam over it —
+resolving `config.Skills` into the `skill.Load` call, applying
+`skills.disabled` (a gofer concept the SDK's `skill.Set` has no notion of),
+and exposing the single `skill` tool `sessionGuard` registers into the base
+tool registry alongside `ask_user`, omitted entirely when nothing survives
+disabling (a permanently-empty tool is pure context cost).
+
+**Precedence — project overrides global.** `config.Skills.Directories`
+resolves the unset default to `<cwd>/.gofer/skills` then `<root>/skills`, in
+that order: the SDK's `skill.Load` is PATH-style (first directory to define a
+name wins), the opposite of `internal/usercmd.Load`'s last-write-wins map, so
+landing on the same outcome — a project skill beats a same-named global one —
+means listing the project directory first, not mirroring `usercmd`'s literal
+build order. Getting this backwards was a confirmed bug (a global skill
+silently shadowing a project one); `internal/skillset`'s
+`TestLoadProjectBeatsGlobal` pins the fix.
+
+Anything `skill.Load` skips (oversized, malformed, duplicate/shadowed,
+symlinked) is never swallowed: `sessionGuard` emits it as a non-fatal
+`session.error` on the session's own event stream once, at creation — the
+same "visible artifact, never silent" treatment a failed turn gets.
 
 ## System prompt composition (M7)
 
@@ -390,7 +417,7 @@ phone-home.
 | **M4 · command views** ✅ shipped 2026-07-15 | slash dispatcher + command panel (`/status`, `/config`, `/model`) + autocomplete + settings registry (`config.Save`) + a TUI redesign wave (global header, bottom-anchored layout, mouse-wheel scroll, cursor-aware input, click-drag selection + OSC 52 copy) | an operator opens `/status`/`/config`/`/model` from the dispatcher and swaps a session's model without leaving the TUI |
 | **M5 · ACP v1 featureset expansion** ✅ shipped 2026-07-25 (on `main`; the `milestone/m5-acp-featureset` integration branch has merged and been deleted). Every committed slice is live end-to-end across SDK → gofer → Agmente; the two carve-outs are image/audio/resource content blocks (modeled, no producer in any repo) and the `available_commands_update`/`current_mode_update` registries, both descoped rather than pending — see the slice list below | cross-repo ACP conformance push (SDK models the blocks, gofer emits them, Agmente decodes) driven by an internal conformance matrix: `usage_update` on `session/update` (SDK v0.6.0 pass-through, [#97](https://github.com/jedwards1230/gofer/pull/97), merged) → rich content/tool-call blocks (`diff` live; image/audio/resource modeled, no producer) → session methods (`session/list`, resume, `set_config_option`, `cwd`) → model discovery + `set_model` → capability stretch (`session_info_update`, `plan`, `available_commands_update`/`current_mode_update`/`config_option_update`). Detail: [ACP v1 featureset expansion](#acp-v1-featureset-expansion-m5) | an ACP client renders live token cost, tool-call blocks, and a model picker — all off the daemon's spec-general `session/update` surface, no client-specific path |
 | **M6 · process isolation** ✅ Phases 0-3 shipped 2026-07-19 and Phase 4 (lifecycle polish) since — [#139](https://github.com/jedwards1230/gofer/issues/139) (offline resume spawns a fresh worker) and [#140](https://github.com/jedwards1230/gofer/issues/140) (cost/usage aggregation + graceful drain) are both closed; only roster reconciliation edge cases remain unverified. Behind the opt-in, off-by-default `gofer daemon --workers` | thin router daemon + detached per-session `gofer session-worker` processes (worker owns runner + pump + gate + journal + broker; router owns roster/fan-out/discovery/ACP surface); `setsid` detachment + endpoint-file adoption on restart; versioned router↔worker wire (the existing client wire + `gofer/hello`) with in-flight-only skew tolerance; `-local` stays in-process. Design: [docs/milestones/M6-process-isolation.md](milestones/M6-process-isolation.md) | upgrade the daemon binary mid-turn — the running session finishes uninterrupted on the old worker binary, the next session runs the new one; `session/list` shows mixed binary versions |
-| **M7 · ecosystem** 🚧 in flight — the current milestone | MCP on by default (schemas preload by default; tool-search index mode is opt-in) + subagents first-class (roster tree, peek/attach into children, linked journals) + skills + plugin UX. **Subagents are partly shipped**: the parent/child primitive, roster tree, drill-in, and per-tool-call agent attribution landed 2026-07-21 ([#204](https://github.com/jedwards1230/gofer/pull/204)/[#207](https://github.com/jedwards1230/gofer/pull/207)/[#208](https://github.com/jedwards1230/gofer/pull/208)), operator-driven only via `gofer run --parent/--agent`. Agent-initiated spawn ([#260](https://github.com/jedwards1230/gofer/issues/260)) is blocked on the SDK spawn seam (agent-sdk-go#90). MCP, skills, and plugin UX are not started | a third-party plugin adds a tool with one config line |
+| **M7 · ecosystem** 🚧 in flight — the current milestone | MCP on by default (schemas preload by default; tool-search index mode is opt-in) + subagents first-class (roster tree, peek/attach into children, linked journals) + skills + plugin UX. **Subagents are partly shipped**: the parent/child primitive, roster tree, drill-in, and per-tool-call agent attribution landed 2026-07-21 ([#204](https://github.com/jedwards1230/gofer/pull/204)/[#207](https://github.com/jedwards1230/gofer/pull/207)/[#208](https://github.com/jedwards1230/gofer/pull/208)), operator-driven only via `gofer run --parent/--agent`. Agent-initiated spawn ([#260](https://github.com/jedwards1230/gofer/issues/260)) is blocked on the SDK spawn seam (agent-sdk-go#90). **Skills shipped**: config-driven `SKILL.md` discovery, progressive disclosure, and project-beats-global precedence (`internal/skillset`) — see [Skills](#skills-m7). MCP and plugin UX are not started | a third-party plugin adds a tool with one config line |
 | M8 · auto + polish | auto mode (reviewer pipeline), CC-asset import, mDNS pairing | auto mode survives a week of real ops without a bad allow |
 
 ## ACP v1 featureset expansion (M5)

@@ -29,6 +29,7 @@ import (
 	// its own body.
 	sysprompt "github.com/jedwards1230/gofer/internal/prompt"
 	"github.com/jedwards1230/gofer/internal/sandbox"
+	"github.com/jedwards1230/gofer/internal/skillset"
 	"github.com/jedwards1230/gofer/internal/websearch"
 )
 
@@ -105,6 +106,18 @@ type Config struct {
 	// — no search tool registered at all.
 	Search func() config.Search
 
+	// Skills resolves the SKILL.md discovery config each NEW session's tool
+	// registry is wired with (see [config.Skills]). Same factory shape as LSP
+	// and for the same reason: called once per Create/Resume — inside
+	// sessionGuard, where the session's own Cwd is finally known — rather
+	// than sampled at construction, so a `skills.*` write reaches the next
+	// session a RUNNING gofer starts, with no restart. It cannot reach a
+	// session that already exists, for the same reason LSP cannot: the SDK
+	// fixes a session's tool registry at construction. Nil defaults to the
+	// zero [config.Skills], which resolves to the two conventional
+	// directories at the package defaults.
+	Skills func() config.Skills
+
 	// Store, when set, is used instead of building a store from Root, and is
 	// NOT closed by [Supervisor.Close] — the caller owns its lifecycle. Test
 	// seam.
@@ -172,6 +185,11 @@ type Supervisor struct {
 	// Config.Search resolves to a constant zero-value factory, which
 	// config.Search.Selected resolves to none).
 	searchConfig func() config.Search
+
+	// skillsConfig mirrors Config.Skills; never nil after New (a nil
+	// Config.Skills resolves to a constant zero-value factory, which
+	// config.Skills.Directories etc. resolve to the package defaults).
+	skillsConfig func() config.Skills
 
 	// resumeMu serializes Resume end-to-end (roster check through
 	// registration) so two concurrent Resumes of the same id can never both
@@ -298,6 +316,15 @@ func New(cfg Config) (*Supervisor, error) {
 		searchConfig = func() config.Search { return config.Search{} }
 	}
 
+	skillsConfig := cfg.Skills
+	if skillsConfig == nil {
+		// No explicit resolver: the zero config.Skills, which its own
+		// Directories/FileLimitBytes/DescriptionLimitBytes resolve to the
+		// package defaults (the two conventional directories, at the
+		// package size caps).
+		skillsConfig = func() config.Skills { return config.Skills{} }
+	}
+
 	return &Supervisor{
 		root:             root,
 		store:            store,
@@ -312,6 +339,7 @@ func New(cfg Config) (*Supervisor, error) {
 		lspConfig:        lspConfig,
 		toolsConfig:      toolsConfig,
 		searchConfig:     searchConfig,
+		skillsConfig:     skillsConfig,
 		lspManager:       lspdiag.NewManager(),
 		roster:           make(map[string]*managed),
 		watchers:         make(map[*watcher]struct{}),
@@ -361,22 +389,32 @@ func New(cfg Config) (*Supervisor, error) {
 // The registry is layered, outermost last, per docs/PRD.md's "Tool surface"
 // section:
 //
-//	tool.NewRegistry(builtins + ask_user + web_search + ix.SearchTool())
+//	tool.NewRegistry(builtins + ask_user + web_search + skill + ix.SearchTool())
 //	  → loop.FromRegistry            (sandbox.WrapRegistry's own base)
 //	  → sandbox.WrapRegistry(cwd, container, extra...)   (bash containment; Specs passthrough)
 //	  → lspdiag.Wrap(…)                                  (diagnostics; Specs passthrough)
 //	  → ix.Wrap(…)                                        (index mode ONLY; the only layer that alters Specs)
 //
 // web_search (internal/websearch) is registered only when
-// config.Search.Selected() is not none; ix.SearchTool() (and the ix.Wrap
-// outer layer) only under index mode — under preload mode nothing beyond
-// web_search changes, so a config with no tools/search section produces a
-// byte-identical registry to before this feature existed. MCP-federated
-// tools (a separate PR) join the SAME extra slice below, before
-// sandbox.WrapRegistry — never a second decorator layer, so N federated
-// servers still cost exactly one Specs() re-derivation, and ix.Wrap (when
-// present) still sees and indexes them.
-func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.Gate, decisions *decision.Gate, tools loop.ToolRegistry, ix *toolindex.Index) {
+// config.Search.Selected() is not none; the skill tool (internal/skillset)
+// only when something survives config.Skills' disabling; ix.SearchTool()
+// (and the ix.Wrap outer layer) only under index mode — under preload mode
+// with no search/skills configured nothing beyond the base registry changes,
+// so a config with no tools/search/skills section produces a byte-identical
+// registry to before this feature existed. MCP-federated tools (a separate
+// PR) join the SAME extra slice below, before sandbox.WrapRegistry — never a
+// second decorator layer, so N federated servers still cost exactly one
+// Specs() re-derivation, and ix.Wrap (when present) still sees and indexes
+// them.
+//
+// skillNote is sessionGuard's out-of-band final return: the operator-facing
+// summary of anything skillset.Load skipped (oversized, malformed, or
+// shadowed by a higher-precedence directory — see [skillset.Summarize]), or
+// "" when nothing was. It travels alongside the built registry rather than
+// being emitted here because sessionGuard runs before the session — and so
+// its id, the one thing [event.NewSessionError] needs — exists; Create and
+// Resume both emit it once the session is registered (see their own calls).
+func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.Gate, decisions *decision.Gate, tools loop.ToolRegistry, ix *toolindex.Index, skillNote string) {
 	gate := loop.NewGate()
 	dgate := decision.NewGate("")
 	askUser := decision.NewAskUser(dgate)
@@ -391,15 +429,24 @@ func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.
 		MaxDiagnostics: lspCfg.DiagnosticLimit(),
 	}
 
-	// Same per-session re-read as lsp/permission mode, for tools.* and
-	// search.* — a config write reaches the next session this supervisor
-	// creates, not the one already running.
+	// Same per-session re-read as lsp/permission mode, for tools.*/search.* —
+	// a config write reaches the next session this supervisor creates, not
+	// the one already running.
 	toolsCfg := s.toolsConfig()
 	searchCfg := s.searchConfig()
+	// Same per-session re-resolution, for skills.* — see [Config.Skills]'s
+	// doc. cwd is only known here, at session-construction time, which is
+	// why this lives in sessionGuard rather than beside lspOpts in New.
+	skillsCfg := s.skillsConfig()
+	skillSet, diags := skillset.Load(skillsCfg, s.root, cwd)
+	skillNote = skillset.Summarize(diags)
 
 	extra := []tool.Tool{askUser}
 	if ws := websearch.New(searchCfg); ws != nil {
 		extra = append(extra, ws)
+	}
+	if skillTool, ok := skillset.NewTool(skillSet, skillsCfg); ok {
+		extra = append(extra, skillTool)
 	}
 	// A federated-MCP PR appends its own tools to extra HERE, before
 	// ix.SearchTool() — see the doc above.
@@ -428,7 +475,7 @@ func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.
 		if ix != nil {
 			tools = ix.Wrap(tools)
 		}
-		return yoloGuard{engine: engine}, gate, dgate, tools, ix
+		return yoloGuard{engine: engine}, gate, dgate, tools, ix, skillNote
 	}
 	container := sandbox.New()
 	rg := loop.RuleGuard{Engine: engine, Container: container, Target: sandbox.ToolTarget}
@@ -436,7 +483,7 @@ func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.
 	if ix != nil {
 		tools = ix.Wrap(tools)
 	}
-	return rg, gate, dgate, tools, ix
+	return rg, gate, dgate, tools, ix, skillNote
 }
 
 // ResolveRoot is gofer's single source of the ~/.gofer default — the SDK
@@ -520,7 +567,7 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts CreateOptio
 		return SessionInfo{}, err
 	}
 
-	guard, gate, decisions, tools, ix := s.sessionGuard(opts.Cwd)
+	guard, gate, decisions, tools, ix, skillNote := s.sessionGuard(opts.Cwd)
 	// Fold the tool index's hint into the system prompt HERE, not in
 	// internal/prompt.Compose's caller — see sysprompt.AppendHint's doc for
 	// why this join lives in internal/prompt rather than being re-derived
@@ -563,6 +610,14 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts CreateOptio
 		// the shared one and stays open; only its broker and journal close.
 		_ = sess.Close()
 		return SessionInfo{}, fmt.Errorf("supervisor: create session: %w", err)
+	}
+	// Surface any skipped SKILL.md on the session's own stream — see
+	// sessionGuard's skillNote doc — the same "visible artifact, never
+	// swallowed" treatment a failed turn gets (see managed.pump). Emitted
+	// after register so it reaches every observer's replay, before any
+	// turn event that might otherwise bury it.
+	if skillNote != "" {
+		sess.Emit(event.NewSessionError(sess.ID(), skillNote, false))
 	}
 	if prompt != "" {
 		if err := m.enqueue(prompt); err != nil {
@@ -661,7 +716,7 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 	// exactly when a client reopened it from somewhere else.
 	meta, _ := lookupDiskSession(s.root, id)
 
-	guard, gate, decisions, tools, ix := s.sessionGuard(opts.Cwd)
+	guard, gate, decisions, tools, ix, skillNote := s.sessionGuard(opts.Cwd)
 	// Same hint fold as Create — see its comment.
 	system := opts.System
 	if ix != nil {
@@ -693,6 +748,10 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 	if err != nil {
 		_ = sess.Close()
 		return SessionInfo{}, fmt.Errorf("supervisor: resume %s: %w", id, err)
+	}
+	// See Create's identical emit — same reasoning, same shape.
+	if skillNote != "" {
+		sess.Emit(event.NewSessionError(sess.ID(), skillNote, false))
 	}
 	// A resumed session returns to the overview for good: clear any archive
 	// marker so it is not hidden again after the next restart. Best-effort — the

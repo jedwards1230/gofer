@@ -199,6 +199,7 @@ func selectTUIBackend(ctx context.Context, df *daemonFlags, cwd, root string, st
 		LSP:              lspConfigResolver(rootDir),
 		Tools:            toolsConfigResolver(rootDir),
 		Search:           searchConfigResolver(rootDir),
+		Skills:           skillsConfigResolver(rootDir),
 	})
 	if err != nil {
 		return tuiBackend{}, fmt.Errorf("build supervisor: %w", err)
