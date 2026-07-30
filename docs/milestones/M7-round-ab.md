@@ -90,6 +90,58 @@ demand, and LSP signal is demonstrated live.
 
 Auto-compaction must be **visible** in the transcript — never silent.
 
+## Exit gate: live daily-driver validation, not green CI
+
+**Merging all the PRs is not the exit.** Twice already in this project the green
+suite passed and live use found the real defects — M2's four conformance bugs and
+M3's approval-modal, sandbox, and empty-`bash({})` failures were all found by
+driving it, not by CI or a review bot. This round is larger than either and
+touches context assembly, the least test-visible part of the system.
+
+So the round is done when these have been done **by hand**, on a real repo:
+
+1. **A session that actually crosses the compaction threshold.** Does the summary
+   preserve enough to keep working, and is the transcript marker legible when it
+   fires?
+2. **`AGENTS.md` adopted by config**, then that session **resumed** — proving it
+   did not silently re-compose a different prompt from current config.
+3. **Index mode on with real MCP servers federated** — confirm the model finds a
+   tool it was not given up front, and judge whether the extra model call is
+   perceptible in practice.
+4. **A project skill overriding a global one** of the same name, by hand rather
+   than only in the test.
+5. **Editing a Go file and seeing a real diagnostic** arrive in the transcript.
+6. **Read a very large file mid-session** — the known unhandled case
+   ([#279](https://github.com/jedwards1230/gofer/issues/279)): the threshold is
+   reactive on settled usage, so a single-turn overshoot gets rejected without
+   ever presenting a reading to compact on. Confirm what actually happens. If it
+   wedges, that is a stated follow-up rather than a day-one surprise.
+
+## The fail-safe rule, and why two defaults point opposite ways
+
+Every guardrail knob in this round resolves an unrecognized or missing value the
+same way: **fail toward the behavior whose worst case is *cost*, not
+*incapacity*.**
+
+That single rule produces defaults that look inconsistent and are not:
+
+| Knob | Default | Worst case of the *other* choice |
+|---|---|---|
+| `compaction.disabled` | **auto-compaction ON** | session dies at the provider limit — incapacity |
+| `tools.schema_mode` | **`preload`** | model can't find a tool it needs — incapacity |
+| `search.provider` | **`none`** | a tool that always errors, plus third-party traffic and paid quota |
+| `mcp` `transport` | **skip unsupported** | silently reinterpreted as a transport that happens to be wired up |
+
+Compaction defaults *on* and index mode defaults *off* — opposite directions,
+same principle, because their failure modes sit on opposite sides. Not
+compacting is incapacity, so compaction is on. Index mode failing is *also*
+incapacity, so preload wins there.
+
+**Do not "align" these for consistency.** The asymmetry is deliberate.
+`Compaction.Disabled` is spelled inverted (rather than `Enabled`) precisely so
+the zero value means on, with an `AutoEnabled()` accessor so no reader has to
+remember the polarity.
+
 ## Process rules this round established
 
 - **Gate the merge result, not the branch.** A branch cut before a dependency
@@ -113,6 +165,31 @@ Auto-compaction must be **visible** in the transcript — never silent.
   editing it serialized every merge behind a conflict.
 
 ## Found along the way
+
+- [#279](https://github.com/jedwards1230/gofer/issues/279) — **auto-compaction
+  cannot catch a single-turn context overshoot.** The trigger is reactive on
+  settled usage, and a rejected call yields no usage report, so a session that
+  jumps past the window in one step (a large uncapped `read`, a wide `grep`) never
+  presents a reading above the threshold and wedges. Blocked on
+  [agent-sdk-go#118](https://github.com/jedwards1230/agent-sdk-go/issues/118) —
+  there is no typed context-overflow error to branch a compact-and-retry on, and
+  string-matching provider error text fails open. Named on the exit gate above.
+- [agent-sdk-go#119](https://github.com/jedwards1230/agent-sdk-go/issues/119) —
+  `tool.Schema` cannot express `oneOf`/`anyOf`/`allOf`, so MCP projects those
+  tools **more permissively than the server accepts**. Measured at **6 of 50
+  (12%)** federated tools on a live gateway. The cheap half — naming the dropped
+  construct so the degradation is visible — is the same
+  visible-behavior discipline as the rest of this round.
+
+### Not addressed by this round, despite touching the same file
+
+[#216](https://github.com/jedwards1230/gofer/issues/216) — the local in-process
+TUI path passes **no `Permissions`**, so local sessions ignore the configured
+ruleset. The LSP config work edited `cmd/gofer/tui_app.go`, which is where that
+gap lives, but did **not** fix it. `#216` remains part of the deferred
+permission/actor round.
+
+## Also found
 
 - [#268](https://github.com/jedwards1230/gofer/issues/268) —
   `TestResumeOfflineSpawnsFreshWorker` duplicates history under full-suite
