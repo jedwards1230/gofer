@@ -156,6 +156,14 @@ remember the polarity.
 - **Never chain a check with the action it gates.** `gh-resolve-threads … && gh pr
   merge …` in one call merged `#273` over two unresolved threads — the listing
   exits 0 and its output arrives too late to read. Separate calls.
+- **A conflicted PR gets NO checks at all — which looks identical to "CI hasn't
+  started yet."** `pull_request` workflows run against GitHub's computed *merge
+  ref*; if the branch conflicts with its base that ref cannot be built, so no
+  workflow fires. `gh pr checks` then reports *"no checks reported"* rather than a
+  failure, and `mergeable` reads `UNKNOWN`. Hit on
+  [#278](https://github.com/jedwards1230/gofer/pull/278) after the base moved 6
+  merges ahead. **Treat "no checks" as a conflict signal, not as patience** — check
+  `gh pr view --json mergeable` before waiting on CI that will never come.
 - **`gh` resolves a bare PR number against the current directory's repo** and
   returns a plausible wrong answer rather than an error. Always pass
   `--repo owner/name` in a multi-repo tree.
