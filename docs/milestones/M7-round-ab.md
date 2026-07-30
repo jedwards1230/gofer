@@ -23,14 +23,14 @@ them. The permission/actor security cluster is a deliberate follow-up.
 | 0 | Config schema: all six new sections, one writer | gofer | **merged** | [#270](https://github.com/jedwards1230/gofer/pull/270) |
 | 0 | Index-first tool-registry contract | both | **designed + built** | [agent-sdk-go#114](https://github.com/jedwards1230/agent-sdk-go/pull/114) |
 | 1 | `Runner.Compact` seam | SDK | **merged** | [agent-sdk-go#111](https://github.com/jedwards1230/agent-sdk-go/pull/111) |
-| 1 | Auto-compact + `/compact` + `/context` | gofer | verified, in review | [#278](https://github.com/jedwards1230/gofer/pull/278) |
-| 2 | Prompt files via config; delete `defaultSystemPrompt` | gofer | verified, in review | [#272](https://github.com/jedwards1230/gofer/pull/272) |
-| 3 | MCP: optional SDK `mcp/` package | SDK | verified, in review | [agent-sdk-go#116](https://github.com/jedwards1230/agent-sdk-go/pull/116) |
-| 3 | MCP: gofer server config + connection manager | gofer | pending | — |
+| 1 | Auto-compact + `/compact` + `/context` | gofer | **merged** | [#278](https://github.com/jedwards1230/gofer/pull/278) |
+| 2 | Prompt files via config; delete `defaultSystemPrompt` | gofer | **merged** | [#272](https://github.com/jedwards1230/gofer/pull/272) |
+| 3 | MCP: optional SDK `mcp/` package | SDK | **merged** | [agent-sdk-go#116](https://github.com/jedwards1230/agent-sdk-go/pull/116) |
+| 3 | MCP: gofer server config + connection manager | gofer | **merged** | [#283](https://github.com/jedwards1230/gofer/pull/283) |
 | 4 | Search providers (Brave + SearXNG) | SDK | **merged** | [agent-sdk-go#113](https://github.com/jedwards1230/agent-sdk-go/pull/113) |
-| 4 | `web_search` tool + `tool_search` + preload toggle wiring | gofer | pending | — |
+| 4 | `web_search` tool + `tool_search` + preload toggle wiring | gofer | **merged** | [#282](https://github.com/jedwards1230/gofer/pull/282) |
 | 5 | Skills: `SKILL.md` loading, progressive disclosure | SDK | **merged** | [agent-sdk-go#115](https://github.com/jedwards1230/agent-sdk-go/pull/115) |
-| 5 | Skills: config-driven dirs + **precedence fix** | gofer | pending | — |
+| 5 | Skills: config-driven dirs + **precedence fix** | gofer | **merged** | [#281](https://github.com/jedwards1230/gofer/pull/281) |
 | 6 | Wire SDK `lsp/`, verified live | gofer | **merged** | [#269](https://github.com/jedwards1230/gofer/pull/269) |
 | 6 | LSP real config reads + drift test + `/config` row | gofer | **merged** | [#275](https://github.com/jedwards1230/gofer/pull/275) |
 | — | CI: `lsp-live` job so the LSP proof is a gate | gofer | **merged** | [#273](https://github.com/jedwards1230/gofer/pull/273), [#274](https://github.com/jedwards1230/gofer/pull/274) |
@@ -89,6 +89,24 @@ alone, a search provider answers from both Brave and SearXNG, a skill loads on
 demand, and LSP signal is demonstrated live.
 
 Auto-compaction must be **visible** in the transcript — never silent.
+
+
+## All six workstreams merged — 20 PRs
+
+The code is in. **The round is not done**: the exit gate below is a live
+daily-driver validation the user runs by hand, and two boundary steps precede it.
+
+**Boundary gate, in this order — it is a required sequence, not a preference:**
+
+1. Merge `jedwards1230/agent-sdk-go#110` (labeled `semver:minor`) → cuts
+   `v0.22.0` from the SDK's `main`.
+2. Small PR re-pinning this branch off the **pseudo-version** onto `v0.22.0`.
+3. Merge `jedwards1230/gofer#266` (labeled `semver:minor`).
+
+gofer cannot be pinned to a tag that does not exist yet, so step 2 necessarily
+sits between the two merges. Leaving gofer on the pseudo-version is the M2/M3
+hazard this gate exists to close — a squash-merge of the SDK tracking PR deletes
+the branch it points at.
 
 ## Exit gate: live daily-driver validation, not green CI
 
