@@ -282,6 +282,8 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 			// Same re-read-per-turn shape as PermissionMode above, for the
 			// automatic-compaction trigger.
 			Compaction: compactionResolver(rootDir),
+			// Same re-read-per-session shape, for lsp.* — see lspConfigResolver.
+			LSP: lspConfigResolver(rootDir),
 			// Attach a per-session telemetry observer at registration, before the
 			// session's first turn — subscribing here (rather than after a turn
 			// has already started) means Events' replay backlog is still empty,
@@ -622,6 +624,26 @@ func compactionResolver(root string) func() config.Compaction {
 			return config.Compaction{}
 		}
 		return cfg.Compaction
+	}
+}
+
+// lspConfigResolver is [supervisor.Config.LSP] for a process rooted at root:
+// it RE-READS <root>/config.json every time a session is created, so an
+// `lsp.*` write (the /config view, or a hand-edited config.json) governs the
+// next session this process starts rather than only the next process. Same
+// shape as permissionModeResolver and wired into every supervisor gofer
+// builds, for the same reason.
+//
+// A config that won't load resolves to the zero [config.LSP] — enabled, at
+// the package defaults (see [config.LSP]'s doc) — matching the fail-safe
+// [supervisor.New] itself falls back to when Config.LSP is nil.
+func lspConfigResolver(root string) func() config.LSP {
+	return func() config.LSP {
+		cfg, err := config.Load(config.DefaultPath(root))
+		if err != nil {
+			return config.LSP{}
+		}
+		return cfg.LSP
 	}
 }
 

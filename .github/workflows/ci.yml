@@ -5,6 +5,10 @@
 # on the PR lane costs extra CI minutes but is the correct trade for this repo;
 # do not gate it back to push-only without restoring PR-time race coverage some
 # other way.
+#
+# The `lsp-live` job installs a real language server so the LSP tests actually
+# run instead of skipping — see its own comment for why a skipping test is worse
+# than a missing one here.
 name: CI
 
 on:
@@ -61,3 +65,48 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test -race ./...
+
+  # The LSP live tests (internal/lspdiag, internal/supervisor) drive a REAL
+  # language server and skip themselves when none is on PATH. Without gopls
+  # installed here they skip in every other job — and a skipped test is
+  # indistinguishable from a passing one in a CI summary, so the whole
+  # "LSP verified working" guarantee would silently decay to nothing while the
+  # checks stayed green. That is the failure this job exists to prevent: the
+  # feature is exercised in reality but structurally invisible to the gate.
+  #
+  # gopls is pinned rather than @latest so a gopls release cannot change
+  # diagnostic wording and break the assertions on an unrelated PR. Bump it
+  # deliberately.
+  lsp-live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: go install golang.org/x/tools/gopls@v0.21.1
+      # Fail loudly if gopls did not land on PATH: without this the tests below
+      # would skip and the job would pass green, recreating the exact blind spot.
+      - run: gopls version
+      - run: go test -count=1 -v -run 'TestLive_|LSP' ./internal/lspdiag/ ./internal/supervisor/ 2>&1 | tee lsp.log
+      # Guard against the tests silently reverting to skipped: assert at least
+      # one live test actually ran, and that none were skipped.
+      #
+      # The PASS pattern deliberately mirrors the -run filter above rather than
+      # naming one test's prefix. Both live tests are real coverage
+      # (TestLive_* at package level, *LSP* through the Supervisor wiring), so
+      # requiring specifically a TestLive_ prefix would fail on a legitimate
+      # rename while proving nothing extra — and the natural "fix" for that
+      # false failure is to weaken the guard, which is the outcome to avoid.
+      # Keep filter and assertion in sync if either changes.
+      - name: Assert the live tests ran rather than skipped
+        run: |
+          if grep -q '^--- SKIP' lsp.log; then
+            echo "::error::an LSP live test SKIPPED — gopls missing or guard regressed"; exit 1
+          fi
+          passed=$(grep -cE '^--- PASS: (TestLive_|.*LSP)' lsp.log || true)
+          if [ "${passed:-0}" -eq 0 ]; then
+            echo "::error::no live LSP test ran — coverage for a user-requested 'verified working' feature has gone missing"; exit 1
+          fi
+          echo "LSP live coverage confirmed running ($passed test(s)):"
+          grep -E '^--- PASS: (TestLive_|.*LSP)' lsp.log

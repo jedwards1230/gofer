@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/jedwards1230/gofer/internal/config"
+	"github.com/jedwards1230/gofer/internal/lspdiag"
 )
 
 func TestLSPIsEnabled(t *testing.T) {
@@ -77,5 +78,26 @@ func TestLSPDiagnosticLimit(t *testing.T) {
 func TestLSPZeroValueIsEnabled(t *testing.T) {
 	if !(config.Config{}).LSP.IsEnabled() {
 		t.Fatal("zero Config LSP.IsEnabled() = false, want true")
+	}
+}
+
+// TestLSPDefaultsMatchLspdiag guards against silent drift between this
+// package's LSP defaults and internal/lspdiag's own zero-value fallbacks
+// (DefaultTimeout / DefaultMaxDiagnostics). The two packages cannot share one
+// constant — this section landed the config SHAPE before internal/lspdiag
+// existed on this branch (see [LSP]'s doc) — so they are two independent
+// sources of truth that a doc comment alone cannot keep in sync: nothing
+// stops one from changing without the other. If this test ever fails, an
+// operator's config.json (e.g. an explicit lsp.timeout_ms matching what they
+// believe is "the default") and gofer's actual runtime behavior have quietly
+// diverged — fix the constant that moved, don't adjust this test to match.
+func TestLSPDefaultsMatchLspdiag(t *testing.T) {
+	if config.DefaultLSPTimeout != lspdiag.DefaultTimeout {
+		t.Errorf("config.DefaultLSPTimeout = %s, lspdiag.DefaultTimeout = %s — these are two independent constants (config predates lspdiag on this branch) and MUST agree, or config.json's documented default silently disagrees with actual diagnostics behavior",
+			config.DefaultLSPTimeout, lspdiag.DefaultTimeout)
+	}
+	if config.DefaultLSPMaxDiagnostics != lspdiag.DefaultMaxDiagnostics {
+		t.Errorf("config.DefaultLSPMaxDiagnostics = %d, lspdiag.DefaultMaxDiagnostics = %d — these are two independent constants (config predates lspdiag on this branch) and MUST agree, or config.json's documented default silently disagrees with actual diagnostics behavior",
+			config.DefaultLSPMaxDiagnostics, lspdiag.DefaultMaxDiagnostics)
 	}
 }

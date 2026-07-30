@@ -126,6 +126,8 @@ func runSessionWorker(ctx context.Context, args []string, stdout, stderr io.Writ
 		// automatic-compaction trigger — the worker process is where a turn
 		// actually settles, so it is the one that must observe a live edit.
 		Compaction: compactionResolver(rootDir),
+		// Same reasoning for lsp.* — see lspConfigResolver.
+		LSP: lspConfigResolver(rootDir),
 		// Pin the sole session's id to --session (design Option A) through the
 		// SDK's pre-assigned-session-id seam: runner.New creates the session with
 		// this exact id, leaving entry-id generation on the store default.

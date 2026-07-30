@@ -308,6 +308,39 @@ opinion. gofer supplies all three:
   free-text edit of a (0,1) fraction risked a confusing, unvalidated UI for a
   knob most operators won't touch; the fraction stays config-file-only.
 
+## System prompt composition (M7)
+
+No hardcoded prompt: `config.Prompt.Files` is an ordered list of markdown
+sources `internal/prompt.Compose` reads and joins into a session's system
+prompt. `cmd/gofer`'s `run`/`resume`/`exec` all call it (replacing the old
+`defaultSystemPrompt` Go string constant); the empty-config default resolves
+to `builtin:system.md`, gofer's baseline prompt, `go:embed`-compiled into the
+binary (`internal/prompt/system.md`) so a fresh install needs no filesystem
+setup.
+
+**Resolution**, per entry: `builtin:<name>` loads an embedded asset (the only
+non-path form); an absolute path reads verbatim; `~/…` expands against the
+home directory; any other relative path resolves against the session's cwd
+first, then the store root — first hit wins. This is what makes `AGENTS.md`
+mean the repo's own file while `prompts/house.md` can live in `~/.gofer`.
+
+**Composition**: resolved sources are read in list order, each trimmed of
+surrounding whitespace, and joined by a blank line. An entry whose resolved
+identity repeats an earlier one is skipped before it is read (dedup, not a
+re-read). A file that can't be found or read warns and is skipped, unless
+`prompt.missing_file_is_error` — an absent `AGENTS.md` is the normal case in
+most repos. `prompt.max_file_bytes` caps one file (default 256 KiB, explicit
+0 = no limit); over-cap warns and skips rather than truncating.
+
+**Provenance.** After a successful `runner.New`/`Resume`,
+`supervisor.RecordPrompt` writes `{files, sha256, bytes}` into the session's
+`<id>.meta.json` sidecar and the composed text verbatim as `<id>.system.md`
+beside the journal — so what a session actually ran with stays greppable on
+disk. This is an audit trail only: `resume` still recomposes fresh from
+current config every time (a project's `AGENTS.md` legitimately changes
+between sessions), so the recorded text can legitimately diverge from a later
+resume's.
+
 ## On-disk layout & config precedence
 
 ```
