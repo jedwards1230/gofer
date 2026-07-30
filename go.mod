@@ -9,7 +9,7 @@ require (
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/coder/websocket v1.8.15
 	github.com/google/uuid v1.6.0
-	github.com/jedwards1230/agent-sdk-go v0.21.1-0.20260730004426-322f8e20ee4c
+	github.com/jedwards1230/agent-sdk-go v0.21.1-0.20260730115402-3d9dea3c557c
 	github.com/muesli/termenv v0.16.0
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc v1.44.0
