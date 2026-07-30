@@ -3,8 +3,6 @@ gofer v0.3.0
 claude-sonnet-5 · ~/orchestration
 1 awaiting input · 1 working · 0 completed
 
-↓ 2 more
-
 
 
 ────────────────────────────────────────────────────────────────────────────────
@@ -19,6 +17,8 @@ Search settings…
   Mouse capture (scroll + selection) … true
   Shell reply mode … reply
   LSP diagnostics … true
+  Tool schema mode … preload
+  Web search provider … none
   Telemetry enabled … false
   Telemetry endpoint … 
 Type to filter · Enter/↓ to select · ↑ to tabs · Esc to clear

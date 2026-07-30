@@ -274,6 +274,10 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 			PermissionMode: permissionModeResolver(rootDir),
 			// Same re-read-per-session shape, for lsp.* — see lspConfigResolver.
 			LSP: lspConfigResolver(rootDir),
+			// Same re-read-per-session shape, for tools.*/search.* — see
+			// toolsConfigResolver/searchConfigResolver.
+			Tools:  toolsConfigResolver(rootDir),
+			Search: searchConfigResolver(rootDir),
 			// Attach a per-session telemetry observer at registration, before the
 			// session's first turn — subscribing here (rather than after a turn
 			// has already started) means Events' replay backlog is still empty,
@@ -575,6 +579,40 @@ func lspConfigResolver(root string) func() config.LSP {
 			return config.LSP{}
 		}
 		return cfg.LSP
+	}
+}
+
+// toolsConfigResolver is [supervisor.Config.Tools] for a process rooted at
+// root — the same re-read-per-session shape as lspConfigResolver, for the
+// same reason: a `tools.*` write (the /config view, or a hand-edited
+// config.json) governs the next session this process starts rather than only
+// the next process.
+//
+// A config that won't load resolves to the zero [config.Tools] — preload,
+// the fail-safe [config.Tools.Schemas] itself falls back to.
+func toolsConfigResolver(root string) func() config.Tools {
+	return func() config.Tools {
+		cfg, err := config.Load(config.DefaultPath(root))
+		if err != nil {
+			return config.Tools{}
+		}
+		return cfg.Tools
+	}
+}
+
+// searchConfigResolver is [supervisor.Config.Search] for a process rooted at
+// root — toolsConfigResolver's search-axis twin, same shape and reason.
+//
+// A config that won't load resolves to the zero [config.Search] — none, the
+// fail-safe [config.Search.Selected] itself falls back to: no search tool
+// registered at all.
+func searchConfigResolver(root string) func() config.Search {
+	return func() config.Search {
+		cfg, err := config.Load(config.DefaultPath(root))
+		if err != nil {
+			return config.Search{}
+		}
+		return cfg.Search
 	}
 }
 

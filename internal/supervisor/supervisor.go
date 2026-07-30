@@ -17,12 +17,19 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/provider"
 	"github.com/jedwards1230/agent-sdk-go/runner"
 	"github.com/jedwards1230/agent-sdk-go/session"
+	"github.com/jedwards1230/agent-sdk-go/tool"
+	"github.com/jedwards1230/agent-sdk-go/toolindex"
 
 	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/decision"
 	"github.com/jedwards1230/gofer/internal/lspdiag"
 	"github.com/jedwards1230/gofer/internal/permrationale"
+	// Aliased: [Supervisor.Create]'s prompt parameter (the turn text, an
+	// unrelated concept) already shadows the package name "prompt" within
+	// its own body.
+	sysprompt "github.com/jedwards1230/gofer/internal/prompt"
 	"github.com/jedwards1230/gofer/internal/sandbox"
+	"github.com/jedwards1230/gofer/internal/websearch"
 )
 
 // Config configures a [Supervisor].
@@ -79,6 +86,24 @@ type Config struct {
 	// session's tool registry at construction. Nil defaults to the zero
 	// [config.LSP], which [config.LSP.IsEnabled] resolves to enabled.
 	LSP func() config.LSP
+
+	// Tools resolves the preload-vs-index tool-schema config each NEW
+	// session's registry is built with (see [config.Tools]). Same
+	// once-per-Create/Resume factory shape as LSP/PermissionMode, and for the
+	// same reason: a `tools.*` write reaches the next session this
+	// supervisor creates, not the one already running. Nil defaults to the
+	// zero [config.Tools], which [config.Tools.Schemas] resolves to preload —
+	// the fail-safe that makes this whole feature additive: an upgrade with
+	// no config change produces byte-identical requests to before it
+	// existed.
+	Tools func() config.Tools
+
+	// Search resolves the web-search provider config each NEW session's
+	// `web_search` tool (internal/websearch) is built from (see
+	// [config.Search]). Same factory shape as Tools. Nil defaults to the
+	// zero [config.Search], which [config.Search.Selected] resolves to none
+	// — no search tool registered at all.
+	Search func() config.Search
 
 	// Store, when set, is used instead of building a store from Root, and is
 	// NOT closed by [Supervisor.Close] — the caller owns its lifecycle. Test
@@ -137,6 +162,16 @@ type Supervisor struct {
 	// resolves to a constant zero-value factory, which config.LSP.IsEnabled
 	// etc. resolve to the package defaults).
 	lspConfig func() config.LSP
+
+	// toolsConfig mirrors Config.Tools; never nil after New (a nil
+	// Config.Tools resolves to a constant zero-value factory, which
+	// config.Tools.Schemas resolves to preload).
+	toolsConfig func() config.Tools
+
+	// searchConfig mirrors Config.Search; never nil after New (a nil
+	// Config.Search resolves to a constant zero-value factory, which
+	// config.Search.Selected resolves to none).
+	searchConfig func() config.Search
 
 	// resumeMu serializes Resume end-to-end (roster check through
 	// registration) so two concurrent Resumes of the same id can never both
@@ -249,6 +284,20 @@ func New(cfg Config) (*Supervisor, error) {
 		lspConfig = func() config.LSP { return config.LSP{} }
 	}
 
+	toolsConfig := cfg.Tools
+	if toolsConfig == nil {
+		// No explicit resolver: the zero config.Tools, which Schemas()
+		// resolves to preload.
+		toolsConfig = func() config.Tools { return config.Tools{} }
+	}
+
+	searchConfig := cfg.Search
+	if searchConfig == nil {
+		// No explicit resolver: the zero config.Search, which Selected()
+		// resolves to none.
+		searchConfig = func() config.Search { return config.Search{} }
+	}
+
 	return &Supervisor{
 		root:             root,
 		store:            store,
@@ -261,6 +310,8 @@ func New(cfg Config) (*Supervisor, error) {
 		newEngine:        newEngine,
 		permissionMode:   permissionMode,
 		lspConfig:        lspConfig,
+		toolsConfig:      toolsConfig,
+		searchConfig:     searchConfig,
 		lspManager:       lspdiag.NewManager(),
 		roster:           make(map[string]*managed),
 		watchers:         make(map[*watcher]struct{}),
@@ -273,9 +324,14 @@ func New(cfg Config) (*Supervisor, error) {
 // backing the session's own ask_user tool (routing is per-session for the same
 // reason — see [Supervisor.AnswerDecision]), a sandbox Container shared between
 // the RuleGuard's containability check and the sandbox-wrapping tool registry,
-// and the compiled guard over a fresh engine. It returns the three
-// runner.Options fields to inject plus the two Gates to store on the managed
-// session.
+// and the compiled guard over a fresh engine. It returns the runner.Options
+// fields to inject, the two Gates to store on the managed session, and — only
+// under index mode — the live *toolindex.Index backing the registry, so
+// Create/Resume can fold its Hint into the session's system prompt and Resume
+// can Rehydrate it from folded history. ix is nil under preload mode: there is
+// nothing for a caller to do with it, and returning a non-nil-but-inert Index
+// would invite a caller to Hint()/Rehydrate() against one that was never
+// wrapped into the registry.
 //
 // The decision gate is built with an empty session id and bound in [register]:
 // the tool registry closes over the gate and must be handed to runner.New, and
@@ -299,7 +355,28 @@ func New(cfg Config) (*Supervisor, error) {
 // Keeping the reply Gate uniform likewise means the managed session's routing
 // doesn't need to know which mode built it (a yolo session simply never emits a
 // permission request for it to carry).
-func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.Gate, decisions *decision.Gate, tools loop.ToolRegistry) {
+//
+// # Tool surface (M7 workstream 4)
+//
+// The registry is layered, outermost last, per docs/PRD.md's "Tool surface"
+// section:
+//
+//	tool.NewRegistry(builtins + ask_user + web_search + ix.SearchTool())
+//	  → loop.FromRegistry            (sandbox.WrapRegistry's own base)
+//	  → sandbox.WrapRegistry(cwd, container, extra...)   (bash containment; Specs passthrough)
+//	  → lspdiag.Wrap(…)                                  (diagnostics; Specs passthrough)
+//	  → ix.Wrap(…)                                        (index mode ONLY; the only layer that alters Specs)
+//
+// web_search (internal/websearch) is registered only when
+// config.Search.Selected() is not none; ix.SearchTool() (and the ix.Wrap
+// outer layer) only under index mode — under preload mode nothing beyond
+// web_search changes, so a config with no tools/search section produces a
+// byte-identical registry to before this feature existed. MCP-federated
+// tools (a separate PR) join the SAME extra slice below, before
+// sandbox.WrapRegistry — never a second decorator layer, so N federated
+// servers still cost exactly one Specs() re-derivation, and ix.Wrap (when
+// present) still sees and indexes them.
+func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.Gate, decisions *decision.Gate, tools loop.ToolRegistry, ix *toolindex.Index) {
 	gate := loop.NewGate()
 	dgate := decision.NewGate("")
 	askUser := decision.NewAskUser(dgate)
@@ -313,14 +390,53 @@ func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.
 		Timeout:        lspCfg.Timeout(),
 		MaxDiagnostics: lspCfg.DiagnosticLimit(),
 	}
+
+	// Same per-session re-read as lsp/permission mode, for tools.* and
+	// search.* — a config write reaches the next session this supervisor
+	// creates, not the one already running.
+	toolsCfg := s.toolsConfig()
+	searchCfg := s.searchConfig()
+
+	extra := []tool.Tool{askUser}
+	if ws := websearch.New(searchCfg); ws != nil {
+		extra = append(extra, ws)
+	}
+	// A federated-MCP PR appends its own tools to extra HERE, before
+	// ix.SearchTool() — see the doc above.
+
+	if toolsCfg.Schemas() == config.ToolSchemaModeIndex {
+		resident := toolsCfg.ResidentTools()
+		residentSet := make(map[string]bool, len(resident))
+		for _, name := range resident {
+			residentSet[name] = true
+		}
+		ix = toolindex.New(toolindex.Options{
+			Resident:     func(name string) bool { return residentSet[name] },
+			SummaryBytes: toolsCfg.SummaryLimitBytes(),
+			MaxResults:   toolsCfg.SearchResultLimit(),
+			InlineMax:    toolsCfg.InlineIndexLimit(),
+		})
+		// Registered into the base registry BEFORE ix.Wrap snapshots it below
+		// — see toolindex.Index.SearchTool's doc: Wrap's snapshot is what
+		// tool_search itself must already be present in, or Get("tool_search")
+		// would fail.
+		extra = append(extra, ix.SearchTool())
+	}
+
 	if s.permissionMode() == config.PermissionModeYolo {
-		tools = lspdiag.Wrap(sandbox.WrapRegistry(cwd, nil, askUser), s.lspManager, cwd, lspOpts)
-		return yoloGuard{engine: engine}, gate, dgate, tools
+		tools = lspdiag.Wrap(sandbox.WrapRegistry(cwd, nil, extra...), s.lspManager, cwd, lspOpts)
+		if ix != nil {
+			tools = ix.Wrap(tools)
+		}
+		return yoloGuard{engine: engine}, gate, dgate, tools, ix
 	}
 	container := sandbox.New()
 	rg := loop.RuleGuard{Engine: engine, Container: container, Target: sandbox.ToolTarget}
-	tools = lspdiag.Wrap(sandbox.WrapRegistry(cwd, container, askUser), s.lspManager, cwd, lspOpts)
-	return rg, gate, dgate, tools
+	tools = lspdiag.Wrap(sandbox.WrapRegistry(cwd, container, extra...), s.lspManager, cwd, lspOpts)
+	if ix != nil {
+		tools = ix.Wrap(tools)
+	}
+	return rg, gate, dgate, tools, ix
 }
 
 // ResolveRoot is gofer's single source of the ~/.gofer default — the SDK
@@ -404,9 +520,18 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts CreateOptio
 		return SessionInfo{}, err
 	}
 
-	guard, gate, decisions, tools := s.sessionGuard(opts.Cwd)
+	guard, gate, decisions, tools, ix := s.sessionGuard(opts.Cwd)
+	// Fold the tool index's hint into the system prompt HERE, not in
+	// internal/prompt.Compose's caller — see sysprompt.AppendHint's doc for
+	// why this join lives in internal/prompt rather than being re-derived
+	// per call site. ix is nil under preload mode (see sessionGuard), so this
+	// is a no-op for every session until an operator opts into index mode.
+	system := opts.System
+	if ix != nil {
+		system = sysprompt.AppendHint(system, ix.Hint())
+	}
 	sess, err := s.newSession(ctx, runner.Options{
-		Root: s.root, Cwd: opts.Cwd, Model: opts.Model, System: opts.System,
+		Root: s.root, Cwd: opts.Cwd, Model: opts.Model, System: system,
 		Params: opts.Params, MaxIters: opts.MaxIters, Agent: opts.Agent,
 		Guard: guard, Approver: gate, Tools: tools,
 	})
@@ -536,14 +661,32 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 	// exactly when a client reopened it from somewhere else.
 	meta, _ := lookupDiskSession(s.root, id)
 
-	guard, gate, decisions, tools := s.sessionGuard(opts.Cwd)
+	guard, gate, decisions, tools, ix := s.sessionGuard(opts.Cwd)
+	// Same hint fold as Create — see its comment.
+	system := opts.System
+	if ix != nil {
+		system = sysprompt.AppendHint(system, ix.Hint())
+	}
 	sess, err := s.resumeSession(ctx, id, runner.Options{
-		Root: s.root, Cwd: opts.Cwd, Model: opts.Model, System: opts.System,
+		Root: s.root, Cwd: opts.Cwd, Model: opts.Model, System: system,
 		Params: opts.Params, MaxIters: opts.MaxIters, Agent: meta.Agent,
 		Guard: guard, Approver: gate, Tools: tools,
 	})
 	if err != nil {
 		return SessionInfo{}, fmt.Errorf("supervisor: resume %s: %w", id, err)
+	}
+	// A resumed session's tool array is a function of its own history, never
+	// a session that starts having promoted nothing a prior turn already
+	// promoted: re-mark every tool name the folded context's tool_use blocks
+	// name as promoted, so Specs() carries them again from THIS resume's
+	// very first model call rather than re-paying a tool_search round trip
+	// (or, worse, the model calling a name it already used that Get() would
+	// still auto-promote — Rehydrate just does it up front). A no-op under
+	// preload mode (ix nil) and for a session with no tool_use history yet.
+	if ix != nil {
+		if names := toolUseNames(sess.Fold()); len(names) > 0 {
+			ix.Rehydrate(names...)
+		}
 	}
 
 	m, err := s.register(sess, opts.Model, opts.Params.Thinking.Effort, opts.Cwd, gate, decisions, meta, true)
@@ -1238,6 +1381,27 @@ func firstUserSnippet(entries []session.Entry) string {
 		}
 	}
 	return ""
+}
+
+// toolUseNames returns the distinct tool names named by a tool_use content
+// block anywhere in msgs, first-seen order — the [Supervisor.Resume]
+// Rehydrate seam's input. It reads provider.Message directly (msgs is
+// [Session.Fold]'s already-folded output) rather than re-parsing raw journal
+// entries, since Fold is the one settled projection every other read of a
+// session's history already goes through.
+func toolUseNames(msgs []provider.Message) []string {
+	seen := make(map[string]bool)
+	var names []string
+	for _, m := range msgs {
+		for _, b := range m.Content {
+			if b.Type != provider.BlockToolUse || b.ToolName == "" || seen[b.ToolName] {
+				continue
+			}
+			seen[b.ToolName] = true
+			names = append(names, b.ToolName)
+		}
+	}
+	return names
 }
 
 // Subscribe returns a live event subscription for id. Errors with

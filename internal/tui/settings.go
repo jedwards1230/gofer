@@ -179,6 +179,37 @@ func settingsRegistry() []Setting {
 			},
 		},
 		{
+			// preload (the default) puts every candidate tool's full schema in
+			// context up front; index puts only a name+one-line-description
+			// index in context, with schemas resolved on demand via
+			// tool_search (M7 workstream 4). See config.Tools.Schemas.
+			Key:     "tools.schema_mode",
+			Label:   "Tool schema mode",
+			Kind:    SettingEnum,
+			Options: []string{"preload", "index"},
+			Get:     func(c config.Config) string { return string(c.Tools.Schemas()) },
+			Set: func(c config.Config, v string) config.Config {
+				c.Tools.SchemaMode = v
+				return c
+			},
+		},
+		{
+			// none (the default) registers no web_search tool at all — see
+			// config.Search.Selected's fail-safe doc. Only "brave"/"searxng"
+			// actually opt in; a provider selected here with no credential
+			// configured is rejected at config load (config.Search.validate),
+			// not silently accepted by this row.
+			Key:     "search.provider",
+			Label:   "Web search provider",
+			Kind:    SettingEnum,
+			Options: []string{"none", "brave", "searxng"},
+			Get:     func(c config.Config) string { return string(c.Search.Selected()) },
+			Set: func(c config.Config, v string) config.Config {
+				c.Search.Provider = v
+				return c
+			},
+		},
+		{
 			Key:   "telemetry.enabled",
 			Label: "Telemetry enabled",
 			Kind:  SettingBool,

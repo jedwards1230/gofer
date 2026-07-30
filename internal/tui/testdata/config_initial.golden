@@ -7,5 +7,7 @@ Search settings…
   Mouse capture (scroll + selection) … true
   Shell reply mode … reply
   LSP diagnostics … true
+  Tool schema mode … preload
+  Web search provider … none
   Telemetry enabled … false
   Telemetry endpoint … 

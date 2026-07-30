@@ -22,6 +22,8 @@ func TestSettingsRegistryDefaults(t *testing.T) {
 		"tui.mouse":               "true",
 		"tui.shell_reply_mode":    "reply",
 		"lsp.enabled":             "true",
+		"tools.schema_mode":       "preload",
+		"search.provider":         "none",
 		"telemetry.enabled":       "false",
 		"telemetry.endpoint":      "",
 	}
@@ -80,6 +82,8 @@ func TestSettingsRegistryKinds(t *testing.T) {
 		"tui.mouse":               {SettingBool, nil},
 		"tui.shell_reply_mode":    {SettingEnum, []string{"reply", "queue"}},
 		"lsp.enabled":             {SettingBool, nil},
+		"tools.schema_mode":       {SettingEnum, []string{"preload", "index"}},
+		"search.provider":         {SettingEnum, []string{"none", "brave", "searxng"}},
 		"telemetry.enabled":       {SettingBool, nil},
 		"telemetry.endpoint":      {SettingString, nil},
 	}

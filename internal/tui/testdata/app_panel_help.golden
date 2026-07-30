@@ -3,8 +3,6 @@ gofer v0.3.0
 claude-sonnet-5 · ~/orchestration
 1 awaiting input · 1 working · 0 completed
 
-↓ 2 more
-
 
 
 ────────────────────────────────────────────────────────────────────────────────
@@ -20,5 +18,7 @@ Commands
   /stats                           Show session lifecycle and roster-wide totals
   /status                          Show session, cwd, and provider status
   /thinking [low|medium|high|off]  Set the reasoning effort for this session (/…
-↓ 72 more
+  /usage                           Show this session's token and cost consumpti…
+  /yolo [on|off]                   Toggle guardrails for new sessions
+↓ 70 more
 ↑/↓ to scroll · ←/→ to switch tabs · esc to close

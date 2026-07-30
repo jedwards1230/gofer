@@ -83,9 +83,10 @@ make install                                       # local install, truthfully v
   `Telemetry`, `Daemon` (incl. `drain_timeout_ms`), and M7's `Prompt`/
   `Tools`/`MCP`/`Search`/`Skills`/`LSP` sections, plus the shared `SecretRef`
   (`env:`/`file:`, resolved at use time, never inlined). `Prompt` is read by
-  `internal/prompt` and `LSP` by `internal/supervisor`'s session wiring; the
-  rest are schema only — each is wired up by its own feature PR. See its
-  package doc.
+  `internal/prompt`; `LSP`/`Tools`/`Search` by `internal/supervisor`'s session
+  wiring (`internal/websearch` and the SDK's `toolindex` consume `Search`/
+  `Tools` respectively); `MCP`/`Skills` are still schema only — each wired up
+  by its own feature PR. See its package doc.
 - `internal/prompt/` — composes a session's system prompt from
   `config.Prompt.Files` (the replacement for cmd/gofer's old
   `defaultSystemPrompt` string constant): `builtin:`/absolute/`~/`/cwd-then-
@@ -109,6 +110,14 @@ make install                                       # local install, truthfully v
   `ask_user` tool (gofer's first tool of its own) plus the per-session `Gate`
   it blocks on, carrying `acp` decision types over a gofer-native transport
   because the SDK's Event union has no decision kind. A leaf over the SDK.
+- `internal/websearch/` — the `web_search` tool (M7 workstream 4): projects
+  the SDK's `search` package (`Provider`, the Brave/SearXNG backends, the
+  name-keyed registry) into a model-facing tool, registered only when
+  `config.Search.Selected()` is not none. Blank-imports both backends
+  unconditionally; resolves its `config.SecretRef` credential at Run time,
+  never at construction. Wired into a session's registry (alongside
+  `tools.schema_mode`'s preload/index toggle, via the SDK's `toolindex`) at
+  `internal/supervisor`'s `sessionGuard` — see its package doc.
 - `internal/telemetry/` — OpenTelemetry (traces/metrics/log-correlation) off
   the Event/Op stream; the only otel importer.
 - `internal/router/` — the M6 thin router daemon: roster aggregation, client

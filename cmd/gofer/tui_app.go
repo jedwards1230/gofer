@@ -197,6 +197,8 @@ func selectTUIBackend(ctx context.Context, df *daemonFlags, cwd, root string, st
 		MaxSubagentDepth: localCfg.Session.SubagentDepthLimit(),
 		PermissionMode:   permissionModeResolver(rootDir),
 		LSP:              lspConfigResolver(rootDir),
+		Tools:            toolsConfigResolver(rootDir),
+		Search:           searchConfigResolver(rootDir),
 	})
 	if err != nil {
 		return tuiBackend{}, fmt.Errorf("build supervisor: %w", err)

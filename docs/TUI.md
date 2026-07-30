@@ -1565,6 +1565,18 @@ immediately, no separate save step. Esc is two-stage: it cancels an
 in-progress edit or clears the filter before a second Esc closes the panel.
 Pure local: reads/writes `config.json` only, no auth path at all.
 
+**M7 additions**: `lsp.enabled` (bool), `tools.schema_mode` (enum:
+`preload`/`index` — the resident-vs-tool_search toggle) and `search.provider`
+(enum: `none`/`brave`/`searxng`) joined the registry. Numeric knobs
+(`lsp.timeout_ms`, `tools.summary_bytes`, `search.max_results`, …) and
+`SecretRef` fields (`search.brave.api_key`, …) stay `config.json`-only —
+`SettingKind` has no numeric or secret-reference affordance, and a secret
+belongs in an env var or a file, never typed through this panel. The
+registry's growth is the reason `panelBodyRows` (`panel.go`) sizes to the
+Config tab's row count rather than the Model tab's catalog — `configView` has
+no scroll-to-selected, so every registered setting needs a budgeted row or it
+is simply unreachable through the panel.
+
 **Built (M4 step 4)**: `modelpicker.go` is the real `/model` body: the SDK's
 static catalog (`provider.Models()`/`provider.Lookup`) filtered to the
 providers `CommandEnv.Auth()` reports authenticated (the same seam
