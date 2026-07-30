@@ -17,10 +17,6 @@ import (
 	"github.com/jedwards1230/gofer/internal/supervisor"
 )
 
-// defaultSystemPrompt is the system prompt a run/resume session uses absent
-// a richer agent manifest (a later milestone).
-const defaultSystemPrompt = "You are gofer, a careful coding agent. Use your tools to accomplish the user's task."
-
 // errNoProviderCredentials is returned when -m is not given and no provider
 // has a credential configured at all. gofer deliberately ships with no
 // flagship-vendor default: the run model is resolved from whichever
@@ -304,11 +300,16 @@ func runRun(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 		return driveDaemonSession(ctx, daemonClient, "run", "", cwd, prompt, sub, *asJSON, stdout, stderr)
 	}
 
+	composed, err := resolveSystemPrompt(rootDir, cwd, stderr)
+	if err != nil {
+		return err
+	}
+
 	r, err := runner.New(ctx, runner.Options{
 		Root:   rootDir,
 		Cwd:    cwd,
 		Model:  modelID,
-		System: defaultSystemPrompt,
+		System: composed.Text,
 	})
 	if err != nil {
 		// runner.New's errors are already contextual (a "runner: …" message);
@@ -317,6 +318,7 @@ func runRun(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 		// 'gofer login' remediation back. Any other error passes through as-is.
 		return wrapCredentialHint(err)
 	}
+	recordPromptProvenance(r.ID(), r.JournalPath(), composed, stderr)
 
 	_, _ = fmt.Fprintf(stderr, "gofer run: session %s\n", r.ID())
 	_, _ = fmt.Fprintf(stderr, "gofer run: journal %s\n", r.JournalPath())
