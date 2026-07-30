@@ -23,6 +23,8 @@ func TestSettingsRegistryDefaults(t *testing.T) {
 		"tui.shell_reply_mode":    "reply",
 		"compaction.enabled":      "true",
 		"lsp.enabled":             "true",
+		"tools.schema_mode":       "preload",
+		"search.provider":         "none",
 		"telemetry.enabled":       "false",
 		"telemetry.endpoint":      "",
 	}
@@ -82,6 +84,8 @@ func TestSettingsRegistryKinds(t *testing.T) {
 		"tui.shell_reply_mode":    {SettingEnum, []string{"reply", "queue"}},
 		"compaction.enabled":      {SettingBool, nil},
 		"lsp.enabled":             {SettingBool, nil},
+		"tools.schema_mode":       {SettingEnum, []string{"preload", "index"}},
+		"search.provider":         {SettingEnum, []string{"none", "brave", "searxng"}},
 		"telemetry.enabled":       {SettingBool, nil},
 		"telemetry.endpoint":      {SettingString, nil},
 	}

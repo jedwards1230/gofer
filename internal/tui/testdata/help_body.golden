@@ -8,4 +8,6 @@ Commands
   /quit                            Quit gofer (/exit)
   /resume [session-id]             Reopen a session from disk
   /stats                           Show session lifecycle and roster-wide totals
-↓ 74 more
+  /status                          Show session, cwd, and provider status
+  /thinking [low|medium|high|off]  Set the reasoning effort for this session (/…
+↓ 72 more

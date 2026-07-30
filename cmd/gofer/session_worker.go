@@ -128,6 +128,10 @@ func runSessionWorker(ctx context.Context, args []string, stdout, stderr io.Writ
 		Compaction: compactionResolver(rootDir),
 		// Same reasoning for lsp.* — see lspConfigResolver.
 		LSP: lspConfigResolver(rootDir),
+		// Same reasoning for tools.*/search.* — see toolsConfigResolver/
+		// searchConfigResolver.
+		Tools:  toolsConfigResolver(rootDir),
+		Search: searchConfigResolver(rootDir),
 		// Same reasoning for skills.* — see skillsConfigResolver.
 		Skills: skillsConfigResolver(rootDir),
 		// Pin the sole session's id to --session (design Option A) through the

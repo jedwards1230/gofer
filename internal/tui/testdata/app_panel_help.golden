@@ -3,8 +3,6 @@ gofer v0.3.0
 claude-sonnet-5 · ~/orchestration
 1 awaiting input · 1 working · 0 completed
 
-↓ 2 more
-
 
 
 ────────────────────────────────────────────────────────────────────────────────
@@ -20,5 +18,7 @@ Commands
   /quit                            Quit gofer (/exit)
   /resume [session-id]             Reopen a session from disk
   /stats                           Show session lifecycle and roster-wide totals
-↓ 74 more
+  /status                          Show session, cwd, and provider status
+  /thinking [low|medium|high|off]  Set the reasoning effort for this session (/…
+↓ 72 more
 ↑/↓ to scroll · ←/→ to switch tabs · esc to close

@@ -368,6 +368,45 @@ current config every time (a project's `AGENTS.md` legitimately changes
 between sessions), so the recorded text can legitimately diverge from a later
 resume's.
 
+## Web search & the tool index (M7)
+
+Two config-gated additions to a session's tool surface, both wired at the one
+place a session's registry is actually built — `internal/supervisor`'s
+`sessionGuard`, shared by the daemon, workers, and the TUI's local fallback:
+
+- **`web_search`** (`internal/websearch`) projects the SDK's provider-agnostic
+  `search` package (Brave, SearXNG) into a model-facing tool. It is registered
+  only when `search.provider` selects one; its result text is the bounded
+  `search.Results` rendered as plain numbered lines, never raw provider JSON.
+  The credential (`config.SecretRef`) resolves at Run time, never at config
+  load — an unselected or misconfigured provider never breaks anything else.
+  gofer blank-imports both `search/brave` and `search/searxng` unconditionally
+  (`search.Build`'s own error already names a missing blank import and lists
+  what's registered, so gofer wraps nothing further here).
+- **`tools.schema_mode`** toggles `preload` (every schema in context, the
+  default — byte-identical to before this feature) vs `index` (a small
+  resident set plus a `tool_search` tool; the SDK's `toolindex.Index` handles
+  discovery, promotion, and the two-tiered `Hint()` summary). The registry is
+  layered outermost-last: `tool.NewRegistry(builtins + ask_user + web_search +
+  ix.SearchTool())` → `loop.FromRegistry` → `sandbox.WrapRegistry` (bash
+  containment) → `lspdiag.Wrap` (diagnostics) → `ix.Wrap` (index mode only —
+  the only layer that alters `Specs()`). Index must be outermost so its
+  filtering covers every layer below while `Get` still reaches the
+  contained/diagnosed tool.
+- **Resume rehydrates.** A resumed session re-promotes every tool named by a
+  `tool_use` block in its folded history (`toolindex.Index.Rehydrate`) before
+  its first model call, so a session's tool array is always a function of its
+  own history and never references a tool the request never earned.
+- **The hint enters the prompt through `internal/prompt`.** `prompt.AppendHint`
+  is the one join point a caller with both a composed system prompt and an
+  index's `Hint()` uses — today, `sessionGuard`'s `Create`/`Resume` callers in
+  `internal/supervisor`, not `cmd/gofer`'s three CLI call sites (which build a
+  bare `runner.New`/`Resume` with no gofer tool wiring at all, daemon-absent
+  path only — see "System prompt composition" above).
+- **A session's tool set is fixed at create.** Neither preload nor index mode
+  ever adds or removes a tool from a *live* session's registry — index mode
+  only grows which of the already-indexed tools are *advertised*.
+
 ## On-disk layout & config precedence
 
 ```

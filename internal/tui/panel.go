@@ -69,19 +69,27 @@ var panelTabs = []panelTab{
 // panelHeight is the fixed number of rows the command panel occupies in the
 // lower region of whichever screen it overlays: 4 fixed rows (two rules, the
 // tab bar, the footer) plus up to panelBodyRows for the active tab's body.
-// The binding case is the Model tab with both providers authenticated: its
-// free-text entry line plus two provider headers plus the catalog's eight
-// rows (gofer supports at most two providers today, see
-// runner.SupportedProviders). /status's worst realistic case (two providers,
-// both config layers present) fits inside the same budget. A tab whose body
-// is shorter is not padded to it — [commandPanel.Height] reserves only the
-// rows actually rendered. The Model tab's typed-candidate line can push one
-// row past the budget mid-typing; that is deliberate, since it costs the last
-// catalog row only while the user is typing an id rather than browsing the
-// list, and growing the overlay permanently would cost the roster above it a
-// row on every open.
+// The binding case is the Config tab's settings list ([settingsRegistry]):
+// [configView] has no scroll-to-selected — its View clips lines[:height]
+// unconditionally (see config_view.go) — so every registered setting needs a
+// row in the budget or it is simply unreachable through this panel, filter
+// text notwithstanding. That is one filter-box row plus one row per
+// registered setting (13 as of M7 workstream 4's tools.schema_mode/
+// search.provider rows). The Model tab (free-text entry line plus two
+// provider headers plus the catalog's eight rows — gofer supports at most
+// two providers today, see runner.SupportedProviders) and /status's worst
+// realistic case (two providers, both config layers present) both fit inside
+// the same budget. A tab whose body is shorter is not padded to it —
+// [commandPanel.Height] reserves only the rows actually rendered. The Model
+// tab's typed-candidate line can push one row past the budget mid-typing;
+// that is deliberate, since it costs the last catalog row only while the
+// user is typing an id rather than browsing the list, and growing the
+// overlay permanently would cost the roster above it a row on every open.
+// Whoever adds the NEXT setting must grow this constant with it, or the new
+// row silently becomes unreachable through the panel (settings_test.go's
+// registry tests catch a missing row; nothing catches an unreachable one).
 const (
-	panelBodyRows = 11
+	panelBodyRows = 13
 	panelHeight   = panelBodyRows + 4
 )
 

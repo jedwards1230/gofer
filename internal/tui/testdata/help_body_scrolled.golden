@@ -1,5 +1,3 @@
-  /status                          Show session, cwd, and provider status
-  /thinking [low|medium|high|off]  Set the reasoning effort for this session (/…
   /usage                           Show this session's token and cost consumpti…
   /yolo [on|off]                   Toggle guardrails for new sessions
 Global
@@ -8,4 +6,8 @@ Global
   ctrl+r  Toggle reply-on-run for shell commands (reply now / queue)
 Roster
   ↑/↓        Move the roster selection
-↑ 10 more · ↓ 64 more
+  enter      Open the selected session, or run what's typed
+  →          Open the selected session (empty dispatch bar)
+  space      Peek the selected session (empty dispatch bar)
+  tab        Switch flat / grouped roster view
+↑ 12 more · ↓ 60 more
