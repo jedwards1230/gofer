@@ -28,7 +28,7 @@ them. The permission/actor security cluster is a deliberate follow-up.
 | 4 | Search providers (Brave + SearXNG) | both | pending | — |
 | 4 | `tool_search` + preload toggle | gofer | pending | — |
 | 5 | Skills: `SKILL.md`, config dirs, progressive disclosure | both | pending | — |
-| 6 | Wire SDK `lsp/`, verified live | gofer | in flight | — |
+| 6 | Wire SDK `lsp/`, verified live | gofer | PR open (verified live w/ real gopls) | [#269](https://github.com/jedwards1230/gofer/pull/269) |
 
 ## Sequencing
 
