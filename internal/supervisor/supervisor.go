@@ -69,6 +69,17 @@ type Config struct {
 	// identical to gofer before this seam existed.
 	PermissionMode func() config.PermissionMode
 
+	// LSP resolves the language-server diagnostics config each NEW session's
+	// tool registry is wrapped with (see [config.LSP]). Same factory shape as
+	// PermissionMode and for the same reason: called once per Create/Resume
+	// rather than sampled at construction, so an `lsp.*` write — the /config
+	// view, or a hand-edited config.json — governs the next session a RUNNING
+	// gofer starts, with no restart. It cannot reach a session that already
+	// exists, for the same reason PermissionMode cannot: the SDK fixes a
+	// session's tool registry at construction. Nil defaults to the zero
+	// [config.LSP], which [config.LSP.IsEnabled] resolves to enabled.
+	LSP func() config.LSP
+
 	// Store, when set, is used instead of building a store from Root, and is
 	// NOT closed by [Supervisor.Close] — the caller owns its lifecycle. Test
 	// seam.
@@ -121,6 +132,11 @@ type Supervisor struct {
 	// permissionMode mirrors Config.PermissionMode; never nil after New (a nil
 	// Config.PermissionMode resolves to a constant ask factory).
 	permissionMode func() config.PermissionMode
+
+	// lspConfig mirrors Config.LSP; never nil after New (a nil Config.LSP
+	// resolves to a constant zero-value factory, which config.LSP.IsEnabled
+	// etc. resolve to the package defaults).
+	lspConfig func() config.LSP
 
 	// resumeMu serializes Resume end-to-end (roster check through
 	// registration) so two concurrent Resumes of the same id can never both
@@ -225,6 +241,14 @@ func New(cfg Config) (*Supervisor, error) {
 		permissionMode = func() config.PermissionMode { return config.PermissionModeAsk }
 	}
 
+	lspConfig := cfg.LSP
+	if lspConfig == nil {
+		// No explicit resolver: the zero config.LSP, which its own
+		// IsEnabled/Timeout/DiagnosticLimit resolve to the package defaults
+		// (enabled, DefaultLSPTimeout, DefaultLSPMaxDiagnostics).
+		lspConfig = func() config.LSP { return config.LSP{} }
+	}
+
 	return &Supervisor{
 		root:             root,
 		store:            store,
@@ -236,6 +260,7 @@ func New(cfg Config) (*Supervisor, error) {
 		onRegister:       cfg.OnRegister,
 		newEngine:        newEngine,
 		permissionMode:   permissionMode,
+		lspConfig:        lspConfig,
 		lspManager:       lspdiag.NewManager(),
 		roster:           make(map[string]*managed),
 		watchers:         make(map[*watcher]struct{}),
@@ -279,10 +304,15 @@ func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.
 	dgate := decision.NewGate("")
 	askUser := decision.NewAskUser(dgate)
 	engine := s.newEngine()
-	// TODO(config): lsp.enabled / lsp.timeout_ms / lsp.max_diagnostics belong
-	// in a config.LSP section — pending the M7 config-schema PR. Until it
-	// lands, this wiring uses fixed defaults (see internal/lspdiag.Options).
-	lspOpts := lspdiag.Options{Enabled: true, Timeout: lspdiag.DefaultTimeout, MaxDiagnostics: lspdiag.DefaultMaxDiagnostics}
+	// Resolved HERE, per session, for the same reason permissionMode is
+	// (see the doc above): an lsp.* write reaches the next session this
+	// supervisor creates, not the one already running.
+	lspCfg := s.lspConfig()
+	lspOpts := lspdiag.Options{
+		Enabled:        lspCfg.IsEnabled(),
+		Timeout:        lspCfg.Timeout(),
+		MaxDiagnostics: lspCfg.DiagnosticLimit(),
+	}
 	if s.permissionMode() == config.PermissionModeYolo {
 		tools = lspdiag.Wrap(sandbox.WrapRegistry(cwd, nil, askUser), s.lspManager, cwd, lspOpts)
 		return yoloGuard{engine: engine}, gate, dgate, tools
