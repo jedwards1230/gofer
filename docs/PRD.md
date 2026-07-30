@@ -225,6 +225,39 @@ format-agnostic rule engine over typed rules; vendor rule formats (Claude Code
 `settings.json`, native YAML) are import adapters that land with the
 vendor-format work (M8).
 
+## LSP diagnostics (M7)
+
+An edit/write tool call is followed by a bounded, best-effort round trip
+through a real language server: `internal/lspdiag` wraps the session's tool
+registry (`internal/supervisor.sessionGuard`, the same seam
+`internal/sandbox.WrapRegistry` uses for containment) so a successful edit
+reopens the changed file against a lazily-started server — gopls,
+typescript-language-server, pyright, rust-analyzer, or clangd, per the SDK's
+`agent-sdk-go/lsp.DefaultRegistry` — waits briefly for its
+`textDocument/publishDiagnostics`, and appends the result to **both** the
+tool's model-facing `Content` (so the agent actually sees a compile error it
+just introduced on its next turn) and its `Diagnostics` metadata (already
+wired end to end to every client — `internal/wirestream`,
+`internal/daemonbridge`, the JSONL journal — via
+`event.ToolCallFinished.Diagnostics`).
+
+One `lspdiag.Manager` per Supervisor runs every server this process starts,
+keyed by (workspace root, language) — one gopls per repo, not one per
+session, matching real-editor behavior — started lazily on first use and
+closed once, by `Supervisor.Close`. Every failure mode (no server on PATH, an
+unsupported language, a crashed server, a timed-out wait) degrades silently
+to the tool's original, unmodified result — LSP is advisory, never
+load-bearing, and never slows a tool call beyond its configured timeout.
+Diagnostics are capped per call (context-cost discipline: a cascading syntax
+error can produce dozens of diagnostics, and only a bounded, current-file
+slice enters context) with the same `… +N more` collapse the TUI's approval
+body uses.
+
+**Not yet config-driven.** `lsp.enabled` / `lsp.timeout_ms` /
+`lsp.max_diagnostics` are fixed defaults at the wiring site pending a
+`config.LSP` section (tracked with the M7 config-schema work); see the
+`TODO(config)` in `sessionGuard`.
+
 ## On-disk layout & config precedence
 
 ```

@@ -20,6 +20,7 @@ import (
 
 	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/decision"
+	"github.com/jedwards1230/gofer/internal/lspdiag"
 	"github.com/jedwards1230/gofer/internal/permrationale"
 	"github.com/jedwards1230/gofer/internal/sandbox"
 )
@@ -128,6 +129,13 @@ type Supervisor struct {
 	// two runners driving it would race on appends.
 	resumeMu sync.Mutex
 
+	// lspManager runs the bounded, best-effort LSP diagnostics round-trip
+	// sessionGuard wraps every session's tool registry with (internal/lspdiag).
+	// It is shared by every session THIS Supervisor hosts — language servers
+	// are workspace-scoped (one gopls per cwd+language), not spawned per
+	// session — and is closed exactly once, by Close.
+	lspManager *lspdiag.Manager
+
 	mu     sync.Mutex
 	roster map[string]*managed
 	closed bool
@@ -228,6 +236,7 @@ func New(cfg Config) (*Supervisor, error) {
 		onRegister:       cfg.OnRegister,
 		newEngine:        newEngine,
 		permissionMode:   permissionMode,
+		lspManager:       lspdiag.NewManager(),
 		roster:           make(map[string]*managed),
 		watchers:         make(map[*watcher]struct{}),
 		watchDone:        make(chan struct{}),
@@ -270,12 +279,18 @@ func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.
 	dgate := decision.NewGate("")
 	askUser := decision.NewAskUser(dgate)
 	engine := s.newEngine()
+	// TODO(config): lsp.enabled / lsp.timeout_ms / lsp.max_diagnostics belong
+	// in a config.LSP section — pending the M7 config-schema PR. Until it
+	// lands, this wiring uses fixed defaults (see internal/lspdiag.Options).
+	lspOpts := lspdiag.Options{Enabled: true, Timeout: lspdiag.DefaultTimeout, MaxDiagnostics: lspdiag.DefaultMaxDiagnostics}
 	if s.permissionMode() == config.PermissionModeYolo {
-		return yoloGuard{engine: engine}, gate, dgate, sandbox.WrapRegistry(cwd, nil, askUser)
+		tools = lspdiag.Wrap(sandbox.WrapRegistry(cwd, nil, askUser), s.lspManager, cwd, lspOpts)
+		return yoloGuard{engine: engine}, gate, dgate, tools
 	}
 	container := sandbox.New()
 	rg := loop.RuleGuard{Engine: engine, Container: container, Target: sandbox.ToolTarget}
-	return rg, gate, dgate, sandbox.WrapRegistry(cwd, container, askUser)
+	tools = lspdiag.Wrap(sandbox.WrapRegistry(cwd, container, askUser), s.lspManager, cwd, lspOpts)
+	return rg, gate, dgate, tools
 }
 
 // ResolveRoot is gofer's single source of the ~/.gofer default — the SDK
@@ -1357,6 +1372,9 @@ func (s *Supervisor) Close() error {
 		if err := m.sess.Close(); err != nil {
 			errs = append(errs, err)
 		}
+	}
+	if err := s.lspManager.Close(); err != nil {
+		errs = append(errs, err)
 	}
 	if s.ownsStore {
 		if err := s.store.Close(); err != nil {
