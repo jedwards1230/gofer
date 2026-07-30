@@ -17,10 +17,12 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/provider"
 	"github.com/jedwards1230/agent-sdk-go/runner"
 	"github.com/jedwards1230/agent-sdk-go/session"
+	"github.com/jedwards1230/agent-sdk-go/tool"
 
 	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/decision"
 	"github.com/jedwards1230/gofer/internal/lspdiag"
+	"github.com/jedwards1230/gofer/internal/mcpconn"
 	"github.com/jedwards1230/gofer/internal/permrationale"
 	"github.com/jedwards1230/gofer/internal/sandbox"
 )
@@ -79,6 +81,20 @@ type Config struct {
 	// session's tool registry at construction. Nil defaults to the zero
 	// [config.LSP], which [config.LSP.IsEnabled] resolves to enabled.
 	LSP func() config.LSP
+
+	// MCP resolves the MCP server configuration used TWICE, differently:
+	// [New] calls it ONCE, at construction, to build and Start the
+	// process-lifetime [mcpconn.Manager] (see Supervisor.mcpManager's doc) —
+	// unlike PermissionMode/LSP, a server's connection cannot be re-dialed
+	// per session, so the server LIST is fixed for this Supervisor's whole
+	// life. sessionGuard then calls it again, per session, for JUST
+	// [config.MCP.ReadyTimeout] — the bounded best-effort wait for that
+	// already-running Manager's initial discovery to settle — so an
+	// `mcp.ready_timeout_ms` edit still reaches the next session with no
+	// restart, even though adding or removing a SERVER does not. Nil
+	// defaults to the zero [config.MCP] (no servers, package-default
+	// timeouts).
+	MCP func() config.MCP
 
 	// Store, when set, is used instead of building a store from Root, and is
 	// NOT closed by [Supervisor.Close] — the caller owns its lifecycle. Test
@@ -151,6 +167,20 @@ type Supervisor struct {
 	// are workspace-scoped (one gopls per cwd+language), not spawned per
 	// session — and is closed exactly once, by Close.
 	lspManager *lspdiag.Manager
+
+	// mcpManager owns every MCP server connection THIS Supervisor makes —
+	// one per process (see internal/mcpconn's package doc), Started once in
+	// New and closed exactly once, by Close. sessionGuard is the only other
+	// place that touches it: a bounded AwaitReady followed by ONE Snapshot
+	// per session, never anything that could grow or shrink a live
+	// session's already-registered tool set (the hard invariant — see
+	// mcpconn's doc and agent-sdk-go/mcp's).
+	mcpManager *mcpconn.Manager
+
+	// mcpConfig mirrors Config.MCP; never nil after New. Re-read per session
+	// for [config.MCP.ReadyTimeout] only — see Config.MCP's doc for why the
+	// server list itself is NOT re-read here.
+	mcpConfig func() config.MCP
 
 	mu     sync.Mutex
 	roster map[string]*managed
@@ -249,6 +279,20 @@ func New(cfg Config) (*Supervisor, error) {
 		lspConfig = func() config.LSP { return config.LSP{} }
 	}
 
+	mcpConfig := cfg.MCP
+	if mcpConfig == nil {
+		// No explicit resolver: the zero config.MCP — no servers configured,
+		// so the Manager below connects nothing and every session's
+		// AwaitReady/Snapshot is instantly a no-op.
+		mcpConfig = func() config.MCP { return config.MCP{} }
+	}
+	// Built and Started ONCE, here — see Config.MCP's doc for why the server
+	// list is a construction-time snapshot rather than re-read per session.
+	// Start connects every enabled server ASYNCHRONOUSLY and returns
+	// immediately, so this never delays New.
+	mcpManager := mcpconn.NewManager(mcpconn.Config{MCP: mcpConfig()})
+	mcpManager.Start(context.Background())
+
 	return &Supervisor{
 		root:             root,
 		store:            store,
@@ -262,6 +306,8 @@ func New(cfg Config) (*Supervisor, error) {
 		permissionMode:   permissionMode,
 		lspConfig:        lspConfig,
 		lspManager:       lspdiag.NewManager(),
+		mcpConfig:        mcpConfig,
+		mcpManager:       mcpManager,
 		roster:           make(map[string]*managed),
 		watchers:         make(map[*watcher]struct{}),
 		watchDone:        make(chan struct{}),
@@ -299,7 +345,20 @@ func New(cfg Config) (*Supervisor, error) {
 // Keeping the reply Gate uniform likewise means the managed session's routing
 // doesn't need to know which mode built it (a yolo session simply never emits a
 // permission request for it to carry).
-func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.Gate, decisions *decision.Gate, tools loop.ToolRegistry) {
+//
+// MCP tools join the SAME base registry builtins and ask_user go into — see
+// [sandbox.WrapRegistry]'s extra parameter — so permission gating, sandbox
+// containment, and LSP diagnostics all apply to them structurally, not by
+// convention. They are captured HERE, exactly once, via a bounded
+// [mcpconn.Manager.AwaitReady] (config.MCP.ReadyTimeout — never longer, so a
+// slow or unreachable server cannot delay Create) followed by ONE
+// [mcpconn.Manager.Snapshot]: this is the hard invariant's enforcement
+// point. The Manager itself never mutates a []tool.Tool once handed out (see
+// its package doc), but sessionGuard is what guarantees each session only
+// ever ASKS once. mcpDown names every enabled server with no live
+// connection at that snapshot — the caller (Create/Resume) emits it as a
+// visible, non-fatal notice once the session's id is known.
+func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.Gate, decisions *decision.Gate, tools loop.ToolRegistry, mcpDown []string) {
 	gate := loop.NewGate()
 	dgate := decision.NewGate("")
 	askUser := decision.NewAskUser(dgate)
@@ -313,14 +372,34 @@ func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.
 		Timeout:        lspCfg.Timeout(),
 		MaxDiagnostics: lspCfg.DiagnosticLimit(),
 	}
+
+	readyCtx, cancel := context.WithTimeout(context.Background(), s.mcpConfig().ReadyTimeout())
+	s.mcpManager.AwaitReady(readyCtx)
+	cancel()
+	mcpSnap := s.mcpManager.Snapshot()
+	extra := append([]tool.Tool{askUser}, mcpSnap.Tools...)
+
 	if s.permissionMode() == config.PermissionModeYolo {
-		tools = lspdiag.Wrap(sandbox.WrapRegistry(cwd, nil, askUser), s.lspManager, cwd, lspOpts)
-		return yoloGuard{engine: engine}, gate, dgate, tools
+		tools = lspdiag.Wrap(sandbox.WrapRegistry(cwd, nil, extra...), s.lspManager, cwd, lspOpts)
+		return yoloGuard{engine: engine}, gate, dgate, tools, mcpSnap.Down
 	}
 	container := sandbox.New()
 	rg := loop.RuleGuard{Engine: engine, Container: container, Target: sandbox.ToolTarget}
-	tools = lspdiag.Wrap(sandbox.WrapRegistry(cwd, container, askUser), s.lspManager, cwd, lspOpts)
-	return rg, gate, dgate, tools
+	tools = lspdiag.Wrap(sandbox.WrapRegistry(cwd, container, extra...), s.lspManager, cwd, lspOpts)
+	return rg, gate, dgate, tools, mcpSnap.Down
+}
+
+// emitMCPDownNotices publishes one visible, non-fatal session.error per
+// down server (see sessionGuard's mcpDown) onto sess's own stream — the
+// "visible non-fatal notice" a down server must produce without ever
+// failing the session (see internal/mcpconn's package doc and
+// docs/PRD.md's MCP section). A no-op for the common case (down is empty).
+func emitMCPDownNotices(sess Session, down []string) {
+	for _, name := range down {
+		sess.Emit(event.NewSessionError(sess.ID(),
+			fmt.Sprintf("mcp server %q is not connected — its tools are unavailable for this session", name),
+			false))
+	}
 }
 
 // ResolveRoot is gofer's single source of the ~/.gofer default — the SDK
@@ -404,7 +483,7 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts CreateOptio
 		return SessionInfo{}, err
 	}
 
-	guard, gate, decisions, tools := s.sessionGuard(opts.Cwd)
+	guard, gate, decisions, tools, mcpDown := s.sessionGuard(opts.Cwd)
 	sess, err := s.newSession(ctx, runner.Options{
 		Root: s.root, Cwd: opts.Cwd, Model: opts.Model, System: opts.System,
 		Params: opts.Params, MaxIters: opts.MaxIters, Agent: opts.Agent,
@@ -413,6 +492,10 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts CreateOptio
 	if err != nil {
 		return SessionInfo{}, fmt.Errorf("supervisor: create session: %w", err)
 	}
+	// The session's id is only knowable now (runner.New/Resume mints it) —
+	// see sessionGuard's doc for why the notice can't be emitted any
+	// earlier.
+	emitMCPDownNotices(sess, mcpDown)
 
 	// The runner seeds its own effort from Params.Thinking.Effort at
 	// construction, so the roster's bookkeeping starts from the same value
@@ -536,7 +619,7 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 	// exactly when a client reopened it from somewhere else.
 	meta, _ := lookupDiskSession(s.root, id)
 
-	guard, gate, decisions, tools := s.sessionGuard(opts.Cwd)
+	guard, gate, decisions, tools, mcpDown := s.sessionGuard(opts.Cwd)
 	sess, err := s.resumeSession(ctx, id, runner.Options{
 		Root: s.root, Cwd: opts.Cwd, Model: opts.Model, System: opts.System,
 		Params: opts.Params, MaxIters: opts.MaxIters, Agent: meta.Agent,
@@ -545,6 +628,7 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 	if err != nil {
 		return SessionInfo{}, fmt.Errorf("supervisor: resume %s: %w", id, err)
 	}
+	emitMCPDownNotices(sess, mcpDown)
 
 	m, err := s.register(sess, opts.Model, opts.Params.Thinking.Effort, opts.Cwd, gate, decisions, meta, true)
 	if err != nil {
@@ -1404,6 +1488,9 @@ func (s *Supervisor) Close() error {
 		}
 	}
 	if err := s.lspManager.Close(); err != nil {
+		errs = append(errs, err)
+	}
+	if err := s.mcpManager.Close(); err != nil {
 		errs = append(errs, err)
 	}
 	if s.ownsStore {

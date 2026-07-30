@@ -82,9 +82,9 @@ make install                                       # local install, truthfully v
   atomic); sections are the permissions ruleset (M3), `Session`/`TUI` (M4),
   `Telemetry`, `Daemon` (incl. `drain_timeout_ms`), and M7's `Prompt`/
   `Tools`/`MCP`/`Search`/`Skills`/`LSP` sections, plus the shared `SecretRef`
-  (`env:`/`file:`, resolved at use time, never inlined). `LSP` is read by
-  `internal/supervisor`'s session wiring; the rest are schema only — each is
-  wired up by its own feature PR. See its package doc.
+  (`env:`/`file:`, resolved at use time, never inlined). `LSP` and `MCP` are
+  read by `internal/supervisor`'s session wiring; the rest are schema only —
+  each is wired up by its own feature PR. See its package doc.
 - `internal/permrationale/` — the gating rationale behind a permission
   request (matched rule, policy, source, trace) that `ctrl+e` surfaces and
   `session/explain_permission` answers.
@@ -96,6 +96,16 @@ make install                                       # local install, truthfully v
   server (the SDK's `agent-sdk-go/lsp`), appending diagnostics to both the
   tool's model-facing content and its client-facing metadata. Advisory only —
   every failure mode degrades silently to the unmodified tool result.
+- `internal/mcpconn/` — the MCP connection manager the SDK's optional
+  `agent-sdk-go/mcp` package leaves to the embedder: one process-lifetime
+  `Manager` (per session under `--workers`) that connects every configured
+  server asynchronously with capped-backoff reconnect, and projects each
+  server's tools into the same base `tool.Registry` builtins and `ask_user`
+  use. A session's tool set is captured ONCE at create (a bounded wait +
+  `Snapshot()`) and never mutated afterward — a late-connecting server joins
+  the next session, a dead one keeps its tools registered (degrading to
+  `IsError`, working again after reconnect with no re-registration). See its
+  package doc.
 - `internal/decision/` — gofer's structured-decision round trip: the
   `ask_user` tool (gofer's first tool of its own) plus the per-session `Gate`
   it blocks on, carrying `acp` decision types over a gofer-native transport

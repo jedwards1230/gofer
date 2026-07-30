@@ -124,6 +124,11 @@ func runSessionWorker(ctx context.Context, args []string, stdout, stderr io.Writ
 		PermissionMode: permissionModeResolver(rootDir),
 		// Same reasoning for lsp.* — see lspConfigResolver.
 		LSP: lspConfigResolver(rootDir),
+		// Same reasoning for mcp.* — see mcpConfigResolver. Under M6 process
+		// isolation a worker hosts exactly one session, so "one manager per
+		// gofer process" (internal/mcpconn's doc) means one manager per
+		// session here — the same shape lspManager already takes.
+		MCP: mcpConfigResolver(rootDir),
 		// Pin the sole session's id to --session (design Option A) through the
 		// SDK's pre-assigned-session-id seam: runner.New creates the session with
 		// this exact id, leaving entry-id generation on the store default.
