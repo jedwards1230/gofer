@@ -21,6 +21,7 @@ func TestSettingsRegistryDefaults(t *testing.T) {
 		"tui.autoscroll":          "true",
 		"tui.mouse":               "true",
 		"tui.shell_reply_mode":    "reply",
+		"lsp.enabled":             "true",
 		"telemetry.enabled":       "false",
 		"telemetry.endpoint":      "",
 	}
@@ -78,6 +79,7 @@ func TestSettingsRegistryKinds(t *testing.T) {
 		"tui.autoscroll":          {SettingBool, nil},
 		"tui.mouse":               {SettingBool, nil},
 		"tui.shell_reply_mode":    {SettingEnum, []string{"reply", "queue"}},
+		"lsp.enabled":             {SettingBool, nil},
 		"telemetry.enabled":       {SettingBool, nil},
 		"telemetry.endpoint":      {SettingString, nil},
 	}

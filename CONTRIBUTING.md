@@ -8,6 +8,13 @@ through the workflow below.
 
 Go ≥ 1.25 and `golangci-lint`.
 
+`gopls` is optional but recommended: the LSP live tests
+(`internal/lspdiag`, `internal/supervisor`) drive a real language server and
+**skip themselves** when none is on `PATH`. Without it they pass silently
+without proving anything, so install it before touching LSP wiring —
+`go install golang.org/x/tools/gopls@v0.21.1` (the version CI pins). CI's
+`lsp-live` job installs it and fails if those tests skip.
+
 ## Build, test & lint
 
 ```bash

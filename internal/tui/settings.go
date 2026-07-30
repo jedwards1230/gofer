@@ -163,6 +163,22 @@ func settingsRegistry() []Setting {
 			},
 		},
 		{
+			Key:   "lsp.enabled",
+			Label: "LSP diagnostics",
+			Kind:  SettingBool,
+			Get: func(c config.Config) string {
+				if c.LSP.IsEnabled() {
+					return "true"
+				}
+				return "false"
+			},
+			Set: func(c config.Config, v string) config.Config {
+				enabled := v == "true"
+				c.LSP.Enabled = &enabled
+				return c
+			},
+		},
+		{
 			Key:   "telemetry.enabled",
 			Label: "Telemetry enabled",
 			Kind:  SettingBool,

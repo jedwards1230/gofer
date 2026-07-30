@@ -81,9 +81,11 @@ make install                                       # local install, truthfully v
   `<root>/config.json`, written via `config.Save` — indented, mode 0600,
   atomic); sections are the permissions ruleset (M3), `Session`/`TUI` (M4),
   `Telemetry`, `Daemon` (incl. `drain_timeout_ms`), and M7's `Prompt`/
-  `Tools`/`MCP`/`Search`/`Skills`/`LSP` (schema only — each is wired up by
-  its own feature PR) plus the shared `SecretRef` (`env:`/`file:`, resolved
-  at use time, never inlined). See its package doc.
+  `Tools`/`MCP`/`Search`/`Skills`/`LSP` sections, plus the shared `SecretRef`
+  (`env:`/`file:`, resolved at use time, never inlined). `Prompt` is read by
+  `internal/prompt` and `LSP` by `internal/supervisor`'s session wiring; the
+  rest are schema only — each is wired up by its own feature PR. See its
+  package doc.
 - `internal/prompt/` — composes a session's system prompt from
   `config.Prompt.Files` (the replacement for cmd/gofer's old
   `defaultSystemPrompt` string constant): `builtin:`/absolute/`~/`/cwd-then-

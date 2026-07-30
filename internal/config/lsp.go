@@ -6,8 +6,9 @@ const (
 	// DefaultLSPTimeout is [LSP.TimeoutMS]'s default: 4s, long enough for
 	// gopls to publish diagnostics after a save and short enough that an
 	// unresponsive server never visibly slows a tool call. MUST stay equal
-	// to internal/lspdiag's own DefaultTimeout (see the doc note below —
-	// that package predates this config section in the same milestone).
+	// to internal/lspdiag's own DefaultTimeout — two independent constants,
+	// checked by internal/config's TestLSPDefaultsMatchLspdiag so a drift
+	// fails loudly instead of silently disagreeing with runtime behavior.
 	DefaultLSPTimeout = 4 * time.Second
 	// DefaultLSPMaxDiagnostics is [LSP.MaxDiagnostics]'s default: 10. The
 	// first handful of errors are what the model must act on; the rest is
@@ -22,12 +23,11 @@ const (
 // there is no failure mode a default-off posture would protect against, only
 // a capability an operator would otherwise have to remember to turn on.
 //
-// Servers is a forward-compatible stub: a parallel M7 workstream (LSP
-// wiring) owns the per-language server launch details and defines its own
-// zero-value fallbacks over this shape (internal/lspdiag, landed on a
-// sibling branch as of this PR — see the PR report for the cross-check this
-// section could not yet wire in). This section lands the CONFIG SHAPE only;
-// it does not consume it.
+// Enabled/TimeoutMS/MaxDiagnostics are read by internal/supervisor's session
+// wiring (see [LSP.IsEnabled], [LSP.Timeout], [LSP.DiagnosticLimit]). Servers
+// remains a forward-compatible stub: internal/lspdiag owns the per-language
+// server launch details and defines its own zero-value fallbacks over this
+// shape, but does not yet consume an operator override here.
 type LSP struct {
 	// Enabled defaults to true (nil or true); see [LSP.IsEnabled].
 	Enabled *bool `json:"enabled,omitempty"`
