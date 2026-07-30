@@ -414,7 +414,13 @@ func newHarness(t *testing.T) *harness {
 // newHarnessWithConfig is [newHarness] with mutate applied to the
 // supervisor.Config after its usual fake-session wiring is set but before
 // construction — the seam the TestAutoCompact-family tests use to install a
-// scripted [config.Compaction] resolver. mutate may be nil.
+// scripted [config.Compaction] resolver, and skills_wiring_test.go uses to
+// install a [config.Skills] resolver (mutate(&cfg) sets cfg.Skills directly;
+// an earlier, skills-only version of this seam took `func() config.Skills`
+// instead of the general mutate callback — generalized here rather than kept
+// as a second declaration, since a plain field-mutator callback can express
+// any one-off Config knob a test needs without a new helper per section).
+// mutate may be nil.
 func newHarnessWithConfig(t *testing.T, mutate func(*supervisor.Config)) *harness {
 	t.Helper()
 	h := &harness{t: t, root: t.TempDir(), sessions: make(map[string]*fakeSession)}

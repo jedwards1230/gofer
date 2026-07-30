@@ -9,15 +9,12 @@ package supervisor_test
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/jedwards1230/agent-sdk-go/event"
-	"github.com/jedwards1230/agent-sdk-go/runner"
 
 	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/supervisor"
@@ -36,36 +33,6 @@ func writeSkillFixture(t *testing.T, dir, name, description, body string) {
 	}
 }
 
-// newHarnessWithConfig is [newHarness] (helpers_test.go) with an explicit
-// Skills resolver injected — newHarness itself builds a Config with none
-// set, so it cannot exercise this knob. Mirrors newLSPHarness's shape
-// (lspdiag_config_test.go) for the same reason.
-func newHarnessWithConfig(t *testing.T, skills func() config.Skills) *harness {
-	t.Helper()
-	h := &harness{t: t, root: t.TempDir(), sessions: make(map[string]*fakeSession)}
-
-	var nextID int64
-	cfg := supervisor.Config{
-		Root:   h.root,
-		Skills: skills,
-		NewSession: func(_ context.Context, opts runner.Options) (supervisor.Session, error) {
-			id := fmt.Sprintf("sess-%d", atomic.AddInt64(&nextID, 1))
-			fs := h.register(id, opts.Cwd)
-			fs.approver = opts.Approver
-			fs.tools = opts.Tools
-			return fs, nil
-		},
-	}
-
-	sup, err := supervisor.New(cfg)
-	if err != nil {
-		t.Fatalf("supervisor.New: %v", err)
-	}
-	h.sup = sup
-	t.Cleanup(func() { _ = sup.Close() })
-	return h
-}
-
 // TestSessionGuard_SkillsConfigReachesRegistry proves a skill discovered
 // under an explicit config.Skills.Dirs is registered as the "skill" tool a
 // real session's registry resolves — the end-to-end pipe from config to
@@ -74,7 +41,9 @@ func TestSessionGuard_SkillsConfigReachesRegistry(t *testing.T) {
 	skillsDir := t.TempDir()
 	writeSkillFixture(t, skillsDir, "review", "reviews a diff", "do the review")
 
-	h := newHarnessWithConfig(t, func() config.Skills { return config.Skills{Dirs: []string{skillsDir}} })
+	h := newHarnessWithConfig(t, func(cfg *supervisor.Config) {
+		cfg.Skills = func() config.Skills { return config.Skills{Dirs: []string{skillsDir}} }
+	})
 
 	info, err := h.sup.Create(context.Background(), "", supervisor.CreateOptions{Cwd: t.TempDir(), Model: "m"})
 	if err != nil {
@@ -117,8 +86,10 @@ func TestSessionGuard_SkillDiagnosticIsVisible(t *testing.T) {
 	writeSkillFixture(t, skillsDir, "huge", "a skill with a huge body", string(make([]byte, 1000)))
 
 	tiny := 10
-	h := newHarnessWithConfig(t, func() config.Skills {
-		return config.Skills{Dirs: []string{skillsDir}, MaxFileBytes: &tiny}
+	h := newHarnessWithConfig(t, func(cfg *supervisor.Config) {
+		cfg.Skills = func() config.Skills {
+			return config.Skills{Dirs: []string{skillsDir}, MaxFileBytes: &tiny}
+		}
 	})
 
 	info, err := h.sup.Create(context.Background(), "", supervisor.CreateOptions{Cwd: t.TempDir(), Model: "m"})
