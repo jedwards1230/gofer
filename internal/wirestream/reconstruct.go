@@ -441,7 +441,7 @@ func (r *Reconstructor) handleGoferEvent(raw json.RawMessage) {
 	case event.KindSessionForked:
 		ev = event.NewSessionForked(w.SessionID, w.At, w.Label)
 	case event.KindSessionCompacted:
-		ev = event.NewSessionCompacted(w.SessionID)
+		ev = event.NewSessionCompacted(w.SessionID, w.ReplacesThrough, w.MessagesCompacted, w.Model, w.Usage, w.Summary)
 	case event.KindSessionKilled:
 		ev = event.NewSessionKilled(w.SessionID)
 	case event.KindSessionArchived:
@@ -519,6 +519,12 @@ type goferEventWire struct {
 	// session.forked
 	At    string `json:"at"`
 	Label string `json:"label"`
+
+	// session.compacted (Usage is shared with turn.finished below)
+	ReplacesThrough   string `json:"replaces_through"`
+	MessagesCompacted int    `json:"messages_compacted"`
+	Model             string `json:"model"`
+	Summary           string `json:"summary"`
 
 	// session.error
 	Err   string `json:"error"`
