@@ -231,6 +231,11 @@ func (f *fakeSup) AnswerDecision(context.Context, string, string, []acp.Decision
 
 func (f *fakeSup) RestartDaemon(context.Context) error { return nil }
 
+// DaemonVersion answers "": this package's tests exercise navigation, not the
+// stale-daemon banner's post-restart refresh (see internal/tui's
+// TestBannerRestartKeyFiresWhenStale for that, against internalFakeSup).
+func (f *fakeSup) DaemonVersion() string { return "" }
+
 // content renders m the way a real frame would, returning just the string
 // content for substring assertions.
 func content(m tea.Model) string {
@@ -463,10 +468,12 @@ func TestNavAttachSendsPrompt(t *testing.T) {
 }
 
 // TestNavCtrlXFirstPressArmsNoAction is the mutation anchor for the two-press
-// confirm's FIRST half: one ctrl-x on the roster must NOT touch the supervisor
-// (no kill, no archive) and must show the confirm line naming the verb the
-// selected (working) row's state calls for. Neutralize confirmDestroy's
-// arm-instead-of-act branch and this goes red.
+// confirm's FIRST half: one ctrl-x on the roster must NOT touch the
+// supervisor (no kill, no archive) and must switch the dispatch-bar hint to
+// the confirm prompt. The operator sees one verb ("delete") regardless of the
+// row's state — which underlying operation confirmDestroy actually dispatches
+// is covered by the kill/archive-specific tests below. Neutralize
+// confirmDestroy's arm-instead-of-act branch and this goes red.
 func TestNavCtrlXFirstPressArmsNoAction(t *testing.T) {
 	sup := newFakeSup(tui.GoldenRoster())
 	m := newTestApp(t, sup)
@@ -476,8 +483,8 @@ func TestNavCtrlXFirstPressArmsNoAction(t *testing.T) {
 	if len(sup.ops) != 0 {
 		t.Fatalf("first ctrl-x must not call the supervisor; sup.ops = %v", sup.ops)
 	}
-	if got := content(m); !strings.Contains(got, `Press ctrl+x again to kill "wire the app root"`) {
-		t.Fatalf("expected the arm/confirm line naming kill for the working row; got:\n%s", got)
+	if got := content(m); !strings.Contains(got, "ctrl-x again to confirm deletion") {
+		t.Fatalf("expected the dispatch-bar hint to switch to the delete confirm; got:\n%s", got)
 	}
 }
 
@@ -497,9 +504,11 @@ func TestNavKillWorkingSession(t *testing.T) {
 	}
 }
 
-// TestNavCtrlXArchivesFinishedSession pins the verb-matches-state contract for
-// the OTHER state: a finished session's confirm line names "archive", and the
-// second press archives (never kills) it.
+// TestNavCtrlXArchivesFinishedSession pins the dispatch contract for a
+// finished session: the second press archives (never kills) it. The confirm
+// hint names no verb of its own (see TestNavCtrlXFirstPressArmsNoAction) — the
+// only observable difference between session states is which Supervisor call
+// actually lands.
 func TestNavCtrlXArchivesFinishedSession(t *testing.T) {
 	sup := newFakeSup([]tui.SessionInfo{{
 		ID:     "fin-1",
@@ -509,12 +518,32 @@ func TestNavCtrlXArchivesFinishedSession(t *testing.T) {
 	m := newTestApp(t, sup)
 
 	m = press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl}) // arm
-	if got := content(m); !strings.Contains(got, `Press ctrl+x again to archive "done and dusted"`) {
-		t.Fatalf("expected the confirm line to name archive for the finished row; got:\n%s", got)
-	}
-	press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl}) // confirm
+	press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl})     // confirm
 
 	if want := "archive:fin-1"; len(sup.ops) != 1 || sup.ops[0] != want {
+		t.Fatalf("sup.ops = %v; want one entry %q (archive, not kill)", sup.ops, want)
+	}
+}
+
+// TestNavCtrlXArchivesIdleSession pins the same dispatch contract for
+// StatusIdle — the status a session reloaded from its on-disk journal
+// surfaces as (see supervisor.go's rebuild-from-journal path). It is not in
+// the live supervisor's roster, so routing it to doKill would hit
+// ErrNotLive ("session not live") instead of clearing it; the fake's Kill
+// returns nil unconditionally, so this asserts on the recorded op rather than
+// on an error.
+func TestNavCtrlXArchivesIdleSession(t *testing.T) {
+	sup := newFakeSup([]tui.SessionInfo{{
+		ID:     "idle-1",
+		Title:  "reloaded from disk",
+		Status: tui.StatusIdle,
+	}})
+	m := newTestApp(t, sup)
+
+	m = press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl}) // arm
+	press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl})     // confirm
+
+	if want := "archive:idle-1"; len(sup.ops) != 1 || sup.ops[0] != want {
 		t.Fatalf("sup.ops = %v; want one entry %q (archive, not kill)", sup.ops, want)
 	}
 }
@@ -544,8 +573,8 @@ func TestNavCtrlXSelectionMoveResetsConfirm(t *testing.T) {
 	if len(sup.ops) != 0 {
 		t.Fatalf("a selection round-trip must cancel the armed confirm; sup.ops = %v (expected none)", sup.ops)
 	}
-	if got := content(m); !strings.Contains(got, `Press ctrl+x again to kill "session A"`) {
-		t.Fatalf("expected ctrl-x after the round trip to re-arm A fresh, not act; got:\n%s", got)
+	if got := content(m); !strings.Contains(got, "ctrl-x again to confirm deletion") {
+		t.Fatalf("expected ctrl-x after the round trip to re-arm A fresh (confirm hint showing), not act; got:\n%s", got)
 	}
 
 	press(t, m, tea.KeyPressMsg{Code: 'x', Mod: ctrl}) // genuine second press: acts

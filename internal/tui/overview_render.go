@@ -702,11 +702,15 @@ func (o Overview) dispatch(width int, hide bool) []string {
 // alternative and names a destructive binding an operator needs to be able to
 // find.
 func (o Overview) hintText() string {
-	// "ctrl-x×2" signals the two-press confirm: the first ctrl-x arms, the second
-	// kills/archives (see [App.confirmDestroy]). The verb stays "kill" — the hint
-	// is state-blind, so it names the common case; the confirm LINE names the
-	// exact verb (archive for a finished session).
-	const base = "enter open · space peek · tab toggle view · ctrl-x×2 kill"
+	// A pending ctrl+x confirm takes over the WHOLE line — not a separate
+	// status line — so the operator's eye stays on the one place shortcuts
+	// live. The verb is always "delete": kill vs. archive is an internal
+	// dispatch detail ([App.confirmDestroy] picks the right one off the
+	// session's status) the operator never needs to know.
+	if o.ctrlXArmed {
+		return "ctrl-x again to confirm deletion"
+	}
+	const base = "enter open · space peek · tab toggle view · ctrl-x delete"
 	if o.layout().tree {
 		return base + " · ctrl-t stop agents"
 	}

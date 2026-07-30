@@ -32,6 +32,14 @@ type Overview struct {
 	input        inputBuffer
 	submitted    string
 	hasSubmitted bool
+
+	// ctrlXArmed mirrors [App.ctrlXArmed]'s "is a delete confirm pending"
+	// state into the dispatch-bar hint: the FIRST ctrl+x press replaces
+	// hintText's whole line with the confirm prompt, in place of the ordinary
+	// shortcut list — see [Overview.hintText]. The app root is the source of
+	// truth (it tracks WHICH session is armed, for the safety property); this
+	// is only the render-facing bit.
+	ctrlXArmed bool
 }
 
 // OverviewMeta is the static header context: the app identity plus the current
@@ -163,6 +171,26 @@ func (o Overview) Roster() []SessionInfo { return append([]SessionInfo(nil), o.s
 // [App.handleModelSelect].
 func (o Overview) WithDefaultModel(model string) Overview {
 	o.meta.Model = model
+	return o
+}
+
+// WithDaemonVersion returns a copy of the overview whose header compares
+// against version as the CURRENT daemon build. meta.DaemonVersion is seeded
+// once at NewApp time from the pre-restart daemon's gofer/hello answer; a
+// successful `R` restart replaces the daemon process without restarting the
+// TUI, so without this the stale-daemon banner (skewSeparator) would keep
+// warning about a daemon the restart already replaced. See
+// [App.doRestartDaemon] and [tui.Supervisor.DaemonVersion].
+func (o Overview) WithDaemonVersion(version string) Overview {
+	o.meta.DaemonVersion = version
+	return o
+}
+
+// WithCtrlXArmed returns a copy of the overview whose dispatch-bar hint
+// reflects whether a ctrl+x delete confirm is pending — see
+// [Overview.hintText] and [App.confirmDestroy].
+func (o Overview) WithCtrlXArmed(armed bool) Overview {
+	o.ctrlXArmed = armed
 	return o
 }
 

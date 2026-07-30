@@ -62,6 +62,13 @@ type internalFakeSup struct {
 	restarts   int
 	restartErr error
 
+	// daemonVersion is what DaemonVersion answers — the replacement build a
+	// restart reports. A real RestartDaemon always redeploys the CLIENT's own
+	// build (see [daemonbridge.Supervisor.RestartDaemon]'s doc), so the
+	// banner-clear test sets this to the app's own cliVer to model a
+	// successful restart.
+	daemonVersion string
+
 	// explains records every Supervisor.ExplainPermission call, and
 	// explainRationale/explainErr are what the next one answers with — both
 	// paths are needed, since ctrl+e's contract is as much about what a FAILED
@@ -187,6 +194,12 @@ func (f *internalFakeSup) RestartDaemon(context.Context) error {
 	defer f.mu.Unlock()
 	f.restarts++
 	return f.restartErr
+}
+
+func (f *internalFakeSup) DaemonVersion() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.daemonVersion
 }
 
 func (f *internalFakeSup) Reply(_ context.Context, sessionID, id string, d PermissionDecision) error {

@@ -520,8 +520,13 @@ func (a App) doArchive(id string) tea.Cmd {
 }
 
 // daemonRestartMsg carries the outcome of the stale-daemon banner's restart
-// action (see [App.doRestartDaemon]).
-type daemonRestartMsg struct{ err error }
+// action (see [App.doRestartDaemon]). version is the replacement daemon's
+// build, read off the fresh connection RestartDaemon just established
+// ([tui.Supervisor.DaemonVersion]) — empty (and ignored) on a failed restart.
+type daemonRestartMsg struct {
+	err     error
+	version string
+}
 
 // doRestartDaemon restarts the stale daemon via the Supervisor — the banner's
 // one-key action — and, on success, the Update handler follows it with a fresh
@@ -530,9 +535,18 @@ type daemonRestartMsg struct{ err error }
 // the restart drives the daemon's own start timeout end to end and must not be
 // cut short by a transient UI context. Blocking, so it runs as its own tea.Cmd
 // goroutine rather than inline.
+//
+// On success it also reads the replacement's build version off the Supervisor
+// (the connection RestartDaemon just swapped in), so the Update handler can
+// refresh the header and clear the stale-daemon banner — without this, the
+// banner stayed frozen at the pre-restart snapshot [NewApp] was seeded with
+// forever, even though the daemon it was warning about no longer exists.
 func (a App) doRestartDaemon() tea.Cmd {
 	return func() tea.Msg {
-		return daemonRestartMsg{err: a.sup.RestartDaemon(context.Background())}
+		if err := a.sup.RestartDaemon(context.Background()); err != nil {
+			return daemonRestartMsg{err: err}
+		}
+		return daemonRestartMsg{version: a.sup.DaemonVersion()}
 	}
 }
 
@@ -930,8 +944,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// The replacement is up and this client is reconnected (the bridge swapped
 		// its connection). Refresh the roster NOW rather than waiting for the next
 		// tick, so the sessions the restart rebuilt from their journals reappear
-		// immediately — the visible proof the restart worked.
+		// immediately — the visible proof the restart worked. Also fold in the
+		// replacement's build version so the header stops warning about the
+		// daemon this restart just replaced (see [App.doRestartDaemon]).
 		a.setStatus(sevOK, "Daemon restarted; roster restored.")
+		a.over = a.over.WithDaemonVersion(msg.version)
 		return a, a.fetchRoster
 
 	case permissionExplainedMsg:
@@ -1024,14 +1041,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		a.clearStatus()
 		// Capture and disarm the ctrl+x two-press confirm. Snapshotting it here —
-		// before any overlay or per-screen handler — and clearing a.ctrlXArmed is
-		// what makes the confirm momentary: ANY key lands on a cleared arm, so
-		// only a SECOND ctrl+x (whose confirmDestroy re-reads this snapshot and
-		// finds the still-selected session) acts; everything else cancels. Mirrors
-		// clearStatus above — the confirm LINE lives in a.status and dies on the
-		// same key.
+		// before any overlay or per-screen handler — and clearing a.ctrlXArmed
+		// (and the hint's mirror of it) is what makes the confirm momentary: ANY
+		// key lands on a cleared arm, so only a SECOND ctrl+x (whose
+		// confirmDestroy re-reads this snapshot and finds the still-selected
+		// session) acts and re-arms the hint; everything else cancels. Mirrors
+		// clearStatus above.
 		prevArmed := a.ctrlXArmed
 		a.ctrlXArmed = ""
+		a.over = a.over.WithCtrlXArmed(false)
 		// Any key press clears an active/frozen mouse selection — docs/TUI.md's
 		// "clear the selection on the next click / a key press" contract (a
 		// fresh click already clears it via handleMouseClick installing a new
@@ -1138,15 +1156,20 @@ func (a App) handleKey(msg tea.KeyPressMsg, prevArmed string) (tea.Model, tea.Cm
 }
 
 // confirmDestroy runs the roster/peek ctrl+x two-press confirm against the
-// selected session. The FIRST press arms the action — it records the session's
-// id in a.ctrlXArmed and shows a confirm line naming the verb the session's
-// state calls for (kill for a running session, archive for a finished one) —
-// and does NOT touch the Supervisor. The SECOND press acts, but only when
-// prevArmed (the arm as of the start of this key press) still equals the
-// selected session's id: that single equality is the whole safety property. Any
-// intervening key press disarms via Update's central reset, and a selection that
-// moved to a different session no longer matches prevArmed, so the confirm can
-// never kill or archive a session other than the exact one it was armed on.
+// selected session. The FIRST press arms the action — it records the
+// session's id in a.ctrlXArmed and switches the dispatch-bar hint to the
+// confirm prompt (see [Overview.hintText]) — and does NOT touch the
+// Supervisor. The operator sees one verb, "delete", regardless of session
+// state: which underlying operation actually runs (kill for a live session,
+// archive for a finished or idle one — an idle session has no live runner to
+// kill, see [supervisor.Supervisor.Archive]'s not-live fallback) is an
+// internal dispatch detail, not something surfaced in the UI. The SECOND
+// press acts, but only when prevArmed (the arm as of the start of this key
+// press) still equals the selected session's id: that single equality is the
+// whole safety property. Any intervening key press disarms via Update's
+// central reset, and a selection that moved to a different session no longer
+// matches prevArmed, so the confirm can never delete a session other than the
+// exact one it was armed on.
 func (a App) confirmDestroy(prevArmed string) (tea.Model, tea.Cmd) {
 	s, ok := a.over.Selected()
 	if !ok {
@@ -1155,20 +1178,15 @@ func (a App) confirmDestroy(prevArmed string) (tea.Model, tea.Cmd) {
 	}
 	if prevArmed == s.ID {
 		// Second press, same session still selected: act on its CURRENT state.
-		if s.Status == StatusFinished {
+		if s.Status == StatusFinished || s.Status == StatusIdle {
 			return a, a.doArchive(s.ID)
 		}
 		return a, a.doKill(s.ID)
 	}
-	// First press (or a fresh session, the previous arm having been disarmed):
-	// arm this session and name the action its state calls for, so the verb the
-	// user reads is the one the second press will actually run.
-	verb := "kill"
-	if s.Status == StatusFinished {
-		verb = "archive"
-	}
+	// First press (or a fresh session, the previous arm having been
+	// disarmed): arm this session. The hint line itself carries the confirm.
 	a.ctrlXArmed = s.ID
-	a.setStatus(sevWarn, fmt.Sprintf("Press ctrl+x again to %s %q.", verb, a.over.rowLabel(s)))
+	a.over = a.over.WithCtrlXArmed(true)
 	return a, nil
 }
 

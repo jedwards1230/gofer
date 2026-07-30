@@ -148,7 +148,7 @@ func screenKeymap() []keyBinding {
 		{Keys: "space", Scope: scopeOverview, Desc: "Peek the selected session (empty dispatch bar)"},
 		{Keys: "tab", Scope: scopeOverview, Desc: "Switch flat / grouped roster view"},
 		{Keys: "esc", Scope: scopeOverview, Desc: "Clear the dispatch bar"},
-		{Keys: "ctrl+x", Scope: scopeOverview, Desc: "Kill a running session, archive a finished one (press twice to confirm)"},
+		{Keys: "ctrl+x", Scope: scopeOverview, Desc: "Delete the selected session (press twice to confirm)"},
 		{Keys: "ctrl+t", Scope: scopeOverview, Desc: "Stop every subagent under the selected session"},
 		{Keys: "R", Scope: scopeOverview, Desc: "Restart a stale daemon (shown only when the daemon is out of date)"},
 		{Keys: "pgup/pgdn", Scope: scopeOverview, Desc: "Scroll the roster"},
@@ -158,7 +158,7 @@ func screenKeymap() []keyBinding {
 		{Keys: "space", Scope: scopePeek, Desc: "Close back to the roster (empty reply)"},
 		{Keys: "esc", Scope: scopePeek, Desc: "Close back to the roster"},
 		{Keys: "↑/↓", Scope: scopePeek, Desc: "Move the roster selection"},
-		{Keys: "ctrl+x", Scope: scopePeek, Desc: "Kill a running session, archive a finished one (press twice to confirm)"},
+		{Keys: "ctrl+x", Scope: scopePeek, Desc: "Delete the selected session (press twice to confirm)"},
 
 		{Keys: "←", Scope: scopeAttach, Desc: "Back out to the parent session, else the roster (empty input)"},
 		{Keys: "↓", Scope: scopeAttach, Desc: "Drill into this session's subagents (empty input)"},

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -30,6 +31,11 @@ func skewApp(t *testing.T, sup *internalFakeSup, cliVer, daemonVer string) App {
 func TestBannerRestartKeyFiresWhenStale(t *testing.T) {
 	sup := newInternalFakeSup(GoldenRoster())
 	a := skewApp(t, sup, "v0.3.1", "v0.2.1") // daemon older than CLI ⇒ banner up
+	// A real restart redeploys the CLIENT's own build (see
+	// [daemonbridge.Supervisor.RestartDaemon]'s doc), so the replacement
+	// answers gofer/hello with the CLI's version, not the stale one it
+	// started on.
+	sup.daemonVersion = "v0.3.1"
 
 	mdl, cmd := a.Update(tea.KeyPressMsg{Text: "R"})
 	a = mdl.(App)
@@ -49,9 +55,26 @@ func TestBannerRestartKeyFiresWhenStale(t *testing.T) {
 		t.Errorf("RestartDaemon called %d times, want exactly 1", sup.restarts)
 	}
 	// The success path re-fetches the roster (so the restored sessions show).
-	_, follow := a.Update(rm)
+	mdl, follow := a.Update(rm)
+	a = mdl.(App)
 	if follow == nil {
 		t.Error("a successful restart did not schedule a roster refresh")
+	}
+	// The banner must already be gone from THIS render — meta.DaemonVersion is
+	// refreshed synchronously in the daemonRestartMsg branch, not deferred
+	// until the roster refresh lands (see [App.doRestartDaemon]/
+	// [Overview.WithDaemonVersion)).
+	if got := a.render(); strings.Contains(got, "daemon is stale") {
+		t.Fatalf("stale-daemon banner still rendered after a successful restart:\n%s", got)
+	}
+
+	// Run the scheduled roster refresh to completion too, so the whole
+	// restart-through-repopulation path is proven, not just the message
+	// branch: the banner must stay gone once the roster is back.
+	mdl, _ = a.Update(follow())
+	a = mdl.(App)
+	if got := a.render(); strings.Contains(got, "daemon is stale") {
+		t.Fatalf("stale-daemon banner reappeared after the post-restart roster refresh:\n%s", got)
 	}
 }
 

@@ -256,6 +256,14 @@ func (a Adapter) RestartDaemon(_ context.Context) error {
 	return errors.New("tuibridge: no daemon to restart (in-process supervisor)")
 }
 
+// DaemonVersion reports "": there is no separate daemon connection to ask,
+// and RestartDaemon above never succeeds on this backend, so the caller this
+// exists for ([App]'s daemonRestartMsg handler) never reaches here in
+// practice. Exists only to satisfy [tui.Supervisor].
+func (a Adapter) DaemonVersion() string {
+	return ""
+}
+
 // toTUI copies the fields the TUI renders from a supervisor snapshot. The
 // status cast relies on the two SessionStatus enums sharing ordinals — a
 // property the mapping test pins so a future drift fails loudly.
