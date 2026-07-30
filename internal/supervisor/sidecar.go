@@ -49,38 +49,67 @@ type sessionMeta struct {
 	// ArchivedAt is when the session was archived; the zero time for a session
 	// that never was. Diagnostic only — Archived is the load-bearing flag.
 	ArchivedAt time.Time `json:"archivedAt,omitempty"`
+	// Prompt is this session's composed system prompt provenance — which
+	// files composed it, its content hash, and its length — recorded by
+	// [RecordPrompt] for the CLI paths that build a session directly via
+	// runner.New/Resume (see cmd/gofer's run/resume/exec and
+	// internal/prompt.Compose). nil for a session predating this field or
+	// one RecordPrompt was never called for (e.g. a daemon-created session —
+	// see internal/prompt's package doc for what's wired so far).
+	Prompt *promptMeta `json:"prompt,omitempty"`
+}
+
+// promptMeta is the on-disk shape of [PromptProvenance] — see [RecordPrompt].
+type promptMeta struct {
+	Files  []string `json:"files,omitempty"`
+	SHA256 string   `json:"sha256,omitempty"`
+	Bytes  int      `json:"bytes,omitempty"`
 }
 
 // recordable reports whether m carries anything worth persisting. A plain root
 // session has nothing to record, so it writes no sidecar at all — which is what
 // keeps this feature invisible for every pre-existing use of the supervisor. An
-// archived session is always recordable: the archive marker is the whole point
-// of the sidecar for a plain root session that has no parent/agent link.
+// archived session, or one with recorded prompt provenance, is always
+// recordable: each is the whole point of the sidecar for a plain root session
+// that has no parent/agent link.
 func (m sessionMeta) recordable() bool {
-	return m.ParentID != "" || m.Agent != "" || m.Archived
+	return m.ParentID != "" || m.Agent != "" || m.Archived || m.Prompt != nil
 }
 
 // sidecarPath is the sidecar file for id in the session directory dir (the
 // directory its journal already lives in).
 func sidecarPath(dir, id string) string { return filepath.Join(dir, id+metaSuffix) }
 
-// writeSessionMeta persists m as id's sidecar in dir, atomically: it marshals to
-// a temp file in the SAME directory (so the rename is same-filesystem, hence
-// atomic) with mode 0600, then renames it over the final path — the same
-// discipline [config.Save] uses for gofer's config file, so a reader never
-// observes a half-written sidecar.
+// writeSessionMeta persists m as id's sidecar in dir, atomically — see
+// [atomicWriteFile].
 func writeSessionMeta(dir, id string, m sessionMeta) error {
 	data, err := json.Marshal(m)
 	if err != nil {
 		return fmt.Errorf("supervisor: marshal session meta %s: %w", id, err)
 	}
+	return atomicWriteFile(dir, "."+id+"-*"+metaSuffix+".tmp", sidecarPath(dir, id), data)
+}
+
+// atomicWriteFile writes data to path, atomically: a temp file in the SAME
+// directory as path (so the rename is same-filesystem, hence atomic) at mode
+// 0600, fsynced before the rename, then renamed over path — the same
+// discipline [config.Save] uses for gofer's config file, with one deliberate
+// divergence: the fsync. Surviving a crash is the whole point of a durability
+// artifact like a session sidecar or its prompt text, and a rename alone is
+// atomic with respect to READERS but not with respect to power loss — without
+// the sync, a host that dies between rename and writeback can leave a
+// truncated file behind. Every caller here degrades a missing/corrupt file
+// silently rather than erroring (see readSessionMeta, [PromptText]), so that
+// failure would present as quietly losing durable data rather than as an
+// error anyone sees. tmpGlob is the [os.CreateTemp] pattern (must contain
+// exactly one "*").
+func atomicWriteFile(dir, tmpGlob, path string, data []byte) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("supervisor: mkdir %s: %w", dir, err)
 	}
-	path := sidecarPath(dir, id)
-	tmp, err := os.CreateTemp(dir, "."+id+"-*"+metaSuffix+".tmp")
+	tmp, err := os.CreateTemp(dir, tmpGlob)
 	if err != nil {
-		return fmt.Errorf("supervisor: create temp session meta in %s: %w", dir, err)
+		return fmt.Errorf("supervisor: create temp file in %s: %w", dir, err)
 	}
 	tmpPath := tmp.Name()
 	// Clean up on any early return; after a successful Rename below the path no
@@ -95,13 +124,6 @@ func writeSessionMeta(dir, id string, m sessionMeta) error {
 		_ = tmp.Close()
 		return fmt.Errorf("supervisor: write %s: %w", tmpPath, err)
 	}
-	// fsync before the rename — the one place this diverges from [config.Save],
-	// deliberately. Surviving a crash is this file's ENTIRE purpose: a rename is
-	// atomic with respect to readers, but not with respect to power loss, so
-	// without the sync a host that dies between rename and writeback can leave a
-	// zero-length sidecar. readSessionMeta degrades that silently to "root
-	// session" (by design — see its doc), so the failure would present as a
-	// subagent quietly losing its parent rather than as an error anyone sees.
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("supervisor: sync %s: %w", tmpPath, err)
@@ -276,6 +298,13 @@ type SidecarInfo struct {
 	Agent    string
 	Depth    int
 	Archived bool
+	// PromptFiles/PromptSHA256/PromptBytes are [RecordPrompt]'s payload read
+	// back — see [PromptProvenance]. PromptFiles is nil when no prompt was
+	// ever recorded for this session (mirrors every other zero-value-means-
+	// absent field here).
+	PromptFiles  []string
+	PromptSHA256 string
+	PromptBytes  int
 }
 
 // ReadSidecar reads id's sidecar from dir — the directory that already holds its
@@ -286,7 +315,13 @@ type SidecarInfo struct {
 // one read and avoiding [DiskMeta]/[DiskArchived]'s per-session project scan.
 func ReadSidecar(dir, id string) SidecarInfo {
 	m := readSessionMeta(sidecarPath(dir, id))
-	return SidecarInfo{ParentID: m.ParentID, Agent: m.Agent, Depth: m.Depth, Archived: m.Archived}
+	info := SidecarInfo{ParentID: m.ParentID, Agent: m.Agent, Depth: m.Depth, Archived: m.Archived}
+	if m.Prompt != nil {
+		info.PromptFiles = m.Prompt.Files
+		info.PromptSHA256 = m.Prompt.SHA256
+		info.PromptBytes = m.Prompt.Bytes
+	}
+	return info
 }
 
 // SetArchivedOnDisk records (archived=true) or clears (false) id's durable
@@ -304,4 +339,69 @@ func SetArchivedOnDisk(root, id string, archived bool, now time.Time) (found boo
 		return false, nil
 	}
 	return true, setArchived(dir, id, archived, now)
+}
+
+// promptTextSuffix is the extension of a session's composed system prompt,
+// written alongside its `<id>.jsonl` journal and `<id>.meta.json` sidecar as
+// `<id>.system.md` — see [RecordPrompt].
+const promptTextSuffix = ".system.md"
+
+// promptTextPath is the composed-prompt file for id in the session directory
+// dir (the directory its journal already lives in).
+func promptTextPath(dir, id string) string { return filepath.Join(dir, id+promptTextSuffix) }
+
+// PromptProvenance is a session's composed system prompt's durable record:
+// which sources composed it (in the order [prompt.Compose] resolved them,
+// post de-dup — see its [prompt.Composed]), a hex SHA-256 digest of the
+// composed text, and its length in bytes. It is [RecordPrompt]'s input.
+type PromptProvenance struct {
+	Files  []string
+	SHA256 string
+	Bytes  int
+}
+
+// RecordPrompt persists prov into id's `.meta.json` sidecar
+// (read-modify-write, preserving any existing subagent link or archive
+// marker already there) and writes text — the composed system prompt
+// verbatim — as `<id>.system.md` beside the journal at journalPath.
+//
+// It exists because cmd/gofer's run/resume/exec build a session directly via
+// runner.New/Resume, bypassing this package's own Create/Resume (and the
+// subagent-link sidecar write those already do) entirely — without this,
+// nothing records which files actually composed a session's prompt, so a
+// resumed session's original prompt was undiscoverable once composed (see
+// internal/prompt's package doc and CLAUDE.md's "visible artifacts over
+// hidden state"). It does NOT change what a resume runs WITH: resume still
+// recomposes fresh from current config on every call (a project's AGENTS.md
+// legitimately changes between sessions), so this is the audit trail of what
+// a session actually ran with THIS time, not a frozen replay input.
+//
+// The session this describes is already running by the time a caller reaches
+// this point, so a write failure here is a best-effort diagnostic loss, not a
+// reason to tear the session down — RecordPrompt returns the error for the
+// caller to log rather than to fail the run on.
+func RecordPrompt(id, journalPath string, prov PromptProvenance, text string) error {
+	dir := filepath.Dir(journalPath)
+	meta := readSessionMeta(sidecarPath(dir, id))
+	meta.Prompt = &promptMeta{Files: prov.Files, SHA256: prov.SHA256, Bytes: prov.Bytes}
+	if err := writeSessionMeta(dir, id, meta); err != nil {
+		return fmt.Errorf("supervisor: record prompt provenance for %s: %w", id, err)
+	}
+	if err := atomicWriteFile(dir, "."+id+"-*"+promptTextSuffix+".tmp", promptTextPath(dir, id), []byte(text)); err != nil {
+		return fmt.Errorf("supervisor: write prompt text for %s: %w", id, err)
+	}
+	return nil
+}
+
+// PromptText reads id's composed system prompt back from its
+// `<id>.system.md` file under dir — the directory that already holds its
+// journal. It exists chiefly for tests verifying [RecordPrompt]'s round
+// trip; nothing in gofer reads it back on a session-restore path (see
+// [RecordPrompt]'s doc).
+func PromptText(dir, id string) (string, error) {
+	data, err := os.ReadFile(promptTextPath(dir, id)) //nolint:gosec // dir/id are the caller's own resolved session directory and id, not user input
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
 }
