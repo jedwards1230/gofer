@@ -81,9 +81,10 @@ make install                                       # local install, truthfully v
   `<root>/config.json`, written via `config.Save` — indented, mode 0600,
   atomic); sections are the permissions ruleset (M3), `Session`/`TUI` (M4),
   `Telemetry`, `Daemon` (incl. `drain_timeout_ms`), and M7's `Prompt`/
-  `Tools`/`MCP`/`Search`/`Skills`/`LSP` (schema only — each is wired up by
-  its own feature PR) plus the shared `SecretRef` (`env:`/`file:`, resolved
-  at use time, never inlined). See its package doc.
+  `Tools`/`MCP`/`Search`/`Skills`/`LSP` sections, plus the shared `SecretRef`
+  (`env:`/`file:`, resolved at use time, never inlined). `LSP` is read by
+  `internal/supervisor`'s session wiring; the rest are schema only — each is
+  wired up by its own feature PR. See its package doc.
 - `internal/permrationale/` — the gating rationale behind a permission
   request (matched rule, policy, source, trace) that `ctrl+e` surfaces and
   `session/explain_permission` answers.
