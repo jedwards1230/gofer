@@ -36,6 +36,7 @@ const (
 	panelEffort
 	panelUsage
 	panelStats
+	panelContext
 	panelResume
 	panelHelp
 )
@@ -60,6 +61,7 @@ var panelTabs = []panelTab{
 	{panelEffort, "Thinking"},
 	{panelUsage, "Usage"},
 	{panelStats, "Stats"},
+	{panelContext, "Context"},
 	{panelResume, "Resume"},
 	{panelHelp, "Help"},
 }
@@ -350,6 +352,9 @@ func (p commandPanel) body(width, bodyRows int) string {
 		return v.View(width, bodyRows)
 	case panelStats:
 		v := statsView{theme: p.theme, sess: p.sess, now: p.now, roster: p.roster}
+		return v.View(width, bodyRows)
+	case panelContext:
+		v := contextView{theme: p.theme, sess: p.sess, env: p.env}
 		return v.View(width, bodyRows)
 	case panelConfig:
 		return p.cfg.View(width, bodyRows)

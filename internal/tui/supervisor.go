@@ -109,6 +109,19 @@ type SessionInfo struct {
 	// Depth is the row's depth in the subagent tree: 0 for a root session,
 	// parent+1 for a child — the indent level a tree render uses.
 	Depth int
+
+	// LastUsage is the MOST RECENTLY COMPLETED turn's token usage in the
+	// session's current folded context — the measured proxy for how full the
+	// context window is right now, as opposed to Usage above (the session's
+	// ACCUMULATED total, which only grows). It is what the /context panel
+	// (context.go) reads as its numerator, and what drops back down the turn
+	// after a compaction. Zero when no turn has settled yet.
+	LastUsage provider.Usage
+	// ContextWindow is the active model's total context-window size in
+	// tokens, resolved server-side — 0 when the model is unregistered
+	// (unknown, never "no window"; a renderer must not divide by it). Pairs
+	// with LastUsage as /context's denominator.
+	ContextWindow int
 }
 
 // SessionRef is one entry in the /resume picker's list: a session that exists
@@ -308,4 +321,13 @@ type Supervisor interface {
 	// in-process supervisor — which never shows the banner) returns an error; the
 	// key is only reachable while the banner is up, so that path is unreached.
 	RestartDaemon(ctx context.Context) error
+
+	// Compact replaces sessionID's history up to HEAD with a summary — the
+	// backend for the explicit `/compact` command (command.go). instructions
+	// is forwarded verbatim; "" uses the SDK's own default. It is idle-only
+	// (see [supervisor.Supervisor.Compact]'s doc): a running session, or one
+	// with queued work, is refused. Success is observable on the session's own
+	// event stream as a session.compacted event — this method does not itself
+	// return a summary, matching Reply/AnswerDecision's fire-and-observe shape.
+	Compact(ctx context.Context, sessionID, instructions string) error
 }

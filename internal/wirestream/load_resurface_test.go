@@ -64,9 +64,15 @@ func (f *blockingApprovalSession) EventsLive() *event.Subscription {
 }
 func (f *blockingApprovalSession) Emit(e event.Event)       { f.broker.Publish(e) }
 func (f *blockingApprovalSession) Cost() session.CostReport { return session.CostReport{} }
-func (f *blockingApprovalSession) SetModel(string) error    { return nil }
-func (f *blockingApprovalSession) SetEffort(string) error   { return nil }
-func (f *blockingApprovalSession) Close() error             { f.broker.Close(); return nil }
+func (f *blockingApprovalSession) Compact(context.Context, string) error {
+	return runner.ErrNothingToCompact
+}
+func (f *blockingApprovalSession) LastUsage() (string, provider.Usage, bool) {
+	return "", provider.Usage{}, false
+}
+func (f *blockingApprovalSession) SetModel(string) error  { return nil }
+func (f *blockingApprovalSession) SetEffort(string) error { return nil }
+func (f *blockingApprovalSession) Close() error           { f.broker.Close(); return nil }
 
 func (f *blockingApprovalSession) Prompt(ctx context.Context, text string) error {
 	f.broker.Publish(event.NewPermissionRequested(f.id, f.callID, "bash", map[string]any{"command": text}, []string{"rule: ask"}))

@@ -15,10 +15,10 @@ claude-sonnet-5 · ~/orchestration
 
 
 
-
-
 ────────────────────────────────────────────────────────────────────────────────
-▸ /config  View and edit settings
+▸ /compact  Summarize this session's history and replace it with the summary
+  /config   View and edit settings
+  /context  Show how full this session's context window is
 ────────────────────────────────────────────────────────────────────────────────
 ❯ /c▏
 enter open · space peek · tab toggle view · ctrl-x×2 kill · ? shortcuts

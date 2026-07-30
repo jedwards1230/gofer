@@ -163,6 +163,28 @@ func settingsRegistry() []Setting {
 			},
 		},
 		{
+			// The numeric threshold (compaction.threshold_fraction) is
+			// deliberately NOT a row here: SettingKind has only bool/enum/string,
+			// and a free-text string edit for a (0,1) fraction (or a percentage —
+			// which spelling?) risks a confusing, unvalidated affordance for a
+			// value most operators will never touch. It stays config-file-only,
+			// documented on config.Compaction; this bool is the one genuinely
+			// UI-appropriate knob the feature introduces.
+			Key:   "compaction.enabled",
+			Label: "Automatic compaction",
+			Kind:  SettingBool,
+			Get: func(c config.Config) string {
+				if c.Compaction.AutoEnabled() {
+					return "true"
+				}
+				return "false"
+			},
+			Set: func(c config.Config, v string) config.Config {
+				c.Compaction.Disabled = v != "true"
+				return c
+			},
+		},
+		{
 			Key:   "telemetry.enabled",
 			Label: "Telemetry enabled",
 			Kind:  SettingBool,

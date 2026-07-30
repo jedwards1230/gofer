@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -231,6 +232,12 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 	// built (see SetDecisionRelay below) — that setter is the in-process
 	// supervisor's own, not part of the daemon.Supervisor hosting interface.
 	var inProcSup *supervisor.Supervisor
+	// d is assigned once, below, right after daemon.New — declared here so
+	// the non-workers branch's OnRegister closure (built and installed BEFORE
+	// daemon.New exists) can close over this exact variable and read
+	// whatever it holds at the time an event actually arrives, never before
+	// daemon.New has returned (see the out-of-turn watcher's doc, below).
+	var d *daemon.Daemon
 	if *workers {
 		// Each worker is spawned from THIS gofer binary (`gofer session-worker`),
 		// so the router needs its own executable path.
@@ -272,6 +279,9 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 			// /yolo from an attached TUI reaches the next session this daemon
 			// creates — see permissionModeResolver.
 			PermissionMode: permissionModeResolver(rootDir),
+			// Same re-read-per-turn shape as PermissionMode above, for the
+			// automatic-compaction trigger.
+			Compaction: compactionResolver(rootDir),
 			// Attach a per-session telemetry observer at registration, before the
 			// session's first turn — subscribing here (rather than after a turn
 			// has already started) means Events' replay backlog is still empty,
@@ -287,9 +297,50 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 					defer close(done)
 					tel.Instrument(ctx, sess.ID(), sub.C)
 				}()
+
+				// Out-of-turn event relay: broadcastGoferEvent/broadcastUpdate
+				// (this daemon's client fan-out) only ever run from INSIDE an
+				// active session/prompt RPC loop, or from a couple of direct
+				// one-off call sites (advertiseModelChange) — there is no
+				// continuous drain of a session's broker otherwise (see
+				// internal/daemon/doc.go). Compaction breaks that assumption:
+				// session.compacted can be published with NO session/prompt in
+				// flight at all — the explicit /compact command requires the
+				// session to be IDLE, and the automatic trigger fires from the
+				// supervisor's own pump between turns. Without this, an
+				// attached remote (daemon/websocket) peer would never see
+				// either — the "auto-compaction must be visible, never
+				// silent" requirement would be true only for the in-process
+				// backend. A second, no-replay subscription (EventsLive: only
+				// events from THIS moment forward, so it never re-announces
+				// history) drains for the session's whole life and rebroadcasts
+				// each event through the SAME exported, already-guarded relay
+				// methods the M6 router uses (Daemon.BroadcastRawEvent /
+				// BroadcastSessionUpdate) — their promptHandlerActive check is
+				// what prevents this from double-delivering a live turn's
+				// events alongside handleSessionPrompt's own fan-out.
+				liveSub := sess.EventsLive()
+				liveDone := make(chan struct{})
+				go func() {
+					defer close(liveDone)
+					for e := range liveSub.C {
+						if d == nil {
+							continue
+						}
+						raw, merr := json.Marshal(e)
+						if merr != nil {
+							continue
+						}
+						d.BroadcastRawEvent(sess.ID(), raw)
+						d.BroadcastSessionUpdate(sess.ID(), e)
+					}
+				}()
+
 				return func() {
 					sub.Close()
 					<-done
+					liveSub.Close()
+					<-liveDone
 				}
 			},
 		})
@@ -299,7 +350,7 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 		sup, closeSup, inProcSup = isup, isup.Close, isup
 	}
 
-	d := daemon.New(sup, daemon.Config{
+	d = daemon.New(sup, daemon.Config{
 		ListenAddr:   *listen,
 		BearerToken:  bearerToken,
 		DefaultModel: modelID,
@@ -553,6 +604,24 @@ func permissionModeResolver(root string) func() config.PermissionMode {
 			return config.PermissionModeAsk
 		}
 		return cfg.Session.Mode()
+	}
+}
+
+// compactionResolver mirrors permissionModeResolver's shape for the
+// automatic-compaction policy: re-read from config.json on every call
+// (supervisor.Config.Compaction is read fresh at the end of every settled
+// turn — see managed.maybeAutoCompact) rather than snapshotted once at
+// startup, so an edited compaction.threshold_fraction/disabled reaches the
+// next turn with no restart. A read failure resolves to the zero value
+// (config.Compaction{}) — automatic compaction on, at the built-in default
+// threshold — matching every other resolver's fail-safe-to-default shape.
+func compactionResolver(root string) func() config.Compaction {
+	return func() config.Compaction {
+		cfg, err := config.Load(config.DefaultPath(root))
+		if err != nil {
+			return config.Compaction{}
+		}
+		return cfg.Compaction
 	}
 }
 

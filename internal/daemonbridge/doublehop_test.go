@@ -92,6 +92,10 @@ func (r *routerSupervisor) SetEffort(ctx context.Context, sessionID, effort stri
 	return r.b.SetEffort(ctx, sessionID, effort)
 }
 
+func (r *routerSupervisor) Compact(ctx context.Context, sessionID, instructions string) error {
+	return r.b.Compact(ctx, sessionID, instructions)
+}
+
 func (r *routerSupervisor) Kill(ctx context.Context, sessionID string) error {
 	return r.b.Kill(ctx, sessionID)
 }

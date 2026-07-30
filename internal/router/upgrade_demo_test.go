@@ -142,11 +142,15 @@ func (s *gatedTailSession) Events() *event.Subscription {
 func (s *gatedTailSession) EventsLive() *event.Subscription {
 	return s.broker.SubscribeLive(event.FilterAll, 64)
 }
-func (s *gatedTailSession) Emit(e event.Event)       { s.broker.Publish(e) }
-func (s *gatedTailSession) Cost() session.CostReport { return session.CostReport{} }
-func (s *gatedTailSession) SetModel(string) error    { return nil }
-func (s *gatedTailSession) SetEffort(string) error   { return nil }
-func (s *gatedTailSession) Close() error             { s.broker.Close(); return nil }
+func (s *gatedTailSession) Emit(e event.Event)                    { s.broker.Publish(e) }
+func (s *gatedTailSession) Cost() session.CostReport              { return session.CostReport{} }
+func (s *gatedTailSession) Compact(context.Context, string) error { return runner.ErrNothingToCompact }
+func (s *gatedTailSession) LastUsage() (string, provider.Usage, bool) {
+	return "", provider.Usage{}, false
+}
+func (s *gatedTailSession) SetModel(string) error  { return nil }
+func (s *gatedTailSession) SetEffort(string) error { return nil }
+func (s *gatedTailSession) Close() error           { s.broker.Close(); return nil }
 
 // demoTailText is the assistant content the released turn emits — the marker the
 // test looks for in a gofer/event frame at the attached client.

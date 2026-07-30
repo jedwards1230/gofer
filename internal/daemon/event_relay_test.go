@@ -320,9 +320,15 @@ func (s *inlineRelaySession) EventsLive() *event.Subscription {
 }
 func (s *inlineRelaySession) Emit(e event.Event)       { s.broker.Publish(e) }
 func (s *inlineRelaySession) Cost() session.CostReport { return session.CostReport{} }
-func (s *inlineRelaySession) SetModel(string) error    { return nil }
-func (s *inlineRelaySession) SetEffort(string) error   { return nil }
-func (s *inlineRelaySession) Close() error             { s.broker.Close(); return nil }
+func (s *inlineRelaySession) Compact(context.Context, string) error {
+	return runner.ErrNothingToCompact
+}
+func (s *inlineRelaySession) LastUsage() (string, provider.Usage, bool) {
+	return "", provider.Usage{}, false
+}
+func (s *inlineRelaySession) SetModel(string) error  { return nil }
+func (s *inlineRelaySession) SetEffort(string) error { return nil }
+func (s *inlineRelaySession) Close() error           { s.broker.Close(); return nil }
 
 // emit publishes e locally and relays it, in the sink's order: the router's sink
 // runs BEFORE the local publish (see wirestream's handleGoferEvent), so the

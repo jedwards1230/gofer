@@ -69,6 +69,15 @@ type Config struct {
 	// identical to gofer before this seam existed.
 	PermissionMode func() config.PermissionMode
 
+	// Compaction resolves the LIVE automatic-compaction policy (see
+	// [config.Compaction]), read fresh at the end of every settled turn (see
+	// [managed.maybeAutoCompact]) rather than sampled once at construction —
+	// the same live-reload shape PermissionMode follows, so a config.json edit
+	// takes effect on the very next turn with no restart. Nil defaults to a
+	// constant zero-value factory: automatic compaction on, at
+	// [config.DefaultCompactionThreshold].
+	Compaction func() config.Compaction
+
 	// Store, when set, is used instead of building a store from Root, and is
 	// NOT closed by [Supervisor.Close] — the caller owns its lifecycle. Test
 	// seam.
@@ -121,6 +130,10 @@ type Supervisor struct {
 	// permissionMode mirrors Config.PermissionMode; never nil after New (a nil
 	// Config.PermissionMode resolves to a constant ask factory).
 	permissionMode func() config.PermissionMode
+
+	// compaction mirrors Config.Compaction; never nil after New (a nil
+	// Config.Compaction resolves to a constant zero-value factory).
+	compaction func() config.Compaction
 
 	// resumeMu serializes Resume end-to-end (roster check through
 	// registration) so two concurrent Resumes of the same id can never both
@@ -225,6 +238,13 @@ func New(cfg Config) (*Supervisor, error) {
 		permissionMode = func() config.PermissionMode { return config.PermissionModeAsk }
 	}
 
+	compaction := cfg.Compaction
+	if compaction == nil {
+		// No explicit policy: the zero value — automatic compaction on, at
+		// config.DefaultCompactionThreshold — matching config.Compaction{}.
+		compaction = func() config.Compaction { return config.Compaction{} }
+	}
+
 	return &Supervisor{
 		root:             root,
 		store:            store,
@@ -236,6 +256,7 @@ func New(cfg Config) (*Supervisor, error) {
 		onRegister:       cfg.OnRegister,
 		newEngine:        newEngine,
 		permissionMode:   permissionMode,
+		compaction:       compaction,
 		lspManager:       lspdiag.NewManager(),
 		roster:           make(map[string]*managed),
 		watchers:         make(map[*watcher]struct{}),
@@ -573,7 +594,7 @@ func (s *Supervisor) register(sess Session, model, effort, cwd string, gate *loo
 		s.mu.Unlock()
 		return nil, ErrClosed
 	}
-	m := newManaged(sess, model, effort, s.clock(), s.clock, s.notify, cwd, gate, decisions, meta, resumed, s.onRegister)
+	m := newManaged(sess, model, effort, s.clock(), s.clock, s.notify, cwd, gate, decisions, meta, resumed, s.onRegister, s.compaction)
 	// Stamp the session id onto the decision gate the moment it is knowable —
 	// before m is published anywhere and before anything can run a turn against
 	// it, so no request can ever open with an empty session id (see
@@ -790,6 +811,45 @@ func (s *Supervisor) SetEffort(ctx context.Context, sessionID, effort string) er
 	m.mu.Lock()
 	m.effort = effort
 	m.mu.Unlock()
+	s.notify()
+	return nil
+}
+
+// Compact replaces sessionID's history up to HEAD with a summary, consuming
+// the SDK runner's own seam ([runner.Runner.Compact] via [Session.Compact]):
+// the summary is appended as a journal entry and a must-deliver
+// session.compacted event is published, so every attached client — the TUI's
+// own transcript included — renders what happened without re-reading the
+// journal. instructions is forwarded verbatim; "" uses the SDK's
+// [runner.DefaultCompactionInstructions].
+//
+// Like Archive (and per [runner.Runner.Compact]'s own documented
+// precondition — "do not call Compact while a Prompt is in flight"), Compact
+// is idle-only: a running session, or one with queued work, is refused with
+// [ErrRunning] rather than racing the pump's own turn-boundary trigger
+// ([managed.maybeAutoCompact]) or summarizing a context a queued prompt is
+// about to extend. [ErrNotLive] for an unknown or archived session.
+// [runner.ErrNothingToCompact] passes through unwrapped-underneath (via
+// %w) when the session's current folded context is already empty.
+func (s *Supervisor) Compact(ctx context.Context, sessionID, instructions string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m, err := s.lookup(sessionID)
+	if err != nil {
+		return fmt.Errorf("supervisor: compact %s: %w", sessionID, err)
+	}
+
+	m.mu.Lock()
+	running := m.state == stateRunning || len(m.queue) > 0
+	m.mu.Unlock()
+	if running {
+		return fmt.Errorf("supervisor: compact %s: %w", sessionID, ErrRunning)
+	}
+
+	if err := m.sess.Compact(ctx, instructions); err != nil {
+		return fmt.Errorf("supervisor: compact %s: %w", sessionID, err)
+	}
 	s.notify()
 	return nil
 }
