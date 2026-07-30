@@ -56,11 +56,20 @@ Recorded as they settle.
   a branch. At the milestone boundary, cut a fresh SDK release tag and re-pin
   again — a squash-merge of the SDK integration PR deletes the branch and orphans
   a pseudo-version (M2 lesson, repeated at M3).
-- **The re-pin was not test-only.** `event.NewSessionForked` gained `at`/`label`
-  between v0.19.0 and v0.21.0, so `internal/wirestream` had to carry both fields
-  in its envelope to keep reconstruction lossless. Covered by
+- **The re-pin was not test-only.** `event.NewSessionForked` changed signature in
+  **v0.20.0** via `jedwards1230/agent-sdk-go#100` (checkpoint/fork/rewind), gaining
+  `at`/`label`. gofer's only consumer was `internal/wirestream/reconstruct.go`,
+  which had to carry both fields in its envelope to keep reconstruction lossless —
+  the encoder needed no change, since `internal/daemon/event_relay.go` forwards the
+  payload verbatim and `SessionForked.MarshalJSON` already emits both. Covered by
   `TestHandleNotificationReplaysGoferEventKinds`, which asserts field-for-field
-  equality through the notification path.
+  equality through the notification path; the `session.forked` case was
+  strengthened to use non-empty values so it exercises the new fields instead of
+  passing on zero values.
+- **No SDK regression in the v0.19.0..v0.21.0 range.** The range was searched for
+  the synthetic-delta / event-sequence changes that were expected to break
+  assertions (incl. `a4c410b`, which touches `event/op.go`); nothing gofer is
+  sensitive to. The one break was the `NewSessionForked` signature above.
 - **Merge method for this round is squash**, so each piece lands as one commit on
   the integration branch and the eventual integration→`main` PR reads as one
   commit per workstream.
