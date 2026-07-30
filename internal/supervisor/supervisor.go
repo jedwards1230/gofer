@@ -17,12 +17,14 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/provider"
 	"github.com/jedwards1230/agent-sdk-go/runner"
 	"github.com/jedwards1230/agent-sdk-go/session"
+	"github.com/jedwards1230/agent-sdk-go/tool"
 
 	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/decision"
 	"github.com/jedwards1230/gofer/internal/lspdiag"
 	"github.com/jedwards1230/gofer/internal/permrationale"
 	"github.com/jedwards1230/gofer/internal/sandbox"
+	"github.com/jedwards1230/gofer/internal/skillset"
 )
 
 // Config configures a [Supervisor].
@@ -79,6 +81,18 @@ type Config struct {
 	// session's tool registry at construction. Nil defaults to the zero
 	// [config.LSP], which [config.LSP.IsEnabled] resolves to enabled.
 	LSP func() config.LSP
+
+	// Skills resolves the SKILL.md discovery config each NEW session's tool
+	// registry is wired with (see [config.Skills]). Same factory shape as LSP
+	// and for the same reason: called once per Create/Resume — inside
+	// sessionGuard, where the session's own Cwd is finally known — rather
+	// than sampled at construction, so a `skills.*` write reaches the next
+	// session a RUNNING gofer starts, with no restart. It cannot reach a
+	// session that already exists, for the same reason LSP cannot: the SDK
+	// fixes a session's tool registry at construction. Nil defaults to the
+	// zero [config.Skills], which resolves to the two conventional
+	// directories at the package defaults.
+	Skills func() config.Skills
 
 	// Store, when set, is used instead of building a store from Root, and is
 	// NOT closed by [Supervisor.Close] — the caller owns its lifecycle. Test
@@ -137,6 +151,11 @@ type Supervisor struct {
 	// resolves to a constant zero-value factory, which config.LSP.IsEnabled
 	// etc. resolve to the package defaults).
 	lspConfig func() config.LSP
+
+	// skillsConfig mirrors Config.Skills; never nil after New (a nil
+	// Config.Skills resolves to a constant zero-value factory, which
+	// config.Skills.Directories etc. resolve to the package defaults).
+	skillsConfig func() config.Skills
 
 	// resumeMu serializes Resume end-to-end (roster check through
 	// registration) so two concurrent Resumes of the same id can never both
@@ -249,6 +268,15 @@ func New(cfg Config) (*Supervisor, error) {
 		lspConfig = func() config.LSP { return config.LSP{} }
 	}
 
+	skillsConfig := cfg.Skills
+	if skillsConfig == nil {
+		// No explicit resolver: the zero config.Skills, which its own
+		// Directories/FileLimitBytes/DescriptionLimitBytes resolve to the
+		// package defaults (the two conventional directories, at the
+		// package size caps).
+		skillsConfig = func() config.Skills { return config.Skills{} }
+	}
+
 	return &Supervisor{
 		root:             root,
 		store:            store,
@@ -261,6 +289,7 @@ func New(cfg Config) (*Supervisor, error) {
 		newEngine:        newEngine,
 		permissionMode:   permissionMode,
 		lspConfig:        lspConfig,
+		skillsConfig:     skillsConfig,
 		lspManager:       lspdiag.NewManager(),
 		roster:           make(map[string]*managed),
 		watchers:         make(map[*watcher]struct{}),
@@ -299,7 +328,15 @@ func New(cfg Config) (*Supervisor, error) {
 // Keeping the reply Gate uniform likewise means the managed session's routing
 // doesn't need to know which mode built it (a yolo session simply never emits a
 // permission request for it to carry).
-func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.Gate, decisions *decision.Gate, tools loop.ToolRegistry) {
+//
+// skillNote is sessionGuard's out-of-band 5th return: the operator-facing
+// summary of anything skillset.Load skipped (oversized, malformed, or
+// shadowed by a higher-precedence directory — see [skillset.Summarize]), or
+// "" when nothing was. It travels alongside the built registry rather than
+// being emitted here because sessionGuard runs before the session — and so
+// its id, the one thing [event.NewSessionError] needs — exists; Create and
+// Resume both emit it once the session is registered (see their own calls).
+func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.Gate, decisions *decision.Gate, tools loop.ToolRegistry, skillNote string) {
 	gate := loop.NewGate()
 	dgate := decision.NewGate("")
 	askUser := decision.NewAskUser(dgate)
@@ -313,14 +350,24 @@ func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.
 		Timeout:        lspCfg.Timeout(),
 		MaxDiagnostics: lspCfg.DiagnosticLimit(),
 	}
+	// Same per-session re-resolution, for skills.* — see [Config.Skills]'s
+	// doc. cwd is only known here, at session-construction time, which is
+	// why this lives in sessionGuard rather than beside lspOpts in New.
+	skillsCfg := s.skillsConfig()
+	skillSet, diags := skillset.Load(skillsCfg, s.root, cwd)
+	skillNote = skillset.Summarize(diags)
+	extra := []tool.Tool{askUser}
+	if skillTool, ok := skillset.NewTool(skillSet, skillsCfg); ok {
+		extra = append(extra, skillTool)
+	}
 	if s.permissionMode() == config.PermissionModeYolo {
-		tools = lspdiag.Wrap(sandbox.WrapRegistry(cwd, nil, askUser), s.lspManager, cwd, lspOpts)
-		return yoloGuard{engine: engine}, gate, dgate, tools
+		tools = lspdiag.Wrap(sandbox.WrapRegistry(cwd, nil, extra...), s.lspManager, cwd, lspOpts)
+		return yoloGuard{engine: engine}, gate, dgate, tools, skillNote
 	}
 	container := sandbox.New()
 	rg := loop.RuleGuard{Engine: engine, Container: container, Target: sandbox.ToolTarget}
-	tools = lspdiag.Wrap(sandbox.WrapRegistry(cwd, container, askUser), s.lspManager, cwd, lspOpts)
-	return rg, gate, dgate, tools
+	tools = lspdiag.Wrap(sandbox.WrapRegistry(cwd, container, extra...), s.lspManager, cwd, lspOpts)
+	return rg, gate, dgate, tools, skillNote
 }
 
 // ResolveRoot is gofer's single source of the ~/.gofer default — the SDK
@@ -404,7 +451,7 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts CreateOptio
 		return SessionInfo{}, err
 	}
 
-	guard, gate, decisions, tools := s.sessionGuard(opts.Cwd)
+	guard, gate, decisions, tools, skillNote := s.sessionGuard(opts.Cwd)
 	sess, err := s.newSession(ctx, runner.Options{
 		Root: s.root, Cwd: opts.Cwd, Model: opts.Model, System: opts.System,
 		Params: opts.Params, MaxIters: opts.MaxIters, Agent: opts.Agent,
@@ -438,6 +485,14 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts CreateOptio
 		// the shared one and stays open; only its broker and journal close.
 		_ = sess.Close()
 		return SessionInfo{}, fmt.Errorf("supervisor: create session: %w", err)
+	}
+	// Surface any skipped SKILL.md on the session's own stream — see
+	// sessionGuard's skillNote doc — the same "visible artifact, never
+	// swallowed" treatment a failed turn gets (see managed.pump). Emitted
+	// after register so it reaches every observer's replay, before any
+	// turn event that might otherwise bury it.
+	if skillNote != "" {
+		sess.Emit(event.NewSessionError(sess.ID(), skillNote, false))
 	}
 	if prompt != "" {
 		if err := m.enqueue(prompt); err != nil {
@@ -536,7 +591,7 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 	// exactly when a client reopened it from somewhere else.
 	meta, _ := lookupDiskSession(s.root, id)
 
-	guard, gate, decisions, tools := s.sessionGuard(opts.Cwd)
+	guard, gate, decisions, tools, skillNote := s.sessionGuard(opts.Cwd)
 	sess, err := s.resumeSession(ctx, id, runner.Options{
 		Root: s.root, Cwd: opts.Cwd, Model: opts.Model, System: opts.System,
 		Params: opts.Params, MaxIters: opts.MaxIters, Agent: meta.Agent,
@@ -550,6 +605,10 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 	if err != nil {
 		_ = sess.Close()
 		return SessionInfo{}, fmt.Errorf("supervisor: resume %s: %w", id, err)
+	}
+	// See Create's identical emit — same reasoning, same shape.
+	if skillNote != "" {
+		sess.Emit(event.NewSessionError(sess.ID(), skillNote, false))
 	}
 	// A resumed session returns to the overview for good: clear any archive
 	// marker so it is not hidden again after the next restart. Best-effort — the
