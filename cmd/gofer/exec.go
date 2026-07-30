@@ -91,11 +91,16 @@ func runExec(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	ctx, stop := interruptCtx(ctx)
 	defer stop()
 
+	composed, err := resolveSystemPrompt(rootDir, cwd, stderr)
+	if err != nil {
+		return err
+	}
+
 	opts := runner.Options{
 		Root:   rootDir,
 		Cwd:    cwd,
 		Model:  modelID,
-		System: defaultSystemPrompt,
+		System: composed.Text,
 	}
 	if execRunnerOpts != nil {
 		execRunnerOpts(&opts)
@@ -104,6 +109,7 @@ func runExec(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	if err != nil {
 		return wrapCredentialHint(err)
 	}
+	recordPromptProvenance(r.ID(), r.JournalPath(), composed, stderr)
 
 	_, runErr := sdkexec.Run(ctx, r, promptText, sdkexec.Options{Out: stdout, OutputSchema: schema})
 	// sdkexec.Run never closes the session, so Close is ours to call. Keep the

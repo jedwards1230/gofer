@@ -82,9 +82,18 @@ make install                                       # local install, truthfully v
   atomic); sections are the permissions ruleset (M3), `Session`/`TUI` (M4),
   `Telemetry`, `Daemon` (incl. `drain_timeout_ms`), and M7's `Prompt`/
   `Tools`/`MCP`/`Search`/`Skills`/`LSP` sections, plus the shared `SecretRef`
-  (`env:`/`file:`, resolved at use time, never inlined). `LSP` is read by
-  `internal/supervisor`'s session wiring; the rest are schema only — each is
-  wired up by its own feature PR. See its package doc.
+  (`env:`/`file:`, resolved at use time, never inlined). `Prompt` is read by
+  `internal/prompt` and `LSP` by `internal/supervisor`'s session wiring; the
+  rest are schema only — each is wired up by its own feature PR. See its
+  package doc.
+- `internal/prompt/` — composes a session's system prompt from
+  `config.Prompt.Files` (the replacement for cmd/gofer's old
+  `defaultSystemPrompt` string constant): `builtin:`/absolute/`~/`/cwd-then-
+  root file resolution, blank-line-joined composition with first-wins dedup,
+  and the shipped `builtin:system.md` default, `go:embed`-compiled in. A leaf
+  over `internal/config`; `cmd/gofer`'s run/resume/exec are its only callers,
+  and `internal/supervisor.RecordPrompt` journals the result beside a
+  session's journal.
 - `internal/permrationale/` — the gating rationale behind a permission
   request (matched rule, policy, source, trace) that `ctrl+e` surfaces and
   `session/explain_permission` answers.
