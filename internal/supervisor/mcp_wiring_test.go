@@ -227,3 +227,56 @@ func TestSessionGuard_MCPDownServerEmitsVisibleNotice(t *testing.T) {
 		}
 	}
 }
+
+// TestSessionGuard_MCPReadyTimeoutReachesCreate is the guard for
+// config.MCP.ReadyTimeout specifically. The manager-construction read
+// (mcpconn.NewManager) is already covered by the down-server notice test, but
+// the PER-SESSION ReadyTimeout read that bounds Create's best-effort wait had
+// no test of its own: replacing it with a hardcoded zero config left the whole
+// package green, so an operator setting mcp.ready_timeout_ms could have been
+// silently ignored — the exact silent-disable class this milestone exists to
+// remove.
+//
+// ReadyTimeout is a CEILING, not a floor: AwaitReady returns as soon as
+// discovery settles, and a refused connection settles in microseconds. So the
+// only way to observe the bound is a server that ACCEPTS the connection and
+// then never answers — discovery cannot settle, and Create can only return by
+// hitting the timeout. A short configured value must then bound Create well
+// below the 2s package default, which is what a dropped config read resolves
+// to.
+func TestSessionGuard_MCPReadyTimeoutReachesCreate(t *testing.T) {
+	// Accepts, then blocks until the test releases it: discovery can never
+	// settle on its own. The release channel is closed BEFORE Close() because
+	// httptest.Server.Close waits for in-flight handlers — blocking on the
+	// request context instead would deadlock teardown against itself.
+	release := make(chan struct{})
+	hang := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		<-release
+	}))
+	t.Cleanup(func() {
+		close(release)
+		hang.Close()
+	})
+
+	// Far below config.DefaultMCPReadyTimeout (2s), so a dropped config read
+	// resolves to that default and blows the ceiling.
+	readyMS := 150
+	h := newMCPHarness(t, config.MCP{
+		Servers:        []config.MCPServer{{Name: "hang", URL: hang.URL}},
+		ReadyTimeoutMS: &readyMS,
+	})
+
+	start := time.Now()
+	if _, err := h.sup.Create(context.Background(), "", supervisor.CreateOptions{Cwd: t.TempDir(), Model: "m"}); err != nil {
+		t.Fatalf("Create: %v (an unresponsive MCP server must never fail session create)", err)
+	}
+	elapsed := time.Since(start)
+
+	// Ceiling sits between the configured 150ms and the 2s default, with
+	// enough headroom that a slow machine cannot flip it.
+	const ceiling = time.Second
+	if elapsed > ceiling {
+		t.Fatalf("Create took %s, want under %s — config.MCP.ReadyTimeout (%dms) did not reach the per-session wait; "+
+			"a hardcoded default (%s) produces exactly this", elapsed, ceiling, readyMS, config.DefaultMCPReadyTimeout)
+	}
+}
