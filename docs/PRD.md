@@ -407,6 +407,42 @@ place a session's registry is actually built — `internal/supervisor`'s
   ever adds or removes a tool from a *live* session's registry — index mode
   only grows which of the already-indexed tools are *advertised*.
 
+## MCP servers (M7)
+
+`internal/mcpconn.Manager` is the connection manager the SDK's optional
+`agent-sdk-go/mcp` package deliberately leaves to the embedder (that package
+owns only the JSON-RPC client and the `[]tool.Tool` projection). One Manager
+per gofer process (per session under `--workers`, since a worker IS a
+single-session process — same shape as `lspdiag.Manager`), built and
+`Start`ed once in `supervisor.New`, closed once in `Supervisor.Close`. It
+connects every `config.MCP.EnabledServers()` server ASYNCHRONOUSLY —
+building the Supervisor never blocks — and reconnects a failed or dead
+server with capped exponential backoff (`mcp.retry_max_interval_ms`).
+
+**A session's tool set is fixed at create.** `sessionGuard` waits, bounded by
+`mcp.ready_timeout_ms` (default 2s, same shape as the existing session-load
+settle timeout), for the Manager's initial discovery to settle, then takes
+ONE `Snapshot()` and registers those tools into the SAME base
+`tool.Registry` builtins and `ask_user` go into — permission gating, sandbox
+containment, and LSP diagnostics all apply structurally, not by convention.
+Nothing after that point can add or remove a tool from a live session's
+registry: a server that finishes connecting later joins the NEXT session,
+and a server that dies mid-session keeps its already-registered tools
+(calls degrade to `IsError`, and succeed again after reconnect with NO
+re-registration — `mcpconn`'s `proxyTool` resolves the current live client
+on every call rather than pinning itself to one). This is required by, and
+tested for, the `toolindex` decorator's prompt-cache byte-identity guarantee
+(agent-sdk-go#114) — see `internal/mcpconn`'s package doc. A server that is
+down when a session is created contributes no tools and emits a visible,
+non-fatal `session.error` naming it.
+
+Credentials (`env:`/`file:` `SecretRef`s on `command`/`env`/`headers`/`auth`)
+resolve at connect time, never at config load. Per-server `allow`/`deny`
+tool globs (the same grammar as a permission rule's specifier) filter a
+chatty server's tools before they ever reach the registry. Server
+definitions are file-only config (objects, not scalars) — no `/config`
+settings-registry row.
+
 ## On-disk layout & config precedence
 
 ```
@@ -467,7 +503,7 @@ phone-home.
 | **M4 · command views** ✅ shipped 2026-07-15 | slash dispatcher + command panel (`/status`, `/config`, `/model`) + autocomplete + settings registry (`config.Save`) + a TUI redesign wave (global header, bottom-anchored layout, mouse-wheel scroll, cursor-aware input, click-drag selection + OSC 52 copy) | an operator opens `/status`/`/config`/`/model` from the dispatcher and swaps a session's model without leaving the TUI |
 | **M5 · ACP v1 featureset expansion** ✅ shipped 2026-07-25 (on `main`; the `milestone/m5-acp-featureset` integration branch has merged and been deleted). Every committed slice is live end-to-end across SDK → gofer → Agmente; the two carve-outs are image/audio/resource content blocks (modeled, no producer in any repo) and the `available_commands_update`/`current_mode_update` registries, both descoped rather than pending — see the slice list below | cross-repo ACP conformance push (SDK models the blocks, gofer emits them, Agmente decodes) driven by an internal conformance matrix: `usage_update` on `session/update` (SDK v0.6.0 pass-through, [#97](https://github.com/jedwards1230/gofer/pull/97), merged) → rich content/tool-call blocks (`diff` live; image/audio/resource modeled, no producer) → session methods (`session/list`, resume, `set_config_option`, `cwd`) → model discovery + `set_model` → capability stretch (`session_info_update`, `plan`, `available_commands_update`/`current_mode_update`/`config_option_update`). Detail: [ACP v1 featureset expansion](#acp-v1-featureset-expansion-m5) | an ACP client renders live token cost, tool-call blocks, and a model picker — all off the daemon's spec-general `session/update` surface, no client-specific path |
 | **M6 · process isolation** ✅ Phases 0-3 shipped 2026-07-19 and Phase 4 (lifecycle polish) since — [#139](https://github.com/jedwards1230/gofer/issues/139) (offline resume spawns a fresh worker) and [#140](https://github.com/jedwards1230/gofer/issues/140) (cost/usage aggregation + graceful drain) are both closed; only roster reconciliation edge cases remain unverified. Behind the opt-in, off-by-default `gofer daemon --workers` | thin router daemon + detached per-session `gofer session-worker` processes (worker owns runner + pump + gate + journal + broker; router owns roster/fan-out/discovery/ACP surface); `setsid` detachment + endpoint-file adoption on restart; versioned router↔worker wire (the existing client wire + `gofer/hello`) with in-flight-only skew tolerance; `-local` stays in-process. Design: [docs/milestones/M6-process-isolation.md](milestones/M6-process-isolation.md) | upgrade the daemon binary mid-turn — the running session finishes uninterrupted on the old worker binary, the next session runs the new one; `session/list` shows mixed binary versions |
-| **M7 · ecosystem** 🚧 in flight — the current milestone | MCP on by default (schemas preload by default; tool-search index mode is opt-in) + subagents first-class (roster tree, peek/attach into children, linked journals) + skills + plugin UX. **Subagents are partly shipped**: the parent/child primitive, roster tree, drill-in, and per-tool-call agent attribution landed 2026-07-21 ([#204](https://github.com/jedwards1230/gofer/pull/204)/[#207](https://github.com/jedwards1230/gofer/pull/207)/[#208](https://github.com/jedwards1230/gofer/pull/208)), operator-driven only via `gofer run --parent/--agent`. Agent-initiated spawn ([#260](https://github.com/jedwards1230/gofer/issues/260)) is blocked on the SDK spawn seam (agent-sdk-go#90). **Skills shipped**: config-driven `SKILL.md` discovery, progressive disclosure, and project-beats-global precedence (`internal/skillset`) — see [Skills](#skills-m7). MCP and plugin UX are not started | a third-party plugin adds a tool with one config line |
+| **M7 · ecosystem** 🚧 in flight — the current milestone | MCP on by default (schemas preload by default; tool-search index mode is opt-in) + subagents first-class (roster tree, peek/attach into children, linked journals) + skills + plugin UX. **Subagents are partly shipped**: the parent/child primitive, roster tree, drill-in, and per-tool-call agent attribution landed 2026-07-21 ([#204](https://github.com/jedwards1230/gofer/pull/204)/[#207](https://github.com/jedwards1230/gofer/pull/207)/[#208](https://github.com/jedwards1230/gofer/pull/208)), operator-driven only via `gofer run --parent/--agent`. Agent-initiated spawn ([#260](https://github.com/jedwards1230/gofer/issues/260)) is blocked on the SDK spawn seam (agent-sdk-go#90). **Skills shipped**: config-driven `SKILL.md` discovery, progressive disclosure, and project-beats-global precedence (`internal/skillset`) — see [Skills](#skills-m7). **MCP servers are wired** (`internal/mcpconn` — see [MCP servers (M7)](#mcp-servers-m7)); plugin UX is not started | a third-party plugin adds a tool with one config line |
 | M8 · auto + polish | auto mode (reviewer pipeline), CC-asset import, mDNS pairing | auto mode survives a week of real ops without a bad allow |
 
 ## ACP v1 featureset expansion (M5)

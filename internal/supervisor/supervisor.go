@@ -23,6 +23,7 @@ import (
 	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/decision"
 	"github.com/jedwards1230/gofer/internal/lspdiag"
+	"github.com/jedwards1230/gofer/internal/mcpconn"
 	"github.com/jedwards1230/gofer/internal/permrationale"
 	// Aliased: [Supervisor.Create]'s prompt parameter (the turn text, an
 	// unrelated concept) already shadows the package name "prompt" within
@@ -96,6 +97,20 @@ type Config struct {
 	// session's tool registry at construction. Nil defaults to the zero
 	// [config.LSP], which [config.LSP.IsEnabled] resolves to enabled.
 	LSP func() config.LSP
+
+	// MCP resolves the MCP server configuration used TWICE, differently:
+	// [New] calls it ONCE, at construction, to build and Start the
+	// process-lifetime [mcpconn.Manager] (see Supervisor.mcpManager's doc) —
+	// unlike PermissionMode/LSP, a server's connection cannot be re-dialed
+	// per session, so the server LIST is fixed for this Supervisor's whole
+	// life. sessionGuard then calls it again, per session, for JUST
+	// [config.MCP.ReadyTimeout] — the bounded best-effort wait for that
+	// already-running Manager's initial discovery to settle — so an
+	// `mcp.ready_timeout_ms` edit still reaches the next session with no
+	// restart, even though adding or removing a SERVER does not. Nil
+	// defaults to the zero [config.MCP] (no servers, package-default
+	// timeouts).
+	MCP func() config.MCP
 
 	// Tools resolves the preload-vs-index tool-schema config each NEW
 	// session's registry is built with (see [config.Tools]). Same
@@ -218,6 +233,20 @@ type Supervisor struct {
 	// session — and is closed exactly once, by Close.
 	lspManager *lspdiag.Manager
 
+	// mcpManager owns every MCP server connection THIS Supervisor makes —
+	// one per process (see internal/mcpconn's package doc), Started once in
+	// New and closed exactly once, by Close. sessionGuard is the only other
+	// place that touches it: a bounded AwaitReady followed by ONE Snapshot
+	// per session, never anything that could grow or shrink a live
+	// session's already-registered tool set (the hard invariant — see
+	// mcpconn's doc and agent-sdk-go/mcp's).
+	mcpManager *mcpconn.Manager
+
+	// mcpConfig mirrors Config.MCP; never nil after New. Re-read per session
+	// for [config.MCP.ReadyTimeout] only — see Config.MCP's doc for why the
+	// server list itself is NOT re-read here.
+	mcpConfig func() config.MCP
+
 	mu     sync.Mutex
 	roster map[string]*managed
 	closed bool
@@ -322,6 +351,20 @@ func New(cfg Config) (*Supervisor, error) {
 		lspConfig = func() config.LSP { return config.LSP{} }
 	}
 
+	mcpConfig := cfg.MCP
+	if mcpConfig == nil {
+		// No explicit resolver: the zero config.MCP — no servers configured,
+		// so the Manager below connects nothing and every session's
+		// AwaitReady/Snapshot is instantly a no-op.
+		mcpConfig = func() config.MCP { return config.MCP{} }
+	}
+	// Built and Started ONCE, here — see Config.MCP's doc for why the server
+	// list is a construction-time snapshot rather than re-read per session.
+	// Start connects every enabled server ASYNCHRONOUSLY and returns
+	// immediately, so this never delays New.
+	mcpManager := mcpconn.NewManager(mcpconn.Config{MCP: mcpConfig()})
+	mcpManager.Start(context.Background())
+
 	toolsConfig := cfg.Tools
 	if toolsConfig == nil {
 		// No explicit resolver: the zero config.Tools, which Schemas()
@@ -362,6 +405,8 @@ func New(cfg Config) (*Supervisor, error) {
 		searchConfig:     searchConfig,
 		skillsConfig:     skillsConfig,
 		lspManager:       lspdiag.NewManager(),
+		mcpConfig:        mcpConfig,
+		mcpManager:       mcpManager,
 		roster:           make(map[string]*managed),
 		watchers:         make(map[*watcher]struct{}),
 		watchDone:        make(chan struct{}),
@@ -410,7 +455,7 @@ func New(cfg Config) (*Supervisor, error) {
 // The registry is layered, outermost last, per docs/PRD.md's "Tool surface"
 // section:
 //
-//	tool.NewRegistry(builtins + ask_user + web_search + skill + ix.SearchTool())
+//	tool.NewRegistry(builtins + ask_user + web_search + skill + mcp + ix.SearchTool())
 //	  → loop.FromRegistry            (sandbox.WrapRegistry's own base)
 //	  → sandbox.WrapRegistry(cwd, container, extra...)   (bash containment; Specs passthrough)
 //	  → lspdiag.Wrap(…)                                  (diagnostics; Specs passthrough)
@@ -420,13 +465,25 @@ func New(cfg Config) (*Supervisor, error) {
 // config.Search.Selected() is not none; the skill tool (internal/skillset)
 // only when something survives config.Skills' disabling; ix.SearchTool()
 // (and the ix.Wrap outer layer) only under index mode — under preload mode
-// with no search/skills configured nothing beyond the base registry changes,
-// so a config with no tools/search/skills section produces a byte-identical
-// registry to before this feature existed. MCP-federated tools (a separate
-// PR) join the SAME extra slice below, before sandbox.WrapRegistry — never a
-// second decorator layer, so N federated servers still cost exactly one
-// Specs() re-derivation, and ix.Wrap (when present) still sees and indexes
-// them.
+// with no search/skills/MCP configured nothing beyond the base registry
+// changes, so a config with no tools/search/skills/mcp section produces a
+// byte-identical registry to before these features existed.
+//
+// MCP tools join the SAME extra slice, before ix.SearchTool() and before
+// sandbox.WrapRegistry — never a second decorator layer, so N federated
+// servers still cost exactly one Specs() re-derivation, and ix.Wrap (when
+// present) still sees and indexes them. Unlike PermissionMode/LSP/Tools/
+// Search/Skills, the server LIST is not re-read per session — see
+// Config.MCP's doc for why — but each session still captures its OWN
+// snapshot of currently-connected tools via a bounded
+// [mcpconn.Manager.AwaitReady] (config.MCP.ReadyTimeout — never longer, so a
+// slow or unreachable server cannot delay Create) followed by ONE
+// [mcpconn.Manager.Snapshot]: this is the hard invariant's enforcement
+// point. The Manager itself never mutates a []tool.Tool once handed out (see
+// its package doc), but sessionGuard is what guarantees each session only
+// ever ASKS once. mcpDown names every enabled server with no live
+// connection at that snapshot — the caller (Create/Resume) emits it as a
+// visible, non-fatal notice once the session's id is known.
 //
 // skillNote is sessionGuard's out-of-band final return: the operator-facing
 // summary of anything skillset.Load skipped (oversized, malformed, or
@@ -435,7 +492,7 @@ func New(cfg Config) (*Supervisor, error) {
 // being emitted here because sessionGuard runs before the session — and so
 // its id, the one thing [event.NewSessionError] needs — exists; Create and
 // Resume both emit it once the session is registered (see their own calls).
-func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.Gate, decisions *decision.Gate, tools loop.ToolRegistry, ix *toolindex.Index, skillNote string) {
+func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.Gate, decisions *decision.Gate, tools loop.ToolRegistry, ix *toolindex.Index, skillNote string, mcpDown []string) {
 	gate := loop.NewGate()
 	dgate := decision.NewGate("")
 	askUser := decision.NewAskUser(dgate)
@@ -462,6 +519,16 @@ func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.
 	skillSet, diags := skillset.Load(skillsCfg, s.root, cwd)
 	skillNote = skillset.Summarize(diags)
 
+	// Same bounded per-session wait as lsp/tools/search/skills, for MCP — see
+	// Config.MCP's doc for why the server LIST is fixed at New but the
+	// ready-timeout is still re-read here. The Manager itself was already
+	// Started once, in New.
+	readyCtx, cancel := context.WithTimeout(context.Background(), s.mcpConfig().ReadyTimeout())
+	s.mcpManager.AwaitReady(readyCtx)
+	cancel()
+	mcpSnap := s.mcpManager.Snapshot()
+	mcpDown = mcpSnap.Down
+
 	extra := []tool.Tool{askUser}
 	if ws := websearch.New(searchCfg); ws != nil {
 		extra = append(extra, ws)
@@ -469,8 +536,9 @@ func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.
 	if skillTool, ok := skillset.NewTool(skillSet, skillsCfg); ok {
 		extra = append(extra, skillTool)
 	}
-	// A federated-MCP PR appends its own tools to extra HERE, before
-	// ix.SearchTool() — see the doc above.
+	// MCP-federated tools join the SAME extra slice, before ix.SearchTool()
+	// — see the doc above.
+	extra = append(extra, mcpSnap.Tools...)
 
 	if toolsCfg.Schemas() == config.ToolSchemaModeIndex {
 		resident := toolsCfg.ResidentTools()
@@ -496,7 +564,7 @@ func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.
 		if ix != nil {
 			tools = ix.Wrap(tools)
 		}
-		return yoloGuard{engine: engine}, gate, dgate, tools, ix, skillNote
+		return yoloGuard{engine: engine}, gate, dgate, tools, ix, skillNote, mcpDown
 	}
 	container := sandbox.New()
 	rg := loop.RuleGuard{Engine: engine, Container: container, Target: sandbox.ToolTarget}
@@ -504,7 +572,20 @@ func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.
 	if ix != nil {
 		tools = ix.Wrap(tools)
 	}
-	return rg, gate, dgate, tools, ix, skillNote
+	return rg, gate, dgate, tools, ix, skillNote, mcpDown
+}
+
+// emitMCPDownNotices publishes one visible, non-fatal session.error per
+// down server (see sessionGuard's mcpDown) onto sess's own stream — the
+// "visible non-fatal notice" a down server must produce without ever
+// failing the session (see internal/mcpconn's package doc and
+// docs/PRD.md's MCP section). A no-op for the common case (down is empty).
+func emitMCPDownNotices(sess Session, down []string) {
+	for _, name := range down {
+		sess.Emit(event.NewSessionError(sess.ID(),
+			fmt.Sprintf("mcp server %q is not connected — its tools are unavailable for this session", name),
+			false))
+	}
 }
 
 // ResolveRoot is gofer's single source of the ~/.gofer default — the SDK
@@ -588,7 +669,7 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts CreateOptio
 		return SessionInfo{}, err
 	}
 
-	guard, gate, decisions, tools, ix, skillNote := s.sessionGuard(opts.Cwd)
+	guard, gate, decisions, tools, ix, skillNote, mcpDown := s.sessionGuard(opts.Cwd)
 	// Fold the tool index's hint into the system prompt HERE, not in
 	// internal/prompt.Compose's caller — see sysprompt.AppendHint's doc for
 	// why this join lives in internal/prompt rather than being re-derived
@@ -606,6 +687,10 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts CreateOptio
 	if err != nil {
 		return SessionInfo{}, fmt.Errorf("supervisor: create session: %w", err)
 	}
+	// The session's id is only knowable now (runner.New/Resume mints it) —
+	// see sessionGuard's doc for why the notice can't be emitted any
+	// earlier.
+	emitMCPDownNotices(sess, mcpDown)
 
 	// The runner seeds its own effort from Params.Thinking.Effort at
 	// construction, so the roster's bookkeeping starts from the same value
@@ -737,7 +822,7 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 	// exactly when a client reopened it from somewhere else.
 	meta, _ := lookupDiskSession(s.root, id)
 
-	guard, gate, decisions, tools, ix, skillNote := s.sessionGuard(opts.Cwd)
+	guard, gate, decisions, tools, ix, skillNote, mcpDown := s.sessionGuard(opts.Cwd)
 	// Same hint fold as Create — see its comment.
 	system := opts.System
 	if ix != nil {
@@ -751,6 +836,9 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 	if err != nil {
 		return SessionInfo{}, fmt.Errorf("supervisor: resume %s: %w", id, err)
 	}
+	// The session's id is only knowable now — see sessionGuard's doc for why
+	// the notice can't be emitted any earlier.
+	emitMCPDownNotices(sess, mcpDown)
 	// A resumed session's tool array is a function of its own history, never
 	// a session that starts having promoted nothing a prior turn already
 	// promoted: re-mark every tool name the folded context's tool_use blocks
@@ -1687,6 +1775,9 @@ func (s *Supervisor) Close() error {
 		}
 	}
 	if err := s.lspManager.Close(); err != nil {
+		errs = append(errs, err)
+	}
+	if err := s.mcpManager.Close(); err != nil {
 		errs = append(errs, err)
 	}
 	if s.ownsStore {

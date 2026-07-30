@@ -128,6 +128,11 @@ func runSessionWorker(ctx context.Context, args []string, stdout, stderr io.Writ
 		Compaction: compactionResolver(rootDir),
 		// Same reasoning for lsp.* — see lspConfigResolver.
 		LSP: lspConfigResolver(rootDir),
+		// Same reasoning for mcp.* — see mcpConfigResolver. Under M6 process
+		// isolation a worker hosts exactly one session, so "one manager per
+		// gofer process" (internal/mcpconn's doc) means one manager per
+		// session here — the same shape lspManager already takes.
+		MCP: mcpConfigResolver(rootDir),
 		// Same reasoning for tools.*/search.* — see toolsConfigResolver/
 		// searchConfigResolver.
 		Tools:  toolsConfigResolver(rootDir),

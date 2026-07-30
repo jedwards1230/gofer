@@ -198,6 +198,7 @@ func selectTUIBackend(ctx context.Context, df *daemonFlags, cwd, root string, st
 		PermissionMode:   permissionModeResolver(rootDir),
 		Compaction:       compactionResolver(rootDir),
 		LSP:              lspConfigResolver(rootDir),
+		MCP:              mcpConfigResolver(rootDir),
 		Tools:            toolsConfigResolver(rootDir),
 		Search:           searchConfigResolver(rootDir),
 		Skills:           skillsConfigResolver(rootDir),

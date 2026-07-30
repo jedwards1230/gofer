@@ -83,11 +83,10 @@ make install                                       # local install, truthfully v
   `Telemetry`, `Daemon` (incl. `drain_timeout_ms`), and M7's `Prompt`/
   `Tools`/`MCP`/`Search`/`Skills`/`LSP` sections, plus the shared `SecretRef`
   (`env:`/`file:`, resolved at use time, never inlined). `Prompt` is read by
-  `internal/prompt`; `LSP`/`Tools`/`Search`/`Skills` by `internal/supervisor`'s
-  session wiring (`internal/websearch` and the SDK's `toolindex` consume
-  `Search`/`Tools` respectively; `internal/skillset` consumes `Skills`);
-  `MCP` is still schema only — wired up by its own feature PR. See its
-  package doc.
+  `internal/prompt`; `LSP`/`MCP`/`Tools`/`Search`/`Skills` by
+  `internal/supervisor`'s session wiring (`internal/websearch` and the SDK's
+  `toolindex` consume `Search`/`Tools` respectively; `internal/skillset`
+  consumes `Skills`; `internal/mcpconn` consumes `MCP`). See its package doc.
 - `internal/prompt/` — composes a session's system prompt from
   `config.Prompt.Files` (the replacement for cmd/gofer's old
   `defaultSystemPrompt` string constant): `builtin:`/absolute/`~/`/cwd-then-
@@ -107,6 +106,16 @@ make install                                       # local install, truthfully v
   server (the SDK's `agent-sdk-go/lsp`), appending diagnostics to both the
   tool's model-facing content and its client-facing metadata. Advisory only —
   every failure mode degrades silently to the unmodified tool result.
+- `internal/mcpconn/` — the MCP connection manager the SDK's optional
+  `agent-sdk-go/mcp` package leaves to the embedder: one process-lifetime
+  `Manager` (per session under `--workers`) that connects every configured
+  server asynchronously with capped-backoff reconnect, and projects each
+  server's tools into the same base `tool.Registry` builtins and `ask_user`
+  use. A session's tool set is captured ONCE at create (a bounded wait +
+  `Snapshot()`) and never mutated afterward — a late-connecting server joins
+  the next session, a dead one keeps its tools registered (degrading to
+  `IsError`, working again after reconnect with no re-registration). See its
+  package doc.
 - `internal/skillset/` — wires the SDK's `agent-sdk-go/skill` package
   (`SKILL.md` discovery with progressive disclosure) into a session:
   resolves `config.Skills` into a `skill.Load` call, applies

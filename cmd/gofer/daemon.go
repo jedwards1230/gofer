@@ -284,6 +284,11 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 			Compaction: compactionResolver(rootDir),
 			// Same re-read-per-session shape, for lsp.* — see lspConfigResolver.
 			LSP: lspConfigResolver(rootDir),
+			// MCP: the server LIST is resolved once at supervisor.New (this
+			// same closure's first call) to build the process-lifetime
+			// connection manager; every later call (one per session) only
+			// affects mcp.ready_timeout_ms — see supervisor.Config.MCP's doc.
+			MCP: mcpConfigResolver(rootDir),
 			// Same re-read-per-session shape, for tools.*/search.* — see
 			// toolsConfigResolver/searchConfigResolver.
 			Tools:  toolsConfigResolver(rootDir),
@@ -650,6 +655,27 @@ func lspConfigResolver(root string) func() config.LSP {
 			return config.LSP{}
 		}
 		return cfg.LSP
+	}
+}
+
+// mcpConfigResolver is [supervisor.Config.MCP] for a process rooted at root:
+// it RE-READS <root>/config.json every time it is called. supervisor.New
+// calls it ONCE, at construction, to build and Start the process-lifetime
+// [mcpconn.Manager] — a server's connection cannot be re-dialed per
+// session, so that call fixes the server LIST for this process's whole
+// life. Every LATER call (one per session, from sessionGuard) only feeds
+// [config.MCP.ReadyTimeout], so an `mcp.ready_timeout_ms` edit still
+// reaches the next session with no restart. Same fail-safe shape as
+// lspConfigResolver: a config that won't load resolves to the zero
+// [config.MCP] (no servers, package-default timeouts) rather than carrying
+// a stale value forward.
+func mcpConfigResolver(root string) func() config.MCP {
+	return func() config.MCP {
+		cfg, err := config.Load(config.DefaultPath(root))
+		if err != nil {
+			return config.MCP{}
+		}
+		return cfg.MCP
 	}
 }
 
