@@ -21,6 +21,11 @@ func resolveSystemPrompt(rootDir, cwd string, stderr io.Writer) (prompt.Composed
 	if err != nil {
 		return prompt.Composed{}, err
 	}
+	// Compose returns warnings independently of err: a nil err does NOT mean
+	// there were none. A missing optional file (the normal case for an absent
+	// AGENTS.md) is a warning, not a failure — surface it and carry on. Only a
+	// non-nil err aborts, which is what prompt.missing_file_is_error promotes a
+	// missing file into.
 	composed, warnings, err := prompt.Compose(cfg.Prompt, cwd, rootDir)
 	if err != nil {
 		return prompt.Composed{}, err
