@@ -4,8 +4,13 @@
 // and the parallel settings registry in internal/tui that the /config command
 // panel view reads and writes through. A vendor-format import (Claude Code
 // settings.json) is deliberately NOT here: that lands in M4/M5 (see the SDK's
-// permission package doc). More config sections (plugins, …) join this type in
-// later milestones.
+// permission package doc). M7 Round A+B adds six more sections — [Prompt]
+// (system prompt file composition), [Tools] (preload vs index tool
+// schemas), [MCP] (server connections, via the shared [SecretRef] type),
+// [Search] (web-search provider), [Skills] (SKILL.md discovery), and [LSP]
+// (language-server diagnostics) — landing the SCHEMA and its resolution
+// only; the features that consume each are separate PRs. More config
+// sections (plugins, …) join this type in later milestones.
 //
 // The file format is JSON, read from <root>/config.json (see [DefaultPath]).
 // A missing file is not an error — an unconfigured gofer runs the default
@@ -49,6 +54,27 @@ type Config struct {
 	// preferences. The zero value means "unset" — each field resolves to its own
 	// default.
 	Daemon Daemon `json:"daemon,omitempty"`
+	// Prompt configures the markdown files composed into a new session's
+	// system prompt — the config replacement for cmd/gofer's old
+	// defaultSystemPrompt string constant. See [Prompt].
+	Prompt Prompt `json:"prompt,omitempty"`
+	// Tools configures how gofer presents its tool surface (builtins and
+	// MCP-federated alike) to the model: preload every schema, or an
+	// index with schemas resolved on demand. See [Tools].
+	Tools Tools `json:"tools,omitempty"`
+	// MCP configures the MCP servers gofer connects to. See [MCP].
+	MCP MCP `json:"mcp,omitempty"`
+	// Search configures gofer's web-search tool provider. See [Search].
+	Search Search `json:"search,omitempty"`
+	// Skills configures where gofer discovers SKILL.md skill directories.
+	// See [Skills].
+	Skills Skills `json:"skills,omitempty"`
+	// LSP configures gofer's language-server diagnostics integration. See
+	// [LSP].
+	LSP LSP `json:"lsp,omitempty"`
+	// Compaction configures gofer's automatic context-compaction trigger. See
+	// [Compaction].
+	Compaction Compaction `json:"compaction,omitempty"`
 }
 
 // Daemon holds daemon-process lifecycle preferences, distinct from Session's
@@ -683,7 +709,8 @@ func Save(path string, c Config) error {
 }
 
 // validate rejects a rule with an unrecognized verdict, so a typo ("den")
-// surfaces at load rather than silently never matching.
+// surfaces at load rather than silently never matching, plus each new
+// section's own load-time invariants ([MCP.validate], [Search.validate]).
 func (c Config) validate() error {
 	for i, r := range c.Permissions {
 		switch event.Verdict(r.Verdict) {
@@ -691,6 +718,12 @@ func (c Config) validate() error {
 		default:
 			return fmt.Errorf("permissions[%d]: unknown verdict %q (want allow, ask, or deny)", i, r.Verdict)
 		}
+	}
+	if err := c.MCP.validate(); err != nil {
+		return err
+	}
+	if err := c.Search.validate(); err != nil {
+		return err
 	}
 	return nil
 }

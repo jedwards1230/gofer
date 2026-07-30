@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -11,7 +12,10 @@ import (
 
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/loop"
+	"github.com/jedwards1230/agent-sdk-go/provider"
+	"github.com/jedwards1230/agent-sdk-go/runner"
 
+	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/decision"
 )
 
@@ -160,6 +164,15 @@ type managed struct {
 	// to a particular error class. A cancelled turn is expected, so the pump
 	// never treats a Prompt error as a supervisor-level failure.
 	lastErr error
+
+	// compaction resolves the LIVE automatic-compaction policy (see
+	// [config.Compaction]), called fresh at the end of every settled turn
+	// (see pump) rather than sampled once at construction — so a
+	// `compaction.disabled`/threshold edit to config.json, or the /config
+	// panel's future equivalent, takes effect on the very next turn with no
+	// restart, the same live-reload shape [Config.PermissionMode] and
+	// [Config.Permissions] already follow. Never nil after newManaged.
+	compaction func() config.Compaction
 }
 
 // newManaged builds a managed session ready to register: idle, empty queue,
@@ -169,7 +182,7 @@ type managed struct {
 // join later. Calling it here, rather than after publish, closes the race
 // where a concurrent Kill/Archive could otherwise observe a live session
 // with no teardown stashed yet (see Config.OnRegister's doc).
-func newManaged(sess Session, model, effort string, now time.Time, clock func() time.Time, notify func(), cwd string, gate *loop.Gate, decisions *decision.Gate, meta sessionMeta, resumed bool, onRegister func(sess Session) (stop func())) *managed {
+func newManaged(sess Session, model, effort string, now time.Time, clock func() time.Time, notify func(), cwd string, gate *loop.Gate, decisions *decision.Gate, meta sessionMeta, resumed bool, onRegister func(sess Session) (stop func()), compaction func() config.Compaction) *managed {
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &managed{
 		sess:         sess,
@@ -195,6 +208,7 @@ func newManaged(sess Session, model, effort string, now time.Time, clock func() 
 		submitCh:     make(chan struct{}, 1),
 		state:        stateIdle,
 		resumed:      resumed,
+		compaction:   compaction,
 
 		pendingPerms: make(map[string]event.PermissionRequested),
 	}
@@ -209,6 +223,15 @@ func newManaged(sess Session, model, effort string, now time.Time, clock func() 
 // tally from the session.
 func (m *managed) info() SessionInfo {
 	report := m.sess.Cost()
+	// LastUsage/ContextWindow are read the same way Cost is — a Session call
+	// outside m.mu, per this file's lock discipline — so a live roster row
+	// carries the pressure figures [SessionInfo.LastUsage]/[SessionInfo.ContextWindow]
+	// document without this snapshot ever blocking on the pump.
+	lastUsageModel, lastUsage, _ := m.sess.LastUsage()
+	var contextWindow int
+	if info, ok := provider.Lookup(lastUsageModel); ok {
+		contextWindow = info.ContextWindow
+	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -230,24 +253,26 @@ func (m *managed) info() SessionInfo {
 		title = m.project
 	}
 	return SessionInfo{
-		ID:          m.id,
-		Title:       title,
-		Status:      status,
-		Model:       m.model,
-		Effort:      m.effort,
-		Cost:        report.Cost,
-		Usage:       report.Usage,
-		Pending:     m.pending,
-		Created:     m.createdAt,
-		Updated:     m.updated,
-		Project:     m.project,
-		JournalPath: m.sess.JournalPath(),
-		Queued:      len(m.queue),
-		Live:        true,
-		Cwd:         m.cwd,
-		ParentID:    m.parentID,
-		Agent:       m.agent,
-		Depth:       m.depth,
+		ID:            m.id,
+		Title:         title,
+		Status:        status,
+		Model:         m.model,
+		Effort:        m.effort,
+		Cost:          report.Cost,
+		Usage:         report.Usage,
+		Pending:       m.pending,
+		Created:       m.createdAt,
+		Updated:       m.updated,
+		Project:       m.project,
+		JournalPath:   m.sess.JournalPath(),
+		Queued:        len(m.queue),
+		Live:          true,
+		Cwd:           m.cwd,
+		ParentID:      m.parentID,
+		Agent:         m.agent,
+		Depth:         m.depth,
+		LastUsage:     lastUsage,
+		ContextWindow: contextWindow,
 	}
 }
 
@@ -407,10 +432,85 @@ func (m *managed) pump() {
 			m.sess.Emit(event.NewSessionError(m.id, err.Error(), false))
 		}
 
+		// Auto-compaction trigger: POST-FLIGHT, off the turn that just settled
+		// cleanly. Deliberately not pre-flight (estimating the NEXT call's size
+		// off the folded context before making it): gofer has no tokenizer, so a
+		// pre-flight estimate would mean re-deriving byte-to-token math the SDK
+		// doesn't provide, while a just-settled turn's Usage.InputTokens is a
+		// REAL number — the provider already tokenized exactly this content to
+		// answer the call (see [Session.LastUsage]'s doc). The cost is one turn
+		// of lag: the turn that finally crosses the threshold runs at full size
+		// before this compacts the NEXT one down. See config.Compaction's doc
+		// for why 85% default headroom exists to absorb exactly that lag.
+		//
+		// Only after a clean, non-cancelled turn — a cancelled turn's usage may
+		// be partial/absent, and there is nothing to react to.
+		if err == nil {
+			m.maybeAutoCompact()
+		}
+
 		// turn.finished: cost and Updated changed even if the next loop
 		// iteration immediately re-dispatches or goes idle.
 		m.notify()
 	}
+}
+
+// maybeAutoCompact checks the just-settled turn's measured usage against the
+// LIVE compaction policy ([managed.compaction], re-read every call so a
+// config edit takes effect on the very next turn) and fires
+// [Session.Compact] when it crosses the threshold. Called only from pump,
+// between turns — Compact's own documented precondition — never while
+// turnCtx is active.
+//
+// A trigger failure (everything except [runner.ErrNothingToCompact], which
+// just means the pressure check and Compact's own emptiness check
+// disagreed — never observed in practice, since nothing else runs between
+// them on this single-goroutine pump) is surfaced the same way a failed
+// Prompt is: a session.error onto the session's own stream. Silently
+// swallowing it would leave a session that keeps growing past its window
+// with no visible explanation once the provider eventually rejects it.
+func (m *managed) maybeAutoCompact() {
+	policy := config.Compaction{}
+	if m.compaction != nil {
+		policy = m.compaction()
+	}
+	if !policy.AutoEnabled() {
+		return
+	}
+	model, usage, ok := m.sess.LastUsage()
+	if !ok {
+		return
+	}
+	var contextWindow int
+	if info, found := provider.Lookup(model); found {
+		contextWindow = info.ContextWindow
+	}
+	if !shouldAutoCompact(usage, contextWindow, policy.Threshold()) {
+		return
+	}
+	if err := m.sess.Compact(m.baseCtx, ""); err != nil {
+		if errors.Is(err, runner.ErrNothingToCompact) {
+			return
+		}
+		m.sess.Emit(event.NewSessionError(m.id, fmt.Sprintf("automatic compaction: %s", err.Error()), false))
+	}
+}
+
+// shouldAutoCompact reports whether usage's measured token footprint has
+// crossed threshold's fraction of contextWindow. contextWindow <= 0 (the
+// model is unregistered/unknown) always returns false — an unknown window
+// must never be treated as "full", since that would fire compaction off a
+// guess rather than a measurement. The footprint is InputTokens +
+// CacheReadTokens, the same formula [event.SessionCompacted]'s doc uses for
+// the pre-compaction context size: exactly what the provider tokenized to
+// answer the call, cache-served tokens included since they are just as much
+// a part of the context that will need to fit again next turn.
+func shouldAutoCompact(usage provider.Usage, contextWindow int, threshold float64) bool {
+	if contextWindow <= 0 {
+		return false
+	}
+	used := usage.InputTokens + usage.CacheReadTokens
+	return float64(used) >= float64(contextWindow)*threshold
 }
 
 // watchPermissions maintains the live pending-approval count from the session's

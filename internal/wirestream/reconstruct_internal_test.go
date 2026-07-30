@@ -149,8 +149,12 @@ func TestHandleNotificationReplaysGoferEventKinds(t *testing.T) {
 	cases := []event.Event{
 		event.NewSessionCreated(sid),
 		event.NewSessionResumed(sid),
-		event.NewSessionForked(sid),
-		event.NewSessionCompacted(sid),
+		event.NewSessionForked(sid, "entry-7", "before-refactor"),
+		// Non-zero in every field so the round-trip actually exercises the
+		// compaction payload rather than passing on zero values.
+		event.NewSessionCompacted(sid, "entry-12", 7, "claude-sonnet-5",
+			provider.Usage{InputTokens: 900, OutputTokens: 120, CacheReadTokens: 40, CacheWriteTokens: 11},
+			"a summary of the compacted turns"),
 		event.NewSessionKilled(sid),
 		event.NewSessionArchived(sid),
 		event.NewSessionError(sid, "boom", true),

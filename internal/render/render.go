@@ -83,6 +83,15 @@ func (h *Human) Render(e event.Event) error {
 		h.marker(ev.Kind(), fmt.Sprintf("%s → %s", ev.ID, ev.Verdict))
 	case event.SessionError:
 		h.marker(ev.Kind(), ev.Err)
+	case event.SessionCompacted:
+		// Compaction must never render as a bare, detail-free marker like the
+		// default case below — an operator watching this stream needs to see
+		// WHAT changed, not just that some lifecycle event fired.
+		unit := "message"
+		if ev.MessagesCompacted != 1 {
+			unit = "messages"
+		}
+		h.marker(ev.Kind(), fmt.Sprintf("%d %s replaced with a summary", ev.MessagesCompacted, unit))
 	default:
 		h.marker(e.Kind(), "")
 	}

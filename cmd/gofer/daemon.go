@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -231,6 +232,12 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 	// built (see SetDecisionRelay below) — that setter is the in-process
 	// supervisor's own, not part of the daemon.Supervisor hosting interface.
 	var inProcSup *supervisor.Supervisor
+	// d is assigned once, below, right after daemon.New — declared here so
+	// the non-workers branch's OnRegister closure (built and installed BEFORE
+	// daemon.New exists) can close over this exact variable and read
+	// whatever it holds at the time an event actually arrives, never before
+	// daemon.New has returned (see the out-of-turn watcher's doc, below).
+	var d *daemon.Daemon
 	if *workers {
 		// Each worker is spawned from THIS gofer binary (`gofer session-worker`),
 		// so the router needs its own executable path.
@@ -272,6 +279,22 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 			// /yolo from an attached TUI reaches the next session this daemon
 			// creates — see permissionModeResolver.
 			PermissionMode: permissionModeResolver(rootDir),
+			// Same re-read-per-turn shape as PermissionMode above, for the
+			// automatic-compaction trigger.
+			Compaction: compactionResolver(rootDir),
+			// Same re-read-per-session shape, for lsp.* — see lspConfigResolver.
+			LSP: lspConfigResolver(rootDir),
+			// MCP: the server LIST is resolved once at supervisor.New (this
+			// same closure's first call) to build the process-lifetime
+			// connection manager; every later call (one per session) only
+			// affects mcp.ready_timeout_ms — see supervisor.Config.MCP's doc.
+			MCP: mcpConfigResolver(rootDir),
+			// Same re-read-per-session shape, for tools.*/search.* — see
+			// toolsConfigResolver/searchConfigResolver.
+			Tools:  toolsConfigResolver(rootDir),
+			Search: searchConfigResolver(rootDir),
+			// Same reasoning, for skills.* — see skillsConfigResolver.
+			Skills: skillsConfigResolver(rootDir),
 			// Attach a per-session telemetry observer at registration, before the
 			// session's first turn — subscribing here (rather than after a turn
 			// has already started) means Events' replay backlog is still empty,
@@ -287,9 +310,50 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 					defer close(done)
 					tel.Instrument(ctx, sess.ID(), sub.C)
 				}()
+
+				// Out-of-turn event relay: broadcastGoferEvent/broadcastUpdate
+				// (this daemon's client fan-out) only ever run from INSIDE an
+				// active session/prompt RPC loop, or from a couple of direct
+				// one-off call sites (advertiseModelChange) — there is no
+				// continuous drain of a session's broker otherwise (see
+				// internal/daemon/doc.go). Compaction breaks that assumption:
+				// session.compacted can be published with NO session/prompt in
+				// flight at all — the explicit /compact command requires the
+				// session to be IDLE, and the automatic trigger fires from the
+				// supervisor's own pump between turns. Without this, an
+				// attached remote (daemon/websocket) peer would never see
+				// either — the "auto-compaction must be visible, never
+				// silent" requirement would be true only for the in-process
+				// backend. A second, no-replay subscription (EventsLive: only
+				// events from THIS moment forward, so it never re-announces
+				// history) drains for the session's whole life and rebroadcasts
+				// each event through the SAME exported, already-guarded relay
+				// methods the M6 router uses (Daemon.BroadcastRawEvent /
+				// BroadcastSessionUpdate) — their promptHandlerActive check is
+				// what prevents this from double-delivering a live turn's
+				// events alongside handleSessionPrompt's own fan-out.
+				liveSub := sess.EventsLive()
+				liveDone := make(chan struct{})
+				go func() {
+					defer close(liveDone)
+					for e := range liveSub.C {
+						if d == nil {
+							continue
+						}
+						raw, merr := json.Marshal(e)
+						if merr != nil {
+							continue
+						}
+						d.BroadcastRawEvent(sess.ID(), raw)
+						d.BroadcastSessionUpdate(sess.ID(), e)
+					}
+				}()
+
 				return func() {
 					sub.Close()
 					<-done
+					liveSub.Close()
+					<-liveDone
 				}
 			},
 		})
@@ -299,7 +363,7 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 		sup, closeSup, inProcSup = isup, isup.Close, isup
 	}
 
-	d := daemon.New(sup, daemon.Config{
+	d = daemon.New(sup, daemon.Config{
 		ListenAddr:   *listen,
 		BearerToken:  bearerToken,
 		DefaultModel: modelID,
@@ -553,6 +617,119 @@ func permissionModeResolver(root string) func() config.PermissionMode {
 			return config.PermissionModeAsk
 		}
 		return cfg.Session.Mode()
+	}
+}
+
+// compactionResolver mirrors permissionModeResolver's shape for the
+// automatic-compaction policy: re-read from config.json on every call
+// (supervisor.Config.Compaction is read fresh at the end of every settled
+// turn — see managed.maybeAutoCompact) rather than snapshotted once at
+// startup, so an edited compaction.threshold_fraction/disabled reaches the
+// next turn with no restart. A read failure resolves to the zero value
+// (config.Compaction{}) — automatic compaction on, at the built-in default
+// threshold — matching every other resolver's fail-safe-to-default shape.
+func compactionResolver(root string) func() config.Compaction {
+	return func() config.Compaction {
+		cfg, err := config.Load(config.DefaultPath(root))
+		if err != nil {
+			return config.Compaction{}
+		}
+		return cfg.Compaction
+	}
+}
+
+// lspConfigResolver is [supervisor.Config.LSP] for a process rooted at root:
+// it RE-READS <root>/config.json every time a session is created, so an
+// `lsp.*` write (the /config view, or a hand-edited config.json) governs the
+// next session this process starts rather than only the next process. Same
+// shape as permissionModeResolver and wired into every supervisor gofer
+// builds, for the same reason.
+//
+// A config that won't load resolves to the zero [config.LSP] — enabled, at
+// the package defaults (see [config.LSP]'s doc) — matching the fail-safe
+// [supervisor.New] itself falls back to when Config.LSP is nil.
+func lspConfigResolver(root string) func() config.LSP {
+	return func() config.LSP {
+		cfg, err := config.Load(config.DefaultPath(root))
+		if err != nil {
+			return config.LSP{}
+		}
+		return cfg.LSP
+	}
+}
+
+// mcpConfigResolver is [supervisor.Config.MCP] for a process rooted at root:
+// it RE-READS <root>/config.json every time it is called. supervisor.New
+// calls it ONCE, at construction, to build and Start the process-lifetime
+// [mcpconn.Manager] — a server's connection cannot be re-dialed per
+// session, so that call fixes the server LIST for this process's whole
+// life. Every LATER call (one per session, from sessionGuard) only feeds
+// [config.MCP.ReadyTimeout], so an `mcp.ready_timeout_ms` edit still
+// reaches the next session with no restart. Same fail-safe shape as
+// lspConfigResolver: a config that won't load resolves to the zero
+// [config.MCP] (no servers, package-default timeouts) rather than carrying
+// a stale value forward.
+func mcpConfigResolver(root string) func() config.MCP {
+	return func() config.MCP {
+		cfg, err := config.Load(config.DefaultPath(root))
+		if err != nil {
+			return config.MCP{}
+		}
+		return cfg.MCP
+	}
+}
+
+// toolsConfigResolver is [supervisor.Config.Tools] for a process rooted at
+// root — the same re-read-per-session shape as lspConfigResolver, for the
+// same reason: a `tools.*` write (the /config view, or a hand-edited
+// config.json) governs the next session this process starts rather than only
+// the next process.
+//
+// A config that won't load resolves to the zero [config.Tools] — preload,
+// the fail-safe [config.Tools.Schemas] itself falls back to.
+func toolsConfigResolver(root string) func() config.Tools {
+	return func() config.Tools {
+		cfg, err := config.Load(config.DefaultPath(root))
+		if err != nil {
+			return config.Tools{}
+		}
+		return cfg.Tools
+	}
+}
+
+// searchConfigResolver is [supervisor.Config.Search] for a process rooted at
+// root — toolsConfigResolver's search-axis twin, same shape and reason.
+//
+// A config that won't load resolves to the zero [config.Search] — none, the
+// fail-safe [config.Search.Selected] itself falls back to: no search tool
+// registered at all.
+func searchConfigResolver(root string) func() config.Search {
+	return func() config.Search {
+		cfg, err := config.Load(config.DefaultPath(root))
+		if err != nil {
+			return config.Search{}
+		}
+		return cfg.Search
+	}
+}
+
+// skillsConfigResolver is [supervisor.Config.Skills] for a process rooted at
+// root: it RE-READS <root>/config.json every time a session is created, so a
+// `skills.*` write governs the next session this process starts rather than
+// only the next process. Same shape as lspConfigResolver, for the same
+// reason.
+//
+// A config that won't load resolves to the zero [config.Skills] — the two
+// conventional directories, at the package defaults — matching the
+// fail-safe [supervisor.New] itself falls back to when Config.Skills is
+// nil.
+func skillsConfigResolver(root string) func() config.Skills {
+	return func() config.Skills {
+		cfg, err := config.Load(config.DefaultPath(root))
+		if err != nil {
+			return config.Skills{}
+		}
+		return cfg.Skills
 	}
 }
 

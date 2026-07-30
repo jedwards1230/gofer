@@ -17,11 +17,21 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/provider"
 	"github.com/jedwards1230/agent-sdk-go/runner"
 	"github.com/jedwards1230/agent-sdk-go/session"
+	"github.com/jedwards1230/agent-sdk-go/tool"
+	"github.com/jedwards1230/agent-sdk-go/toolindex"
 
 	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/decision"
+	"github.com/jedwards1230/gofer/internal/lspdiag"
+	"github.com/jedwards1230/gofer/internal/mcpconn"
 	"github.com/jedwards1230/gofer/internal/permrationale"
+	// Aliased: [Supervisor.Create]'s prompt parameter (the turn text, an
+	// unrelated concept) already shadows the package name "prompt" within
+	// its own body.
+	sysprompt "github.com/jedwards1230/gofer/internal/prompt"
 	"github.com/jedwards1230/gofer/internal/sandbox"
+	"github.com/jedwards1230/gofer/internal/skillset"
+	"github.com/jedwards1230/gofer/internal/websearch"
 )
 
 // Config configures a [Supervisor].
@@ -67,6 +77,70 @@ type Config struct {
 	// lifetime. Nil defaults to [config.PermissionModeAsk] — contain-or-ask,
 	// identical to gofer before this seam existed.
 	PermissionMode func() config.PermissionMode
+
+	// Compaction resolves the LIVE automatic-compaction policy (see
+	// [config.Compaction]), read fresh at the end of every settled turn (see
+	// [managed.maybeAutoCompact]) rather than sampled once at construction —
+	// the same live-reload shape PermissionMode follows, so a config.json edit
+	// takes effect on the very next turn with no restart. Nil defaults to a
+	// constant zero-value factory: automatic compaction on, at
+	// [config.DefaultCompactionThreshold].
+	Compaction func() config.Compaction
+
+	// LSP resolves the language-server diagnostics config each NEW session's
+	// tool registry is wrapped with (see [config.LSP]). Same factory shape as
+	// PermissionMode and for the same reason: called once per Create/Resume
+	// rather than sampled at construction, so an `lsp.*` write — the /config
+	// view, or a hand-edited config.json — governs the next session a RUNNING
+	// gofer starts, with no restart. It cannot reach a session that already
+	// exists, for the same reason PermissionMode cannot: the SDK fixes a
+	// session's tool registry at construction. Nil defaults to the zero
+	// [config.LSP], which [config.LSP.IsEnabled] resolves to enabled.
+	LSP func() config.LSP
+
+	// MCP resolves the MCP server configuration used TWICE, differently:
+	// [New] calls it ONCE, at construction, to build and Start the
+	// process-lifetime [mcpconn.Manager] (see Supervisor.mcpManager's doc) —
+	// unlike PermissionMode/LSP, a server's connection cannot be re-dialed
+	// per session, so the server LIST is fixed for this Supervisor's whole
+	// life. sessionGuard then calls it again, per session, for JUST
+	// [config.MCP.ReadyTimeout] — the bounded best-effort wait for that
+	// already-running Manager's initial discovery to settle — so an
+	// `mcp.ready_timeout_ms` edit still reaches the next session with no
+	// restart, even though adding or removing a SERVER does not. Nil
+	// defaults to the zero [config.MCP] (no servers, package-default
+	// timeouts).
+	MCP func() config.MCP
+
+	// Tools resolves the preload-vs-index tool-schema config each NEW
+	// session's registry is built with (see [config.Tools]). Same
+	// once-per-Create/Resume factory shape as LSP/PermissionMode, and for the
+	// same reason: a `tools.*` write reaches the next session this
+	// supervisor creates, not the one already running. Nil defaults to the
+	// zero [config.Tools], which [config.Tools.Schemas] resolves to preload —
+	// the fail-safe that makes this whole feature additive: an upgrade with
+	// no config change produces byte-identical requests to before it
+	// existed.
+	Tools func() config.Tools
+
+	// Search resolves the web-search provider config each NEW session's
+	// `web_search` tool (internal/websearch) is built from (see
+	// [config.Search]). Same factory shape as Tools. Nil defaults to the
+	// zero [config.Search], which [config.Search.Selected] resolves to none
+	// — no search tool registered at all.
+	Search func() config.Search
+
+	// Skills resolves the SKILL.md discovery config each NEW session's tool
+	// registry is wired with (see [config.Skills]). Same factory shape as LSP
+	// and for the same reason: called once per Create/Resume — inside
+	// sessionGuard, where the session's own Cwd is finally known — rather
+	// than sampled at construction, so a `skills.*` write reaches the next
+	// session a RUNNING gofer starts, with no restart. It cannot reach a
+	// session that already exists, for the same reason LSP cannot: the SDK
+	// fixes a session's tool registry at construction. Nil defaults to the
+	// zero [config.Skills], which resolves to the two conventional
+	// directories at the package defaults.
+	Skills func() config.Skills
 
 	// Store, when set, is used instead of building a store from Root, and is
 	// NOT closed by [Supervisor.Close] — the caller owns its lifecycle. Test
@@ -121,12 +195,57 @@ type Supervisor struct {
 	// Config.PermissionMode resolves to a constant ask factory).
 	permissionMode func() config.PermissionMode
 
+	// compaction mirrors Config.Compaction; never nil after New (a nil
+	// Config.Compaction resolves to a constant zero-value factory).
+	compaction func() config.Compaction
+
+	// lspConfig mirrors Config.LSP; never nil after New (a nil Config.LSP
+	// resolves to a constant zero-value factory, which config.LSP.IsEnabled
+	// etc. resolve to the package defaults).
+	lspConfig func() config.LSP
+
+	// toolsConfig mirrors Config.Tools; never nil after New (a nil
+	// Config.Tools resolves to a constant zero-value factory, which
+	// config.Tools.Schemas resolves to preload).
+	toolsConfig func() config.Tools
+
+	// searchConfig mirrors Config.Search; never nil after New (a nil
+	// Config.Search resolves to a constant zero-value factory, which
+	// config.Search.Selected resolves to none).
+	searchConfig func() config.Search
+
+	// skillsConfig mirrors Config.Skills; never nil after New (a nil
+	// Config.Skills resolves to a constant zero-value factory, which
+	// config.Skills.Directories etc. resolve to the package defaults).
+	skillsConfig func() config.Skills
+
 	// resumeMu serializes Resume end-to-end (roster check through
 	// registration) so two concurrent Resumes of the same id can never both
 	// observe "not live" and both build a second runner over the same
 	// on-disk journal — the SDK's store caches one live journal per id, and
 	// two runners driving it would race on appends.
 	resumeMu sync.Mutex
+
+	// lspManager runs the bounded, best-effort LSP diagnostics round-trip
+	// sessionGuard wraps every session's tool registry with (internal/lspdiag).
+	// It is shared by every session THIS Supervisor hosts — language servers
+	// are workspace-scoped (one gopls per cwd+language), not spawned per
+	// session — and is closed exactly once, by Close.
+	lspManager *lspdiag.Manager
+
+	// mcpManager owns every MCP server connection THIS Supervisor makes —
+	// one per process (see internal/mcpconn's package doc), Started once in
+	// New and closed exactly once, by Close. sessionGuard is the only other
+	// place that touches it: a bounded AwaitReady followed by ONE Snapshot
+	// per session, never anything that could grow or shrink a live
+	// session's already-registered tool set (the hard invariant — see
+	// mcpconn's doc and agent-sdk-go/mcp's).
+	mcpManager *mcpconn.Manager
+
+	// mcpConfig mirrors Config.MCP; never nil after New. Re-read per session
+	// for [config.MCP.ReadyTimeout] only — see Config.MCP's doc for why the
+	// server list itself is NOT re-read here.
+	mcpConfig func() config.MCP
 
 	mu     sync.Mutex
 	roster map[string]*managed
@@ -217,6 +336,58 @@ func New(cfg Config) (*Supervisor, error) {
 		permissionMode = func() config.PermissionMode { return config.PermissionModeAsk }
 	}
 
+	compaction := cfg.Compaction
+	if compaction == nil {
+		// No explicit policy: the zero value — automatic compaction on, at
+		// config.DefaultCompactionThreshold — matching config.Compaction{}.
+		compaction = func() config.Compaction { return config.Compaction{} }
+	}
+
+	lspConfig := cfg.LSP
+	if lspConfig == nil {
+		// No explicit resolver: the zero config.LSP, which its own
+		// IsEnabled/Timeout/DiagnosticLimit resolve to the package defaults
+		// (enabled, DefaultLSPTimeout, DefaultLSPMaxDiagnostics).
+		lspConfig = func() config.LSP { return config.LSP{} }
+	}
+
+	mcpConfig := cfg.MCP
+	if mcpConfig == nil {
+		// No explicit resolver: the zero config.MCP — no servers configured,
+		// so the Manager below connects nothing and every session's
+		// AwaitReady/Snapshot is instantly a no-op.
+		mcpConfig = func() config.MCP { return config.MCP{} }
+	}
+	// Built and Started ONCE, here — see Config.MCP's doc for why the server
+	// list is a construction-time snapshot rather than re-read per session.
+	// Start connects every enabled server ASYNCHRONOUSLY and returns
+	// immediately, so this never delays New.
+	mcpManager := mcpconn.NewManager(mcpconn.Config{MCP: mcpConfig()})
+	mcpManager.Start(context.Background())
+
+	toolsConfig := cfg.Tools
+	if toolsConfig == nil {
+		// No explicit resolver: the zero config.Tools, which Schemas()
+		// resolves to preload.
+		toolsConfig = func() config.Tools { return config.Tools{} }
+	}
+
+	searchConfig := cfg.Search
+	if searchConfig == nil {
+		// No explicit resolver: the zero config.Search, which Selected()
+		// resolves to none.
+		searchConfig = func() config.Search { return config.Search{} }
+	}
+
+	skillsConfig := cfg.Skills
+	if skillsConfig == nil {
+		// No explicit resolver: the zero config.Skills, which its own
+		// Directories/FileLimitBytes/DescriptionLimitBytes resolve to the
+		// package defaults (the two conventional directories, at the
+		// package size caps).
+		skillsConfig = func() config.Skills { return config.Skills{} }
+	}
+
 	return &Supervisor{
 		root:             root,
 		store:            store,
@@ -228,6 +399,14 @@ func New(cfg Config) (*Supervisor, error) {
 		onRegister:       cfg.OnRegister,
 		newEngine:        newEngine,
 		permissionMode:   permissionMode,
+		compaction:       compaction,
+		lspConfig:        lspConfig,
+		toolsConfig:      toolsConfig,
+		searchConfig:     searchConfig,
+		skillsConfig:     skillsConfig,
+		lspManager:       lspdiag.NewManager(),
+		mcpConfig:        mcpConfig,
+		mcpManager:       mcpManager,
 		roster:           make(map[string]*managed),
 		watchers:         make(map[*watcher]struct{}),
 		watchDone:        make(chan struct{}),
@@ -239,9 +418,14 @@ func New(cfg Config) (*Supervisor, error) {
 // backing the session's own ask_user tool (routing is per-session for the same
 // reason — see [Supervisor.AnswerDecision]), a sandbox Container shared between
 // the RuleGuard's containability check and the sandbox-wrapping tool registry,
-// and the compiled guard over a fresh engine. It returns the three
-// runner.Options fields to inject plus the two Gates to store on the managed
-// session.
+// and the compiled guard over a fresh engine. It returns the runner.Options
+// fields to inject, the two Gates to store on the managed session, and — only
+// under index mode — the live *toolindex.Index backing the registry, so
+// Create/Resume can fold its Hint into the session's system prompt and Resume
+// can Rehydrate it from folded history. ix is nil under preload mode: there is
+// nothing for a caller to do with it, and returning a non-nil-but-inert Index
+// would invite a caller to Hint()/Rehydrate() against one that was never
+// wrapped into the registry.
 //
 // The decision gate is built with an empty session id and bound in [register]:
 // the tool registry closes over the gate and must be handed to runner.New, and
@@ -265,17 +449,143 @@ func New(cfg Config) (*Supervisor, error) {
 // Keeping the reply Gate uniform likewise means the managed session's routing
 // doesn't need to know which mode built it (a yolo session simply never emits a
 // permission request for it to carry).
-func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.Gate, decisions *decision.Gate, tools loop.ToolRegistry) {
+//
+// # Tool surface (M7 workstream 4)
+//
+// The registry is layered, outermost last, per docs/PRD.md's "Tool surface"
+// section:
+//
+//	tool.NewRegistry(builtins + ask_user + web_search + skill + mcp + ix.SearchTool())
+//	  → loop.FromRegistry            (sandbox.WrapRegistry's own base)
+//	  → sandbox.WrapRegistry(cwd, container, extra...)   (bash containment; Specs passthrough)
+//	  → lspdiag.Wrap(…)                                  (diagnostics; Specs passthrough)
+//	  → ix.Wrap(…)                                        (index mode ONLY; the only layer that alters Specs)
+//
+// web_search (internal/websearch) is registered only when
+// config.Search.Selected() is not none; the skill tool (internal/skillset)
+// only when something survives config.Skills' disabling; ix.SearchTool()
+// (and the ix.Wrap outer layer) only under index mode — under preload mode
+// with no search/skills/MCP configured nothing beyond the base registry
+// changes, so a config with no tools/search/skills/mcp section produces a
+// byte-identical registry to before these features existed.
+//
+// MCP tools join the SAME extra slice, before ix.SearchTool() and before
+// sandbox.WrapRegistry — never a second decorator layer, so N federated
+// servers still cost exactly one Specs() re-derivation, and ix.Wrap (when
+// present) still sees and indexes them. Unlike PermissionMode/LSP/Tools/
+// Search/Skills, the server LIST is not re-read per session — see
+// Config.MCP's doc for why — but each session still captures its OWN
+// snapshot of currently-connected tools via a bounded
+// [mcpconn.Manager.AwaitReady] (config.MCP.ReadyTimeout — never longer, so a
+// slow or unreachable server cannot delay Create) followed by ONE
+// [mcpconn.Manager.Snapshot]: this is the hard invariant's enforcement
+// point. The Manager itself never mutates a []tool.Tool once handed out (see
+// its package doc), but sessionGuard is what guarantees each session only
+// ever ASKS once. mcpDown names every enabled server with no live
+// connection at that snapshot — the caller (Create/Resume) emits it as a
+// visible, non-fatal notice once the session's id is known.
+//
+// skillNote is sessionGuard's out-of-band final return: the operator-facing
+// summary of anything skillset.Load skipped (oversized, malformed, or
+// shadowed by a higher-precedence directory — see [skillset.Summarize]), or
+// "" when nothing was. It travels alongside the built registry rather than
+// being emitted here because sessionGuard runs before the session — and so
+// its id, the one thing [event.NewSessionError] needs — exists; Create and
+// Resume both emit it once the session is registered (see their own calls).
+func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.Gate, decisions *decision.Gate, tools loop.ToolRegistry, ix *toolindex.Index, skillNote string, mcpDown []string) {
 	gate := loop.NewGate()
 	dgate := decision.NewGate("")
 	askUser := decision.NewAskUser(dgate)
 	engine := s.newEngine()
+	// Resolved HERE, per session, for the same reason permissionMode is
+	// (see the doc above): an lsp.* write reaches the next session this
+	// supervisor creates, not the one already running.
+	lspCfg := s.lspConfig()
+	lspOpts := lspdiag.Options{
+		Enabled:        lspCfg.IsEnabled(),
+		Timeout:        lspCfg.Timeout(),
+		MaxDiagnostics: lspCfg.DiagnosticLimit(),
+	}
+
+	// Same per-session re-read as lsp/permission mode, for tools.*/search.* —
+	// a config write reaches the next session this supervisor creates, not
+	// the one already running.
+	toolsCfg := s.toolsConfig()
+	searchCfg := s.searchConfig()
+	// Same per-session re-resolution, for skills.* — see [Config.Skills]'s
+	// doc. cwd is only known here, at session-construction time, which is
+	// why this lives in sessionGuard rather than beside lspOpts in New.
+	skillsCfg := s.skillsConfig()
+	skillSet, diags := skillset.Load(skillsCfg, s.root, cwd)
+	skillNote = skillset.Summarize(diags)
+
+	// Same bounded per-session wait as lsp/tools/search/skills, for MCP — see
+	// Config.MCP's doc for why the server LIST is fixed at New but the
+	// ready-timeout is still re-read here. The Manager itself was already
+	// Started once, in New.
+	readyCtx, cancel := context.WithTimeout(context.Background(), s.mcpConfig().ReadyTimeout())
+	s.mcpManager.AwaitReady(readyCtx)
+	cancel()
+	mcpSnap := s.mcpManager.Snapshot()
+	mcpDown = mcpSnap.Down
+
+	extra := []tool.Tool{askUser}
+	if ws := websearch.New(searchCfg); ws != nil {
+		extra = append(extra, ws)
+	}
+	if skillTool, ok := skillset.NewTool(skillSet, skillsCfg); ok {
+		extra = append(extra, skillTool)
+	}
+	// MCP-federated tools join the SAME extra slice, before ix.SearchTool()
+	// — see the doc above.
+	extra = append(extra, mcpSnap.Tools...)
+
+	if toolsCfg.Schemas() == config.ToolSchemaModeIndex {
+		resident := toolsCfg.ResidentTools()
+		residentSet := make(map[string]bool, len(resident))
+		for _, name := range resident {
+			residentSet[name] = true
+		}
+		ix = toolindex.New(toolindex.Options{
+			Resident:     func(name string) bool { return residentSet[name] },
+			SummaryBytes: toolsCfg.SummaryLimitBytes(),
+			MaxResults:   toolsCfg.SearchResultLimit(),
+			InlineMax:    toolsCfg.InlineIndexLimit(),
+		})
+		// Registered into the base registry BEFORE ix.Wrap snapshots it below
+		// — see toolindex.Index.SearchTool's doc: Wrap's snapshot is what
+		// tool_search itself must already be present in, or Get("tool_search")
+		// would fail.
+		extra = append(extra, ix.SearchTool())
+	}
+
 	if s.permissionMode() == config.PermissionModeYolo {
-		return yoloGuard{engine: engine}, gate, dgate, sandbox.WrapRegistry(cwd, nil, askUser)
+		tools = lspdiag.Wrap(sandbox.WrapRegistry(cwd, nil, extra...), s.lspManager, cwd, lspOpts)
+		if ix != nil {
+			tools = ix.Wrap(tools)
+		}
+		return yoloGuard{engine: engine}, gate, dgate, tools, ix, skillNote, mcpDown
 	}
 	container := sandbox.New()
 	rg := loop.RuleGuard{Engine: engine, Container: container, Target: sandbox.ToolTarget}
-	return rg, gate, dgate, sandbox.WrapRegistry(cwd, container, askUser)
+	tools = lspdiag.Wrap(sandbox.WrapRegistry(cwd, container, extra...), s.lspManager, cwd, lspOpts)
+	if ix != nil {
+		tools = ix.Wrap(tools)
+	}
+	return rg, gate, dgate, tools, ix, skillNote, mcpDown
+}
+
+// emitMCPDownNotices publishes one visible, non-fatal session.error per
+// down server (see sessionGuard's mcpDown) onto sess's own stream — the
+// "visible non-fatal notice" a down server must produce without ever
+// failing the session (see internal/mcpconn's package doc and
+// docs/PRD.md's MCP section). A no-op for the common case (down is empty).
+func emitMCPDownNotices(sess Session, down []string) {
+	for _, name := range down {
+		sess.Emit(event.NewSessionError(sess.ID(),
+			fmt.Sprintf("mcp server %q is not connected — its tools are unavailable for this session", name),
+			false))
+	}
 }
 
 // ResolveRoot is gofer's single source of the ~/.gofer default — the SDK
@@ -359,15 +669,28 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts CreateOptio
 		return SessionInfo{}, err
 	}
 
-	guard, gate, decisions, tools := s.sessionGuard(opts.Cwd)
+	guard, gate, decisions, tools, ix, skillNote, mcpDown := s.sessionGuard(opts.Cwd)
+	// Fold the tool index's hint into the system prompt HERE, not in
+	// internal/prompt.Compose's caller — see sysprompt.AppendHint's doc for
+	// why this join lives in internal/prompt rather than being re-derived
+	// per call site. ix is nil under preload mode (see sessionGuard), so this
+	// is a no-op for every session until an operator opts into index mode.
+	system := opts.System
+	if ix != nil {
+		system = sysprompt.AppendHint(system, ix.Hint())
+	}
 	sess, err := s.newSession(ctx, runner.Options{
-		Root: s.root, Cwd: opts.Cwd, Model: opts.Model, System: opts.System,
+		Root: s.root, Cwd: opts.Cwd, Model: opts.Model, System: system,
 		Params: opts.Params, MaxIters: opts.MaxIters, Agent: opts.Agent,
 		Guard: guard, Approver: gate, Tools: tools,
 	})
 	if err != nil {
 		return SessionInfo{}, fmt.Errorf("supervisor: create session: %w", err)
 	}
+	// The session's id is only knowable now (runner.New/Resume mints it) —
+	// see sessionGuard's doc for why the notice can't be emitted any
+	// earlier.
+	emitMCPDownNotices(sess, mcpDown)
 
 	// The runner seeds its own effort from Params.Thinking.Effort at
 	// construction, so the roster's bookkeeping starts from the same value
@@ -393,6 +716,14 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts CreateOptio
 		// the shared one and stays open; only its broker and journal close.
 		_ = sess.Close()
 		return SessionInfo{}, fmt.Errorf("supervisor: create session: %w", err)
+	}
+	// Surface any skipped SKILL.md on the session's own stream — see
+	// sessionGuard's skillNote doc — the same "visible artifact, never
+	// swallowed" treatment a failed turn gets (see managed.pump). Emitted
+	// after register so it reaches every observer's replay, before any
+	// turn event that might otherwise bury it.
+	if skillNote != "" {
+		sess.Emit(event.NewSessionError(sess.ID(), skillNote, false))
 	}
 	if prompt != "" {
 		if err := m.enqueue(prompt); err != nil {
@@ -491,20 +822,45 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 	// exactly when a client reopened it from somewhere else.
 	meta, _ := lookupDiskSession(s.root, id)
 
-	guard, gate, decisions, tools := s.sessionGuard(opts.Cwd)
+	guard, gate, decisions, tools, ix, skillNote, mcpDown := s.sessionGuard(opts.Cwd)
+	// Same hint fold as Create — see its comment.
+	system := opts.System
+	if ix != nil {
+		system = sysprompt.AppendHint(system, ix.Hint())
+	}
 	sess, err := s.resumeSession(ctx, id, runner.Options{
-		Root: s.root, Cwd: opts.Cwd, Model: opts.Model, System: opts.System,
+		Root: s.root, Cwd: opts.Cwd, Model: opts.Model, System: system,
 		Params: opts.Params, MaxIters: opts.MaxIters, Agent: meta.Agent,
 		Guard: guard, Approver: gate, Tools: tools,
 	})
 	if err != nil {
 		return SessionInfo{}, fmt.Errorf("supervisor: resume %s: %w", id, err)
 	}
+	// The session's id is only knowable now — see sessionGuard's doc for why
+	// the notice can't be emitted any earlier.
+	emitMCPDownNotices(sess, mcpDown)
+	// A resumed session's tool array is a function of its own history, never
+	// a session that starts having promoted nothing a prior turn already
+	// promoted: re-mark every tool name the folded context's tool_use blocks
+	// name as promoted, so Specs() carries them again from THIS resume's
+	// very first model call rather than re-paying a tool_search round trip
+	// (or, worse, the model calling a name it already used that Get() would
+	// still auto-promote — Rehydrate just does it up front). A no-op under
+	// preload mode (ix nil) and for a session with no tool_use history yet.
+	if ix != nil {
+		if names := toolUseNames(sess.Fold()); len(names) > 0 {
+			ix.Rehydrate(names...)
+		}
+	}
 
 	m, err := s.register(sess, opts.Model, opts.Params.Thinking.Effort, opts.Cwd, gate, decisions, meta, true)
 	if err != nil {
 		_ = sess.Close()
 		return SessionInfo{}, fmt.Errorf("supervisor: resume %s: %w", id, err)
+	}
+	// See Create's identical emit — same reasoning, same shape.
+	if skillNote != "" {
+		sess.Emit(event.NewSessionError(sess.ID(), skillNote, false))
 	}
 	// A resumed session returns to the overview for good: clear any archive
 	// marker so it is not hidden again after the next restart. Best-effort — the
@@ -558,7 +914,7 @@ func (s *Supervisor) register(sess Session, model, effort, cwd string, gate *loo
 		s.mu.Unlock()
 		return nil, ErrClosed
 	}
-	m := newManaged(sess, model, effort, s.clock(), s.clock, s.notify, cwd, gate, decisions, meta, resumed, s.onRegister)
+	m := newManaged(sess, model, effort, s.clock(), s.clock, s.notify, cwd, gate, decisions, meta, resumed, s.onRegister, s.compaction)
 	// Stamp the session id onto the decision gate the moment it is knowable —
 	// before m is published anywhere and before anything can run a turn against
 	// it, so no request can ever open with an empty session id (see
@@ -775,6 +1131,45 @@ func (s *Supervisor) SetEffort(ctx context.Context, sessionID, effort string) er
 	m.mu.Lock()
 	m.effort = effort
 	m.mu.Unlock()
+	s.notify()
+	return nil
+}
+
+// Compact replaces sessionID's history up to HEAD with a summary, consuming
+// the SDK runner's own seam ([runner.Runner.Compact] via [Session.Compact]):
+// the summary is appended as a journal entry and a must-deliver
+// session.compacted event is published, so every attached client — the TUI's
+// own transcript included — renders what happened without re-reading the
+// journal. instructions is forwarded verbatim; "" uses the SDK's
+// [runner.DefaultCompactionInstructions].
+//
+// Like Archive (and per [runner.Runner.Compact]'s own documented
+// precondition — "do not call Compact while a Prompt is in flight"), Compact
+// is idle-only: a running session, or one with queued work, is refused with
+// [ErrRunning] rather than racing the pump's own turn-boundary trigger
+// ([managed.maybeAutoCompact]) or summarizing a context a queued prompt is
+// about to extend. [ErrNotLive] for an unknown or archived session.
+// [runner.ErrNothingToCompact] passes through unwrapped-underneath (via
+// %w) when the session's current folded context is already empty.
+func (s *Supervisor) Compact(ctx context.Context, sessionID, instructions string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m, err := s.lookup(sessionID)
+	if err != nil {
+		return fmt.Errorf("supervisor: compact %s: %w", sessionID, err)
+	}
+
+	m.mu.Lock()
+	running := m.state == stateRunning || len(m.queue) > 0
+	m.mu.Unlock()
+	if running {
+		return fmt.Errorf("supervisor: compact %s: %w", sessionID, ErrRunning)
+	}
+
+	if err := m.sess.Compact(ctx, instructions); err != nil {
+		return fmt.Errorf("supervisor: compact %s: %w", sessionID, err)
+	}
 	s.notify()
 	return nil
 }
@@ -1195,6 +1590,27 @@ func firstUserSnippet(entries []session.Entry) string {
 	return ""
 }
 
+// toolUseNames returns the distinct tool names named by a tool_use content
+// block anywhere in msgs, first-seen order — the [Supervisor.Resume]
+// Rehydrate seam's input. It reads provider.Message directly (msgs is
+// [Session.Fold]'s already-folded output) rather than re-parsing raw journal
+// entries, since Fold is the one settled projection every other read of a
+// session's history already goes through.
+func toolUseNames(msgs []provider.Message) []string {
+	seen := make(map[string]bool)
+	var names []string
+	for _, m := range msgs {
+		for _, b := range m.Content {
+			if b.Type != provider.BlockToolUse || b.ToolName == "" || seen[b.ToolName] {
+				continue
+			}
+			seen[b.ToolName] = true
+			names = append(names, b.ToolName)
+		}
+	}
+	return names
+}
+
 // Subscribe returns a live event subscription for id. Errors with
 // [ErrNotLive] if the session is not live.
 func (s *Supervisor) Subscribe(ctx context.Context, sessionID string) (*event.Subscription, error) {
@@ -1357,6 +1773,12 @@ func (s *Supervisor) Close() error {
 		if err := m.sess.Close(); err != nil {
 			errs = append(errs, err)
 		}
+	}
+	if err := s.lspManager.Close(); err != nil {
+		errs = append(errs, err)
+	}
+	if err := s.mcpManager.Close(); err != nil {
+		errs = append(errs, err)
 	}
 	if s.ownsStore {
 		if err := s.store.Close(); err != nil {

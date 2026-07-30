@@ -122,6 +122,23 @@ func runSessionWorker(ctx context.Context, args []string, stdout, stderr io.Writ
 		// snapshot above, keeping one answer to "what posture does a new session
 		// get" across every supervisor gofer builds.
 		PermissionMode: permissionModeResolver(rootDir),
+		// Same re-read-per-turn shape as PermissionMode above, for the
+		// automatic-compaction trigger — the worker process is where a turn
+		// actually settles, so it is the one that must observe a live edit.
+		Compaction: compactionResolver(rootDir),
+		// Same reasoning for lsp.* — see lspConfigResolver.
+		LSP: lspConfigResolver(rootDir),
+		// Same reasoning for mcp.* — see mcpConfigResolver. Under M6 process
+		// isolation a worker hosts exactly one session, so "one manager per
+		// gofer process" (internal/mcpconn's doc) means one manager per
+		// session here — the same shape lspManager already takes.
+		MCP: mcpConfigResolver(rootDir),
+		// Same reasoning for tools.*/search.* — see toolsConfigResolver/
+		// searchConfigResolver.
+		Tools:  toolsConfigResolver(rootDir),
+		Search: searchConfigResolver(rootDir),
+		// Same reasoning for skills.* — see skillsConfigResolver.
+		Skills: skillsConfigResolver(rootDir),
 		// Pin the sole session's id to --session (design Option A) through the
 		// SDK's pre-assigned-session-id seam: runner.New creates the session with
 		// this exact id, leaving entry-id generation on the store default.

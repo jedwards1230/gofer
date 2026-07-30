@@ -63,6 +63,12 @@ func downPressesTo(t *testing.T, key string) int {
 	return 0
 }
 
+// SettingsRegistryLen exposes len(settingsRegistry()) to package tui_test's
+// command_test.go, which cannot reach the unexported registry directly (see
+// that file's TestPanelConfigEditPersistsViaSaveConfig). Test-only — not
+// part of the package's real API.
+func SettingsRegistryLen() int { return len(settingsRegistry()) }
+
 // TestGoldenConfigInitialList covers the view's opening state: an empty
 // filter box and every registry setting listed at its default value, no row
 // highlighted.

@@ -86,6 +86,8 @@ func (s *settleSupervisor) OverviewRoster(context.Context) ([]supervisor.Session
 }
 func (s *settleSupervisor) SetModel(context.Context, string, string) error  { return nil }
 func (s *settleSupervisor) SetEffort(context.Context, string, string) error { return nil }
+
+func (s *settleSupervisor) Compact(context.Context, string, string) error { return nil }
 func (s *settleSupervisor) SubscribeLive(context.Context, string) (*event.Subscription, error) {
 	return nil, nil
 }

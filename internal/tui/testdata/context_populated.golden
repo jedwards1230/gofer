@@ -1,0 +1,6 @@
+Model: claude-sonnet-5
+Context window: 200000 tokens
+[█████░░░░░░░░░░░░░░░] 25%
+In use: 50000 tokens (measured — this session's last turn)
+Free: 150000 tokens
+Auto-compacts at: 85% (/compact to do it now)

@@ -1,0 +1,24 @@
+<accent>●</accent> Context compacted — 12 messages replaced with a summary
+<muted>   └ ~45200 in (est., incl. overhead) → 512 out · claude-sonnet-5</muted>
+     Decisions made: use pgx over database/sql. Open TODO: wire the retry
+policy.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+> ▏
+────────────────────────────────────────────────────────────────────────────────

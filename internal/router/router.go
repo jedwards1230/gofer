@@ -354,6 +354,7 @@ const (
 	methodGoferArchive    = "gofer/archive"
 	methodGoferSetModel   = "gofer/set_model"
 	methodGoferSetEffort  = "gofer/set_effort"
+	methodGoferCompact    = "gofer/compact"
 	methodPermissionReply = "permission.reply"
 )
 

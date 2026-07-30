@@ -47,9 +47,13 @@ func (f *toolCallSession) Events() *event.Subscription {
 func (f *toolCallSession) EventsLive() *event.Subscription {
 	return f.broker.SubscribeLive(event.FilterAll, 64)
 }
-func (f *toolCallSession) Emit(e event.Event)       { f.broker.Publish(e) }
-func (f *toolCallSession) Cost() session.CostReport { return session.CostReport{} }
-func (f *toolCallSession) Close() error             { f.broker.Close(); return nil }
+func (f *toolCallSession) Emit(e event.Event)                    { f.broker.Publish(e) }
+func (f *toolCallSession) Cost() session.CostReport              { return session.CostReport{} }
+func (f *toolCallSession) Compact(context.Context, string) error { return runner.ErrNothingToCompact }
+func (f *toolCallSession) LastUsage() (string, provider.Usage, bool) {
+	return "", provider.Usage{}, false
+}
+func (f *toolCallSession) Close() error { f.broker.Close(); return nil }
 
 // SetModel is a no-op: this fake's Prompt scripts a fixed tool-call +
 // permission round-trip and never reads a model.

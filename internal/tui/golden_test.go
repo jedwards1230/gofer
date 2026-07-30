@@ -360,6 +360,38 @@ func TestGoldenSessionInterruptedStyled(t *testing.T) {
 	renderStyled(t, "session_interrupted", event.NewSessionError(sid, "context canceled", true))
 }
 
+// TestGoldenSessionCompacted covers the hard requirement compaction ships
+// under: it must render as a VISIBLE transcript item, automatic trigger or
+// explicit /compact alike — never a silent context swap. It pins the full
+// shape: the message count, the "~before → after" token line (explicitly
+// labeled an estimate — see [Model.renderSessionCompactedLines]'s doc for
+// why), the model, and the summary text itself.
+func TestGoldenSessionCompacted(t *testing.T) {
+	render(t, "session_compacted", event.NewSessionCompacted(sid, "entry-9", 12, "claude-sonnet-5",
+		provider.Usage{InputTokens: 45000, CacheReadTokens: 200, OutputTokens: 512},
+		"Decisions made: use pgx over database/sql. Open TODO: wire the retry policy."))
+}
+
+// TestGoldenSessionCompactedNoModel covers a summarization strategy that
+// made no model call (a deterministic non-LLM condenser, or a test double):
+// Model == "" per event.SessionCompacted's doc, so the token/model line is
+// omitted entirely rather than showing a blank model id or zeroed tokens —
+// the same omit-what-you-can't-answer rule usage.go/stats.go follow.
+func TestGoldenSessionCompactedNoModel(t *testing.T) {
+	render(t, "session_compacted_no_model", event.NewSessionCompacted(sid, "entry-3", 4, "",
+		provider.Usage{}, "terse deterministic summary"))
+}
+
+// TestGoldenSessionCompactedStyled pins the marker's color: accent, not one
+// of the OK/warn/danger state colors — compaction reports no success/failure
+// state of its own (mirrors [Model.renderBackgroundAgentLines]'s same
+// accent-not-state choice, for the same reason).
+func TestGoldenSessionCompactedStyled(t *testing.T) {
+	renderStyled(t, "session_compacted", event.NewSessionCompacted(sid, "entry-9", 12, "claude-sonnet-5",
+		provider.Usage{InputTokens: 45000, CacheReadTokens: 200, OutputTokens: 512},
+		"Decisions made: use pgx over database/sql. Open TODO: wire the retry policy."))
+}
+
 // attributionSuffix is the exact substring the approval prompt's header
 // carries when — and only when — the gated call is attributed to an agent.
 // Its ABSENCE is the un-attributed contract (see
