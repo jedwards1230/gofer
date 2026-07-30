@@ -163,6 +163,28 @@ func settingsRegistry() []Setting {
 			},
 		},
 		{
+			// The numeric threshold (compaction.threshold_fraction) is
+			// deliberately NOT a row here: SettingKind has only bool/enum/string,
+			// and a free-text string edit for a (0,1) fraction (or a percentage —
+			// which spelling?) risks a confusing, unvalidated affordance for a
+			// value most operators will never touch. It stays config-file-only,
+			// documented on config.Compaction; this bool is the one genuinely
+			// UI-appropriate knob the feature introduces.
+			Key:   "compaction.enabled",
+			Label: "Automatic compaction",
+			Kind:  SettingBool,
+			Get: func(c config.Config) string {
+				if c.Compaction.AutoEnabled() {
+					return "true"
+				}
+				return "false"
+			},
+			Set: func(c config.Config, v string) config.Config {
+				c.Compaction.Disabled = v != "true"
+				return c
+			},
+		},
+		{
 			Key:   "lsp.enabled",
 			Label: "LSP diagnostics",
 			Kind:  SettingBool,
@@ -175,6 +197,37 @@ func settingsRegistry() []Setting {
 			Set: func(c config.Config, v string) config.Config {
 				enabled := v == "true"
 				c.LSP.Enabled = &enabled
+				return c
+			},
+		},
+		{
+			// preload (the default) puts every candidate tool's full schema in
+			// context up front; index puts only a name+one-line-description
+			// index in context, with schemas resolved on demand via
+			// tool_search (M7 workstream 4). See config.Tools.Schemas.
+			Key:     "tools.schema_mode",
+			Label:   "Tool schema mode",
+			Kind:    SettingEnum,
+			Options: []string{"preload", "index"},
+			Get:     func(c config.Config) string { return string(c.Tools.Schemas()) },
+			Set: func(c config.Config, v string) config.Config {
+				c.Tools.SchemaMode = v
+				return c
+			},
+		},
+		{
+			// none (the default) registers no web_search tool at all — see
+			// config.Search.Selected's fail-safe doc. Only "brave"/"searxng"
+			// actually opt in; a provider selected here with no credential
+			// configured is rejected at config load (config.Search.validate),
+			// not silently accepted by this row.
+			Key:     "search.provider",
+			Label:   "Web search provider",
+			Kind:    SettingEnum,
+			Options: []string{"none", "brave", "searxng"},
+			Get:     func(c config.Config) string { return string(c.Search.Selected()) },
+			Set: func(c config.Config, v string) config.Config {
+				c.Search.Provider = v
 				return c
 			},
 		},

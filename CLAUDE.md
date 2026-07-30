@@ -82,9 +82,19 @@ make install                                       # local install, truthfully v
   atomic); sections are the permissions ruleset (M3), `Session`/`TUI` (M4),
   `Telemetry`, `Daemon` (incl. `drain_timeout_ms`), and M7's `Prompt`/
   `Tools`/`MCP`/`Search`/`Skills`/`LSP` sections, plus the shared `SecretRef`
-  (`env:`/`file:`, resolved at use time, never inlined). `LSP` and `MCP` are
-  read by `internal/supervisor`'s session wiring; the rest are schema only —
-  each is wired up by its own feature PR. See its package doc.
+  (`env:`/`file:`, resolved at use time, never inlined). `Prompt` is read by
+  `internal/prompt`; `LSP`/`MCP`/`Tools`/`Search`/`Skills` by
+  `internal/supervisor`'s session wiring (`internal/websearch` and the SDK's
+  `toolindex` consume `Search`/`Tools` respectively; `internal/skillset`
+  consumes `Skills`; `internal/mcpconn` consumes `MCP`). See its package doc.
+- `internal/prompt/` — composes a session's system prompt from
+  `config.Prompt.Files` (the replacement for cmd/gofer's old
+  `defaultSystemPrompt` string constant): `builtin:`/absolute/`~/`/cwd-then-
+  root file resolution, blank-line-joined composition with first-wins dedup,
+  and the shipped `builtin:system.md` default, `go:embed`-compiled in. A leaf
+  over `internal/config`; `cmd/gofer`'s run/resume/exec are its only callers,
+  and `internal/supervisor.RecordPrompt` journals the result beside a
+  session's journal.
 - `internal/permrationale/` — the gating rationale behind a permission
   request (matched rule, policy, source, trace) that `ctrl+e` surfaces and
   `session/explain_permission` answers.
@@ -106,10 +116,27 @@ make install                                       # local install, truthfully v
   the next session, a dead one keeps its tools registered (degrading to
   `IsError`, working again after reconnect with no re-registration). See its
   package doc.
+- `internal/skillset/` — wires the SDK's `agent-sdk-go/skill` package
+  (`SKILL.md` discovery with progressive disclosure) into a session:
+  resolves `config.Skills` into a `skill.Load` call, applies
+  `skills.disabled` (which the SDK's `skill.Set` has no notion of), and
+  exposes the single `skill` tool `internal/supervisor.sessionGuard`
+  registers into the base tool registry, omitted when nothing survives
+  disabling. Also the seam that fixes the project-vs-global skill precedence
+  bug (`config.Skills.Directories` lists the project directory first, since
+  the SDK's `skill.Load` is first-directory-wins).
 - `internal/decision/` — gofer's structured-decision round trip: the
   `ask_user` tool (gofer's first tool of its own) plus the per-session `Gate`
   it blocks on, carrying `acp` decision types over a gofer-native transport
   because the SDK's Event union has no decision kind. A leaf over the SDK.
+- `internal/websearch/` — the `web_search` tool (M7 workstream 4): projects
+  the SDK's `search` package (`Provider`, the Brave/SearXNG backends, the
+  name-keyed registry) into a model-facing tool, registered only when
+  `config.Search.Selected()` is not none. Blank-imports both backends
+  unconditionally; resolves its `config.SecretRef` credential at Run time,
+  never at construction. Wired into a session's registry (alongside
+  `tools.schema_mode`'s preload/index toggle, via the SDK's `toolindex`) at
+  `internal/supervisor`'s `sessionGuard` — see its package doc.
 - `internal/telemetry/` — OpenTelemetry (traces/metrics/log-correlation) off
   the Event/Op stream; the only otel importer.
 - `internal/router/` — the M6 thin router daemon: roster aggregation, client

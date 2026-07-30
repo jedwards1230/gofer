@@ -159,6 +159,35 @@ func (s *Supervisor) SetEffort(ctx context.Context, sessionID, effort string) er
 	return nil
 }
 
+// Compact replaces sessionID's history up to HEAD with a summary by forwarding
+// gofer/compact to its worker — the same shape as SetModel/SetEffort (ctx read
+// once by the admission check, the write under an owned bound, refused on wire
+// skew since it drives a real model call). The worker validates idleness
+// ([supervisor.ErrRunning] surfaces as the Call's application error) and
+// publishes session.compacted onto its own stream, which the router's
+// reconstruction core observes and re-fans exactly like any other event — no
+// separate advertisement is needed here (see [Supervisor.SetModel]'s doc for
+// the parallel case).
+func (s *Supervisor) Compact(ctx context.Context, sessionID, instructions string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	h, ok := s.get(sessionID)
+	if !ok {
+		return fmt.Errorf("router: compact %s: %w", sessionID, ErrNotLive)
+	}
+	if err := h.refuseNewWork("compact"); err != nil {
+		return fmt.Errorf("router: compact %s: %w", sessionID, err)
+	}
+	cctx, cancel := wireCallCtx()
+	defer cancel()
+	params := map[string]string{"sessionId": sessionID, "instructions": instructions}
+	if _, err := h.client.Call(cctx, methodGoferCompact, params); err != nil {
+		return fmt.Errorf("router: compact %s: %w", sessionID, err)
+	}
+	return nil
+}
+
 // Reply answers a pending permission request by forwarding permission.reply to
 // the owning worker as a bare notification. The write's lifetime is owned by
 // [daemon.Client.Notify], which takes no context and derives its own bound (see

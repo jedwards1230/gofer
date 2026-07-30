@@ -177,6 +177,14 @@ func (a Adapter) SetEffort(ctx context.Context, sessionID, effort string) error 
 	return a.sup.SetEffort(ctx, sessionID, effort)
 }
 
+// Compact passes through to the supervisor's own Compact. An in-process
+// caller gets back the real [supervisor.ErrRunning] / [runner.ErrNothingToCompact]
+// sentinels unwrapped (errors.Is works directly), unlike a daemon-backed
+// [daemonbridge.Supervisor], which only ever sees a plain messaged error.
+func (a Adapter) Compact(ctx context.Context, sessionID, instructions string) error {
+	return a.sup.Compact(ctx, sessionID, instructions)
+}
+
 // Reply answers a pending permission request by routing straight to the
 // supervisor's own Reply, which resolves the session's loop.Gate — see
 // internal/supervisor's Reply doc. ctx is accepted to satisfy
@@ -276,5 +284,9 @@ func toTUI(s supervisor.SessionInfo) tui.SessionInfo {
 		ParentID: s.ParentID,
 		Agent:    s.Agent,
 		Depth:    s.Depth,
+		// LastUsage/ContextWindow: the /context panel's pressure figures — see
+		// [supervisor.SessionInfo.LastUsage]'s doc.
+		LastUsage:     s.LastUsage,
+		ContextWindow: s.ContextWindow,
 	}
 }

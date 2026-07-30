@@ -253,10 +253,159 @@ error can produce dozens of diagnostics, and only a bounded, current-file
 slice enters context) with the same `… +N more` collapse the TUI's approval
 body uses.
 
-**Not yet config-driven.** `lsp.enabled` / `lsp.timeout_ms` /
-`lsp.max_diagnostics` are fixed defaults at the wiring site pending a
-`config.LSP` section (tracked with the M7 config-schema work); see the
-`TODO(config)` in `sessionGuard`.
+Config-driven via `config.LSP` (`lsp.enabled` / `lsp.timeout_ms` /
+`lsp.max_diagnostics`), read per session by `internal/supervisor.sessionGuard`
+so a `/config` edit reaches the next session a running gofer starts.
+
+## Skills (M7)
+
+`SKILL.md` discovery follows the same progressive-disclosure discipline as
+tool/MCP indexing: only a skill's name and (budget-truncated) description
+enter context up front, via the SDK's `agent-sdk-go/skill` package
+(`skill.Load`/`Set.Index`); the body is read from disk once, on invocation
+(`Set.Body`), never cached. `internal/skillset` is gofer's seam over it —
+resolving `config.Skills` into the `skill.Load` call, applying
+`skills.disabled` (a gofer concept the SDK's `skill.Set` has no notion of),
+and exposing the single `skill` tool `sessionGuard` registers into the base
+tool registry alongside `ask_user`, omitted entirely when nothing survives
+disabling (a permanently-empty tool is pure context cost).
+
+**Precedence — project overrides global.** `config.Skills.Directories`
+resolves the unset default to `<cwd>/.gofer/skills` then `<root>/skills`, in
+that order: the SDK's `skill.Load` is PATH-style (first directory to define a
+name wins), the opposite of `internal/usercmd.Load`'s last-write-wins map, so
+landing on the same outcome — a project skill beats a same-named global one —
+means listing the project directory first, not mirroring `usercmd`'s literal
+build order. Getting this backwards was a confirmed bug (a global skill
+silently shadowing a project one); `internal/skillset`'s
+`TestLoadProjectBeatsGlobal` pins the fix.
+
+Anything `skill.Load` skips (oversized, malformed, duplicate/shadowed,
+symlinked) is never swallowed: `sessionGuard` emits it as a non-fatal
+`session.error` on the session's own event stream once, at creation — the
+same "visible artifact, never silent" treatment a failed turn gets.
+
+## Context compaction (M7)
+
+The SDK ships the seam (`runner.Runner.Compact`, `event.SessionCompacted`)
+with no policy — no threshold, no automatic trigger, no summarization prompt
+opinion. gofer supplies all three:
+
+- **Automatic trigger — POST-FLIGHT.** `internal/supervisor`'s pump checks
+  pressure once a turn settles cleanly (not pre-flight, before the next call):
+  gofer has no tokenizer, so a just-finished turn's real `Usage.InputTokens (+
+  CacheReadTokens)` — what the provider actually tokenized to answer that call
+  — is a measured number, where a pre-flight estimate over the folded context
+  would be a guess. The cost is one turn of lag (the turn that crosses the
+  threshold runs at full size; the trigger compacts the *next* one down),
+  which `config.Compaction`'s 85% default threshold gives headroom for.
+  `ContextWindow == 0` (an unregistered model) never triggers — an unknown
+  window is never treated as full. `config.Compaction.Disabled` turns the
+  trigger off entirely; `/compact` stays available either way.
+- **Visibility is the hard constraint.** `event.SessionCompacted` is
+  must-deliver and renders as a durable transcript block (`itemSessionCompacted`,
+  accent-styled like the background-agents summary — a structural event, not
+  a success/failure state): message count, a `~before → after` token line
+  explicitly labeled an *estimate* (the summarizer's own call measures
+  context-plus-instructions-overhead, not context alone), the model, and the
+  summary text itself. The line renderer (`gofer demo`) and the JSONL renderer
+  render it too — no client-side surface swallows it. Over the daemon/websocket
+  backend specifically, compaction's session.compacted can fire with **no**
+  `session/prompt` call in flight (the trigger fires between turns; `/compact`
+  requires the session to be idle) — the one gap this closes: a per-session
+  out-of-turn watcher (`cmd/gofer/daemon.go`'s `OnRegister` hook) relays such
+  events through the same guarded broadcast the M6 router relay already used,
+  so a remote peer sees them too. The M6 `--workers` path does not yet wire
+  this watcher — a known follow-up, not silently left.
+- **`/compact [instructions]`** — explicit, idle-only (mirrors `/kill`/
+  `/archive`'s precondition), forwards free-text instructions verbatim ("" is
+  the SDK's own default). No `ArgHint`: like `/new`'s prompt, every string is
+  a valid instruction, so there is no "unusable argument" to reject.
+- **`/context`** (gofer#177) — context-window pressure, legible before it
+  bites. Reads the SAME measured figures the trigger uses
+  (`SessionInfo.LastUsage`/`ContextWindow`), not a tokenizer-derived category
+  breakdown — issue #177's full per-category grid (system prompt / tools /
+  skills / messages) stays blocked on the tokenizer primitive it names as a
+  hard prerequisite, which this round does not build. A fill bar + in-use/free
+  counts + the configured auto-compaction threshold is what the accessors
+  available today can answer honestly.
+- **Config**: `compaction.threshold_fraction` (fraction of the context window,
+  default 0.85) and `compaction.disabled`. Only the bool is a `/config` row
+  (`compaction.enabled`) — `SettingKind` has no numeric affordance yet, and a
+  free-text edit of a (0,1) fraction risked a confusing, unvalidated UI for a
+  knob most operators won't touch; the fraction stays config-file-only.
+
+## System prompt composition (M7)
+
+No hardcoded prompt: `config.Prompt.Files` is an ordered list of markdown
+sources `internal/prompt.Compose` reads and joins into a session's system
+prompt. `cmd/gofer`'s `run`/`resume`/`exec` all call it (replacing the old
+`defaultSystemPrompt` Go string constant); the empty-config default resolves
+to `builtin:system.md`, gofer's baseline prompt, `go:embed`-compiled into the
+binary (`internal/prompt/system.md`) so a fresh install needs no filesystem
+setup.
+
+**Resolution**, per entry: `builtin:<name>` loads an embedded asset (the only
+non-path form); an absolute path reads verbatim; `~/…` expands against the
+home directory; any other relative path resolves against the session's cwd
+first, then the store root — first hit wins. This is what makes `AGENTS.md`
+mean the repo's own file while `prompts/house.md` can live in `~/.gofer`.
+
+**Composition**: resolved sources are read in list order, each trimmed of
+surrounding whitespace, and joined by a blank line. An entry whose resolved
+identity repeats an earlier one is skipped before it is read (dedup, not a
+re-read). A file that can't be found or read warns and is skipped, unless
+`prompt.missing_file_is_error` — an absent `AGENTS.md` is the normal case in
+most repos. `prompt.max_file_bytes` caps one file (default 256 KiB, explicit
+0 = no limit); over-cap warns and skips rather than truncating.
+
+**Provenance.** After a successful `runner.New`/`Resume`,
+`supervisor.RecordPrompt` writes `{files, sha256, bytes}` into the session's
+`<id>.meta.json` sidecar and the composed text verbatim as `<id>.system.md`
+beside the journal — so what a session actually ran with stays greppable on
+disk. This is an audit trail only: `resume` still recomposes fresh from
+current config every time (a project's `AGENTS.md` legitimately changes
+between sessions), so the recorded text can legitimately diverge from a later
+resume's.
+
+## Web search & the tool index (M7)
+
+Two config-gated additions to a session's tool surface, both wired at the one
+place a session's registry is actually built — `internal/supervisor`'s
+`sessionGuard`, shared by the daemon, workers, and the TUI's local fallback:
+
+- **`web_search`** (`internal/websearch`) projects the SDK's provider-agnostic
+  `search` package (Brave, SearXNG) into a model-facing tool. It is registered
+  only when `search.provider` selects one; its result text is the bounded
+  `search.Results` rendered as plain numbered lines, never raw provider JSON.
+  The credential (`config.SecretRef`) resolves at Run time, never at config
+  load — an unselected or misconfigured provider never breaks anything else.
+  gofer blank-imports both `search/brave` and `search/searxng` unconditionally
+  (`search.Build`'s own error already names a missing blank import and lists
+  what's registered, so gofer wraps nothing further here).
+- **`tools.schema_mode`** toggles `preload` (every schema in context, the
+  default — byte-identical to before this feature) vs `index` (a small
+  resident set plus a `tool_search` tool; the SDK's `toolindex.Index` handles
+  discovery, promotion, and the two-tiered `Hint()` summary). The registry is
+  layered outermost-last: `tool.NewRegistry(builtins + ask_user + web_search +
+  ix.SearchTool())` → `loop.FromRegistry` → `sandbox.WrapRegistry` (bash
+  containment) → `lspdiag.Wrap` (diagnostics) → `ix.Wrap` (index mode only —
+  the only layer that alters `Specs()`). Index must be outermost so its
+  filtering covers every layer below while `Get` still reaches the
+  contained/diagnosed tool.
+- **Resume rehydrates.** A resumed session re-promotes every tool named by a
+  `tool_use` block in its folded history (`toolindex.Index.Rehydrate`) before
+  its first model call, so a session's tool array is always a function of its
+  own history and never references a tool the request never earned.
+- **The hint enters the prompt through `internal/prompt`.** `prompt.AppendHint`
+  is the one join point a caller with both a composed system prompt and an
+  index's `Hint()` uses — today, `sessionGuard`'s `Create`/`Resume` callers in
+  `internal/supervisor`, not `cmd/gofer`'s three CLI call sites (which build a
+  bare `runner.New`/`Resume` with no gofer tool wiring at all, daemon-absent
+  path only — see "System prompt composition" above).
+- **A session's tool set is fixed at create.** Neither preload nor index mode
+  ever adds or removes a tool from a *live* session's registry — index mode
+  only grows which of the already-indexed tools are *advertised*.
 
 ## MCP servers (M7)
 
@@ -354,7 +503,7 @@ phone-home.
 | **M4 · command views** ✅ shipped 2026-07-15 | slash dispatcher + command panel (`/status`, `/config`, `/model`) + autocomplete + settings registry (`config.Save`) + a TUI redesign wave (global header, bottom-anchored layout, mouse-wheel scroll, cursor-aware input, click-drag selection + OSC 52 copy) | an operator opens `/status`/`/config`/`/model` from the dispatcher and swaps a session's model without leaving the TUI |
 | **M5 · ACP v1 featureset expansion** ✅ shipped 2026-07-25 (on `main`; the `milestone/m5-acp-featureset` integration branch has merged and been deleted). Every committed slice is live end-to-end across SDK → gofer → Agmente; the two carve-outs are image/audio/resource content blocks (modeled, no producer in any repo) and the `available_commands_update`/`current_mode_update` registries, both descoped rather than pending — see the slice list below | cross-repo ACP conformance push (SDK models the blocks, gofer emits them, Agmente decodes) driven by an internal conformance matrix: `usage_update` on `session/update` (SDK v0.6.0 pass-through, [#97](https://github.com/jedwards1230/gofer/pull/97), merged) → rich content/tool-call blocks (`diff` live; image/audio/resource modeled, no producer) → session methods (`session/list`, resume, `set_config_option`, `cwd`) → model discovery + `set_model` → capability stretch (`session_info_update`, `plan`, `available_commands_update`/`current_mode_update`/`config_option_update`). Detail: [ACP v1 featureset expansion](#acp-v1-featureset-expansion-m5) | an ACP client renders live token cost, tool-call blocks, and a model picker — all off the daemon's spec-general `session/update` surface, no client-specific path |
 | **M6 · process isolation** ✅ Phases 0-3 shipped 2026-07-19 and Phase 4 (lifecycle polish) since — [#139](https://github.com/jedwards1230/gofer/issues/139) (offline resume spawns a fresh worker) and [#140](https://github.com/jedwards1230/gofer/issues/140) (cost/usage aggregation + graceful drain) are both closed; only roster reconciliation edge cases remain unverified. Behind the opt-in, off-by-default `gofer daemon --workers` | thin router daemon + detached per-session `gofer session-worker` processes (worker owns runner + pump + gate + journal + broker; router owns roster/fan-out/discovery/ACP surface); `setsid` detachment + endpoint-file adoption on restart; versioned router↔worker wire (the existing client wire + `gofer/hello`) with in-flight-only skew tolerance; `-local` stays in-process. Design: [docs/milestones/M6-process-isolation.md](milestones/M6-process-isolation.md) | upgrade the daemon binary mid-turn — the running session finishes uninterrupted on the old worker binary, the next session runs the new one; `session/list` shows mixed binary versions |
-| **M7 · ecosystem** 🚧 in flight — the current milestone | MCP on by default (schemas preload by default; tool-search index mode is opt-in) + subagents first-class (roster tree, peek/attach into children, linked journals) + skills + plugin UX. **Subagents are partly shipped**: the parent/child primitive, roster tree, drill-in, and per-tool-call agent attribution landed 2026-07-21 ([#204](https://github.com/jedwards1230/gofer/pull/204)/[#207](https://github.com/jedwards1230/gofer/pull/207)/[#208](https://github.com/jedwards1230/gofer/pull/208)), operator-driven only via `gofer run --parent/--agent`. Agent-initiated spawn ([#260](https://github.com/jedwards1230/gofer/issues/260)) is blocked on the SDK spawn seam (agent-sdk-go#90). **MCP servers are wired** (`internal/mcpconn` — see [MCP servers (M7)](#mcp-servers-m7)); skills and plugin UX are not started | a third-party plugin adds a tool with one config line |
+| **M7 · ecosystem** 🚧 in flight — the current milestone | MCP on by default (schemas preload by default; tool-search index mode is opt-in) + subagents first-class (roster tree, peek/attach into children, linked journals) + skills + plugin UX. **Subagents are partly shipped**: the parent/child primitive, roster tree, drill-in, and per-tool-call agent attribution landed 2026-07-21 ([#204](https://github.com/jedwards1230/gofer/pull/204)/[#207](https://github.com/jedwards1230/gofer/pull/207)/[#208](https://github.com/jedwards1230/gofer/pull/208)), operator-driven only via `gofer run --parent/--agent`. Agent-initiated spawn ([#260](https://github.com/jedwards1230/gofer/issues/260)) is blocked on the SDK spawn seam (agent-sdk-go#90). **Skills shipped**: config-driven `SKILL.md` discovery, progressive disclosure, and project-beats-global precedence (`internal/skillset`) — see [Skills](#skills-m7). **MCP servers are wired** (`internal/mcpconn` — see [MCP servers (M7)](#mcp-servers-m7)); plugin UX is not started | a third-party plugin adds a tool with one config line |
 | M8 · auto + polish | auto mode (reviewer pipeline), CC-asset import, mDNS pairing | auto mode survives a week of real ops without a bad allow |
 
 ## ACP v1 featureset expansion (M5)

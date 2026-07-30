@@ -70,6 +70,12 @@ const (
 	// and vanishes the instant the turn finishes, so it never belongs to the
 	// durable item list or the exit-flushed transcript.
 	itemThinking
+	// itemSessionCompacted marks a context-compaction boundary — the
+	// transcript record of an event.SessionCompacted, automatic or
+	// explicit (`/compact`). This is the ONE requirement compaction ships
+	// under: it must be VISIBLE, never a silent context swap (see
+	// [Model.renderSessionCompactedLines]).
+	itemSessionCompacted
 )
 
 // spawnedAgent is one child session named by an [itemBackgroundAgents] block:
@@ -129,6 +135,16 @@ type item struct {
 	// inContext flag drives the block's disposition LABEL only — what actually
 	// reaches the model is [App.composePrompt]'s call, never this copy.
 	shell shellRun
+
+	// compactMessagesCompacted/compactModel/compactUsage/compactSummary are
+	// itemSessionCompacted-only: what an event.SessionCompacted reported (see
+	// its doc). compactModel is "" when the summarization strategy made no
+	// model call, in which case compactUsage is also the zero value and the
+	// render omits the token line entirely rather than showing zeros.
+	compactMessagesCompacted int
+	compactModel             string
+	compactUsage             provider.Usage
+	compactSummary           string
 }
 
 // Model is gofer's minimal attach surface. It is immutable from the
@@ -499,10 +515,26 @@ func (m Model) Ingest(e event.Event) Model {
 			m.pending = nil
 		}
 
+	case event.SessionCompacted:
+		// Compaction moves the session's context boundary — the ONE event
+		// this package renders unconditionally as a durable transcript item,
+		// automatic trigger or explicit `/compact` alike: an operator must be
+		// able to see that it happened, what it replaced, and roughly what it
+		// cost, never infer it from the conversation just getting shorter.
+		// See [Model.renderSessionCompactedLines] for what actually renders.
+		m.items = append(m.items, item{
+			kind:                     itemSessionCompacted,
+			compactMessagesCompacted: ev.MessagesCompacted,
+			compactModel:             ev.Model,
+			compactUsage:             ev.Usage,
+			compactSummary:           ev.Summary,
+			done:                     true,
+		})
+
 		// event.SessionCreated, event.SessionResumed, event.SessionForked,
-		// event.SessionCompacted, event.SessionKilled, and
-		// event.SessionArchived carry no transcript-visible state in the
-		// minimal attach surface; they fall through untouched.
+		// event.SessionKilled, and event.SessionArchived carry no
+		// transcript-visible state in the minimal attach surface; they fall
+		// through untouched.
 	}
 
 	return m
@@ -1609,6 +1641,9 @@ func (m Model) renderItemLines(it item, width int) []string {
 	case itemBackgroundAgents:
 		return m.renderBackgroundAgentLines(it)
 
+	case itemSessionCompacted:
+		return m.renderSessionCompactedLines(it)
+
 	case itemShellRun:
 		return m.renderShellRunLines(it.shell)
 
@@ -1890,6 +1925,56 @@ func (m Model) renderBackgroundAgentLines(it item) []string {
 		glyph:  m.theme.GlyphAgent,
 		header: header,
 		rows:   rows,
+	})
+}
+
+// renderSessionCompactedLines renders an itemSessionCompacted block: what an
+// event.SessionCompacted reported, through the same accent-styled
+// [contentBlock] grammar [Model.renderBackgroundAgentLines] uses — a
+// structural event, not a state to color success/failure. The header names
+// WHAT REPLACED WHAT ("N messages replaced with a summary"); when the
+// summarization strategy made a model call, a muted token/model line follows;
+// then the summary text itself (bounded like a tool result), so an operator
+// can see roughly what the new context actually contains, not merely that a
+// swap happened.
+//
+// The token line labels its "before" figure an ESTIMATE, explicitly. It is
+// [event.SessionCompacted]'s Usage.InputTokens (+ CacheReadTokens) — the
+// closest available measurement without a local tokenizer, since the provider
+// tokenized exactly that content to answer the summarizer's call. But it is
+// the SUMMARIZER's own call, which sends the folded messages PLUS the
+// compaction instructions (and possibly a system block) — see
+// runner.Runner.Compact's doc — so it measures context-plus-overhead, not
+// context alone. Presenting it as an exact figure would be exactly the
+// "quietly derived number rendered as measured fact" class of bug this
+// project has been bitten by before; the "~" and "estimate" qualifier are
+// load-bearing, not decoration.
+func (m Model) renderSessionCompactedLines(it item) []string {
+	header := fmt.Sprintf("Context compacted — %s replaced with a summary",
+		plural(it.compactMessagesCompacted, "message"))
+
+	var rows []blockRow
+	if it.compactModel != "" {
+		footprint := it.compactUsage.InputTokens + it.compactUsage.CacheReadTokens
+		muted := func(s string) string { return m.theme.MutedStyle().Render(s) }
+		rows = append(rows, blockRow{
+			text: fmt.Sprintf("~%d in (est., incl. overhead) → %d out · %s",
+				footprint, it.compactUsage.OutputTokens, it.compactModel),
+			render: muted,
+		})
+	}
+	if summary := strings.TrimSpace(it.compactSummary); summary != "" {
+		for _, l := range strings.Split(summary, "\n") {
+			rows = append(rows, blockRow{text: l})
+		}
+	}
+
+	return m.renderBlock(contentBlock{
+		marker:  m.theme.AccentStyle(),
+		glyph:   m.theme.GlyphAgent,
+		header:  header,
+		rows:    rows,
+		maxBody: 6,
 	})
 }
 

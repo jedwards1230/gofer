@@ -11,9 +11,13 @@ func TestSkillsDirectories(t *testing.T) {
 	root, cwd := "/store/root", "/work/cwd"
 
 	got := (config.Skills{}).Directories(root, cwd)
+	// Project (cwd) FIRST: skill.Load is first-directory-wins (PATH-style),
+	// so the project directory must lead the list for a same-named project
+	// skill to beat a global one — see Directories' doc for why this order
+	// is precedence, not just a search list.
 	want := []string{
-		filepath.Join(root, "skills"),
 		filepath.Join(cwd, ".gofer", "skills"),
+		filepath.Join(root, "skills"),
 	}
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("Directories() unset = %v, want %v", got, want)

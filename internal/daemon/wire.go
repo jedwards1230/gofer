@@ -246,6 +246,18 @@ type sessionInfoDTO struct {
 	ParentID string `json:"parentId,omitempty"`
 	Agent    string `json:"agent,omitempty"`
 	Depth    int    `json:"depth,omitempty"`
+	// LastUsage is the most recently completed turn's token usage in the
+	// session's current folded context (see [supervisor.SessionInfo.LastUsage])
+	// — the measured proxy for how full the context window is right now,
+	// distinct from the ACCUMULATED Usage above. Additive field: an older
+	// client decoding this DTO simply never reads it.
+	LastUsage provider.Usage `json:"lastUsage"`
+	// ContextWindow is the active model's context-window size in tokens,
+	// resolved server-side via provider.Lookup (see
+	// [supervisor.SessionInfo.ContextWindow]) — 0 when unknown. Additive and
+	// omitempty: 0 is also the correct "unknown" value an older client's
+	// absence of this field would imply.
+	ContextWindow int `json:"contextWindow,omitempty"`
 }
 
 func toSessionInfoDTO(info supervisor.SessionInfo) sessionInfoDTO {
@@ -268,6 +280,8 @@ func toSessionInfoDTO(info supervisor.SessionInfo) sessionInfoDTO {
 		ParentID:      info.ParentID,
 		Agent:         info.Agent,
 		Depth:         info.Depth,
+		LastUsage:     info.LastUsage,
+		ContextWindow: info.ContextWindow,
 	}
 }
 
@@ -542,6 +556,28 @@ func decodeSetEffortParams(params json.RawMessage) (setEffortParams, *rpcError) 
 	}
 	if req.SessionID == "" {
 		return setEffortParams{}, invalidParamsMsg(methodGoferSetEffort + ": sessionId is required")
+	}
+	return req, nil
+}
+
+// compactParams is the params shape of gofer/compact: {sessionId, instructions}.
+type compactParams struct {
+	SessionID    string `json:"sessionId"`
+	Instructions string `json:"instructions"`
+}
+
+// decodeCompactParams decodes gofer/compact's params, rejecting only a
+// missing sessionId. Like decodeSetEffortParams and unlike
+// [decodeSetModelParams], an empty instructions is a legitimate request —
+// [supervisor.Supervisor.Compact] forwards "" to the SDK, which resolves it
+// to [runner.DefaultCompactionInstructions] — not a malformed one.
+func decodeCompactParams(params json.RawMessage) (compactParams, *rpcError) {
+	var req compactParams
+	if err := json.Unmarshal(params, &req); err != nil {
+		return compactParams{}, invalidParams(err)
+	}
+	if req.SessionID == "" {
+		return compactParams{}, invalidParamsMsg(methodGoferCompact + ": sessionId is required")
 	}
 	return req, nil
 }

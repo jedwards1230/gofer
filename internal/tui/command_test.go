@@ -220,15 +220,36 @@ func TestPanelConfigEditPersistsViaSaveConfig(t *testing.T) {
 	m, _ = m.Update(m.Init()())
 
 	m = dispatchSlash(t, m, "/config")
-	// session.model, session.effort, session.permission_mode, tui.roster_view,
-	// tui.autoscroll, tui.mouse, tui.shell_reply_mode, lsp.enabled,
-	// telemetry.enabled — nine ↓ presses (the first selects row 0) land on
-	// telemetry.enabled, a bool row that saves on Enter with no further input
-	// needed. This package can't read the unexported registry to derive the
-	// count (config_view_test.go's downPressesTo does), so the row list above
-	// is the thing to update when a setting is added ahead of
-	// telemetry.enabled — the assertions below fail loudly if it isn't.
-	for i := 0; i < 9; i++ {
+	// rowOrder mirrors settingsRegistry()'s full row order by key. This
+	// package can't read the unexported registry to derive the press count
+	// the way config_view_test.go's downPressesTo does, so rowOrder is a
+	// second, independent source of truth this test cross-checks against the
+	// real registry (via tui.SettingsRegistryLen) below — a stale rowOrder
+	// does not fail loudly on its own, it silently re-points every
+	// navigation assertion at the wrong row.
+	rowOrder := []string{
+		"session.model", "session.effort", "session.permission_mode",
+		"tui.roster_view", "tui.autoscroll", "tui.mouse", "tui.shell_reply_mode",
+		"compaction.enabled", "lsp.enabled", "tools.schema_mode", "search.provider",
+		"telemetry.enabled", "telemetry.endpoint",
+	}
+	if got, want := len(rowOrder), tui.SettingsRegistryLen(); got != want {
+		t.Fatalf("rowOrder has %d entries but settingsRegistry() has %d — add the new row to rowOrder in TestPanelConfigEditPersistsViaSaveConfig", got, want)
+	}
+	// telemetry.enabled is a bool row that saves on Enter with no further
+	// input needed; the down-press count to reach it is rowOrder's index of
+	// it plus one (the first press selects row 0).
+	target := -1
+	for i, key := range rowOrder {
+		if key == "telemetry.enabled" {
+			target = i
+			break
+		}
+	}
+	if target < 0 {
+		t.Fatalf("rowOrder has no %q entry", "telemetry.enabled")
+	}
+	for i := 0; i <= target; i++ {
 		m = press(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})

@@ -110,11 +110,16 @@ func runResume(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 		return driveDaemonSession(ctx, daemonClient, "resume", id, cwd, prompt, subagentLink{}, *asJSON, stdout, stderr)
 	}
 
+	composed, err := resolveSystemPrompt(rootDir, cwd, stderr)
+	if err != nil {
+		return err
+	}
+
 	r, err := runner.Resume(ctx, id, runner.Options{
 		Root:   rootDir,
 		Cwd:    cwd,
 		Model:  modelID,
-		System: defaultSystemPrompt,
+		System: composed.Text,
 	})
 	if err != nil {
 		// runner.Resume's errors are already contextual (a "runner: …"
@@ -123,6 +128,7 @@ func runResume(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 		// gofer's 'gofer login' remediation back.
 		return wrapCredentialHint(err)
 	}
+	recordPromptProvenance(r.ID(), r.JournalPath(), composed, stderr)
 
 	_, _ = fmt.Fprintf(stderr, "gofer resume: session %s\n", r.ID())
 	_, _ = fmt.Fprintf(stderr, "gofer resume: journal %s\n", r.JournalPath())

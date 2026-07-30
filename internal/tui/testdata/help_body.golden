@@ -1,5 +1,7 @@
 Commands
+  /compact                         Summarize this session's history and replace…
   /config                          View and edit settings (/cfg)
+  /context                         Show how full this session's context window …
   /help                            List commands and keys
   /model [id]                      Pick the active/default model
   /new                             Start a new session and attach to it

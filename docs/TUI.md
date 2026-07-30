@@ -1565,6 +1565,18 @@ immediately, no separate save step. Esc is two-stage: it cancels an
 in-progress edit or clears the filter before a second Esc closes the panel.
 Pure local: reads/writes `config.json` only, no auth path at all.
 
+**M7 additions**: `lsp.enabled` (bool), `tools.schema_mode` (enum:
+`preload`/`index` — the resident-vs-tool_search toggle) and `search.provider`
+(enum: `none`/`brave`/`searxng`) joined the registry. Numeric knobs
+(`lsp.timeout_ms`, `tools.summary_bytes`, `search.max_results`, …) and
+`SecretRef` fields (`search.brave.api_key`, …) stay `config.json`-only —
+`SettingKind` has no numeric or secret-reference affordance, and a secret
+belongs in an env var or a file, never typed through this panel. The
+registry's growth is the reason `panelBodyRows` (`panel.go`) sizes to the
+Config tab's row count rather than the Model tab's catalog — `configView` has
+no scroll-to-selected, so every registered setting needs a budgeted row or it
+is simply unreachable through the panel.
+
 **Built (M4 step 4)**: `modelpicker.go` is the real `/model` body: the SDK's
 static catalog (`provider.Models()`/`provider.Lookup`) filtered to the
 providers `CommandEnv.Auth()` reports authenticated (the same seam
@@ -2076,17 +2088,25 @@ input — and it is **leading-only**, so `that worked!` and
   it with its own file tools if it wants more. The trigger is a token
   boundary, so an email address never opens the popup.
 
-- **P0**: `/compact [instructions]` (block-if-busy) — **still blocked on the
-  SDK** as of the pinned `v0.19.0` (tracked as agent-sdk-go#89). The SDK
-  ships the `session.compact` op and `session.compacted` event as data types and
-  a `session.NewCompactionEntry` journal entry, but no way for an embedder to
-  TRIGGER compaction. There is no `Runner.Compact`, no compaction option on
-  `runner.Options` or the loop, and `Runner` keeps its `*session.Journal`
-  unexported with no accessor — so gofer cannot summarize-and-append without
-  reaching around the contract (invariant #1). Unblocked by a runner-level
-  entrypoint, e.g. `func (r *Runner) Compact(ctx context.Context, instructions
-  string) error` that folds the history, appends the compaction entry, and emits
-  `session.compacted`.
+**Built (M7 — compaction)**: `/compact [instructions]` (`compact.go`) and
+`/context` (`context.go`, gofer#177), both landing once the SDK's
+`Runner.Compact` seam unblocked them (agent-sdk-go#89, resolved in the pinned
+build). `/compact` is idle-only (block-if-busy, like `/kill`/`/archive`) and
+carries no `ArgHint` — every string is a valid instruction, the same reason
+`/new` declines one — forwarding args space-joined to
+`Supervisor.Compact`; success is reported OPTIMISTICALLY (a "Compacting
+context…" status note before the async call resolves) since the real visible
+effect is the `session.compacted` transcript block Ingest appends once it
+actually arrives (model.go, `itemSessionCompacted` — accent-styled like the
+background-agents summary, never silent: message count, a `~before → after`
+token line explicitly labeled an *estimate*, the model, and the summary text).
+`/context` opens the command-panel Context tab (`panelContext`, between Stats
+and Resume): a fill bar plus in-use/free token counts read off
+`SessionInfo.LastUsage`/`ContextWindow` — the SAME measured figures the
+automatic trigger uses, not a tokenizer-derived category breakdown (gofer#177's
+full grid stays blocked on the tokenizer primitive it names as a prerequisite)
+— plus the configured auto-compaction threshold. `ContextWindow == 0`
+(unregistered model) renders counts only, never a fabricated percentage.
 - **P1**: `/init` (first-run project context) · `/fork` · `/tree` ·
   `/export html|jsonl` · `/login` · runtime `registerCommand` from plugins ·
   `/skill:name` · `/name` · `/session` (id, path, per-model tokens/cost).

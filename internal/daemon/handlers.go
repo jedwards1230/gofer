@@ -37,6 +37,13 @@ const (
 	// kind of control-plane mutation and travel the same road.
 	methodGoferSetEffort = "gofer/set_effort"
 
+	// methodGoferCompact mirrors [supervisor.Supervisor.Compact]: it replaces
+	// a session's history up to HEAD with a summary. Gofer-native, not an ACP
+	// op — the SDK's Event/Op contract carries the RESULT
+	// (event.SessionCompacted) but no op to trigger it. Idle-only, like
+	// gofer/kill and gofer/archive.
+	methodGoferCompact = "gofer/compact"
+
 	// methodGoferFleet is gofer-native fleet-wide usage: the summed Cost/Usage
 	// across every LIVE session, aggregated by the hosted supervisor (see
 	// [FleetUsager]). With sessions in separate worker processes under M6, no
@@ -176,6 +183,7 @@ var methodTable = map[string]methodHandler{
 	methodGoferHello:    handleGoferHello,
 
 	methodGoferSetEffort: handleGoferSetEffort,
+	methodGoferCompact:   handleGoferCompact,
 
 	methodPermissionReply: handlePermissionReply,
 	methodDecisionAnswer:  handleDecisionAnswer,
@@ -1755,5 +1763,30 @@ func handleGoferSetEffort(d *Daemon, ctx context.Context, _ *peer, params json.R
 		return nil, appError(err)
 	}
 	d.log.Info("session effort set", "session", req.SessionID, "effort", req.Effort)
+	return struct{}{}, nil
+}
+
+// handleGoferCompact answers gofer/compact {sessionId, instructions},
+// replacing the session's history up to HEAD with a summary (see
+// [supervisor.Supervisor.Compact]). [supervisor.ErrNotLive] (unknown
+// session), [supervisor.ErrRunning] (a turn in flight or queued work), and
+// [runner.ErrNothingToCompact] (nothing to summarize) all surface as clear
+// application errors naming the reason — the concrete sentinel types do not
+// cross the wire (see internal/daemonbridge's Compact doc), the messages do.
+//
+// Nothing is advertised afterward: the caller learns what happened from the
+// must-deliver session.compacted event this call causes the daemon to
+// publish, which reaches every attached peer through the normal event
+// broadcast (handleSessionPrompt's per-event fan-out) — the same path a live
+// turn's events already take, not a second mechanism this handler invents.
+func handleGoferCompact(d *Daemon, ctx context.Context, _ *peer, params json.RawMessage) (any, *rpcError) {
+	req, rerr := decodeCompactParams(params)
+	if rerr != nil {
+		return nil, rerr
+	}
+	if err := d.sup.Compact(ctx, req.SessionID, req.Instructions); err != nil {
+		return nil, appError(err)
+	}
+	d.log.Info("session compacted", "session", req.SessionID)
 	return struct{}{}, nil
 }

@@ -75,6 +75,22 @@ func TestHuman(t *testing.T) {
 			want:   "· session.error  boom\n",
 		},
 		{
+			name: "session compacted",
+			events: []event.Event{
+				event.NewSessionCompacted(sid, "entry-9", 4, "claude-sonnet-5",
+					provider.Usage{InputTokens: 4000, OutputTokens: 200}, "condensed summary"),
+			},
+			want: "· session.compacted  4 messages replaced with a summary\n",
+		},
+		{
+			name: "session compacted, singular",
+			events: []event.Event{
+				event.NewSessionCompacted(sid, "entry-1", 1, "claude-sonnet-5",
+					provider.Usage{InputTokens: 100, OutputTokens: 20}, "summary"),
+			},
+			want: "· session.compacted  1 message replaced with a summary\n",
+		},
+		{
 			// event.MessageUser (the user's own prompt) never deltas — see its
 			// doc — so unlike reasoning/text, MessageStarted writes nothing and
 			// the settled MessageFinished is the only content this renderer

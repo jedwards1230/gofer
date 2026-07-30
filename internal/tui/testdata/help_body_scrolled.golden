@@ -8,4 +8,6 @@ Roster
   ↑/↓        Move the roster selection
   enter      Open the selected session, or run what's typed
   →          Open the selected session (empty dispatch bar)
-↑ 10 more · ↓ 62 more
+  space      Peek the selected session (empty dispatch bar)
+  tab        Switch flat / grouped roster view
+↑ 12 more · ↓ 60 more
