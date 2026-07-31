@@ -49,6 +49,7 @@ go build ./... && go vet ./... && go test ./...   # the CI gate
 go vet -tags workerbench ./...                     # also on the PR lane
 golangci-lint run                                  # lint, zero tolerance
 go test -race ./...                                # PR lane + push/tags
+scripts/bench.sh --check                           # allocation-regression gate (PR lane)
 go run ./cmd/gofer demo                            # offline faux-provider stream
 make install                                       # local install, truthfully version-stamped (never bare `go install`)
 ```

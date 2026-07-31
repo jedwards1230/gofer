@@ -1,0 +1,24 @@
+# gofer benchmark baseline: <name> <allocs/op> <B/op> [allocs-only]
+# Regenerate with scripts/bench.sh --update. Gating: scripts/bench.sh --check.
+# ns/op is deliberately absent — see the header of scripts/bench.sh.
+# A 4th field of 'allocs-only' gates that benchmark on allocs/op only
+# (concurrent benchmarks: their B/op is scheduling-dependent).
+BenchmarkAppRenderMassiveTranscript 40017 2034168
+BenchmarkBroadcastRawEvent/message_delta/peers=1 15 1048 allocs-only
+BenchmarkBroadcastRawEvent/message_delta/peers=32 234 13776 allocs-only
+BenchmarkBroadcastRawEvent/message_delta/peers=8 65 3920 allocs-only
+BenchmarkBroadcastRawEvent/tool_call_finished/peers=1 17 2424 allocs-only
+BenchmarkBroadcastRawEvent/tool_call_finished/peers=32 237 33520 allocs-only
+BenchmarkBroadcastRawEvent/tool_call_finished/peers=8 66 16856 allocs-only
+BenchmarkOverviewRoster/sessions=100 22450 2498352
+BenchmarkOverviewRoster/sessions=30 6762 737696
+BenchmarkOverviewRoster/sessions=500 112056 12253104
+BenchmarkOverviewRosterJournalDepth/turns=256 170446 18014256
+BenchmarkOverviewRosterJournalDepth/turns=64 43722 4800464
+BenchmarkOverviewRosterJournalDepth/turns=8 6762 739664
+BenchmarkTranscriptIngest/turns=100 1442 4557072
+BenchmarkTranscriptIngest/turns=1000 14089 372586448
+BenchmarkTranscriptIngest/turns=5000 70664 9094293648
+BenchmarkTranscriptView/turns=100 806 40192
+BenchmarkTranscriptView/turns=1000 8007 419264
+BenchmarkTranscriptView/turns=5000 40008 2189248

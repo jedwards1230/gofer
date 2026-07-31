@@ -23,11 +23,64 @@ go vet ./...
 go vet -tags workerbench ./...
 go test ./...
 golangci-lint run
+scripts/bench.sh --check
 ```
 
 `go test -race ./...` runs on every PR and on push to `main` / release tags.
 Still run it locally before anything touching concurrency so you catch a race
 before CI does — but a data race now blocks the PR, not just the release.
+
+[`docs/TESTING.md`](docs/TESTING.md) is the full map of what gofer verifies and
+what each layer is blind to. Read it before adding a test of a kind you haven't
+written here before — picking the wrong layer is how you end up with a test that
+looks thorough and proves nothing.
+
+## Performance is a gate, not a follow-up
+
+`scripts/bench.sh --check` runs on every PR and **fails on allocation
+regressions** against the committed `bench/baseline.txt`.
+
+This exists because every other check in this repo passes just as happily
+against an accidentally quadratic implementation. Both of the performance bugs
+found so far — the roster re-reading every journal on every one-second tick
+(gofer#298) and `Model.Ingest` deep-copying the whole transcript per event
+(gofer#308, 1.6s and ~9 GB to open a 5,000-turn session) — were invisible to the
+entire correctness suite and surfaced only when a user said it felt slow.
+
+- **Add a benchmark when your change touches anything whose cost grows** with
+  session count, transcript length, or attached client count.
+- **Sweep the axis; never report one number.** A single point cannot distinguish
+  linear from quadratic, and the question is always "what happens as this grows".
+  Where two axes exist, sweep them separately — a fix that flattens one and not
+  the other looks complete against a combined benchmark.
+- **The gate is allocations only** (`allocs/op`, `B/op`), never wall-clock:
+  ns/op on a shared runner is too noisy for a threshold that both catches
+  regressions and avoids false alarms, and a gate that cries wolf gets ignored.
+  Concurrent benchmarks are marked `allocs-only` in the baseline and skip the
+  `B/op` half — at one iteration their byte total is decided by goroutine
+  scheduling and swings ~200% with no code change.
+- **A legitimate cost increase means updating the baseline** —
+  `scripts/bench.sh --update` — and saying in the PR why the extra work is worth
+  it. The baseline is committed precisely so that argument happens in review
+  rather than silently.
+- Narrow it while iterating: `BENCH_PKGS=./internal/tui/ scripts/bench.sh --check`.
+
+## A green test is not evidence until you have seen it go red
+
+Before treating a new test as proof, **mutation-test it**: break the thing under
+test and confirm the check fails. A mutation only counts if the mutated tree
+still **builds** and the **named** test fails — a compile error proves nothing
+about your assertion, and a mutation that matched nothing leaves the suite
+passing vacuously.
+
+Two traps this repo has actually hit: an assertion whose *shape* doesn't match
+the property (a timeout is a ceiling, not a floor, so "assert it takes ≥3s" tests
+nothing against a fast-failing dependency), and a harness that cannot express the
+failure (`tea.Batch` arrives at `App.Update` as a `tea.BatchMsg` it has no case
+for, so the one-Cmd test helpers swallow it and the test goes quietly vacuous
+rather than red).
+
+`docs/TESTING.md` has the longer list.
 
 ## Local install
 

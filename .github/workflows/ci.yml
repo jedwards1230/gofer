@@ -36,6 +36,23 @@ jobs:
       # silently and stop being runnable at the commit its baseline names.
       - run: go vet -tags workerbench ./...
 
+  # Allocation regression gate. Benchmarks are the only signal that catches the
+  # failure mode this repo actually hits — work that scales with session count or
+  # transcript length (gofer#298, gofer#308), which stays invisible to every
+  # correctness test until a user reports the TUI feeling slow.
+  #
+  # It gates on allocs/op and B/op ONLY, never wall-clock: ns/op on a shared
+  # runner is too noisy for a threshold that both catches regressions and does
+  # not cry wolf, and a gate that cries wolf gets ignored. See scripts/bench.sh.
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: scripts/bench.sh --check
+
   lint:
     runs-on: ubuntu-latest
     steps:
