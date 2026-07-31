@@ -322,6 +322,19 @@ type Supervisor interface {
 	// key is only reachable while the banner is up, so that path is unreached.
 	RestartDaemon(ctx context.Context) error
 
+	// DaemonVersion reports the build version of the daemon this Supervisor is
+	// currently connected to — the value a fresh gofer/hello handshake would
+	// answer, best-effort and non-blocking (it never dials on its own). "" means
+	// unknown, including on a backend with no separate daemon to ask (the local
+	// in-process supervisor, which never shows the banner this exists for).
+	//
+	// It exists so [App]'s daemonRestartMsg handler can refresh
+	// OverviewMeta.DaemonVersion after RestartDaemon swaps in a fresh
+	// connection: that seed value is otherwise a one-shot snapshot taken before
+	// [NewApp] and never updated, so the stale-daemon banner (skewSeparator)
+	// would keep warning about a daemon the restart already replaced.
+	DaemonVersion() string
+
 	// Compact replaces sessionID's history up to HEAD with a summary — the
 	// backend for the explicit `/compact` command (command.go). instructions
 	// is forwarded verbatim; "" uses the SDK's own default. It is idle-only

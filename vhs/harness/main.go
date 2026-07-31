@@ -390,3 +390,6 @@ func (s *vhsSupervisor) AnswerDecision(context.Context, string, string, []acp.De
 }
 
 func (s *vhsSupervisor) RestartDaemon(context.Context) error { return nil }
+
+// DaemonVersion answers "": no tape drives the stale-daemon banner's restart.
+func (s *vhsSupervisor) DaemonVersion() string { return "" }

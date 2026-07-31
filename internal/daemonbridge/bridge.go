@@ -87,12 +87,19 @@ type Supervisor struct {
 	reconnect func(ctx context.Context) (*daemon.Client, error)
 }
 
-// conn is one live connection: the reconstruction core and the client it drives.
-// core owns the client's lifecycle (Close), so closing the core closes the
-// client and joins its demuxer goroutine.
+// conn is one live connection: the reconstruction core and the client it
+// drives. core owns the client's lifecycle (Close), so closing the core closes
+// the client and joins its demuxer goroutine.
 type conn struct {
 	core   *wirestream.Reconstructor
 	client *daemon.Client
+	// version is this connection's daemon build, per [Supervisor.DaemonVersion].
+	// It is populated on the [RestartDaemon] path (the caller who dialed the
+	// INITIAL connection already knows its version off the same gofer/hello
+	// handshake, and seeds [tui.OverviewMeta.DaemonVersion] with it directly —
+	// see cmd/gofer's daemonBinaryVersion), so it is empty on the connection
+	// [New] builds and only ever read after a successful restart.
+	version string
 }
 
 // Supervisor satisfies the TUI's consumer interface. Failing this assertion
@@ -157,11 +164,34 @@ func (s *Supervisor) RestartDaemon(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("daemonbridge: restart daemon: %w", err)
 	}
-	old := s.conn.Swap(&conn{core: wirestream.New(client), client: client})
+	old := s.conn.Swap(&conn{core: wirestream.New(client), client: client, version: helloBinaryVersion(ctx, client)})
 	if old != nil {
 		_ = old.core.Close()
 	}
 	return nil
+}
+
+// helloBinaryVersion reads client's build version off gofer/hello,
+// best-effort — the daemonbridge-side twin of cmd/gofer's daemonBinaryVersion,
+// used here to populate the replacement connection's [conn.version] so
+// [Supervisor.DaemonVersion] can answer with it after a restart. A daemon that
+// fails to answer (or predates the field) yields "", which the header's skew
+// comparison treats as unknown rather than stale — a header detail must never
+// keep the restart from completing.
+func helloBinaryVersion(ctx context.Context, c *daemon.Client) string {
+	hello, err := c.Hello(ctx)
+	if err != nil {
+		return ""
+	}
+	return hello.BinaryVersion
+}
+
+// DaemonVersion reports the build version of the daemon this Supervisor is
+// currently connected to, as of the last successful [RestartDaemon] — empty
+// before any restart (the caller who built the initial connection already
+// knows that version from the same handshake; see [conn.version]'s doc).
+func (s *Supervisor) DaemonVersion() string {
+	return s.cur().version
 }
 
 // statusFromWire maps the daemon's roster Status string — literally
