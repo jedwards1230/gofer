@@ -102,6 +102,46 @@ bot has no memory across pull requests, but this file does.
 - An automated code review runs on each PR; address and resolve its threads
   like any other review.
 
+## Capture new TUI states as VHS tapes, as you go
+
+**A PR that adds or changes a visible TUI state should add or update a
+`vhs/*.tape` in the same PR.** Not as a follow-up, and not "once it settles" —
+a state nobody captured is a state nobody can review, and the tape is cheapest
+to write while the state is fresh in your head.
+
+The reason is a gap, not a ritual. The Ascii golden tests are authoritative for
+*text*, but they render `termenv.Ascii`: they cannot see colour, and by
+construction they miss ANSI-width bugs (the #61 colour-scatter regression
+shipped past green goldens). Anything whose meaning lives in colour, styling, or
+motion — a highlight that shifts to signal a pending confirm, a muted
+in-progress indicator, a marker that changes hue — is invisible to them. That is
+precisely what a tape is for.
+
+Practical notes, learned the hard way:
+
+- **Capture a state change as a before/after PAIR.** One frame of the new state
+  shows a colour; it cannot show a *change*. The pair is also what makes the
+  tape sensitive to your feature at all — if both frames would look identical
+  without it, the tape is decoration. See `roster-delete-confirm.tape`.
+- **Make the frame deterministic.** `vhs-baseline.yml` re-renders every tape on
+  each push to `main` and commits the key-frames, so anything time-varying
+  churns the baseline forever (gofer#297). If the state shows a live counter,
+  capture it mid-bucket rather than on a boundary — `transcript-compacting.tape`
+  works this way, and it is why the elapsed counter truncates instead of
+  rounding.
+- **A state that only exists mid-call needs the harness to hold that call.**
+  Against a canned Supervisor that returns instantly, an in-flight indicator
+  appears and vanishes inside one frame with nothing to photograph. See
+  `vhsSupervisor.compactHold`.
+- **Reuse an existing scenario when only the driving keys differ** — most tapes
+  need no new harness scenario at all (`roster-peek`, `roster-delete-confirm`).
+- **Look at the rendered frame before committing it.** A tape that runs
+  successfully can still produce a blank, stale, or wrong-screen capture, and it
+  will do so silently.
+
+Tapes are advisory — never a merge gate. `vhs/README.md` has the full tape
+inventory and `scripts/tui-vhs.sh` the render workflow.
+
 ## Documentation
 
 Keep documentation current as part of the change, not as a follow-up — update

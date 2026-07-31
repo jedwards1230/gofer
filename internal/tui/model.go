@@ -1711,8 +1711,16 @@ func (m Model) renderItemLines(it item, width int) []string {
 		// slow compaction from a hung one, so it is not decoration: compaction
 		// streams nothing at all, making elapsed time the ONLY evidence of
 		// progress there is.
+		// TRUNCATED, not rounded, because this is a stopwatch: a stopwatch reads
+		// "2s" for the whole of the third second, and rounding would make it
+		// read AHEAD of reality — flipping to "3s" at 2.5s elapsed, claiming
+		// time that has not passed. (It also puts a fixed-delay screen capture
+		// dead-centre in a bucket instead of on its boundary, which is what lets
+		// vhs/transcript-compacting.tape pin a stable frame; the tracked
+		// snapshot baseline re-renders on every push to main, so a frame that
+		// straddled a boundary would churn forever — see gofer#297.)
 		muted := m.theme.MutedStyle()
-		elapsed := time.Since(it.compactingSince).Round(time.Second)
+		elapsed := time.Since(it.compactingSince).Truncate(time.Second)
 		return []string{markerLine(muted, "⋯",
 			muted.Render(fmt.Sprintf("compacting context… (%s)", elapsed)))}
 

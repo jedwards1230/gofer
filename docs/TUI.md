@@ -1412,6 +1412,11 @@ human-eye check of real rendered frames, `vhs/` holds on-demand
   the header, block rhythm). `transcript-approval` — a turn ending in the
   inline permission prompt, with a failed call's red error marker and dimmed
   body above it.
+- `transcript-compacting` — the in-progress compaction indicator at the attach
+  transcript's tail. Needs the harness's blocking `Compact`
+  (`vhsSupervisor.compactHold`) for the state to exist long enough to capture,
+  and screenshots mid-second so the truncating counter reads the same on every
+  render.
 - `roster-overview` — the roster with mixed states, showing the status words
   in color (yellow working/awaiting vs green finished) — the state that now
   lives only in color.

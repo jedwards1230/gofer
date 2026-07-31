@@ -19,6 +19,15 @@ Tape/scenario names follow one slug schema, `<area>-<view>[-<state>]`
   `transcript-tool-call-running`, `transcript-tool-call`.
 - `transcript-approval.tape` — a turn ending in the inline permission prompt,
   with a failed tool call's red error marker and dimmed body above it.
+- `transcript-compacting.tape` — compaction in progress: the transient
+  `⋯ compacting context… (Ns)` indicator at the attach transcript's tail while
+  an explicit `/compact` runs. Needs a Supervisor whose `Compact` BLOCKS
+  (`vhsSupervisor.compactHold`) — against the instant-returning Compact every
+  other scene uses, the indicator would appear and vanish inside one frame with
+  nothing to photograph. The screenshot lands MID-second on purpose: the counter
+  truncates, so capturing ~2.5s in sits in the middle of the "2s" bucket rather
+  than on its edge, which is what keeps the tracked baseline from churning
+  (gofer#297). The transcript above is empty, as in every canned-App scene.
 - `roster-overview.tape` — the roster screen with mixed session states,
   capturing the ● status markers in color (yellow working / awaiting input
   incl. the ●2 pending count vs green finished).

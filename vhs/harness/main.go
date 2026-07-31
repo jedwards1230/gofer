@@ -60,7 +60,7 @@ type step struct {
 // vocabulary is spelled out, so the two never drift apart. Slugs follow
 // `<area>-<view>[-<state>]`, kebab-case: transcript-* (the attach scenes),
 // roster-* (the overview scene), panel-* (the command-panel scenes).
-const scenarioHelp = "transcript-tool-call | transcript-approval | roster-overview | panel-status-overview | panel-status | panel-config | panel-model | panel-model-empty | panel-model-daemon-refresh | panel-thinking | panel-usage | panel-stats | panel-help | panel-resume"
+const scenarioHelp = "transcript-tool-call | transcript-approval | transcript-compacting | roster-overview | panel-status-overview | panel-status | panel-config | panel-model | panel-model-empty | panel-model-daemon-refresh | panel-thinking | panel-usage | panel-stats | panel-help | panel-resume"
 
 func main() {
 	scenario := flag.String("scenario", "transcript-tool-call", "scripted scene to play: "+scenarioHelp)
@@ -90,6 +90,11 @@ func main() {
 		// command (and any navigation) that selects which tab is on screen. The
 		// panel-resume scene additionally reads [vhsSupervisor.ListSessions].
 		model = commandViewApp(cannedCommandEnv())
+	case "transcript-compacting":
+		// An attach scene that nonetheless builds the real App, because the
+		// state under capture is reached by DISPATCHING a slash command, not by
+		// replaying an event stream — the tape types /compact itself.
+		model = compactingApp()
 	case "panel-model-empty":
 		model = commandViewApp(emptyCommandEnv())
 	case "panel-model-daemon-refresh":
@@ -232,14 +237,44 @@ func (m overviewModel) View() tea.View {
 // panel-model scene's ✓ active mark is [modelPickerView.activeModel] matching
 // a row's id verbatim, so a display-name shorthand here would silently mark
 // nothing.
+// compactingApp is the transcript-compacting scene: the same canned App every
+// panel-* scene uses, but over a Supervisor whose Compact BLOCKS. The tape
+// attaches to a session and dispatches /compact; the call is still in flight
+// when the screenshot is taken, which is the only way the in-progress
+// indicator exists to be captured at all.
+//
+// The hold is generous relative to the tape's own timeline: it must outlast
+// the capture, and overshooting costs nothing because the tape quits with
+// Ctrl+C long before it elapses (and Compact honors ctx regardless).
+func compactingApp() tea.Model {
+	sup := newVHSSupervisor(cannedSessions())
+	sup.compactHold = 30 * time.Second
+	return commandViewAppOver(cannedCommandEnv(), sup)
+}
+
 func commandViewApp(env tui.CommandEnv) tea.Model {
+	return commandViewAppOver(env, newVHSSupervisor(cannedSessions()))
+}
+
+// cannedSessions is the two-session roster every canned-App scene renders:
+// one working, one awaiting input. Shared rather than inlined so the compaction
+// scene's roster is the SAME roster as the panel scenes' — a scene that quietly
+// rendered a different session set would make its frame incomparable with the
+// rest of the baseline.
+func cannedSessions() []tui.SessionInfo {
 	now := fixedNow
-	sessions := []tui.SessionInfo{
+	return []tui.SessionInfo{
 		{ID: "sess-1", Title: "wire the websocket ACP listener", Summary: "streaming the daemon handshake", Status: tui.StatusWorking, Model: "claude-fable-5", Cwd: "~/orchestration", Updated: now.Add(-30 * time.Second)},
 		{ID: "sess-2", Title: "keycloak path-b groundwork", Summary: "turn finished — awaiting the next prompt", Status: tui.StatusNeedsInput, Model: "claude-sonnet-5", Cwd: "~/orchestration", Updated: now.Add(-5 * time.Minute)},
 	}
-	meta := tui.OverviewMeta{App: "gofer", Version: "0.4.0", Model: "claude-fable-5", Cwd: "~/orchestration", Now: now}
-	return tui.NewApp(theme.Default(), newVHSSupervisor(sessions), meta, env)
+}
+
+// commandViewAppOver builds the canned App over a caller-supplied Supervisor,
+// which is what lets the compaction scene swap in a blocking Compact without
+// duplicating the roster or the meta.
+func commandViewAppOver(env tui.CommandEnv, sup *vhsSupervisor) tea.Model {
+	meta := tui.OverviewMeta{App: "gofer", Version: "0.4.0", Model: "claude-fable-5", Cwd: "~/orchestration", Now: fixedNow}
+	return tui.NewApp(theme.Default(), sup, meta, env)
 }
 
 // cannedCommandEnv is the [tui.CommandEnv] most panel-* scenes read: a fixed
@@ -317,6 +352,15 @@ func daemonRefreshCommandEnv() tui.CommandEnv {
 type vhsSupervisor struct {
 	sessions []tui.SessionInfo
 	broker   *event.Broker
+
+	// compactHold is how long Compact blocks before returning. Zero (every
+	// scene but transcript-compacting) returns immediately, as every other
+	// write op does. The compaction scene needs the opposite: the in-progress
+	// indicator lives exactly as long as the call does, so against an
+	// instant-returning Compact it would appear and vanish inside one frame,
+	// with nothing left to photograph. Holding the call is what makes the state
+	// under capture actually exist.
+	compactHold time.Duration
 }
 
 func newVHSSupervisor(sessions []tui.SessionInfo) *vhsSupervisor {
@@ -360,7 +404,21 @@ func (s *vhsSupervisor) SetModel(context.Context, string, string) error { return
 
 func (s *vhsSupervisor) SetEffort(context.Context, string, string) error { return nil }
 
-func (s *vhsSupervisor) Compact(context.Context, string, string) error { return nil }
+// Compact holds for [vhsSupervisor.compactHold] before succeeding, so the
+// transcript-compacting scene can capture an in-progress compaction. It honors
+// ctx so the tape's Ctrl+C still exits promptly rather than waiting out the
+// hold.
+func (s *vhsSupervisor) Compact(ctx context.Context, _, _ string) error {
+	if s.compactHold == 0 {
+		return nil
+	}
+	select {
+	case <-time.After(s.compactHold):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 func (s *vhsSupervisor) Reply(context.Context, string, string, tui.PermissionDecision) error {
 	return nil
