@@ -4,10 +4,10 @@ Global
   ctrl+c  Quit gofer
   ctrl+y  Toggle guardrails for new sessions (same as /yolo)
   ctrl+a  Select the whole screen and copy it (empty input bar)
+  alt+a   Copy the WHOLE transcript, scrolled-off content included (attach, emp…
   ctrl+r  Toggle reply-on-run for shell commands (reply now / queue)
 Roster
   ↑/↓        Move the roster selection
   enter      Open the selected session, or run what's typed
   →          Open the selected session (empty dispatch bar)
-  space      Peek the selected session (empty dispatch bar)
-↑ 12 more · ↓ 61 more
+↑ 12 more · ↓ 62 more

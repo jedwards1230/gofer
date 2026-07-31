@@ -297,6 +297,41 @@ func (a App) selectAll() (App, tea.Cmd) {
 	return a, tea.SetClipboard(text)
 }
 
+// copyTranscript copies the WHOLE transcript — every item, regardless of what
+// the viewport currently shows — to the system clipboard.
+//
+// It exists because selection is viewport-only: [App.selectAll] spans the
+// composed FRAME, so even selecting everything on screen cannot reach content
+// that has scrolled off (gofer#312, from live use: "i can only select whats
+// already on screen"). For the stated need — put a whole session on the
+// clipboard — a dedicated action is strictly better than dragging through
+// thousands of rows: deterministic, instant, and testable without a mouse.
+//
+// It reads [Model.transcriptLines], which renders every item and is already
+// independent of scroll (it is what [App.ingestAttach] measures to hold the
+// viewport still), so no new rendering plumbing is needed. That deliberately
+// covers the transcript ONLY — not the identity header, input box, or usage
+// footer. Those are frame chrome, not session content, and "copy the
+// transcript" that silently included the input box would be a different
+// action; ctrl+a remains the way to copy what is on screen INCLUDING chrome.
+//
+// Normalization is [normalizeCopy], unchanged and shared with select-all, so
+// the two actions produce the same shape of text: every row right-trimmed, no
+// leading or trailing blank rows, interior runs collapsed to one. That
+// behavior was confirmed against a live roster by hand and is not re-litigated
+// here.
+//
+// An empty transcript (or one that normalizes to nothing) is a no-op with no
+// Cmd — never an empty clipboard write, which would silently destroy whatever
+// the user had copied before. Same rule [App.selectAll] follows.
+func (a App) copyTranscript() (App, tea.Cmd) {
+	text := normalizeCopy(a.sess.transcriptLines(a.width))
+	if text == "" {
+		return a, nil
+	}
+	return a, tea.SetClipboard(text)
+}
+
 // handleMouseClick starts a new selection at the clicked cell — a fresh
 // click always overwrites any previous selection outright, satisfying
 // "clear the selection on the next click" without any separate clear step.

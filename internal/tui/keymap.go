@@ -149,6 +149,21 @@ func globalKeymap() []keyBinding {
 			},
 		},
 		{
+			Keys:  "alt+a",
+			Scope: scopeGlobal,
+			Desc:  "Copy the WHOLE transcript, scrolled-off content included (attach, empty input)",
+			match: func(k tea.Key) bool { return k.Mod.Contains(tea.ModAlt) && k.Code == 'a' },
+			// Attach only — it is the only screen with a transcript — and only on
+			// an empty input bar, matching ctrl+a's gate so the two select/copy
+			// keys behave consistently rather than one stealing a key the other
+			// yields.
+			enabled: func(a App) bool { return a.scr == screenAttach && a.inputEmpty() },
+			run: func(a App) (tea.Model, tea.Cmd) {
+				next, cmd := a.copyTranscript()
+				return next, cmd
+			},
+		},
+		{
 			Keys:  "ctrl+r",
 			Scope: scopeGlobal,
 			Desc:  "Toggle reply-on-run for shell commands (reply now / queue)",

@@ -878,6 +878,29 @@ frame and copies it in one press; with text in the bar it stays the readline
 through to the input keymap untouched), and it is the same "empty dispatch bar"
 idiom `space`, `?`, and `→` already use on the overview.
 
+**Copy the whole transcript: `alt+a`.** Selection is bounded by the frame, so
+even `ctrl+a` cannot reach content that has scrolled off — on a long session it
+copies a screenful, not the session (gofer#312). `alt+a` on the attach screen
+copies the **entire** transcript regardless of scroll position, reading
+`Model.transcriptLines` (which renders every item and is already independent of
+the viewport) rather than the rendered frame. Same empty-input gate as `ctrl+a`,
+so the two keys behave consistently rather than one stealing a key the other
+yields.
+
+The two actions cover deliberately different things. `ctrl+a` copies **what is
+on screen, chrome included** — identity header, footer, status line, any open
+panel. `alt+a` copies **session content only**: no input box, no usage footer,
+no header. A "copy the transcript" that silently included the input box would be
+a third, surprising thing. Both share `normalizeCopy` unchanged, so their output
+has the same shape.
+
+Auto-scroll *while dragging* is the remaining half of gofer#312 and is not
+implemented: the selection anchor lives in screen-row coordinates, so it would
+drift the moment content scrolled under it, and `selectedText` reads the frame —
+a drag that scrolled would paint a highlight the clipboard could not honor,
+breaking the agreement below. That needs the anchor in document coordinates,
+tracked separately.
+
 **The clipboard gets text, not a grid.** `normalizeCopy` right-trims every row,
 drops leading/trailing blank rows, and collapses interior runs of blank rows to
 one. Rows are padded to the frame width to paint their background and the area
