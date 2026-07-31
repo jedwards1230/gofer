@@ -1449,6 +1449,13 @@ human-eye check of real rendered frames, `vhs/` holds on-demand
   (`-before` / plain). Checks that the reverse video covers the identity
   header and the dispatch bar/hint rows, not just the roster body (#307);
   Ascii goldens cannot see a highlight, so this is the only check on it.
+- `transcript-select-all` — the same, on the **attach** screen, as a
+  before/after pair. Select-all is captured on BOTH screens on purpose: attach
+  is the only one with an input box and its framing rules, so the roster pair
+  cannot see a regression confined to it. The rendered frame confirms the
+  input row, both rules and the usage footer highlight along with the header
+  and transcript. Reuses the `transcript-compacting` scenario (its
+  `compactHold` is inert — no `/compact` is dispatched).
 - `roster-delete-confirm` — the armed `ctrl+x` delete confirm, as a
   before/after pair (`-before` / plain). The row highlight's shift from
   `Highlight` to `HighlightArmed` is a COLOR change, so a single armed frame

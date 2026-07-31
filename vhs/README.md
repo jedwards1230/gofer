@@ -58,6 +58,19 @@ Tape/scenario names follow one slug schema, `<area>-<view>[-<state>]`
   and nothing highlights. Read-only — select-all only installs a client-side
   selection and writes the clipboard. Reuses the `panel-status-overview`
   scenario.
+- `transcript-select-all.tape` — the same `ctrl+a` select-all on the **attach**
+  screen, as a before/after pair (`transcript-select-all-before` /
+  `transcript-select-all`). Not a duplicate of the roster pair: the chrome under
+  test is a different set. `App.transcriptRegion`'s doc lists what the old clamp
+  excluded, and the attach entry adds the **input box and its framing rules** on
+  top of the status/usage footer — neither of which exists on the overview, so
+  the roster pair demonstrates nothing about them. A regression confined to
+  attach would leave every other tracked frame correct. The rendered after-frame
+  confirms the header, transcript, both input framing rules, the input row and
+  the usage footer are all highlighted. Empty input box (same `ctrl+a` gate).
+  Reuses the `transcript-compacting` scenario for its seeded two-turn history
+  and populated usage footer; that scenario's `compactHold` is **inert** here,
+  since this tape never dispatches `/compact`.
 - `roster-peek.tape` — the peek card: the roster-only session summary opened
   with **space** on an empty dispatch bar (enter/→ *attach* instead). Peek does
   not subscribe to the session's event stream, so the card renders purely from
