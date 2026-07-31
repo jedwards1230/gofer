@@ -135,6 +135,14 @@ threshold there both catches a real regression and stays quiet. Its allocation
 *count* is stable, and is what that benchmark's own doc calls its evidence. The
 exemption is per-benchmark and visible in the baseline, not a blanket loosening.
 
+In CI the lane writes a **job summary** — every benchmark's current allocs/op,
+B/op and ns/op with its delta against the baseline — on a pass as well as a
+failure. On a failure it is where you see *which* numbers moved without opening
+the log; on a pass it is the per-PR record of what the hot paths currently cost,
+which is the entire point of measuring and is invisible if it only ever lands in
+a log nobody opens on a green run. ns/op appears there and nowhere else, labelled
+indicative.
+
 `bench/baseline.txt` is **committed**. Updating it is deliberate and shows up in
 review as a diff, so a regression cannot be absorbed silently. A baseline entry
 that stops running fails the gate as `MISSING`, so deleting or renaming a

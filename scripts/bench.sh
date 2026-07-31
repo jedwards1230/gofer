@@ -84,21 +84,27 @@ echo "running benchmarks (-benchtime 1x) over ${pkgs[*]}..." >&2
 raw="$(go test -run '^$' -bench . -benchmem -benchtime 1x "${pkgs[@]}" 2>&1)"
 echo "$raw"
 
-# Normalize to "name allocs bytes". Benchmark lines look like:
+# Normalize to "name allocs bytes ns". Benchmark lines look like:
 #   BenchmarkX/sub-12   1   123 ns/op   456 B/op   7 allocs/op
 # The -N CPU suffix is stripped so a baseline recorded on one core count still
 # matches a run on another.
+#
+# ns/op is carried for the JOB SUMMARY only and never reaches the baseline or the
+# gate — it is far too noisy on a shared runner to compare against a stored
+# number, but it is the figure a human actually wants to see when asking "is this
+# still fast?", so the summary shows it and labels it indicative.
 normalize() {
 	awk '
 		/^Benchmark/ && /allocs\/op/ {
 			name = $1
 			sub(/-[0-9]+$/, "", name)
-			bytes = ""; allocs = ""
+			bytes = ""; allocs = ""; ns = ""
 			for (i = 1; i <= NF; i++) {
+				if ($i == "ns/op") ns = $(i-1)
 				if ($i == "B/op") bytes = $(i-1)
 				if ($i == "allocs/op") allocs = $(i-1)
 			}
-			if (bytes != "" && allocs != "") print name, allocs, bytes
+			if (bytes != "" && allocs != "") print name, allocs, bytes, (ns == "" ? "-" : ns)
 		}
 	' | sort
 }
@@ -119,9 +125,9 @@ update)
 	# Carry forward any `allocs-only` marks from the existing baseline. Without
 	# this, --update silently re-enables a B/op gate that was deliberately
 	# disabled, and the next run starts flapping again.
-	merged="$current"
+	merged="$(echo "$current" | awk '{print $1, $2, $3}')"
 	if [ -f "$baseline" ]; then
-		merged="$(echo "$current" | while read -r n a b; do
+		merged="$(echo "$current" | while read -r n a b _ns; do
 			mode="$(awk -v n="$n" '$1 == n && NF >= 4 {print $4}' "$baseline")"
 			if [ -n "$mode" ]; then echo "$n $a $b $mode"; else echo "$n $a $b"; fi
 		done)"
@@ -146,6 +152,7 @@ check)
 	# not a pass. Otherwise deleting or renaming a benchmark silently retires its
 	# gate, and coverage erodes without anyone deciding to erode it.
 	status=0
+	missing=""
 	while read -r name base_allocs base_bytes base_mode; do
 		[ -z "${name:-}" ] && continue
 		case "$name" in \#*) continue ;; esac
@@ -153,6 +160,7 @@ check)
 		line="$(echo "$current" | awk -v n="$name" '$1 == n')"
 		if [ -z "$line" ]; then
 			echo "MISSING: $name is in the baseline but did not run (renamed or deleted?)" >&2
+			missing="$missing$name"$'\n'
 			status=1
 			continue
 		fi
@@ -184,6 +192,76 @@ check)
 			fi
 		done
 	done <"$baseline"
+
+	# GitHub Actions job summary. Written on BOTH outcomes: on a failure it is
+	# where you see WHICH numbers moved without opening the log, and on a pass it
+	# is the per-PR record of what the hot paths currently cost — which is the
+	# whole point of measuring, and is invisible if it only ever lives in a log
+	# nobody opens on a green run.
+	if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+		{
+			echo "## Benchmarks"
+			echo
+			if [ "$status" -eq 0 ]; then
+				echo "No allocation regressions beyond ${tolerance}%."
+			else
+				if [ -n "$missing" ]; then
+					echo "**Benchmarks in the baseline that did not run.** Renamed or deleted?"
+					echo "A baseline entry that stops running fails the gate rather than passing"
+					echo "quietly, so coverage cannot be retired by accident."
+					echo
+					echo "$missing" | while read -r m; do
+						[ -n "$m" ] && echo "- \`$m\`"
+					done
+					echo
+				fi
+				echo "**Allocation regressions**, if any, are marked ⚠ in the table below."
+				echo
+				echo "If the extra work is intended, re-run \`scripts/bench.sh --update\`"
+				echo "and commit the baseline diff with a note on why it is worth it."
+			fi
+			echo
+			echo "| Benchmark | allocs/op | Δ | B/op | Δ | ns/op |"
+			echo "|---|---:|---:|---:|---:|---:|"
+			# shellcheck disable=SC2016
+			# The backticks in the printf formats below are MARKDOWN code spans,
+			# not command substitution — single quotes are what keeps them
+			# literal, which is the intent.
+			echo "$current" | while read -r n a b ns; do
+				base="$(awk -v n="$n" '$1 == n {print $2, $3, $4}' "$baseline")"
+				if [ -z "$base" ]; then
+					printf '| `%s` | %s | new | %s | new | %s |\n' "$n" "$a" "$b" "$ns"
+					continue
+				fi
+				ba="$(echo "$base" | awk '{print $1}')"
+				bb="$(echo "$base" | awk '{print $2}')"
+				mode="$(echo "$base" | awk '{print $3}')"
+
+				da="—"; [ "$ba" -gt 0 ] && da="$(printf '%+d%%' $(((a - ba) * 100 / ba)))"
+				if [ "$mode" = "allocs-only" ]; then
+					db="not gated"
+				elif [ "$bb" -gt 0 ]; then
+					db="$(printf '%+d%%' $(((b - bb) * 100 / bb)))"
+				else
+					db="—"
+				fi
+
+				mark=""
+				[ "$ba" -gt 0 ] && [ $(((a - ba) * 100 / ba)) -gt "$tolerance" ] && mark=" ⚠"
+				if [ "$mode" != "allocs-only" ] && [ "$bb" -gt 0 ] && [ $(((b - bb) * 100 / bb)) -gt "$tolerance" ]; then
+					mark=" ⚠"
+				fi
+
+				printf '| `%s`%s | %s | %s | %s | %s | %s |\n' "$n" "$mark" "$a" "$da" "$b" "$db" "$ns"
+			done
+			echo
+			echo "Gated on **allocs/op** and **B/op** against \`bench/baseline.txt\`, tolerance ${tolerance}%."
+			echo "**ns/op is indicative only** and never gates — wall-clock on a shared runner is"
+			echo "too noisy to threshold. Benchmarks marked \`allocs-only\` in the baseline are"
+			echo "concurrent, and their B/op is scheduling-dependent (measured swinging +209%"
+			echo "between identical runs), so only their allocation count is gated."
+		} >>"$GITHUB_STEP_SUMMARY"
+	fi
 
 	if [ "$status" -ne 0 ]; then
 		echo "" >&2
