@@ -337,6 +337,15 @@ var (
 // Models is the one wrapper that can leave the machine — it enables live
 // discovery. Every other closure here is a local file read.
 func buildCommandEnv(root, cwd string) tui.CommandEnv {
+	// One loader for the whole env, built here rather than inside the closure:
+	// its memo lives in the closure it returns, so rebuilding it per call would
+	// cache nothing. The TUI resolves several settings by calling Config on
+	// every use — three times per drawn frame, six per mouse-motion event — and
+	// each uncached call is a read + parse + validate of config.json
+	// (gofer#315, item 2). [config.CachedLoader] keeps that per-call
+	// "always current, never a stale snapshot" contract intact by re-reading
+	// whenever the file's mtime or size changes; see its doc.
+	loadConfig := config.CachedLoader(config.DefaultPath(root))
 	return tui.CommandEnv{
 		Version: effectiveVersion(),
 		Cwd:     cwd,
@@ -361,9 +370,7 @@ func buildCommandEnv(root, cwd string) tui.CommandEnv {
 			}
 			return out, nil
 		},
-		Config: func() (config.Config, error) {
-			return config.Load(config.DefaultPath(root))
-		},
+		Config: loadConfig,
 		SaveConfig: func(c config.Config) error {
 			return config.Save(config.DefaultPath(root), c)
 		},
