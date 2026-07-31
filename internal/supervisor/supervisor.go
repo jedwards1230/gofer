@@ -1468,7 +1468,7 @@ func (s *Supervisor) List(ctx context.Context) ([]SessionInfo, error) {
 				continue
 			}
 			path := filepath.Join(sessionsDir, slug, id+".jsonl")
-			out = append(out, diskSessionInfo(id, slug, path))
+			out = append(out, DiskSessionInfo(id, slug, path))
 		}
 	}
 	return out, nil
@@ -1513,7 +1513,16 @@ func (s *Supervisor) OverviewRoster(ctx context.Context) ([]SessionInfo, error) 
 	return out, nil
 }
 
-// diskSessionInfo builds a disk-only [SessionInfo] for id under slug at path.
+// DiskSessionInfo builds a disk-only [SessionInfo] for id under slug at path.
+//
+// It is EXPORTED because the M6 router builds the same offline rows from the
+// same journals, and under M6 the router is the daemon a TUI or `gofer ps`
+// talks to — the primary path, with the in-process supervisor as the fallback.
+// It used to keep a parallel copy of this derivation; two implementations of
+// one projection is how the two paths came to disagree about the same session
+// on disk (the copy left Status at its zero value, reporting a session at rest
+// as working), and a second copy of the cache's staleness key would be the same
+// bug waiting to happen. There is now one builder and one key.
 // Its four journal-derived fields — Cwd, Title, Created, Updated — are served
 // from the session's `<id>.meta.json` sidecar when that cache still matches the
 // journal's size and mtime, and derived by reading the journal (read-only via
@@ -1552,7 +1561,7 @@ func (s *Supervisor) OverviewRoster(ctx context.Context) ([]SessionInfo, error) 
 // {ID, Project, JournalPath, Live:false} snapshot rather than failing the
 // whole List — one unreadable journal must never hide every other session, and
 // nothing is cached for it, so it re-reads (and can recover) on the next call.
-func diskSessionInfo(id, slug, path string) SessionInfo {
+func DiskSessionInfo(id, slug, path string) SessionInfo {
 	dir := filepath.Dir(path)
 	meta := readSessionMeta(sidecarPath(dir, id))
 	info := SessionInfo{

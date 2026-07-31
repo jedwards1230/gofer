@@ -265,8 +265,8 @@ func readSessionMeta(path string) sessionMeta {
 
 // DiskMeta reports the durable subagent link recorded for id under the session
 // store rooted at root: the spawning session's id, the agent identity, and the
-// depth. It is the ONE reader every offline-row builder must go through — the
-// in-process [Supervisor.List] and the M6 router's own parallel List — so that
+// depth. It is the ONE reader every offline-row builder must go through — which
+// since the router adopted [DiskSessionInfo] is a single builder — so that
 // "an offline child still shows its parent" holds on every deployment path, not
 // just the in-process one.
 //
@@ -403,8 +403,8 @@ func cacheDerived(dir, id string, d derivedMeta) error {
 
 // DiskArchived reports whether id was archived, read from its sidecar under the
 // store rooted at root. Like [DiskMeta] it is the reader an offline-row builder
-// goes through so the flag holds on every deployment path (the in-process
-// [Supervisor.List] and the M6 router's own parallel List). An unknown id, a
+// goes through so the flag holds on every deployment path (both the in-process
+// [Supervisor.List] and the M6 router now share [DiskSessionInfo]). An unknown id, a
 // session with no sidecar, or an unreadable one all report false — archived is
 // an overlay on a listing and can never fail one.
 func DiskArchived(root, id string) bool {
@@ -415,7 +415,7 @@ func DiskArchived(root, id string) bool {
 // SidecarInfo is the durable per-session metadata a `.meta.json` sidecar carries
 // beside its journal: the subagent link (which session spawned it, its agent
 // identity, its depth) and the archive marker. It is the exported projection of
-// the unexported [sessionMeta] for cross-package offline-row builders (the M6
+// the unexported [sessionMeta] for cross-package sidecar readers (the M6
 // router).
 type SidecarInfo struct {
 	ParentID string
