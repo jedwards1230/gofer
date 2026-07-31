@@ -4,21 +4,27 @@
 # A 4th field of 'allocs-only' gates that benchmark on allocs/op only
 # (concurrent benchmarks: their B/op is scheduling-dependent).
 BenchmarkAppRenderMassiveTranscript 40017 2034152
-BenchmarkBroadcastRawEvent/message_delta/peers=1 18 1144 allocs-only
-BenchmarkBroadcastRawEvent/message_delta/peers=32 233 13712 allocs-only
-BenchmarkBroadcastRawEvent/message_delta/peers=8 66 4096 allocs-only
-BenchmarkBroadcastRawEvent/tool_call_finished/peers=1 18 2440 allocs-only
-BenchmarkBroadcastRawEvent/tool_call_finished/peers=32 236 41640 allocs-only
-BenchmarkBroadcastRawEvent/tool_call_finished/peers=8 70 25856 allocs-only
-BenchmarkOverviewRoster/sessions=100 2549 492608
+BenchmarkBroadcastRawEvent/message_delta/peers=1 15 1048 allocs-only
+BenchmarkBroadcastRawEvent/message_delta/peers=32 232 13696 allocs-only
+BenchmarkBroadcastRawEvent/message_delta/peers=8 65 3920 allocs-only
+BenchmarkBroadcastRawEvent/tool_call_finished/peers=1 19 2504 allocs-only
+BenchmarkBroadcastRawEvent/tool_call_finished/peers=32 236 33504 allocs-only
+BenchmarkBroadcastRawEvent/tool_call_finished/peers=8 66 9424 allocs-only
+BenchmarkOverviewRoster/sessions=100 2549 494224
 BenchmarkOverviewRoster/sessions=30 793 136272
-BenchmarkOverviewRoster/sessions=500 12555 2217552
+BenchmarkOverviewRoster/sessions=500 12556 2225568
 BenchmarkOverviewRosterJournalDepth/turns=256 793 138240
 BenchmarkOverviewRosterJournalDepth/turns=64 793 138240
 BenchmarkOverviewRosterJournalDepth/turns=8 793 138240
+BenchmarkRouterList/sessions=100 2547 387536
+BenchmarkRouterList/sessions=30 791 112320
+BenchmarkRouterList/sessions=500 12564 1829408
+BenchmarkRouterListJournalDepth/turns=256 791 114288
+BenchmarkRouterListJournalDepth/turns=64 791 113792
+BenchmarkRouterListJournalDepth/turns=8 791 113312
 BenchmarkTranscriptIngest/turns=100 818 144704
 BenchmarkTranscriptIngest/turns=1000 8023 1605136
-BenchmarkTranscriptIngest/turns=5000 40034 9688208
+BenchmarkTranscriptIngest/turns=5000 40029 9682960
 BenchmarkTranscriptView/turns=100 806 40192
 BenchmarkTranscriptView/turns=1000 8007 419264
 BenchmarkTranscriptView/turns=5000 40008 2189248
