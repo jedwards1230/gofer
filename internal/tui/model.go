@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -76,6 +77,14 @@ const (
 	// under: it must be VISIBLE, never a silent context swap (see
 	// [Model.renderSessionCompactedLines]).
 	itemSessionCompacted
+	// itemCompacting is the transient "a compaction is in flight" indicator at
+	// the transcript tail — itemThinking's counterpart for the one other
+	// long-running, entirely silent operation gofer performs. Like itemThinking
+	// it is composed onto a render-local copy ([Model.WithCompacting]), never
+	// ingested, and it vanishes the instant the operation ends. It is the
+	// PROGRESS half of compaction's visibility requirement; itemSessionCompacted
+	// above is the RESULT half.
+	itemCompacting
 )
 
 // spawnedAgent is one child session named by an [itemBackgroundAgents] block:
@@ -145,6 +154,12 @@ type item struct {
 	compactModel             string
 	compactUsage             provider.Usage
 	compactSummary           string
+
+	// compactingSince is itemCompacting-only: when the in-flight compaction was
+	// dispatched, which the render turns into elapsed seconds AT RENDER TIME
+	// (see [Model.WithCompacting]). Storing the start instant rather than a
+	// pre-formatted duration is what keeps the counter honest across redraws.
+	compactingSince time.Time
 }
 
 // Model is gofer's minimal attach surface. It is immutable from the
@@ -811,6 +826,38 @@ func (m Model) WithThinking() Model {
 	items := make([]item, 0, len(m.items)+1)
 	items = append(items, m.items...)
 	m.items = append(items, item{kind: itemThinking, done: false})
+	return m
+}
+
+// WithCompacting returns a copy of the model whose transcript ends with a muted
+// "⋯ compacting context… (Ns)" indicator while an explicit /compact is in
+// flight, where since is when it was dispatched ([App.compactingSince]) and the
+// zero time means none is. Compaction is a full summarizer model call over the
+// folded history and streams NOTHING while it runs, so without this the TUI
+// looks frozen for its whole duration — which is exactly how a completed
+// compaction used to read, too, back when its only signal was a status note
+// nothing ever cleared.
+//
+// The elapsed figure is recomputed here on every render rather than stored,
+// so it can never go stale; the once-per-second redraw that advances it is
+// [compactTickMsg], which lives and dies with the operation.
+//
+// Like [Model.WithThinking] it is a per-render composition appended LAST, never
+// an Ingest: the indicator is derived state that must vanish the instant the
+// operation finishes and must never enter the durable item list or the
+// exit-flushed transcript. What DOES belong there is the itemSessionCompacted
+// block session.compacted produces.
+func (m Model) WithCompacting(since time.Time) Model {
+	if since.IsZero() {
+		return m
+	}
+	items := make([]item, 0, len(m.items)+1)
+	items = append(items, m.items...)
+	m.items = append(items, item{
+		kind:            itemCompacting,
+		done:            false,
+		compactingSince: since,
+	})
 	return m
 }
 
@@ -1655,6 +1702,19 @@ func (m Model) renderItemLines(it item, width int) []string {
 		// one-token swap if that preference changes.
 		muted := m.theme.MutedStyle()
 		return []string{markerLine(muted, "⋯", muted.Render("working…"))}
+
+	case itemCompacting:
+		// Transient compaction-in-flight indicator, deliberately the SAME muted
+		// `⋯` grammar as itemThinking above — both say "an operation you cannot
+		// see is running," and giving them one visual vocabulary means an
+		// operator learns it once. The elapsed counter is what distinguishes a
+		// slow compaction from a hung one, so it is not decoration: compaction
+		// streams nothing at all, making elapsed time the ONLY evidence of
+		// progress there is.
+		muted := m.theme.MutedStyle()
+		elapsed := time.Since(it.compactingSince).Round(time.Second)
+		return []string{markerLine(muted, "⋯",
+			muted.Render(fmt.Sprintf("compacting context… (%s)", elapsed)))}
 
 	default: // itemAssistantText
 		// Same empty-guard as itemAssistantReasoning above: an assistant-text
