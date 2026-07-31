@@ -328,42 +328,65 @@ func TestCachedLoaderSeesADeletion(t *testing.T) {
 // Cmd goroutines read it too, and sessionGuard reads config six times per
 // session create.
 //
-// Two assertions, neither of which the race detector makes on its own: no
-// caller ever observes a TORN config (every result is one of the two whole
-// values that were on disk, never a mix or a zero from a half-updated cache
-// entry), and the writer's change is eventually observed rather than pinned.
-// Run with -race for the third.
+// Two assertions the race detector does not make on its own: no caller ever
+// observes a value that was never written (a torn or half-updated cache entry),
+// and the writer's changes ARE observed under contention — a locking bug could
+// pin the entry only when readers and the writer overlap, which the
+// single-goroutine tests above cannot see.
+//
+// WHY THE READERS RUN TO A CONDITION AND NOT A FIXED COUNT. The first version
+// gave each reader a fixed quota and asserted afterwards that both values had
+// been seen. That is a race, and it lost: a cached read is a single stat, so
+// 1,600 of them complete in ~3.8ms, while one config.Save — marshal, temp file,
+// chmod, write, rename — takes ~6.5ms. The readers reliably finished their
+// whole quota before the writer landed its FIRST alternate save, so every read
+// returned the initial value and the assertion failed on correct code.
+//
+// Reading until the change is observed (or a deadline expires) turns that race
+// into a bounded wait. The second value normally appears within ~13ms, so the
+// deadline is ~750x the expected time — it exists to fail a genuinely pinned
+// cache, not to pace the test.
 func TestCachedLoaderConcurrent(t *testing.T) {
+	const (
+		modelA   = "claude-sonnet-5"
+		modelB   = "claude-opus-5"
+		readers  = 8
+		deadline = 10 * time.Second
+	)
+
 	path := filepath.Join(t.TempDir(), "config.json")
-	if err := config.Save(path, config.Config{Session: config.Session{Model: "claude-sonnet-5"}}); err != nil {
+	if err := config.Save(path, config.Config{Session: config.Session{Model: modelA}}); err != nil {
 		t.Fatalf("save: %v", err)
 	}
-
 	load := config.CachedLoader(path)
 
-	const readers = 8
-	const reads = 200
 	var (
 		wg   sync.WaitGroup
 		mu   sync.Mutex
 		seen = map[string]int{}
-		done = make(chan struct{})
+		stop = make(chan struct{})
 	)
+	bothSeen := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return seen[modelA] > 0 && seen[modelB] > 0
+	}
+	expired := time.After(deadline)
 
-	// The writer keeps replacing the file through the real atomic Save, which
-	// is the write path that actually happens in gofer.
+	// The writer replaces the file through the real atomic Save, which is the
+	// write path gofer actually uses.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for i := 0; ; i++ {
 			select {
-			case <-done:
+			case <-stop:
 				return
 			default:
 			}
-			model := "claude-sonnet-5"
+			model := modelA
 			if i%2 == 1 {
-				model = "claude-opus-5"
+				model = modelB
 			}
 			if err := config.Save(path, config.Config{Session: config.Session{Model: model}}); err != nil {
 				t.Errorf("save: %v", err)
@@ -376,7 +399,12 @@ func TestCachedLoaderConcurrent(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for range reads {
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
 				cfg, err := load()
 				if err != nil {
 					t.Errorf("load: %v", err)
@@ -389,33 +417,35 @@ func TestCachedLoaderConcurrent(t *testing.T) {
 		}()
 	}
 
-	// Stop the writer once the readers are done.
-	go func() {
-		for {
-			mu.Lock()
-			total := 0
-			for _, n := range seen {
-				total += n
+	// Stop everything as soon as the change has been observed under contention,
+	// or give up at the deadline and let the assertion below report it.
+	timedOut := false
+	for done := false; !done; {
+		select {
+		case <-expired:
+			timedOut, done = true, true
+		default:
+			if bothSeen() {
+				done = true
+			} else {
+				time.Sleep(time.Millisecond)
 			}
-			mu.Unlock()
-			if total >= readers*reads {
-				close(done)
-				return
-			}
-			time.Sleep(time.Millisecond)
 		}
-	}()
+	}
+	close(stop)
 	wg.Wait()
 
 	mu.Lock()
 	defer mu.Unlock()
+	total := 0
 	for model, n := range seen {
-		if model != "claude-sonnet-5" && model != "claude-opus-5" {
+		total += n
+		if model != modelA && model != modelB {
 			t.Errorf("observed model %q (%d times) — neither of the two values ever written; a concurrent reader saw a torn or half-updated cache entry", model, n)
 		}
 	}
-	if len(seen) < 2 {
-		t.Errorf("every one of the %d concurrent reads returned the same config %v; the writer replaced the file continuously throughout, so the cache is pinning a value rather than re-reading", readers*reads, seen)
+	if timedOut {
+		t.Errorf("after %s and %d concurrent reads the writer's change was never observed (saw %v); the cache is pinning a value under contention rather than re-reading", deadline, total, seen)
 	}
 }
 
