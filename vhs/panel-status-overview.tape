@@ -24,5 +24,5 @@ Type "/status"
 Enter
 Sleep 1s
 Screenshot vhs/out/panel-status-overview.png
-Sleep 500ms
+Sleep 100ms
 Ctrl+C
