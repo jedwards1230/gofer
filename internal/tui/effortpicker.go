@@ -31,9 +31,16 @@ package tui
 // agent-sdk-go v0.18.x — the effort was plumbed gofer-side and went inert one
 // hop below the last layer anyone tested — but v0.19.0 (SDK issue #88, commit
 // 83f0a2c) made a named effort self-enabling via Thinking.Active(), and both
-// adapters now gate on that rather than on .Enabled. gofer pins a later SDK, so
-// mid-session /thinking reaches the wire. See docs/TUI.md's "Reasoning effort
-// reaches the provider (SDK gap closed in v0.19.0)".
+// adapters now gate on that rather than on .Enabled. gofer pins v0.22.0, so
+// mid-session /thinking reaches the wire.
+//
+// What is still inert is only the PERSISTED default: nothing in gofer populates
+// a session's Params.Thinking at creation (see internal/config's Effort doc),
+// so `session.effort` does not seed a new session — it is the picker's own
+// commit path that carries a level to the provider. Stating the narrower
+// remainder rather than the old blanket "does not reach the provider at all" is
+// the point; see docs/TUI.md's "Reasoning effort reaches the provider (SDK gap
+// closed in v0.19.0)". That remainder is below this file, not in it.
 //
 // Like statusView/modelPickerView it is a pure value: every method returns an
 // updated copy, so a fixed key sequence replays to the same rendered output in

@@ -1789,7 +1789,7 @@ func (t Thinking) Active() bool { return t.Enabled || t.Effort != "" }
 Both adapters now gate on `Active()` rather than `.Enabled` —
 `provider/anthropic/convert.go:130` and `provider/openai/request.go:101` — so
 the `Effort` the runner overlay already set is sufficient on its own. gofer
-pins v0.19.0, so **mid-session `/thinking` now reaches the wire**: no
+pins v0.22.0 (≥ v0.19.0), so **mid-session `/thinking` reaches the wire**: no
 gofer-side change was needed, and nothing has to force `Thinking.Enabled: true`
 at session creation (which would have switched Anthropic extended thinking on
 wholesale — the reason gofer deliberately refused to work around it locally).
@@ -1944,7 +1944,8 @@ they are the part of the input surface a user is least likely to find unaided.
 advertised "? shortcuts" since M2 with nothing behind it.
 
 Deferred (issue #175): true per-message / per-tool-call token attribution
-(needs SDK per-item usage granularity still absent as of v0.19.0, which reports usage
+(needs SDK per-item usage granularity still absent as of v0.22.0 — `provider.Usage`
+is flat token counters, so the SDK reports usage
 only at the turn and session level — rendering a synthesized per-message
 estimate as fact is what the issue forbids), and the per-turn activity roll-up
 line ("read N files, ran M commands") the issue flags as M8 polish (needs
