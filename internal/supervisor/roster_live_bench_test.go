@@ -155,37 +155,42 @@ func benchLiveRoot(b *testing.B, sessions, turns int) *supervisor.Supervisor {
 // +39 stray failed LiveSnapshotJournalDepth/turns=8 (77 -> 116), and the same
 // +39 would have failed the 134-alloc rows too (134 -> 173 is +29%).
 //
-// Batching raises the measured work WITHOUT changing what is measured, and
-// that is checkable — so here is the check, including where it does not come
-// out clean.
+// WHY 40 AND NOT 20. This constant has to be re-derived whenever the measured
+// cost changes, because it is sized against the SIGNAL while the noise stays
+// put — the stray allocations come from neighbouring goroutines and have
+// nothing to do with the journal walk. agent-sdk-go v0.22.1 cut the per-read
+// cost (77 -> 45 allocations here, 134 -> 102 next door), so the signal shrank
+// and the margin shrank with it. Measured against the +39 stray CI actually
+// produced, at a 25% tolerance:
 //
-// Five of the nine committed rows divide by this constant back to the exact
-// pre-batch number. Figures below are as committed in bench/baseline.txt, not
-// idealised:
+//	row                          per read   x20 margin   x40 margin
+//	OverviewRosterLive/live=1          33         4.2x         8.5x
+//	LiveSnapshotJournalDepth/*         45         5.8x        11.5x
+//	OverviewRosterLive/live=8         102        13.1x        26.2x
 //
-//	LiveSnapshotJournalDepth/turns=8   1,540/20 = 77    1,387,040/20 = 69,352
-//	LiveSnapshotJournalDepth/turns=64  1,540/20 = 77    9,169,440/20 = 458,472
-//	OverviewRosterLive/live=8          2,680/20 = 134   1,745,600/20 = 87,280
+// A batched count of 624 is where the weakest row would drop to a 4x margin.
+// At 20x it sits at 660 — above the line, but only just. 40x puts every row at
+// 2x that, for a benchmark loop that is a few milliseconds longer.
 //
-// The other four do not, and the reason is the noise this constant exists to
-// shrink rather than eliminate. The largest case:
+// THE RULE, so the next person does not have to re-derive it: if the per-read
+// allocation count of the weakest row falls below ~31, 20x stops giving a 4x
+// margin. Re-measure and raise this constant rather than discovering it on CI.
 //
-//	LiveSnapshotJournalDepth/turns=256 1,543/20 = 77.15 36,080,448/20 = 1,804,022.4
-//	                        pre-batch:            77                   1,804,008
+// DIVIDING BACK. Every reported figure divides by this constant to the
+// per-read cost. Eight of the nine committed rows do so exactly — for example
+// LiveSnapshotJournalDepth at every depth is 1,800/40 = 45 allocations and
+// 677,440/40 = 16,936 B. The ninth, OverviewRosterLive/live=32, comes back to
+// 302.05 allocations and 129,485.2 B against a measured 302 / 129,480: a residual
+// of +2 allocations and +208 B spread across 40 reads.
 //
-// — that is +3 allocations and +288 bytes of stray allocation spread across 20
-// reads, or 0.2% against a 25% gate. OverviewRosterLiveJournalDepth/turns=64
-// and /turns=256 carry +2 allocs/+208 B and +3 allocs/+224 B;
-// OverviewRosterLive/live=32 carries +16 B and no extra allocation.
-//
-// The residual lands on the longest-running rows and on none of the short ones,
-// which is exactly what a process-wide counter predicts: a longer timed window
-// catches more of whatever the other goroutines happen to do. Batching cannot
-// drive that to zero — it makes it 0.2% instead of 50%.
-//
-// Divide any reported figure by this constant for the per-read cost, and expect
-// a small residual on the deeper rows.
-const liveCallsPerOp = 20
+// That residual used to appear on four rows rather than one, and it shrank for
+// the same reason everything else here got cheaper: v0.22.1 made each read
+// faster, so the timed window is shorter and catches less of what the
+// neighbouring goroutines do. The remaining case is the row with the most live
+// sessions, hence the longest window — which is exactly the direction a
+// process-wide counter predicts, and is worth more as corroboration than it
+// costs as imprecision.
+const liveCallsPerOp = 40
 
 // assertAllLive fails the benchmark unless every row in the roster is a LIVE
 // row. It is the guard the benchmarks next door needed and did not have: their

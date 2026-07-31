@@ -3,54 +3,54 @@
 # ns/op is deliberately absent — see the header of scripts/bench.sh.
 # A 4th field of 'allocs-only' gates that benchmark on allocs/op only
 # (concurrent benchmarks: their B/op is scheduling-dependent).
-BenchmarkAppRenderConfigSize/config=large/loader=cached 3571 304104
-BenchmarkAppRenderConfigSize/config=large/loader=direct 4833 429224
+BenchmarkAppRenderConfigSize/config=large/loader=cached 3571 304136
+BenchmarkAppRenderConfigSize/config=large/loader=direct 4838 431360
 BenchmarkAppRenderConfigSize/config=small/loader=cached 3571 304136
 BenchmarkAppRenderConfigSize/config=small/loader=direct 3597 307416
-BenchmarkAppRenderMassiveTranscript 355047 32238304
+BenchmarkAppRenderMassiveTranscript 355045 32236456
 BenchmarkBroadcastRawEvent/message_delta/peers=1 15 1048 allocs-only
 BenchmarkBroadcastRawEvent/message_delta/peers=32 235 21928 allocs-only
 BenchmarkBroadcastRawEvent/message_delta/peers=8 67 12136 allocs-only
 BenchmarkBroadcastRawEvent/tool_call_finished/peers=1 19 2504 allocs-only
 BenchmarkBroadcastRawEvent/tool_call_finished/peers=32 234 33424 allocs-only
 BenchmarkBroadcastRawEvent/tool_call_finished/peers=8 66 9424 allocs-only
-BenchmarkComposedAttach/turns=1 1351 166224
-BenchmarkComposedAttach/turns=10 4034 464616
-BenchmarkComposedAttach/turns=100 30427 3250552
-BenchmarkComposedAttach/turns=1000 293484 31971160
-BenchmarkComposedAttachStoreSize/sessions=1 3404 381248
-BenchmarkComposedAttachStoreSize/sessions=10 3755 489080
-BenchmarkComposedAttachStoreSize/sessions=100 6716 1483808
-BenchmarkCopyTranscript/turns=100 27689 2811840
-BenchmarkCopyTranscript/turns=1000 275182 27843056
-BenchmarkCopyTranscript/turns=5000 1359210 138132480
-BenchmarkLiveSnapshotJournalDepth/turns=256 1543 36080448
-BenchmarkLiveSnapshotJournalDepth/turns=64 1540 9169440
-BenchmarkLiveSnapshotJournalDepth/turns=8 1540 1387040
+BenchmarkComposedAttach/turns=1 1332 164648
+BenchmarkComposedAttach/turns=10 3990 421008
+BenchmarkComposedAttach/turns=100 30371 3014576
+BenchmarkComposedAttach/turns=1000 293373 29430952
+BenchmarkComposedAttachStoreSize/sessions=1 3420 354640
+BenchmarkComposedAttachStoreSize/sessions=10 3756 487536
+BenchmarkComposedAttachStoreSize/sessions=100 6690 1363584
+BenchmarkCopyTranscript/turns=100 27687 2811760
+BenchmarkCopyTranscript/turns=1000 275184 27843072
+BenchmarkCopyTranscript/turns=5000 1359213 138132416
+BenchmarkLiveSnapshotJournalDepth/turns=256 1800 677440
+BenchmarkLiveSnapshotJournalDepth/turns=64 1800 677440
+BenchmarkLiveSnapshotJournalDepth/turns=8 1800 677440
 BenchmarkOverviewRender/sessions=100 1775 254632
 BenchmarkOverviewRender/sessions=30 573 74640
-BenchmarkOverviewRender/sessions=500 8593 1134592
+BenchmarkOverviewRender/sessions=500 8595 1134832
 BenchmarkOverviewRoster/sessions=100 2549 494224
-BenchmarkOverviewRoster/sessions=30 793 136272
-BenchmarkOverviewRoster/sessions=500 12556 2225584
+BenchmarkOverviewRoster/sessions=30 793 136256
+BenchmarkOverviewRoster/sessions=500 12556 2217552
 BenchmarkOverviewRosterJournalDepth/turns=256 793 138240
 BenchmarkOverviewRosterJournalDepth/turns=64 793 138240
 BenchmarkOverviewRosterJournalDepth/turns=8 793 138240
-BenchmarkOverviewRosterLive/live=1 740 264480
-BenchmarkOverviewRosterLive/live=32 8600 6782896
-BenchmarkOverviewRosterLive/live=8 2680 1745600
-BenchmarkOverviewRosterLiveJournalDepth/turns=256 2683 36441184
-BenchmarkOverviewRosterLiveJournalDepth/turns=64 2682 9530448
-BenchmarkOverviewRosterLiveJournalDepth/turns=8 2680 1747840
+BenchmarkOverviewRosterLive/live=1 1320 266880
+BenchmarkOverviewRosterLive/live=32 12082 5179408
+BenchmarkOverviewRosterLive/live=8 4080 1394560
+BenchmarkOverviewRosterLiveJournalDepth/turns=256 4080 1399040
+BenchmarkOverviewRosterLiveJournalDepth/turns=64 4080 1399040
+BenchmarkOverviewRosterLiveJournalDepth/turns=8 4080 1399040
 BenchmarkRouterList/sessions=100 2547 387536
 BenchmarkRouterList/sessions=30 791 112320
-BenchmarkRouterList/sessions=500 12558 1824144
-BenchmarkRouterListJournalDepth/turns=256 791 113792
-BenchmarkRouterListJournalDepth/turns=64 791 113312
+BenchmarkRouterList/sessions=500 12557 1824064
+BenchmarkRouterListJournalDepth/turns=256 791 114288
+BenchmarkRouterListJournalDepth/turns=64 791 113792
 BenchmarkRouterListJournalDepth/turns=8 791 113312
 BenchmarkTranscriptIngest/turns=100 7527 835280
-BenchmarkTranscriptIngest/turns=1000 75051 9089328
-BenchmarkTranscriptIngest/turns=5000 375067 50657832
+BenchmarkTranscriptIngest/turns=1000 75060 9090160
+BenchmarkTranscriptIngest/turns=5000 375072 50658024
 BenchmarkTranscriptView/turns=100 7109 598352
-BenchmarkTranscriptView/turns=1000 71024 6031416
-BenchmarkTranscriptView/turns=5000 355034 31195456
+BenchmarkTranscriptView/turns=1000 71021 6031112
+BenchmarkTranscriptView/turns=5000 355053 31197352
