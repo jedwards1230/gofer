@@ -24,5 +24,5 @@ Type "/usage"
 Enter
 Sleep 1s
 Screenshot vhs/out/panel-usage.png
-Sleep 500ms
+Sleep 100ms
 Ctrl+C

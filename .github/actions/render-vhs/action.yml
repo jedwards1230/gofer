@@ -14,22 +14,71 @@ runs:
       with:
         go-version-file: go.mod
 
+    # The vhs binary itself is the expensive half of "install deps" (~30s to
+    # `go install` from source). It's pinned to an exact release tag, so a
+    # cache keyed on that tag + OS + arch can never serve a stale binary — a
+    # miss just falls through to the same `go install` as before. Restore
+    # target is a fixed, non-GOPATH dir so the cache key doesn't depend on
+    # setup-go's GOPATH layout.
+    - name: Cache VHS binary
+      id: cache-vhs
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.local/bin/vhs
+        key: vhs-bin-v0.11.0-${{ runner.os }}-${{ runner.arch }}
+
+    # apt's own package index/checksum verification is what keeps this safe on
+    # a stale cache: a cached .deb that no longer matches the resolved version
+    # is simply ignored and re-downloaded, it is never installed anyway. So
+    # this cache can only ever save time, not correctness. chown/chmod the
+    # archive dir first: it's root-owned, but actions/cache runs as the
+    # unprivileged runner user and needs to read it (for save) and write into
+    # it (on restore, before this step's `sudo apt-get install` runs again).
+    - name: Prepare apt archive cache dir
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo mkdir -p /var/cache/apt/archives/partial
+        sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
+
+    - name: Cache apt archives (ffmpeg/ttyd/fonts-jetbrains-mono)
+      id: cache-apt
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: /var/cache/apt/archives
+        key: apt-archives-vhs-deps-${{ runner.os }}-v1
+
     # Install the VHS toolchain directly rather than via charmbracelet/vhs-action:
     # the action's dependency install is unconditional and its bundled ffmpeg
     # installer is currently broken (dead download URL), so it fails install-only
     # too. apt carries ttyd/ffmpeg/the font; vhs is pinned by release tag. Unset
     # CI and force truecolor so termenv emits real ANSI colors in the frames.
+    #
+    # ffmpeg is not optional here even though every tape's PNG comes from
+    # `Screenshot`, not the GIF `Output`: vhs checks for ffmpeg on startup
+    # unconditionally (confirmed locally — `vhs` exits 1 with "ffmpeg is not
+    # installed" on a Screenshot-only tape when ffmpeg is absent from PATH),
+    # so it can't be dropped without dropping vhs entirely.
     - name: Install VHS and render deps
       shell: bash
       run: |
         set -euo pipefail
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends ffmpeg ttyd fonts-jetbrains-mono
-        # setup-go pins GOTOOLCHAIN=local at the repo's go.mod version; vhs needs a
-        # newer toolchain than that, so let this one build fetch it (auto). The
-        # later harness build still uses the repo's pinned toolchain.
-        GOTOOLCHAIN=auto go install github.com/charmbracelet/vhs@v0.11.0
-        echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+        # Give the apt cache's post-job save step (runs as the unprivileged
+        # runner user) write access to the archive dir apt just repopulated as
+        # root, same as the pre-restore chown above.
+        sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
+        if [ "${{ steps.cache-vhs.outputs.cache-hit }}" != "true" ]; then
+          # setup-go pins GOTOOLCHAIN=local at the repo's go.mod version; vhs
+          # needs a newer toolchain than that, so let this one build fetch it
+          # (auto). The later harness build still uses the repo's pinned
+          # toolchain.
+          mkdir -p ~/.local/bin
+          GOTOOLCHAIN=auto GOBIN="$HOME/.local/bin" go install github.com/charmbracelet/vhs@v0.11.0
+        fi
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        "$HOME/.local/bin/vhs" --version
         {
           echo "CI="
           echo "COLORTERM=truecolor"

@@ -21,5 +21,5 @@ Show
 
 Sleep 3500ms
 Screenshot vhs/out/transcript-approval.png
-Sleep 500ms
+Sleep 100ms
 Ctrl+C

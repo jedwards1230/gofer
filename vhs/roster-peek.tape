@@ -31,5 +31,5 @@ Sleep 2s
 Space
 Sleep 1s
 Screenshot vhs/out/roster-peek.png
-Sleep 500ms
+Sleep 100ms
 Ctrl+C

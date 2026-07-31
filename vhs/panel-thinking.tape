@@ -24,5 +24,5 @@ Type "/thinking"
 Enter
 Sleep 1s
 Screenshot vhs/out/panel-thinking.png
-Sleep 500ms
+Sleep 100ms
 Ctrl+C

@@ -45,5 +45,5 @@ Enter
 Sleep 1500ms
 Screenshot vhs/out/panel-model-daemon-refresh-after.png
 
-Sleep 500ms
+Sleep 100ms
 Ctrl+C

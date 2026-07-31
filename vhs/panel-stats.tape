@@ -23,5 +23,5 @@ Type "/stats"
 Enter
 Sleep 1s
 Screenshot vhs/out/panel-stats.png
-Sleep 500ms
+Sleep 100ms
 Ctrl+C

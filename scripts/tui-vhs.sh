@@ -42,7 +42,15 @@ go build -o vhs/.bin/harness ./vhs/harness
 
 tapes=("$@")
 if [ ${#tapes[@]} -eq 0 ]; then
-	tapes=(transcript-tool-call transcript-approval roster-overview panel-status-overview panel-status panel-config panel-model panel-model-empty panel-model-daemon-refresh panel-thinking panel-usage panel-stats panel-help panel-resume)
+	# Glob rather than hardcode: a hand-maintained list drifts the moment a
+	# tape is added and nobody remembers to update it here too (roster-peek.tape
+	# was added 2026-07-24 and silently missing from this list since — see
+	# gofer#288). CI's render-vhs action globs the same way for the same reason.
+	shopt -s nullglob
+	for tape in vhs/*.tape; do
+		tapes+=("$(basename "$tape" .tape)")
+	done
+	shopt -u nullglob
 fi
 
 for name in "${tapes[@]}"; do
