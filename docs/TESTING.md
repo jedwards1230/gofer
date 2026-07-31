@@ -225,6 +225,41 @@ new test as proof:
   quietly vacuous rather than red (`TestSyncMenuReturnsAtMostOneCmd` exists to
   catch exactly this).
 
+### Worked example: pinning an untested invariant before trading it away
+
+gofer#308 is the canonical case. `Model.Ingest` deep-copied the whole transcript
+per event to keep a prior `Model` observable — quadratic, 1.6s and ~9GB to open
+a 5,000-turn session. The blocker was not the fix, it was that **the entire
+`internal/tui` suite passed with the copy deleted**: nobody could tell a correct
+optimization from a broken one.
+
+So the invariant was written down as a test *first*, and mutation-tested three
+ways before a line of it was optimized. `TestIngestDoesNotAliasPriorModel`
+(since retired, see below) asserted a retained prior stayed unchanged, and each
+of these mutations **built** and made that **named** test fail:
+
+| mutation | observed failure |
+|---|---|
+| delete `m.items = append([]item(nil), m.items...)` | `prior.items[1] mutated by a child Ingest: got text:prior-childA-childB, want text:prior` |
+| delete the `m.toolIndex` clone | `prior.toolIndex = map[call-child-a:3 call-child-b:3 call-prior:2], want map[call-prior:2]` |
+| delete the `m.toolAgents` clone | `prior.toolAgents = map[call-child-a:… call-prior:…], want map[call-prior:…]` |
+
+That is what made the *next* step decidable. The first failure is an in-place
+element write (`m.items[idx].text += …` on a `MessageDelta`), which no
+spare-capacity or ownership-watermark scheme can avoid — so value semantics and
+an O(1) `Ingest` are genuinely incompatible, and the invariant had to be dropped
+rather than optimized around. `Ingest` took a pointer receiver; the compiler
+then enumerated every call site, and the only three outside tests
+(`app.go` ×2, `adapter.go`) already discarded the parent.
+
+**A pinning test earns its keep even when the fix retires it** — it converts
+"this might break something" into a specific, priced trade. What replaces it
+must pin whatever invariant *survives*: here that is
+`TestWithHelpersDoNotAliasBaseModel`, since the render-local `With*` helpers are
+now the only value-semantics surface. It is mutation-tested the same way —
+making `WithThinking` or `WithBackgroundAgents` append into the shared array
+builds fine and fails it with `tail is kind 2 after an Ingest on the base`.
+
 ## CI summary
 
 `.github/workflows/ci.yml` on every PR: `go build ./...`, `go vet ./...`,

@@ -95,6 +95,19 @@ type keyBinding struct {
 	match func(tea.Key) bool
 	// run performs the binding's action. Non-nil only on a live row.
 	run func(App) (tea.Model, tea.Cmd)
+	// enabled, when non-nil, gates a matched binding on app state: false
+	// makes dispatchGlobalKey report the key UNHANDLED, so it falls through
+	// to the per-screen switch and the shared input keymap exactly as if
+	// this row did not exist.
+	//
+	// It exists so a global row can share a key with a text-entry binding
+	// without stealing it. ctrl+a is the case: on an empty dispatch bar it
+	// selects the frame, and with text in the bar it stays "move to line
+	// start" (applyInputKey). That is the same "empty dispatch bar" idiom
+	// space / ? / → already use on the overview, just expressed here rather
+	// than in a screen's switch, because this binding applies on every
+	// screen.
+	enabled func(App) bool
 }
 
 // live reports whether this row is dispatched through the table rather than by
@@ -119,6 +132,34 @@ func globalKeymap() []keyBinding {
 			match: func(k tea.Key) bool { return k.Mod.Contains(tea.ModCtrl) && k.Code == 'y' },
 			run: func(a App) (tea.Model, tea.Cmd) {
 				next, cmd := a.applyPermissionMode(yoloToggle)
+				return next, cmd
+			},
+		},
+		{
+			Keys:  "ctrl+a",
+			Scope: scopeGlobal,
+			Desc:  "Select the whole screen and copy it (empty input bar)",
+			match: func(k tea.Key) bool { return k.Mod.Contains(tea.ModCtrl) && k.Code == 'a' },
+			// Only on an empty input bar — with text in it, ctrl+a stays
+			// "move to line start" (see keyBinding.enabled).
+			enabled: func(a App) bool { return a.inputEmpty() },
+			run: func(a App) (tea.Model, tea.Cmd) {
+				next, cmd := a.selectAll()
+				return next, cmd
+			},
+		},
+		{
+			Keys:  "alt+a",
+			Scope: scopeGlobal,
+			Desc:  "Copy the WHOLE transcript, scrolled-off content included (attach, empty input)",
+			match: func(k tea.Key) bool { return k.Mod.Contains(tea.ModAlt) && k.Code == 'a' },
+			// Attach only — it is the only screen with a transcript — and only on
+			// an empty input bar, matching ctrl+a's gate so the two select/copy
+			// keys behave consistently rather than one stealing a key the other
+			// yields.
+			enabled: func(a App) bool { return a.scr == screenAttach && a.inputEmpty() },
+			run: func(a App) (tea.Model, tea.Cmd) {
+				next, cmd := a.copyTranscript()
 				return next, cmd
 			},
 		},
@@ -168,7 +209,7 @@ func screenKeymap() []keyBinding {
 
 		{Keys: "←/→", Scope: scopeInput, Desc: "Move one character"},
 		{Keys: "alt+←/→", Scope: scopeInput, Desc: "Move one word"},
-		{Keys: "home/ctrl+a", Scope: scopeInput, Desc: "Move to line start"},
+		{Keys: "home/ctrl+a", Scope: scopeInput, Desc: "Move to line start (ctrl+a selects the screen when the bar is empty)"},
 		{Keys: "end/ctrl+e", Scope: scopeInput, Desc: "Move to line end"},
 		{Keys: "backspace", Scope: scopeInput, Desc: "Delete the character before the cursor"},
 		{Keys: "delete/ctrl+d", Scope: scopeInput, Desc: "Delete the character at the cursor"},
@@ -245,10 +286,17 @@ func keymap() []keyBinding {
 // toggle would stop gating.
 func dispatchGlobalKey(a App, key tea.Key) (tea.Model, tea.Cmd, bool) {
 	for _, b := range globalKeymap() {
-		if b.match(key) {
-			next, cmd := b.run(a)
-			return next, cmd, true
+		if !b.match(key) {
+			continue
 		}
+		if b.enabled != nil && !b.enabled(a) {
+			// Gated off: report UNHANDLED so the key falls through to the
+			// per-screen switch / input keymap. Returning `true` here would
+			// swallow it into a no-op instead.
+			return a, nil, false
+		}
+		next, cmd := b.run(a)
+		return next, cmd, true
 	}
 	return a, nil, false
 }

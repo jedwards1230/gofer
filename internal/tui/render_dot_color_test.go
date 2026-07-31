@@ -55,14 +55,14 @@ func TestInterruptFreezesAssistantDotAmber(t *testing.T) {
 	const msg = "The shell command was requested, but"
 
 	build := func(interrupt bool) string {
-		m := New(testkit.ColorTheme()).
-			Ingest(event.NewTurnStarted(s)).
-			Ingest(event.NewMessageStarted(s, event.MessageText)).
-			Ingest(event.NewMessageDelta(s, event.MessageText, msg)).
-			Ingest(event.NewMessageFinished(s, event.MessageText, msg))
+		m := New(testkit.ColorTheme())
+		m.Ingest(event.NewTurnStarted(s))
+		m.Ingest(event.NewMessageStarted(s, event.MessageText))
+		m.Ingest(event.NewMessageDelta(s, event.MessageText, msg))
+		m.Ingest(event.NewMessageFinished(s, event.MessageText, msg))
 		if interrupt {
 			// The cancel error the SDK surfaces after flushing the open message.
-			m = m.Ingest(event.NewSessionError(s, "context canceled", true))
+			m.Ingest(event.NewSessionError(s, "context canceled", true))
 		}
 		return testkit.TagANSI(t, testkit.Render(m, testkit.Width, testkit.Height))
 	}
@@ -93,10 +93,10 @@ func TestInterruptFreezesAssistantDotAmber(t *testing.T) {
 // arguments), not a bare `bash` the user can't act on.
 func TestRunningToolShowsStreamedInvocation(t *testing.T) {
 	const s = "sess-x"
-	m := New(theme.Test()).
-		Ingest(event.NewToolCallStarted(s, "call-1", "bash", json.RawMessage(`{}`))).
-		Ingest(event.NewToolCallDelta(s, "call-1", `{"command":"sleep 15 `)).
-		Ingest(event.NewToolCallDelta(s, "call-1", `&& echo 'Waited 15 seconds.'"}`))
+	m := New(theme.Test())
+	m.Ingest(event.NewToolCallStarted(s, "call-1", "bash", json.RawMessage(`{}`)))
+	m.Ingest(event.NewToolCallDelta(s, "call-1", `{"command":"sleep 15 `))
+	m.Ingest(event.NewToolCallDelta(s, "call-1", `&& echo 'Waited 15 seconds.'"}`))
 
 	frame := testkit.Render(m, testkit.Width, testkit.Height)
 	if !strings.Contains(frame, "bash(sleep 15 && echo 'Waited 15 seconds.')") {
@@ -104,11 +104,10 @@ func TestRunningToolShowsStreamedInvocation(t *testing.T) {
 	}
 
 	// The running dot is amber.
-	tagged := testkit.TagANSI(t, testkit.Render(
-		New(testkit.ColorTheme()).
-			Ingest(event.NewToolCallStarted(s, "call-1", "bash", json.RawMessage(`{}`))).
-			Ingest(event.NewToolCallDelta(s, "call-1", `{"command":"sleep 15"}`)),
-		testkit.Width, testkit.Height))
+	running := ingested(testkit.ColorTheme(),
+		event.NewToolCallStarted(s, "call-1", "bash", json.RawMessage(`{}`)),
+		event.NewToolCallDelta(s, "call-1", `{"command":"sleep 15"}`))
+	tagged := testkit.TagANSI(t, testkit.Render(running, testkit.Width, testkit.Height))
 	if !strings.Contains(tagged, "<yellow>●</yellow>") {
 		t.Errorf("running tool dot was not amber; frame:\n%s", tagged)
 	}
@@ -119,9 +118,9 @@ func TestRunningToolShowsStreamedInvocation(t *testing.T) {
 // name-only until the accumulated arguments parse cleanly.
 func TestRunningToolPartialArgsStayNameOnly(t *testing.T) {
 	const s = "sess-x"
-	m := New(theme.Test()).
-		Ingest(event.NewToolCallStarted(s, "call-1", "bash", json.RawMessage(`{}`))).
-		Ingest(event.NewToolCallDelta(s, "call-1", `{"command":"sleep 15 `)) // unterminated JSON
+	m := New(theme.Test())
+	m.Ingest(event.NewToolCallStarted(s, "call-1", "bash", json.RawMessage(`{}`)))
+	m.Ingest(event.NewToolCallDelta(s, "call-1", `{"command":"sleep 15 `)) // unterminated JSON
 
 	frame := testkit.Render(m, testkit.Width, testkit.Height)
 	if strings.Contains(frame, "sleep 15") {

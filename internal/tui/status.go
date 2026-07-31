@@ -4,9 +4,13 @@ package tui
 // read-only, no-persist view over [CommandEnv] and whichever session is
 // currently peeked or attached, if any. Every field the current data can't
 // answer honestly is OMITTED rather than blank-filled — this includes the
-// whole MCP row, which gofer has no integration for yet. It never resolves a
-// credential or hits a provider — env.Auth/env.Config are local reads only,
-// so the view opens cleanly with zero providers authenticated.
+// whole MCP row. gofer DOES have MCP integration (config.MCP,
+// internal/mcpconn), but a server's live connection state belongs to the
+// per-session [mcpconn.Manager] and is not projected into [CommandEnv], so
+// this view has nothing truthful to print; growing the row is gofer#303's
+// concern, not this file's. It never resolves a credential or hits a provider
+// — env.Auth/env.Config are local reads only, so the view opens cleanly with
+// zero providers authenticated.
 
 import (
 	"os"

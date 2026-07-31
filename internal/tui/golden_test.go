@@ -24,7 +24,7 @@ const sid = "0192a1b2-c3d4-7e5f-8a90-000000000001"
 func ingest(events ...event.Event) tui.Model {
 	m := tui.New(theme.Test())
 	for _, e := range events {
-		m = m.Ingest(e)
+		m.Ingest(e)
 	}
 	return m
 }
@@ -41,7 +41,7 @@ func render(t *testing.T, name string, events ...event.Event) {
 func ingestColor(events ...event.Event) tui.Model {
 	m := tui.New(testkit.ColorTheme())
 	for _, e := range events {
-		m = m.Ingest(e)
+		m.Ingest(e)
 	}
 	return m
 }
@@ -201,8 +201,8 @@ func TestEmptyReasoningRendersNoMarker(t *testing.T) {
 		t.Errorf("empty reasoning item rendered a marker glyph; want no visible line:\n%s", got)
 	}
 
-	m = m.Ingest(event.NewMessageStarted(sid, event.MessageText))
-	m = m.Ingest(event.NewMessageFinished(sid, event.MessageText, "Hello! How can I help you today?"))
+	m.Ingest(event.NewMessageStarted(sid, event.MessageText))
+	m.Ingest(event.NewMessageFinished(sid, event.MessageText, "Hello! How can I help you today?"))
 	got = testkit.Render(m, testkit.Width, testkit.Height)
 	if !strings.Contains(got, "● Hello! How can I help you today?") {
 		t.Errorf("non-empty text after the empty reasoning item didn't render:\n%s", got)
@@ -691,7 +691,7 @@ func TestColorApprovalPromptInlineNarrow(t *testing.T) {
 	build := func(th theme.Theme) tui.Model {
 		m := tui.New(th)
 		for _, e := range events {
-			m = m.Ingest(e)
+			m.Ingest(e)
 		}
 		return m
 	}

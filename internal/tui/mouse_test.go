@@ -52,10 +52,8 @@ func TestSelectionSpanNormalizesReadingOrder(t *testing.T) {
 
 // TestSelectedTextSingleLine covers a plain same-row selection: the
 // substring between the clicked and released columns, inclusive of the
-// released-over cell. The row selected is inside the roster body (the
-// overview screen's transcript-region equivalent — see
-// TestSelectionHighlightAndCopyExcludeChrome for why a header row wouldn't
-// even be selectable).
+// released-over cell. The row selected is inside the roster body, though
+// since #307 any row would do — see TestSelectionReachesChrome.
 func TestSelectedTextSingleLine(t *testing.T) {
 	a := newAppForGolden(t, newInternalFakeSup(GoldenRoster()))
 	// Row 6 of the rendered content (testdata/app_overview.golden, 0-indexed)
@@ -123,23 +121,23 @@ func TestSelectedTextWithScrollOffsetAndHeader(t *testing.T) {
 	}
 }
 
-// TestSelectionHighlightAndCopyExcludeChrome reproduces the reported bug:
-// on the attach screen with an overflowing (tailed) transcript, a
-// click-drag that starts inside the transcript and extends DOWN past the
-// transcript's own bottom edge into the input box and its framing rules
-// used to paint a full-width reverse-video bar over those rows too
-// (highlightSelection/selectedText operated on App.render's ENTIRE frame,
-// clamped only to [0, len(lines)-1] — never to the transcript region) and
-// copy their text into the clipboard on release. Both must now be clamped to
-// [App.transcriptRegion]: the highlight never touches the input/rule rows
-// below the transcript, and both selectedText and the OSC 52 clipboard
-// payload handleMouseRelease produces carry only the transcript's own text.
+// TestSelectionReachesChrome pins the CURRENT contract: a drag that runs from
+// the transcript down past its bottom edge into the input box and its framing
+// rules paints and copies those rows too, because every rendered row is
+// selectable ([selectableRegion], issue #307).
 //
-// This test fails against the pre-fix highlightSelection/selectedText (no
-// region clamp, whole-frame [0, len(lines)-1] bound only): the input row
-// would carry the reverse-video SGR and selectedText/the clipboard payload
-// would include the input line's "> " prompt text.
-func TestSelectionHighlightAndCopyExcludeChrome(t *testing.T) {
+// This deliberately supersedes the narrower contract M4 (#75) introduced,
+// which clamped selection to [App.transcriptRegion] so an overshooting drag
+// could not capture the input box. That clamp fixed a real annoyance —
+// overshooting while selecting transcript text captured the "> " prompt — but
+// it did so by making the header, footer, status line, and any open panel
+// permanently unselectable, which is the larger problem: text a user can read
+// on screen and cannot copy.
+//
+// The whitespace normalization ([normalizeCopy]) is what keeps the wider
+// selection pleasant to paste; the earlier fix's real complaint was junk in
+// the clipboard, not the rows themselves being reachable.
+func TestSelectionReachesChrome(t *testing.T) {
 	meta := GoldenMeta()
 	meta.AttachSessionID = "sess-x"
 	a := NewApp(testkit.ColorTheme(), &internalFakeSup{}, meta, GoldenCommandEnv())
@@ -202,20 +200,21 @@ func TestSelectionHighlightAndCopyExcludeChrome(t *testing.T) {
 	if !strings.Contains(hLines[lastTranscriptRow], reverseOn) {
 		t.Errorf("highlightSelection did not paint the transcript's own last row (%d): %q", lastTranscriptRow, hLines[lastTranscriptRow])
 	}
-	if strings.Contains(hLines[ruleRow], reverseOn) {
-		t.Errorf("highlightSelection painted the input box's rule row (%d), outside the transcript region: %q", ruleRow, hLines[ruleRow])
+	if !strings.Contains(hLines[ruleRow], reverseOn) {
+		t.Errorf("highlightSelection did not paint the input box's rule row (%d), which is inside the selection: %q", ruleRow, hLines[ruleRow])
 	}
-	if strings.Contains(hLines[inputRow], reverseOn) {
-		t.Errorf("highlightSelection painted the input line (%d), outside the transcript region: %q", inputRow, hLines[inputRow])
+	if !strings.Contains(hLines[inputRow], reverseOn) {
+		t.Errorf("highlightSelection did not paint the input line (%d), which is inside the selection: %q", inputRow, hLines[inputRow])
 	}
 
-	// selectedText must likewise carry only the transcript's own text.
+	// selectedText carries the chrome rows the drag covered, not just the
+	// transcript's own text.
 	text := a.selectedText()
 	if text == "" {
 		t.Fatal("selectedText() returned empty for a selection that covers a real transcript row")
 	}
-	if strings.Contains(text, ">") || strings.Contains(text, "─") {
-		t.Errorf("selectedText() leaked chrome text (input/rule) = %q", text)
+	if !strings.Contains(text, "─") {
+		t.Errorf("selectedText() dropped the input box's rule row, which the drag covered = %q", text)
 	}
 
 	// handleMouseRelease's Cmd is the OSC 52 clipboard write (tea.SetClipboard)
@@ -230,10 +229,15 @@ func TestSelectionHighlightAndCopyExcludeChrome(t *testing.T) {
 	}
 	copied := fmt.Sprintf("%v", cmd())
 	if copied != text {
-		t.Errorf("handleMouseRelease's clipboard Cmd copied %q, want the same region-clamped text selectedText() returned (%q)", copied, text)
+		t.Errorf("handleMouseRelease's clipboard Cmd copied %q, want the same text selectedText() returned (%q)", copied, text)
 	}
-	if strings.Contains(copied, ">") || strings.Contains(copied, "─") {
-		t.Errorf("clipboard payload leaked chrome text (input/rule) = %q", copied)
+
+	// Whatever the selection covers, no line reaches the clipboard carrying
+	// the frame's right-hand padding.
+	for _, line := range strings.Split(copied, "\n") {
+		if line != strings.TrimRight(line, " \t") {
+			t.Errorf("clipboard payload line has trailing whitespace: %q", line)
+		}
 	}
 }
 
@@ -257,25 +261,23 @@ func bigRoster(n int) []SessionInfo {
 	return out
 }
 
-// TestSelectionRegionExcludesStatusRowKeepsTail pins the transcript-region
-// boundary against the app-level status footer (a.status — the transient
-// error row render() appends when set). It is the anti-regression guard for
-// the two review-bot threads that flagged transcriptRegion for "not
-// accounting for fl.footer": that report is a false positive, because
-// frameLayout already does h-- when a.status != "" (app.go), so fl.h — the
-// budget transcriptRegion divides into header/transcript/Model-footer —
-// ALREADY excludes the app status row (render appends it AFTER the fl.h-row
-// body, outside that budget). The proposed footerLen++/bodyAvail-- "fix"
-// would DOUBLE-count it and shrink the region by one, dropping the newest
-// tail line from selection whenever a status shows.
+// TestSelectionSpansContentAndChromeKeepsTail asserts, for overview and
+// attach, that a drag running from real content down onto the app-level
+// status footer (a.status — the transient row render() appends when set)
+// covers BOTH halves: (a) the chrome it passes through — the input box /
+// dispatch rule and the status row itself — is highlighted and copied, since
+// every rendered row is selectable (#307), AND (b) the bottom-most real
+// content row is still included: the newest transcript line on attach, the
+// last visible roster row on overview.
 //
-// So this asserts BOTH halves for overview and attach: (a) a drag that
-// reaches the status row never highlights or copies it (nor the input box /
-// dispatch rule between), AND (b) the region still includes the bottom-most
-// real content row — the newest transcript line on attach, the last visible
-// roster row on overview — so it stays selectable/copyable. Half (b) is the
-// one that fails against the bot's proposed change.
-func TestSelectionRegionExcludesStatusRowKeepsTail(t *testing.T) {
+// Half (b) is inherited from this test's earlier form, where it guarded
+// transcriptRegion's boundary math against a review-bot false positive (a
+// proposed footerLen++/bodyAvail-- that would have double-counted the status
+// row and silently dropped the newest tail line from every selection). The
+// region is now the whole frame so that specific off-by-one cannot recur,
+// but "the newest line is selectable" is worth pinning on its own — it is
+// the row a user most often wants to copy.
+func TestSelectionSpansContentAndChromeKeepsTail(t *testing.T) {
 	const status = "unknown command: /foo"
 	const reverseOn = "\x1b[7m"
 
@@ -324,12 +326,13 @@ func TestSelectionRegionExcludesStatusRowKeepsTail(t *testing.T) {
 		a.sel = &selectionState{dragging: true, startX: 2, startY: tailRow, curX: 10, curY: statusRow}
 
 		hl := strings.Split(a.render(), "\n")
-		// (a) chrome below the transcript is never highlighted.
-		if strings.Contains(hl[statusRow], reverseOn) {
-			t.Errorf("status row %d highlighted; it is outside the transcript region: %q", statusRow, hl[statusRow])
+		// (a) chrome below the transcript IS highlighted — every rendered row
+		// is selectable (#307).
+		if !strings.Contains(hl[statusRow], reverseOn) {
+			t.Errorf("status row %d not highlighted; the drag covers it and every rendered row is selectable: %q", statusRow, hl[statusRow])
 		}
-		if strings.Contains(hl[inputRow], reverseOn) {
-			t.Errorf("input row %d highlighted; it is outside the transcript region: %q", inputRow, hl[inputRow])
+		if !strings.Contains(hl[inputRow], reverseOn) {
+			t.Errorf("input row %d not highlighted; the drag covers it and every rendered row is selectable: %q", inputRow, hl[inputRow])
 		}
 		// (b) the newest tail transcript row stays selectable — the exact row
 		// the bot's proposed footerLen++ would have dropped.
@@ -341,8 +344,15 @@ func TestSelectionRegionExcludesStatusRowKeepsTail(t *testing.T) {
 		if !strings.Contains(text, "turn 39") {
 			t.Errorf("selectedText dropped the newest tail line; got %q", text)
 		}
-		if strings.Contains(text, status) || strings.Contains(text, ">") || strings.Contains(text, "─") {
-			t.Errorf("selectedText leaked chrome (status/input/rule): %q", text)
+		// The release column bounds the LAST row (selectedText's x1 clamp), so
+		// the status row arrives truncated at the drag's end column rather than
+		// whole — the standard terminal drag shape. Assert a non-empty prefix
+		// of it, which proves the row was reached without pinning the exact
+		// release column.
+		rows := strings.Split(text, "\n")
+		lastCopied := rows[len(rows)-1]
+		if lastCopied == "" || !strings.HasPrefix(status, lastCopied) {
+			t.Errorf("expected the copy to end with a prefix of the status row %q, got last line %q (full copy: %q)", status, lastCopied, text)
 		}
 
 		_, cmd := a.handleMouseRelease(tea.MouseReleaseMsg{X: 10, Y: statusRow, Button: tea.MouseLeft})
@@ -350,7 +360,7 @@ func TestSelectionRegionExcludesStatusRowKeepsTail(t *testing.T) {
 			t.Fatal("handleMouseRelease produced no clipboard Cmd for a non-empty selection")
 		}
 		if copied := fmt.Sprintf("%v", cmd()); copied != text {
-			t.Errorf("clipboard payload %q != region-clamped selectedText %q", copied, text)
+			t.Errorf("clipboard payload %q != selectedText %q", copied, text)
 		}
 	})
 
@@ -400,11 +410,11 @@ func TestSelectionRegionExcludesStatusRowKeepsTail(t *testing.T) {
 		a.sel = &selectionState{dragging: true, startX: 2, startY: bottomRosterRow - 2, curX: 10, curY: statusRow}
 
 		hl := strings.Split(a.render(), "\n")
-		if strings.Contains(hl[statusRow], reverseOn) {
-			t.Errorf("status row %d highlighted; it is outside the roster region: %q", statusRow, hl[statusRow])
+		if !strings.Contains(hl[statusRow], reverseOn) {
+			t.Errorf("status row %d not highlighted; the drag covers it and every rendered row is selectable: %q", statusRow, hl[statusRow])
 		}
-		if strings.Contains(hl[ruleRow], reverseOn) {
-			t.Errorf("dispatch rule row %d highlighted; it is outside the roster region: %q", ruleRow, hl[ruleRow])
+		if !strings.Contains(hl[ruleRow], reverseOn) {
+			t.Errorf("dispatch rule row %d not highlighted; the drag covers it and every rendered row is selectable: %q", ruleRow, hl[ruleRow])
 		}
 		if !strings.Contains(hl[bottomRosterRow], reverseOn) {
 			t.Errorf("bottom roster row %d not highlighted; the region must still include it: %q", bottomRosterRow, hl[bottomRosterRow])
@@ -414,8 +424,15 @@ func TestSelectionRegionExcludesStatusRowKeepsTail(t *testing.T) {
 		if !strings.Contains(text, "session ") {
 			t.Errorf("selectedText dropped the bottom roster row; got %q", text)
 		}
-		if strings.Contains(text, status) {
-			t.Errorf("selectedText leaked the status row: %q", text)
+		// The release column bounds the LAST row (selectedText's x1 clamp), so
+		// the status row arrives truncated at the drag's end column rather than
+		// whole — the standard terminal drag shape. Assert a non-empty prefix
+		// of it, which proves the row was reached without pinning the exact
+		// release column.
+		rows := strings.Split(text, "\n")
+		lastCopied := rows[len(rows)-1]
+		if lastCopied == "" || !strings.HasPrefix(status, lastCopied) {
+			t.Errorf("expected the copy to end with a prefix of the status row %q, got last line %q (full copy: %q)", status, lastCopied, text)
 		}
 	})
 }
@@ -728,5 +745,163 @@ func TestSelectionHighlightContiguousAcrossMarkerAndTailRows(t *testing.T) {
 	}
 	if idx := strings.Index(text, "20"); idx < 0 || idx < strings.Index(text, "bash") {
 		t.Errorf("selectedText() out of order: %q (want \"bash\" before \"20\", matching the top-to-bottom drag)", text)
+	}
+}
+
+// TestSelectAllCoversTheWholeFrame is the headline assertion for #307:
+// ctrl+a's selection must reach the frame's FIRST and LAST real rows — the
+// identity header at the top and the footer/hint rows at the bottom — not
+// just the roster body between them. It locates those rows by scanning the
+// render rather than hardcoding their text, so it keeps testing "the whole
+// frame" rather than "these two strings" as the header and footer evolve.
+func TestSelectAllCoversTheWholeFrame(t *testing.T) {
+	a := NewApp(testkit.ColorTheme(), newInternalFakeSup(GoldenRoster()), GoldenMeta(), GoldenCommandEnv())
+	mdl, _ := a.Update(tea.WindowSizeMsg{Width: testkit.Width, Height: testkit.Height})
+	a = mdl.(App)
+
+	lines := strings.Split(ansi.Strip(a.render()), "\n")
+	firstRow, lastRow := -1, -1
+	for i, l := range lines {
+		if strings.TrimSpace(l) == "" {
+			continue
+		}
+		if firstRow < 0 {
+			firstRow = i
+		}
+		lastRow = i
+	}
+	if firstRow < 0 || lastRow <= firstRow {
+		t.Fatalf("precondition failed: firstRow=%d lastRow=%d in:\n%s", firstRow, lastRow, a.render())
+	}
+
+	next, cmd := a.selectAll()
+	if cmd == nil {
+		t.Fatal("selectAll produced no clipboard Cmd")
+	}
+	if next.sel == nil {
+		t.Fatal("selectAll installed no selection, so nothing is highlighted on screen")
+	}
+	copied := fmt.Sprintf("%v", cmd())
+
+	wantFirst := strings.TrimSpace(lines[firstRow])
+	wantLast := strings.TrimSpace(lines[lastRow])
+	if !strings.Contains(copied, wantFirst) {
+		t.Errorf("select-all dropped the frame's first row %q — the header is not being copied.\ngot:\n%s", wantFirst, copied)
+	}
+	if !strings.Contains(copied, wantLast) {
+		t.Errorf("select-all dropped the frame's last row %q — the footer is not being copied.\ngot:\n%s", wantLast, copied)
+	}
+
+	// The clipboard payload is normalized: no padded lines, no leading or
+	// trailing blanks, no runs of blank lines.
+	got := strings.Split(copied, "\n")
+	for i, line := range got {
+		if line != strings.TrimRight(line, " \t") {
+			t.Errorf("copied line %d has trailing whitespace: %q", i, line)
+		}
+		if i > 0 && line == "" && got[i-1] == "" {
+			t.Errorf("copied text has a run of blank lines at %d", i)
+		}
+	}
+	if len(got) > 0 && (got[0] == "" || got[len(got)-1] == "") {
+		t.Errorf("copied text has a leading or trailing blank line: %q … %q", got[0], got[len(got)-1])
+	}
+}
+
+// TestNormalizeCopy table-tests the clipboard normalization directly — the
+// grid-to-text conversion that keeps a full-frame selection pasteable.
+func TestNormalizeCopy(t *testing.T) {
+	tests := []struct {
+		name string
+		rows []string
+		want string
+	}{
+		{"right-trims padding", []string{"gofer   ", "idle    "}, "gofer\nidle"},
+		{"drops leading blanks", []string{"", "  ", "a"}, "a"},
+		{"drops trailing blanks", []string{"a", "", "   "}, "a"},
+		{"collapses interior runs", []string{"a", "", "", "", "b"}, "a\n\nb"},
+		{"keeps a single interior blank", []string{"a", "", "b"}, "a\n\nb"},
+		{"all blank is empty", []string{"", "   ", ""}, ""},
+		{"no rows is empty", nil, ""},
+		{"preserves interior indentation", []string{"a", "    indented  "}, "a\n    indented"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := normalizeCopy(tc.rows); got != tc.want {
+				t.Errorf("normalizeCopy(%q) = %q, want %q", tc.rows, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSelectionOnAPanelAndPeekScreens closes the last leg of issue #307's
+// definition of done: a command panel (/help here) and the peek screen must be
+// selectable and copyable, not just the overview and attach transcripts.
+//
+// Panels were the sharpest case in the issue. They are pure read-only reference
+// text — a keymap, a config dump, a status table — which is exactly the content
+// a user most wants to copy out.
+//
+// The two screens fail through DIFFERENT gates, which is why both are here and
+// why the issue's own framing needs a correction. #307 attributed unselectable
+// panels to [App.mouseSelectable]'s old `scr == screenOverview || scr ==
+// screenAttach` test, but a panel is an OVERLAY: `a.scr` stays screenOverview
+// while it is open, so that gate always passed. What actually excluded a panel
+// was the region clamp — [App.transcriptRegion] returns the overview's ROSTER
+// BODY rows and its doc excludes "the command menu/panel" in as many words. The
+// screen the old gate genuinely excluded is screenPeek.
+//
+// So: the panel half is pinned against the region (mutating [App.selectedText]
+// back to transcriptRegion must fail it), and the peek half against the screen
+// gate (restoring the old mouseSelectable must fail it). Either assertion alone
+// would go green against the other's regression.
+func TestSelectionOnAPanelAndPeekScreens(t *testing.T) {
+	a := NewApp(testkit.ColorTheme(), newInternalFakeSup(GoldenRoster()), GoldenMeta(), GoldenCommandEnv())
+	mdl, _ := a.Update(tea.WindowSizeMsg{Width: testkit.Width, Height: testkit.Height})
+	a = mdl.(App)
+
+	// --- panel: "?" on an empty dispatch bar opens the panel on the Help tab.
+	mdl, _ = a.Update(tea.KeyPressMsg{Text: "?"})
+	panel := mdl.(App)
+	if panel.panel == nil {
+		t.Fatal("precondition: ? did not open the command panel")
+	}
+	if panel.scr != screenOverview {
+		t.Fatalf("precondition: a panel is expected to be an overlay on screenOverview, got scr=%v", panel.scr)
+	}
+	if frame := ansi.Strip(panel.render()); !strings.Contains(frame, "[Help]") {
+		t.Fatalf("precondition: the panel is not on the Help tab:\n%s", frame)
+	}
+
+	next, cmd := panel.selectAll()
+	if cmd == nil {
+		t.Fatal("selectAll on a panel screen produced no clipboard Cmd")
+	}
+	if next.sel == nil {
+		t.Fatal("selectAll on a panel screen installed no selection, so nothing highlights")
+	}
+	copied := fmt.Sprintf("%v", cmd())
+	if !strings.Contains(copied, "[Help]") {
+		t.Errorf("select-all on the /help panel did not copy the panel body — the selectable region is still clamped to the roster.\ngot:\n%s", copied)
+	}
+	// A row from the panel's own scrollable body, not just its tab strip.
+	if !strings.Contains(copied, "Reopen a session from disk") {
+		t.Errorf("select-all on the /help panel copied the tab strip but not the keymap body.\ngot:\n%s", copied)
+	}
+	for i, line := range strings.Split(copied, "\n") {
+		if line != strings.TrimRight(line, " \t") {
+			t.Errorf("copied panel line %d has trailing whitespace: %q", i, line)
+		}
+	}
+
+	// --- peek: the screen the old overview+attach-only gate genuinely refused.
+	peeked := a
+	peeked.scr = screenPeek
+	if !peeked.mouseSelectable() {
+		t.Fatal("mouseSelectable() is false on the peek screen — the old screen gate is back")
+	}
+	dragged, _ := peeked.handleMouseClick(tea.MouseClickMsg{Button: tea.MouseLeft, X: 2, Y: 3})
+	if dragged.sel == nil {
+		t.Error("a left click on the peek screen started no selection — the screen gate still excludes peek")
 	}
 }

@@ -3,8 +3,10 @@ package supervisor
 import (
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -57,6 +59,63 @@ type sessionMeta struct {
 	// one RecordPrompt was never called for (e.g. a daemon-created session —
 	// see internal/prompt's package doc for what's wired so far).
 	Prompt *promptMeta `json:"prompt,omitempty"`
+	// Derived is the journal-derived roster metadata cached from the last
+	// read of this session's journal — see [derivedMeta] and
+	// [diskSessionInfo]. nil for a session predating this field or one no
+	// offline listing has touched yet; a nil (or stale) Derived simply means
+	// the next listing re-reads the journal, so it can never make a row wrong.
+	Derived *derivedMeta `json:"derived,omitempty"`
+}
+
+// derivedMeta is the roster metadata [diskSessionInfo] otherwise recomputes by
+// parsing a session's ENTIRE journal on every refresh — cwd, title, created and
+// last-activity — cached beside the journal so a roster tick costs one small
+// JSON read plus one Stat per offline session instead of a full JSONL parse
+// (gofer#298: the TUI refreshes on a ~1s tick, so the full scan was being paid
+// continuously, not just on the delete that made it noticeable).
+//
+// # Why the journal's size and mtime are a sound cache key
+//
+// A session journal is APPEND-ONLY — the SDK's [session.Journal] opens it
+// O_APPEND and only ever writes whole entries, and gofer never rewrites or
+// truncates one (architecture invariant #4: journals are never deleted). Every
+// change to a journal is therefore an append of at least one non-empty line, so
+// its SIZE strictly increases on every change. Size alone would very nearly do;
+// mtime is carried alongside as a second, independent witness so that a journal
+// replaced wholesale out-of-band (a restore from backup, a manual edit) is also
+// caught unless it happens to match on both. The pair can only collide for a
+// rewrite that preserves size AND mtime, which nothing in gofer can produce.
+//
+// The stat is taken BEFORE the journal is read, never after: a stat taken after
+// the read could observe an append that landed mid-read and would then tag
+// content-derived-from-the-old-bytes with the NEW size, pinning a stale cache
+// entry until the next append. Stat-then-read can only err the other way — a
+// cache entry tagged with a size older than the content it describes, which
+// simply misses on the next listing and re-derives. Conservative in the safe
+// direction.
+type derivedMeta struct {
+	Cwd     string    `json:"cwd,omitempty"`
+	Title   string    `json:"title,omitempty"`
+	Created time.Time `json:"created,omitempty"`
+	Updated time.Time `json:"updated,omitempty"`
+	// JournalSize and JournalModNano are the journal's stat at the moment the
+	// fields above were derived — the staleness key. Both are written even
+	// when zero: a mismatch is what re-derives, so an absent value must not
+	// read back as "matches anything".
+	JournalSize    int64 `json:"journalSize"`
+	JournalModNano int64 `json:"journalModNano"`
+}
+
+// fresh reports whether d still describes the journal fi stats — i.e. whether
+// the cached fields can be served without re-reading the JSONL. A nil d (no
+// sidecar, or one written by a gofer predating this field) is never fresh, so
+// every legacy session falls back to the journal read and lists exactly as it
+// did before.
+func (d *derivedMeta) fresh(fi fs.FileInfo) bool {
+	if d == nil || fi == nil {
+		return false
+	}
+	return d.JournalSize == fi.Size() && d.JournalModNano == fi.ModTime().UnixNano()
 }
 
 // promptMeta is the on-disk shape of [PromptProvenance] — see [RecordPrompt].
@@ -69,25 +128,75 @@ type promptMeta struct {
 // recordable reports whether m carries anything worth persisting. A plain root
 // session has nothing to record, so it writes no sidecar at all — which is what
 // keeps this feature invisible for every pre-existing use of the supervisor. An
-// archived session, or one with recorded prompt provenance, is always
-// recordable: each is the whole point of the sidecar for a plain root session
-// that has no parent/agent link.
+// archived session, one with recorded prompt provenance, or one with cached
+// roster metadata is always recordable: each is the whole point of the sidecar
+// for a plain root session that has no parent/agent link.
 func (m sessionMeta) recordable() bool {
-	return m.ParentID != "" || m.Agent != "" || m.Archived || m.Prompt != nil
+	return m.ParentID != "" || m.Agent != "" || m.Archived || m.Prompt != nil || m.Derived != nil
 }
 
 // sidecarPath is the sidecar file for id in the session directory dir (the
 // directory its journal already lives in).
 func sidecarPath(dir, id string) string { return filepath.Join(dir, id+metaSuffix) }
 
+// sidecarMu serializes every read-modify-write of a sidecar in this process.
+//
+// [atomicWriteFile] already makes a single write atomic for READERS, but the
+// sidecar has several independent RMW writers — the archive marker, prompt
+// provenance, and (on every roster refresh, for every offline session whose
+// journal grew) the derived-metadata cache. Without this lock, an archive
+// landing between a concurrent refresh's read and its write-back would be
+// silently overwritten with Archived=false, resurfacing an archived session on
+// the overview. The lock is process-wide rather than per-path because sidecar
+// writes are rare relative to reads and never held across a journal read.
+//
+// It does NOT coordinate across processes (the M6 router writes the same files
+// from its own process); the pre-existing exposure there is unchanged, and the
+// derived cache in particular degrades to a re-derive rather than to a wrong
+// row.
+var sidecarMu sync.Mutex
+
 // writeSessionMeta persists m as id's sidecar in dir, atomically — see
-// [atomicWriteFile].
+// [atomicWriteFile]. Callers replacing a whole sidecar go through here; callers
+// mutating one field of an existing sidecar must use [updateSessionMeta] so the
+// read and the write are one critical section.
 func writeSessionMeta(dir, id string, m sessionMeta) error {
+	sidecarMu.Lock()
+	defer sidecarMu.Unlock()
+	return writeSessionMetaLocked(dir, id, m)
+}
+
+// writeSessionMetaLocked is [writeSessionMeta]'s body; the caller holds
+// [sidecarMu].
+func writeSessionMetaLocked(dir, id string, m sessionMeta) error {
 	data, err := json.Marshal(m)
 	if err != nil {
 		return fmt.Errorf("supervisor: marshal session meta %s: %w", id, err)
 	}
 	return atomicWriteFile(dir, "."+id+"-*"+metaSuffix+".tmp", sidecarPath(dir, id), data)
+}
+
+// updateSessionMeta read-modify-writes id's sidecar under dir under
+// [sidecarMu], so a concurrent update of a DIFFERENT field cannot be lost.
+// mutate reports whether it changed anything; false means no write at all (no
+// file churn for a no-op). A mutation that leaves nothing worth recording (see
+// [sessionMeta.recordable]) removes the sidecar rather than leaving an all-zero
+// stub — a missing sidecar reads back as the same zero value.
+func updateSessionMeta(dir, id string, mutate func(*sessionMeta) bool) error {
+	sidecarMu.Lock()
+	defer sidecarMu.Unlock()
+
+	meta := readSessionMeta(sidecarPath(dir, id))
+	if !mutate(&meta) {
+		return nil
+	}
+	if !meta.recordable() {
+		if err := os.Remove(sidecarPath(dir, id)); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("supervisor: remove session meta %s: %w", id, err)
+		}
+		return nil
+	}
+	return writeSessionMetaLocked(dir, id, meta)
 }
 
 // atomicWriteFile writes data to path, atomically: a temp file in the SAME
@@ -156,8 +265,8 @@ func readSessionMeta(path string) sessionMeta {
 
 // DiskMeta reports the durable subagent link recorded for id under the session
 // store rooted at root: the spawning session's id, the agent identity, and the
-// depth. It is the ONE reader every offline-row builder must go through — the
-// in-process [Supervisor.List] and the M6 router's own parallel List — so that
+// depth. It is the ONE reader every offline-row builder must go through — which
+// since the router adopted [DiskSessionInfo] is a single builder — so that
 // "an offline child still shows its parent" holds on every deployment path, not
 // just the in-process one.
 //
@@ -255,32 +364,47 @@ func diskSessionDir(root, id string) (dir string, ok bool) {
 // change) intact. When clearing leaves a plain root session with nothing left to
 // record, the now-empty sidecar is removed rather than left as a stub.
 func setArchived(dir, id string, archived bool, now time.Time) error {
-	meta := readSessionMeta(sidecarPath(dir, id))
-	if meta.Archived == archived {
-		return nil // already in the desired state — no write, no churn
-	}
-	meta.Archived = archived
-	if archived {
-		meta.ArchivedAt = now
-	} else {
-		meta.ArchivedAt = time.Time{}
-	}
-	if !meta.recordable() {
-		// Clearing the marker off a plain root session: drop the sidecar rather
-		// than leave an all-zero stub. A missing sidecar reads back as the same
-		// zero value.
-		if err := os.Remove(sidecarPath(dir, id)); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("supervisor: remove session meta %s: %w", id, err)
+	return updateSessionMeta(dir, id, func(meta *sessionMeta) bool {
+		if meta.Archived == archived {
+			return false // already in the desired state — no write, no churn
 		}
-		return nil
-	}
-	return writeSessionMeta(dir, id, meta)
+		meta.Archived = archived
+		if archived {
+			meta.ArchivedAt = now
+		} else {
+			meta.ArchivedAt = time.Time{}
+		}
+		return true
+	})
+}
+
+// cacheDerived records d as id's journal-derived roster metadata in its sidecar
+// under dir, preserving every other field (subagent link, archive marker,
+// prompt provenance) — see [derivedMeta] for why this is safe to serve back and
+// [diskSessionInfo] for who calls it.
+//
+// It is BEST-EFFORT by contract: the caller has already built a correct row
+// from the journal it just read, so a failed write costs a re-derive on the next
+// refresh and nothing else. That matters on a read-only store or a directory the
+// listing process cannot write, where failing the listing instead would take the
+// whole roster down to save a cache.
+//
+// It writes only the `.meta.json` sidecar, never the JSONL — the listing path
+// stays read-only over the journals.
+func cacheDerived(dir, id string, d derivedMeta) error {
+	return updateSessionMeta(dir, id, func(meta *sessionMeta) bool {
+		if meta.Derived != nil && *meta.Derived == d {
+			return false // already current — no write, no churn
+		}
+		meta.Derived = &d
+		return true
+	})
 }
 
 // DiskArchived reports whether id was archived, read from its sidecar under the
 // store rooted at root. Like [DiskMeta] it is the reader an offline-row builder
-// goes through so the flag holds on every deployment path (the in-process
-// [Supervisor.List] and the M6 router's own parallel List). An unknown id, a
+// goes through so the flag holds on every deployment path (both the in-process
+// [Supervisor.List] and the M6 router now share [DiskSessionInfo]). An unknown id, a
 // session with no sidecar, or an unreadable one all report false — archived is
 // an overlay on a listing and can never fail one.
 func DiskArchived(root, id string) bool {
@@ -291,7 +415,7 @@ func DiskArchived(root, id string) bool {
 // SidecarInfo is the durable per-session metadata a `.meta.json` sidecar carries
 // beside its journal: the subagent link (which session spawned it, its agent
 // identity, its depth) and the archive marker. It is the exported projection of
-// the unexported [sessionMeta] for cross-package offline-row builders (the M6
+// the unexported [sessionMeta] for cross-package sidecar readers (the M6
 // router).
 type SidecarInfo struct {
 	ParentID string
@@ -382,9 +506,11 @@ type PromptProvenance struct {
 // caller to log rather than to fail the run on.
 func RecordPrompt(id, journalPath string, prov PromptProvenance, text string) error {
 	dir := filepath.Dir(journalPath)
-	meta := readSessionMeta(sidecarPath(dir, id))
-	meta.Prompt = &promptMeta{Files: prov.Files, SHA256: prov.SHA256, Bytes: prov.Bytes}
-	if err := writeSessionMeta(dir, id, meta); err != nil {
+	err := updateSessionMeta(dir, id, func(meta *sessionMeta) bool {
+		meta.Prompt = &promptMeta{Files: prov.Files, SHA256: prov.SHA256, Bytes: prov.Bytes}
+		return true
+	})
+	if err != nil {
 		return fmt.Errorf("supervisor: record prompt provenance for %s: %w", id, err)
 	}
 	if err := atomicWriteFile(dir, "."+id+"-*"+promptTextSuffix+".tmp", promptTextPath(dir, id), []byte(text)); err != nil {

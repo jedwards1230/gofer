@@ -32,9 +32,9 @@ func TestSessionErrorUserCancelReframed(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			m := New(theme.Test()).
-				Ingest(event.NewTurnStarted(s)).
-				Ingest(event.NewSessionError(s, tc.errText, true))
+			m := ingested(theme.Test(),
+				event.NewTurnStarted(s),
+				event.NewSessionError(s, tc.errText, true))
 
 			if len(m.items) == 0 {
 				t.Fatal("no transcript item produced")

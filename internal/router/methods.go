@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -606,13 +605,20 @@ func (s *Supervisor) List(ctx context.Context) ([]supervisor.SessionInfo, error)
 			return nil, fmt.Errorf("router: list project %s: %w", slug, err)
 		}
 		for _, id := range ids {
+			// Per-SESSION cancellation check — see the matching comment in
+			// [supervisor.Supervisor.List]. DiskSessionInfo honors no ctx of its
+			// own, so without this a cancelled fetch still walks (and caches)
+			// every session in the project.
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			seen[id] = struct{}{}
 			if info, ok := live[id]; ok {
 				out = append(out, info)
 				continue
 			}
 			path := filepath.Join(sessionsDir, slug, id+".jsonl")
-			out = append(out, diskSessionInfo(id, slug, path))
+			out = append(out, supervisor.DiskSessionInfo(ctx, id, slug, path))
 		}
 	}
 	// A live session whose journal is not on disk yet (a just-spawned worker
@@ -963,84 +969,4 @@ func statusFromWire(s string) supervisor.SessionStatus {
 	default:
 		return supervisor.StatusNeedsInput
 	}
-}
-
-// diskSessionInfo builds an offline [supervisor.SessionInfo] for id from its
-// journal, read-only via [session.ReadEntries] — the same enrichment
-// [supervisor.Supervisor.List] applies to a disk-only entry: Cwd from the meta
-// root entry, Title from the first user message, Created/Updated from the first
-// and last entry times. A read error or an empty journal degrades to the bare
-// {ID, Project, JournalPath, Live:false} snapshot rather than failing List.
-//
-// The subagent link and archive marker live in a sidecar beside the journal,
-// not in the journal itself, and are read together through
-// [supervisor.ReadSidecar] — the by-directory reader the in-process List's own
-// builder uses. Under M6 the router IS the daemon a TUI or `gofer ps` talks to,
-// so skipping the link here would collapse a subagent tree into a flat list of
-// roots the moment its workers exited, and skipping the archive marker would
-// resurface an archived session on the overview after a restart — both on the
-// primary deployment path.
-func diskSessionInfo(id, slug, path string) supervisor.SessionInfo {
-	// Read the sidecar by the directory we already hold (filepath.Dir(path)),
-	// folding the subagent link and the archive marker into one read — no
-	// per-session project scan (what supervisor.DiskMeta would cost).
-	sc := supervisor.ReadSidecar(filepath.Dir(path), id)
-	info := supervisor.SessionInfo{
-		ID:          id,
-		Project:     slug,
-		JournalPath: path,
-		Live:        false,
-		ParentID:    sc.ParentID,
-		Agent:       sc.Agent,
-		Depth:       sc.Depth,
-		Archived:    sc.Archived,
-	}
-
-	entries, err := session.ReadEntries(path)
-	if err != nil || len(entries) == 0 {
-		return info
-	}
-
-	info.Created = entries[0].Time
-	info.Updated = entries[len(entries)-1].Time
-
-	if entries[0].Type == session.EntryMeta {
-		if meta, metaErr := entries[0].Meta(); metaErr == nil {
-			info.Cwd = meta.Cwd
-		}
-	}
-
-	for _, e := range entries {
-		if e.Type != session.EntryMessage {
-			continue
-		}
-		msg, msgErr := e.Message()
-		if msgErr != nil || msg.Role != provider.RoleUser {
-			continue
-		}
-		if text := msg.Text(); text != "" {
-			info.Title = snippet(text)
-			break
-		}
-	}
-
-	return info
-}
-
-// snippetMax bounds a disk-only session's derived title.
-const snippetMax = 80
-
-// snippet renders the first line of text, trimmed and truncated to snippetMax
-// runes, as an offline session's title — the router-local mirror of the
-// supervisor's own title derivation.
-func snippet(text string) string {
-	text = strings.TrimSpace(text)
-	if i := strings.IndexByte(text, '\n'); i >= 0 {
-		text = strings.TrimSpace(text[:i])
-	}
-	r := []rune(text)
-	if len(r) > snippetMax {
-		return string(r[:snippetMax-1]) + "…"
-	}
-	return text
 }

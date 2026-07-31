@@ -12,14 +12,17 @@ import (
 
 // subagent_test.go covers the M6 half of the parent/child session primitive: the
 // router forwards a create's subagent link to the worker that actually hosts the
-// session, and — the part that is easy to get wrong, because the router keeps its
-// own offline-row builder — reports the link for sessions whose workers are gone.
+// session, and reports the link for sessions whose workers are gone.
+//
+// The router used to keep its own offline-row builder, which is what made the
+// second half easy to get wrong. It now calls [supervisor.DiskSessionInfo], so
+// this is a regression test against the duplicate ever coming back.
 
 // TestListOfflineSubagentLinkFromSidecar is the regression test for the router's
-// parallel List. Under M6 the router IS the daemon a TUI or `gofer ps` talks to,
-// so if its own diskSessionInfo skips the sidecar a subagent tree collapses into
-// a flat list of roots the moment its workers exit — on the PRIMARY deployment
-// path, while the in-process supervisor's List keeps working and hides it.
+// List. Under M6 the router IS the daemon a TUI or `gofer ps` talks to, so if its
+// offline rows skip the sidecar a subagent tree collapses into a flat list of
+// roots the moment its workers exit — on the PRIMARY deployment path, while the
+// in-process supervisor's List keeps working and hides it.
 //
 // It is deliberately worker-free: journals and a sidecar are written straight to
 // the store root, so the assertion is about the offline-row builder alone with no

@@ -554,7 +554,7 @@ func TestGoldenAttachHistoryReplayRendersUserTurn(t *testing.T) {
 
 	m := tui.New(theme.Test())
 	for _, e := range history {
-		m = m.Ingest(e)
+		m.Ingest(e)
 	}
 	got := testkit.Render(m, testkit.Width, testkit.Height)
 	testkit.AssertGolden(t, "attach_history_replay_user_turn", got)

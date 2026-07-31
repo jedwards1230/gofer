@@ -62,7 +62,7 @@ func BenchmarkTranscriptIngest(b *testing.B) {
 			for b.Loop() {
 				m := tui.New(theme.Test())
 				for _, ev := range evs {
-					m = m.Ingest(ev)
+					m.Ingest(ev)
 				}
 				// Keep the fully-replayed model observable so the loop cannot be
 				// optimized away, and assert it actually absorbed the stream — a
@@ -88,7 +88,7 @@ func BenchmarkTranscriptView(b *testing.B) {
 		b.Run(fmt.Sprintf("turns=%d", turns), func(b *testing.B) {
 			m := tui.New(theme.Test())
 			for _, ev := range benchTurns(turns) {
-				m = m.Ingest(ev)
+				m.Ingest(ev)
 			}
 
 			b.ReportAllocs()

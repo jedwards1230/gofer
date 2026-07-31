@@ -63,9 +63,11 @@
 // The link is DURABLE and gofer-native: it is written beside the journal as
 // <root>/sessions/<slug>/<id>.meta.json (see the sidecar file), so
 // [Supervisor.List] reports it for offline sessions too and [Supervisor.Resume]
-// restores a child's attribution. Only a session that actually has a parent or
-// an agent writes a sidecar; a plain root session writes none and every session
-// predating this feature reads back as a root, unchanged.
+// restores a child's attribution. Create writes a sidecar only for a session
+// that actually has a parent or an agent; a plain root session gets one only
+// once something else needs recording against it (an archive marker, prompt
+// provenance, or the offline-row metadata cache described below), and every
+// session predating this feature reads back as a root, unchanged.
 //
 // [DiskMeta] is that sidecar's exported reader, for the OTHER offline-row
 // builder: internal/router keeps its own List over the same store, and under M6
@@ -107,6 +109,15 @@
 // journals: archive state lives in the sidecar, never in the JSONL, and
 // [Supervisor.Resume] clears the marker so a resumed session stays on the
 // overview.
+//
+// Because a client POLLS that rebuild (the TUI on a ~1s tick), each offline
+// row's journal-derived fields — Cwd, Title, Created, Updated — are cached in
+// the same sidecar, keyed on the journal's size and mtime, so a refresh over
+// unchanged journals parses no JSONL at all. The cache is a pure accelerator:
+// a missing, legacy, or stale entry re-reads the journal and rewrites itself,
+// and the write is best-effort and confined to the sidecar, so the read-only-
+// over-journals guarantee is unchanged. See [diskSessionInfo] and the sidecar
+// file's derivedMeta.
 //
 // # Concurrency
 //

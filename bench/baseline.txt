@@ -4,21 +4,30 @@
 # A 4th field of 'allocs-only' gates that benchmark on allocs/op only
 # (concurrent benchmarks: their B/op is scheduling-dependent).
 BenchmarkAppRenderMassiveTranscript 40017 2034168
-BenchmarkBroadcastRawEvent/message_delta/peers=1 15 1048 allocs-only
+BenchmarkBroadcastRawEvent/message_delta/peers=1 17 1128 allocs-only
 BenchmarkBroadcastRawEvent/message_delta/peers=32 234 13776 allocs-only
-BenchmarkBroadcastRawEvent/message_delta/peers=8 65 3920 allocs-only
+BenchmarkBroadcastRawEvent/message_delta/peers=8 67 4000 allocs-only
 BenchmarkBroadcastRawEvent/tool_call_finished/peers=1 17 2424 allocs-only
-BenchmarkBroadcastRawEvent/tool_call_finished/peers=32 237 33520 allocs-only
-BenchmarkBroadcastRawEvent/tool_call_finished/peers=8 66 16856 allocs-only
-BenchmarkOverviewRoster/sessions=100 22450 2498352
-BenchmarkOverviewRoster/sessions=30 6762 737696
-BenchmarkOverviewRoster/sessions=500 112056 12253104
-BenchmarkOverviewRosterJournalDepth/turns=256 170446 18014256
-BenchmarkOverviewRosterJournalDepth/turns=64 43722 4800464
-BenchmarkOverviewRosterJournalDepth/turns=8 6762 739664
-BenchmarkTranscriptIngest/turns=100 1442 4557072
-BenchmarkTranscriptIngest/turns=1000 14089 372586448
-BenchmarkTranscriptIngest/turns=5000 70664 9094293648
+BenchmarkBroadcastRawEvent/tool_call_finished/peers=32 236 33504 allocs-only
+BenchmarkBroadcastRawEvent/tool_call_finished/peers=8 66 9424 allocs-only
+BenchmarkCopyTranscript/turns=100 27686 2811632
+BenchmarkCopyTranscript/turns=1000 275184 27842960
+BenchmarkCopyTranscript/turns=5000 1359206 138127376
+BenchmarkOverviewRoster/sessions=100 2549 492608
+BenchmarkOverviewRoster/sessions=30 793 136256
+BenchmarkOverviewRoster/sessions=500 12555 2225552
+BenchmarkOverviewRosterJournalDepth/turns=256 793 138240
+BenchmarkOverviewRosterJournalDepth/turns=64 793 138240
+BenchmarkOverviewRosterJournalDepth/turns=8 793 138240
+BenchmarkRouterList/sessions=100 2547 387536
+BenchmarkRouterList/sessions=30 791 112320
+BenchmarkRouterList/sessions=500 12558 1824144
+BenchmarkRouterListJournalDepth/turns=256 791 114288
+BenchmarkRouterListJournalDepth/turns=64 791 113792
+BenchmarkRouterListJournalDepth/turns=8 791 113312
+BenchmarkTranscriptIngest/turns=100 818 144704
+BenchmarkTranscriptIngest/turns=1000 8025 1605328
+BenchmarkTranscriptIngest/turns=5000 40029 9682960
 BenchmarkTranscriptView/turns=100 806 40192
 BenchmarkTranscriptView/turns=1000 8007 419264
-BenchmarkTranscriptView/turns=5000 40008 2189248
+BenchmarkTranscriptView/turns=5000 40009 2189344

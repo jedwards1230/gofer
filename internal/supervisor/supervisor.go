@@ -1433,8 +1433,9 @@ func (s *Supervisor) snapshotLive() []SessionInfo {
 // <root>/sessions/<slug> directories directly and lists each via the shared
 // store, since the SDK exposes no store-wide enumeration. Live entries carry
 // full snapshot data (Status, Cost, ...); disk-only entries carry Live=false,
-// a zero-value Status, and are enriched from their journal (see
-// [diskSessionInfo]) — Cwd, Title, and Updated all survive a process restart.
+// a zero-value Status, and are enriched from their journal — via the sidecar
+// cache of that derivation once it is warm (see [diskSessionInfo]) — so Cwd,
+// Title, and Updated all survive a process restart.
 func (s *Supervisor) List(ctx context.Context) ([]SessionInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -1462,12 +1463,23 @@ func (s *Supervisor) List(ctx context.Context) ([]SessionInfo, error) {
 			return nil, fmt.Errorf("supervisor: list project %s: %w", slug, err)
 		}
 		for _, id := range ids {
+			// Per-SESSION cancellation check. This is NOT the "check ctx.Done()
+			// between loop iterations" false positive CONTRIBUTING lists: that
+			// applies when every iteration already makes a context-honoring
+			// call, and [DiskSessionInfo] makes none — it is unbounded
+			// filesystem work (a stat, a sidecar read, sometimes a full journal
+			// parse plus a sidecar WRITE) with no ctx of its own. ctx was
+			// previously consulted once per PROJECT, so a cancelled walk over a
+			// single project with hundreds of sessions still did all of it.
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			if info, ok := live[id]; ok {
 				out = append(out, info)
 				continue
 			}
 			path := filepath.Join(sessionsDir, slug, id+".jsonl")
-			out = append(out, diskSessionInfo(id, slug, path))
+			out = append(out, diskSessionInfo(ctx, id, slug, path, !s.isClosed()))
 		}
 	}
 	return out, nil
@@ -1486,7 +1498,11 @@ func (s *Supervisor) List(ctx context.Context) ([]SessionInfo, error) {
 // without deleting its journal. A killed/terminated session is NOT archived, so
 // it reappears here as an offline row (visible, resumable, not "live") until the
 // user archives it. The read is entirely READ-ONLY over the journals; archive
-// state comes from the `.meta.json` sidecar, never from mutating the JSONL.
+// state comes from the `.meta.json` sidecar, never from mutating the JSONL, and
+// so does the cached derivation of each offline row's Cwd/Title/Created/Updated
+// (see [diskSessionInfo]) — a refresh that finds every cache entry current
+// re-reads no journal at all, which is what keeps a ~1s refresh tick affordable
+// on a large, long-lived roster.
 func (s *Supervisor) OverviewRoster(ctx context.Context) ([]SessionInfo, error) {
 	infos, err := s.List(ctx)
 	if err != nil {
@@ -1508,9 +1524,21 @@ func (s *Supervisor) OverviewRoster(ctx context.Context) ([]SessionInfo, error) 
 	return out, nil
 }
 
-// diskSessionInfo builds a disk-only [SessionInfo] for id under slug at path,
-// enriched from the journal read-only via [session.ReadEntries] (no append
-// handle is opened — List never resumes a session just to enumerate it):
+// DiskSessionInfo builds a disk-only [SessionInfo] for id under slug at path.
+//
+// It is EXPORTED because the M6 router builds the same offline rows from the
+// same journals, and under M6 the router is the daemon a TUI or `gofer ps`
+// talks to — the primary path, with the in-process supervisor as the fallback.
+// It used to keep a parallel copy of this derivation; two implementations of
+// one projection is how the two paths came to disagree about the same session
+// on disk (the copy left Status at its zero value, reporting a session at rest
+// as working), and a second copy of the cache's staleness key would be the same
+// bug waiting to happen. There is now one builder and one key.
+// Its four journal-derived fields — Cwd, Title, Created, Updated — are served
+// from the session's `<id>.meta.json` sidecar when that cache still matches the
+// journal's size and mtime, and derived by reading the journal (read-only via
+// [session.ReadEntries]; no append handle is opened, so List never resumes a
+// session just to enumerate it) only when it does not:
 //
 //   - Cwd comes from the journal's [session.EntryMeta] root entry (see
 //     [session.NewMetaEntry]), always its first entry when present. A legacy
@@ -1520,17 +1548,49 @@ func (s *Supervisor) OverviewRoster(ctx context.Context) ([]SessionInfo, error) 
 //   - Title mirrors how a live session derives it (see managed.go's
 //     enqueue/snippet): an excerpt of the first user-role message's text.
 //   - Created and Updated come from the first and last entry's Time.
-//   - ParentID, Agent and Depth come from the session's `<id>.meta.json`
-//     sidecar (see [sessionMeta]), so an offline child still shows its parent
-//     link. A session with no sidecar — every session predating subagents, and
-//     every root session, which writes none — reads back zero values and lists
-//     exactly as it did before.
+//   - ParentID, Agent and Depth come from the same sidecar (see [sessionMeta]),
+//     so an offline child still shows its parent link. A session with no
+//     sidecar — every session predating subagents, and every root session,
+//     which wrote none — reads back zero values and lists exactly as it did
+//     before.
+//
+// The cache exists because this function runs once per offline session on every
+// roster refresh, and the TUI refreshes on a ~1s tick: a full JSONL parse per
+// session per tick is continuous cost proportional to both roster size and
+// conversation length (gofer#298). On a hit the whole call is one small JSON
+// read plus one Stat. On a MISS — no sidecar, a sidecar from a gofer predating
+// the cache, or a journal that has since grown — it re-reads the journal and
+// writes the cache back, so the very first listing after an upgrade warms it and
+// every subsequent one is cheap. See [derivedMeta] for why size+mtime is a sound
+// key for an append-only journal, and why the stat is taken BEFORE the read.
+//
+// The write-back is BEST-EFFORT and touches only the sidecar, never the JSONL:
+// the listing path remains read-only over the journals, and a store it cannot
+// write simply re-derives every time instead of failing the roster.
 //
 // A read error, or a journal with no entries at all, degrades to the bare
 // {ID, Project, JournalPath, Live:false} snapshot rather than failing the
-// whole List — one unreadable journal must never hide every other session.
-func diskSessionInfo(id, slug, path string) SessionInfo {
-	meta := readSessionMeta(sidecarPath(filepath.Dir(path), id))
+// whole List — one unreadable journal must never hide every other session, and
+// nothing is cached for it, so it re-reads (and can recover) on the next call.
+func DiskSessionInfo(ctx context.Context, id, slug, path string) SessionInfo {
+	return diskSessionInfo(ctx, id, slug, path, true)
+}
+
+// diskSessionInfo is [DiskSessionInfo]'s body. cache gates only the write-BACK,
+// never the read: a false cache still serves a fresh sidecar and still derives
+// from the journal, so the row it returns is byte-for-byte the same either way.
+//
+// [Supervisor.List] passes !s.isClosed() because a CLOSED supervisor must not
+// write to the store. Without that, a List racing shutdown — the daemon serving
+// one last request while Close is in flight, at which point every session has
+// just stopped being live and so takes this offline path — creates a sidecar per
+// session AFTER the owner considers itself done with the directory. In
+// production that is merely work nobody asked for; against a test's temporary
+// root it is a write landing inside the RemoveAll that follows, which surfaced
+// as an intermittent "TempDir RemoveAll cleanup: directory not empty".
+func diskSessionInfo(ctx context.Context, id, slug, path string, cache bool) SessionInfo {
+	dir := filepath.Dir(path)
+	meta := readSessionMeta(sidecarPath(dir, id))
 	info := SessionInfo{
 		ID:          id,
 		Project:     slug,
@@ -1549,6 +1609,18 @@ func diskSessionInfo(id, slug, path string) SessionInfo {
 		Archived: meta.Archived,
 	}
 
+	// Stat BEFORE reading — see [derivedMeta]. A stat failure only forfeits the
+	// cache (both the hit below and the write-back at the end); the journal read
+	// still happens, so the row is built exactly as it was before this cache.
+	fi, statErr := os.Stat(path)
+	if statErr == nil && meta.Derived.fresh(fi) {
+		info.Cwd = meta.Derived.Cwd
+		info.Title = meta.Derived.Title
+		info.Created = meta.Derived.Created
+		info.Updated = meta.Derived.Updated
+		return info
+	}
+
 	entries, err := session.ReadEntries(path)
 	if err != nil || len(entries) == 0 {
 		return info
@@ -1558,12 +1630,28 @@ func diskSessionInfo(id, slug, path string) SessionInfo {
 	info.Updated = entries[len(entries)-1].Time
 
 	if entries[0].Type == session.EntryMeta {
-		if meta, metaErr := entries[0].Meta(); metaErr == nil {
-			info.Cwd = meta.Cwd
+		if metaEntry, metaErr := entries[0].Meta(); metaErr == nil {
+			info.Cwd = metaEntry.Cwd
 		}
 	}
 
 	info.Title = firstUserSnippet(entries)
+
+	// Skip the write-back once ctx is done. The row above is already correct, so
+	// the only thing forfeited is a warm cache — while a caller that has given up
+	// must not leave a trail of newly created files behind it. That is wasted
+	// work in production and, in tests, a write racing the teardown that follows
+	// the abandoned call.
+	if cache && statErr == nil && ctx.Err() == nil {
+		_ = cacheDerived(dir, id, derivedMeta{
+			Cwd:            info.Cwd,
+			Title:          info.Title,
+			Created:        info.Created,
+			Updated:        info.Updated,
+			JournalSize:    fi.Size(),
+			JournalModNano: fi.ModTime().UnixNano(),
+		})
+	}
 
 	return info
 }

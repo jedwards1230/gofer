@@ -28,13 +28,13 @@ func consumedRunModel(th theme.Theme) Model {
 	const s = "sess-x"
 	run := finishedRun(1, "ls docs", "doc1.md\ndoc2.md", true)
 	fold := run.contextBlock()
-	return New(th).
-		CommitShellRuns([]shellRun{run}, fold).
-		Ingest(event.NewMessageStarted(s, event.MessageUser)).
-		Ingest(event.NewMessageFinished(s, event.MessageUser, fold)). // pure `!` turn → stripped away
-		Ingest(event.NewMessageStarted(s, event.MessageText)).
-		Ingest(event.NewMessageFinished(s, event.MessageText, "Two markdown files.")).
-		Ingest(event.NewTurnFinished(s, "end_turn", provider.Usage{InputTokens: 12, OutputTokens: 4}))
+	m := New(th).CommitShellRuns([]shellRun{run}, fold)
+	m.Ingest(event.NewMessageStarted(s, event.MessageUser))
+	m.Ingest(event.NewMessageFinished(s, event.MessageUser, fold)) // pure `!` turn → stripped away
+	m.Ingest(event.NewMessageStarted(s, event.MessageText))
+	m.Ingest(event.NewMessageFinished(s, event.MessageText, "Two markdown files."))
+	m.Ingest(event.NewTurnFinished(s, "end_turn", provider.Usage{InputTokens: 12, OutputTokens: 4}))
+	return m
 }
 
 // TestGoldenShellRunConsumed pins the fixed transcript: the `! ls docs` sigil
@@ -61,9 +61,8 @@ func TestConsumedShellRunRendersAsSigilNotFold(t *testing.T) {
 
 	// The consumed run is committed as a sigil block; its echo (== the fold, for a
 	// pure `!` turn) arrives and is stripped to nothing (no separate user message).
-	m := New(theme.Test()).
-		CommitShellRuns([]shellRun{run}, fold).
-		Ingest(event.NewMessageFinished(s, event.MessageUser, fold))
+	m := New(theme.Test()).CommitShellRuns([]shellRun{run}, fold)
+	m.Ingest(event.NewMessageFinished(s, event.MessageUser, fold))
 	view := m.View(testkit.Width, testkit.Height)
 
 	if !strings.Contains(view, "! ls docs") {
@@ -88,9 +87,8 @@ func TestConsumedShellRunWithTypedText(t *testing.T) {
 	run := finishedRun(1, "ls docs", "doc1.md", true)
 	fold := run.contextBlock()
 
-	m := New(theme.Test()).
-		CommitShellRuns([]shellRun{run}, fold).
-		Ingest(event.NewMessageFinished(s, event.MessageUser, fold+"explain this"))
+	m := New(theme.Test()).CommitShellRuns([]shellRun{run}, fold)
+	m.Ingest(event.NewMessageFinished(s, event.MessageUser, fold+"explain this"))
 	view := m.View(testkit.Width, testkit.Height)
 
 	if !strings.Contains(view, "! ls docs") {
@@ -104,33 +102,44 @@ func TestConsumedShellRunWithTypedText(t *testing.T) {
 	}
 }
 
-// TestIngestFoldQueueCopyOnWrite locks the copy-on-write invariant flagged in
-// review: Ingest pops the head fold for a stripped echo, and because Model is
-// value-copied per frame that pop must NOT reach through to a prior Model's
-// queue. Two children derived from one prior each see the pop; the prior sees
-// neither. Runs under `-race` in CI alongside the rest.
-func TestIngestFoldQueueCopyOnWrite(t *testing.T) {
+// TestIngestPopsOnlyTheHeadFold locks the fold queue's pop discipline: an echo
+// that matches the HEAD fold consumes exactly that one entry and leaves the
+// rest of the queue intact, in order.
+//
+// It replaces TestIngestFoldQueueCopyOnWrite, which asserted the pop did not
+// write through to a PRIOR Model — a hazard that no longer exists. [Model.Ingest]
+// now takes a pointer receiver and owns its transcript state outright
+// (gofer#308), so there is no second Model to corrupt and the two-children form
+// the old test used will not compile. What remains worth pinning is the pop
+// itself, which is what actually decides whether the next echo strips correctly.
+func TestIngestPopsOnlyTheHeadFold(t *testing.T) {
 	const s = "sess-x"
-	prior := New(theme.Test()).
+	m := New(theme.Test()).
 		CommitShellRuns(nil, "$ a\n\n").
 		CommitShellRuns(nil, "$ b\n\n")
-	if len(prior.pendingEchoFolds) != 2 {
-		t.Fatalf("precondition: prior queue = %v, want 2 folds", prior.pendingEchoFolds)
+	if len(m.pendingEchoFolds) != 2 {
+		t.Fatalf("precondition: queue = %v, want 2 folds", m.pendingEchoFolds)
 	}
 
-	childA := prior.Ingest(event.NewMessageFinished(s, event.MessageUser, "$ a\n\ntyped A"))
-	childB := prior.Ingest(event.NewMessageFinished(s, event.MessageUser, "$ a\n\ntyped B"))
-
-	if len(prior.pendingEchoFolds) != 2 {
-		t.Errorf("prior queue mutated by a child Ingest: %v, want it left at 2 folds", prior.pendingEchoFolds)
+	m.Ingest(event.NewMessageFinished(s, event.MessageUser, "$ a\n\ntyped A"))
+	if len(m.pendingEchoFolds) != 1 || m.pendingEchoFolds[0] != "$ b\n\n" {
+		t.Fatalf("after the first echo, queue = %v, want the head popped leaving [\"$ b\\n\\n\"]", m.pendingEchoFolds)
 	}
-	for _, c := range []struct {
-		name string
-		m    Model
-	}{{"A", childA}, {"B", childB}} {
-		if len(c.m.pendingEchoFolds) != 1 || c.m.pendingEchoFolds[0] != "$ b\n\n" {
-			t.Errorf("child %s queue = %v, want the head popped leaving [\"$ b\\n\\n\"]", c.name, c.m.pendingEchoFolds)
+
+	// The next echo strips against what is now the head — proof the pop left the
+	// queue correctly aligned rather than merely shorter.
+	m.Ingest(event.NewMessageFinished(s, event.MessageUser, "$ b\n\ntyped B"))
+	if len(m.pendingEchoFolds) != 0 {
+		t.Errorf("after the second echo, queue = %v, want empty", m.pendingEchoFolds)
+	}
+	view := m.View(testkit.Width, testkit.Height)
+	for _, want := range []string{"typed A", "typed B"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("residual %q missing from the transcript:\n%s", want, view)
 		}
+	}
+	if strings.Contains(view, "$ a") || strings.Contains(view, "$ b") {
+		t.Errorf("a model-facing `$` fold leaked onto the screen:\n%s", view)
 	}
 }
 
@@ -140,7 +149,7 @@ func TestIngestFoldQueueCopyOnWrite(t *testing.T) {
 // against the recorded fold, never `$`-parsing.
 func TestEchoStripOnlyMatchesHeadFold(t *testing.T) {
 	const s = "sess-x"
-	m := New(theme.Test()).Ingest(event.NewMessageFinished(s, event.MessageUser, "$ not a fold"))
+	m := ingested(theme.Test(), event.NewMessageFinished(s, event.MessageUser, "$ not a fold"))
 	if got := m.View(testkit.Width, testkit.Height); !strings.Contains(got, "$ not a fold") {
 		t.Errorf("a plain user message starting with `$` was wrongly stripped:\n%s", got)
 	}

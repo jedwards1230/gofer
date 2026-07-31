@@ -117,16 +117,16 @@ func TestMarkdownLinkOSC8ProfileGated(t *testing.T) {
 	const msg = "See https://example.com/page for more."
 	const osc8 = "\x1b]8;;https://example.com/page\x1b\\"
 
-	color := New(testkit.ColorTheme()).
-		Ingest(event.NewMessageStarted("s", event.MessageText)).
-		Ingest(event.NewMessageFinished("s", event.MessageText, msg))
+	color := ingested(testkit.ColorTheme(),
+		event.NewMessageStarted("s", event.MessageText),
+		event.NewMessageFinished("s", event.MessageText, msg))
 	if got := testkit.Render(color, testkit.Width, testkit.Height); !strings.Contains(got, osc8) {
 		t.Errorf("color render did not emit an OSC 8 hyperlink for the URL")
 	}
 
-	ascii := New(theme.Test()).
-		Ingest(event.NewMessageStarted("s", event.MessageText)).
-		Ingest(event.NewMessageFinished("s", event.MessageText, msg))
+	ascii := ingested(theme.Test(),
+		event.NewMessageStarted("s", event.MessageText),
+		event.NewMessageFinished("s", event.MessageText, msg))
 	if got := testkit.Render(ascii, testkit.Width, testkit.Height); strings.Contains(got, "\x1b]8;;") {
 		t.Errorf("Ascii render leaked an OSC 8 escape (goldens must stay plain)")
 	}

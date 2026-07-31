@@ -266,7 +266,7 @@ func TestAmendEditorVisibleLinesScrollsToCursor(t *testing.T) {
 // editor is open, failing the test if the spec had nothing to amend.
 func amendingModel(t *testing.T, spec map[string]any) Model {
 	t.Helper()
-	m := New(theme.Test()).Ingest(event.NewPermissionRequested("sess-1", "perm-1", "bash", spec, nil))
+	m := ingested(theme.Test(), event.NewPermissionRequested("sess-1", "perm-1", "bash", spec, nil))
 	next, ok := m.BeginApprovalAmend()
 	if !ok {
 		t.Fatalf("BeginApprovalAmend over spec %v: want an editor, got none", spec)
@@ -355,7 +355,7 @@ func TestBeginApprovalAmendNeedsACommandKey(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			m := New(theme.Test()).Ingest(event.NewPermissionRequested("sess-1", "perm-1", "edit", tc.spec, nil))
+			m := ingested(theme.Test(), event.NewPermissionRequested("sess-1", "perm-1", "edit", tc.spec, nil))
 			if next, ok := m.BeginApprovalAmend(); ok {
 				t.Errorf("BeginApprovalAmend over %v opened an editor; want a refusal", tc.spec)
 			} else if next.AmendingApproval() {

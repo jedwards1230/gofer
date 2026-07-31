@@ -1169,7 +1169,7 @@ func envWithTUI(tui config.TUI) CommandEnv {
 // renders no approval prompt.
 func TestAppApprovalDialogHiddenOnOverview(t *testing.T) {
 	th := theme.Test()
-	sess := New(th).Ingest(event.NewPermissionRequested("sess-x", "perm-1", "bash", nil, nil))
+	sess := ingested(th, event.NewPermissionRequested("sess-x", "perm-1", "bash", nil, nil))
 	a := App{
 		theme:  th,
 		over:   NewOverview(th, GoldenMeta()),
