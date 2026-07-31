@@ -24,5 +24,5 @@ Type "/model"
 Enter
 Sleep 1s
 Screenshot vhs/out/panel-model.png
-Sleep 500ms
+Sleep 100ms
 Ctrl+C

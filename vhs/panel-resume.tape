@@ -24,5 +24,5 @@ Type "/resume"
 Enter
 Sleep 1s
 Screenshot vhs/out/panel-resume.png
-Sleep 500ms
+Sleep 100ms
 Ctrl+C

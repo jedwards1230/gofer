@@ -22,5 +22,5 @@ Sleep 2s
 Screenshot vhs/out/transcript-tool-call-running.png
 Sleep 4s
 Screenshot vhs/out/transcript-tool-call.png
-Sleep 500ms
+Sleep 100ms
 Ctrl+C

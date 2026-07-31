@@ -22,5 +22,5 @@ Show
 
 Sleep 2s
 Screenshot vhs/out/roster-overview.png
-Sleep 500ms
+Sleep 100ms
 Ctrl+C

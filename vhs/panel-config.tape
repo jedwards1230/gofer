@@ -23,5 +23,5 @@ Type "/config"
 Enter
 Sleep 1s
 Screenshot vhs/out/panel-config.png
-Sleep 500ms
+Sleep 100ms
 Ctrl+C
