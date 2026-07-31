@@ -233,7 +233,33 @@ to the measured path happened inside the timed region and its one-time costs
 were charged to whichever sub-benchmark ran first.
 
 Write wall-clock assertions as a **ratio against the same code at a smaller
-input**, not as a millisecond budget. A budget loose enough to survive a shared runner is loose
+input**, not as a millisecond budget.
+
+#### Size the input step so the threshold is not a machine constant
+
+A ratio removes the machine's absolute speed from the assertion; it does **not**
+remove the machine. Measured on the same commit, `matchFilePaths` at a 4x input
+step read a healthy **4.0x** on darwin/arm64 and a healthy **6.6x** on
+linux/amd64 CI (EPYC 7763, GOMAXPROCS=4) — a 1.65x inflation, against a 6.0
+threshold picked from local runs. It went red on healthy code (2026-07-31).
+
+The fix is the input step, not the threshold. Linear costs `k`x for a `k`x
+input and quadratic costs `k²`x, so the healthy/broken separation *is* `k`:
+
+| input step | healthy | quadratic (measured) | separation |
+|---|---|---|---|
+| 4x | 4.0x | 14.6x | ~3.6x |
+| 16x | 14.5x | 257.5x | **~17.8x** |
+
+At 4x, runner noise consumed most of the gap. At 16x the threshold can sit far
+from both endpoints — 100x is 6.8x above healthy and 2.5x below quadratic — so
+it encodes the linear-vs-quadratic distinction rather than one machine's timing.
+**Raising the threshold to quiet a failure is the move to avoid; widening the
+input step is the one that helps.**
+
+Log the observed ratio unconditionally, pass or fail. Wall-clock behaviour on
+the actual runner is exactly the data the next person writing a timing assertion
+needs, and a number that only prints on failure is a number nobody ever sees. A budget loose enough to survive a shared runner is loose
 enough to pass the regression it was written for — the first draft of the
 `matchFilePaths` assertion used a 20ms ceiling and stayed green against a
 deliberately quadratic mutation that took ~10ms. Comparing 4x the input against

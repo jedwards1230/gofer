@@ -129,30 +129,56 @@ func timeMatchPair(t *testing.T, small, large int) (time.Duration, time.Duration
 // function runs on every keystroke while an `@` token is open, over up to
 // config.DefaultFileMentionMaxEntries candidates, and the allocation gate
 // cannot see it at any speed.
+//
+// WHY 16x INPUT AND NOT 4x. The first version compared 1,250 against 5,000 —
+// a 4x step, where linear predicts 4x and quadratic 16x. That is a separation
+// of only ~3.6x between healthy and broken, and CI ate most of it: this
+// machine read a healthy 4.0x while linux/amd64 CI read a healthy **6.6x** on
+// the same commit, against a 6.0 threshold picked from local runs. The test
+// went red on healthy code.
+//
+// Widening the step fixes that at the source rather than by moving the
+// threshold. At 16x, linear predicts 16x and quadratic 256x, and the measured
+// endpoints on this machine are:
+//
+//	healthy    14.5x
+//	quadratic 257.5x   (ranking sort replaced with a bubble sort)
+//
+// — a separation of ~17.8x instead of ~3.6x. maxRatio can then sit far from
+// BOTH endpoints instead of splitting a narrow gap, which is what makes it a
+// property of the algorithm rather than of the machine. Even applying CI's
+// observed 1.65x inflation to the healthy figure lands near 24x, still 4x
+// under the threshold.
+//
+// The production cap (config.DefaultFileMentionMaxEntries, 5,000) sits between
+// the two measurement points on purpose, so the curve is sampled across the
+// operating range rather than beyond it. The large end deliberately exceeds the
+// cap: this measures the SHAPE of the curve, not a scenario an operator hits.
+//
+// Do not raise maxRatio to quiet a failure. If this fires, either the ranking
+// really did become super-linear, or the runner is so contended that a linear
+// scan reads 100x for a 16x input — and that is worth knowing either way.
 func TestMatchFilePathsScalesLinearlyInCandidates(t *testing.T) {
 	const small = config.DefaultFileMentionMaxEntries / 4 // 1,250
-	const large = config.DefaultFileMentionMaxEntries     // 5,000
+	const large = small * 16                              // 20,000
 
-	// 4x the candidates. The threshold is set from BOTH measured endpoints
-	// rather than from theory: as written the ratio is 3.7-4.0x, stable across
-	// repeated runs, and against a mutation replacing the ranking sort with a
-	// quadratic one it is 14.3x. 6.0 sits between them, ~1.5x above the healthy
-	// figure and well under the broken one.
-	//
-	// The first draft of this test asserted an absolute 20ms budget instead;
-	// the quadratic mutation passed it at ~10ms. The threshold here is chosen
-	// against a measured failure, not against a guess.
-	const maxRatio = 6.0
+	const maxRatio = 100.0
 
 	smallCost, largeCost := timeMatchPair(t, small, large)
 	if smallCost <= 0 {
 		t.Fatalf("the %d-candidate call measured %s — too fast to time, which would make the ratio below meaningless", small, smallCost)
 	}
 	ratio := float64(largeCost) / float64(smallCost)
-	t.Logf("matchFilePaths: %s at %d candidates, %s at %d — %.1fx for 4x the input", smallCost, small, largeCost, large, ratio)
+
+	// Logged unconditionally, pass or fail. Wall-clock behaviour on whatever
+	// runner this lands on is exactly the data nobody has when they come to
+	// write the next timing assertion, and a number that only appears on
+	// failure is a number nobody ever sees.
+	t.Logf("matchFilePaths: %s at %d candidates, %s at %d — %.1fx for 16x the input (linear ~16x, quadratic ~256x)",
+		smallCost, small, largeCost, large, ratio)
 
 	if ratio > maxRatio {
-		t.Errorf("4x the candidates cost %.1fx the time (%s -> %s), want under %.0fx. matchFilePaths runs on every keystroke while an @ token is open, in FIVE allocations no matter how slow it gets — scripts/bench.sh cannot see this, so this assertion is the only thing watching it",
+		t.Errorf("16x the candidates cost %.1fx the time (%s -> %s), want under %.0fx — linear would be ~16x and quadratic ~256x. matchFilePaths runs on every keystroke while an @ token is open, in FIVE allocations no matter how slow it gets, so scripts/bench.sh cannot see this and this assertion is the only thing watching it",
 			ratio, smallCost, largeCost, maxRatio)
 	}
 }
