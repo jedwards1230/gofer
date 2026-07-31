@@ -48,6 +48,20 @@ Tape/scenario names follow one slug schema, `<area>-<view>[-<state>]`
   this covers. One press only: the first `ctrl+x` is pure client state and
   never reaches the Supervisor, so the scene deletes nothing. Reuses the
   `panel-status-overview` scenario.
+- `roster-delete-lands.tape` — the frame a quarter second AFTER the confirming
+  `ctrl+x`, as a **before/after pair** (`roster-delete-lands-before` /
+  `roster-delete-lands`). The companion to the tape above, which stops at the
+  arm. The subject is a timing change (gofer#322): a roster-mutating op used to
+  leave its stale row on screen until the next 1s poll came round, and now
+  refetches the roster the moment it lands. The after-frame is taken at a fixed
+  250ms — after the refetch, inside the poll interval — which is what makes the
+  change visible at all; the Ascii goldens assert the text of a state and never
+  how long it took to arrive. The selected row is Working, so the op dispatched
+  is `kill`: the row goes `Working` → `Finished · killed` (amber → green) and
+  the header count follows, rather than vanishing, because a kill keeps the
+  journal. Needs `vhsSupervisor.Kill` to really mutate the canned roster —
+  against a frozen one both frames would be identical. Reuses the
+  `panel-status-overview` scenario.
 - `roster-select-all.tape` — `ctrl+a` select-all, captured as a **before/after
   pair** (`roster-select-all-before` / `roster-select-all`). The claim under
   review is that the reverse video reaches the rows OUTSIDE the roster body —
