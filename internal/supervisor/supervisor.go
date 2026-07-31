@@ -1463,12 +1463,23 @@ func (s *Supervisor) List(ctx context.Context) ([]SessionInfo, error) {
 			return nil, fmt.Errorf("supervisor: list project %s: %w", slug, err)
 		}
 		for _, id := range ids {
+			// Per-SESSION cancellation check. This is NOT the "check ctx.Done()
+			// between loop iterations" false positive CONTRIBUTING lists: that
+			// applies when every iteration already makes a context-honoring
+			// call, and [DiskSessionInfo] makes none — it is unbounded
+			// filesystem work (a stat, a sidecar read, sometimes a full journal
+			// parse plus a sidecar WRITE) with no ctx of its own. ctx was
+			// previously consulted once per PROJECT, so a cancelled walk over a
+			// single project with hundreds of sessions still did all of it.
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			if info, ok := live[id]; ok {
 				out = append(out, info)
 				continue
 			}
 			path := filepath.Join(sessionsDir, slug, id+".jsonl")
-			out = append(out, DiskSessionInfo(id, slug, path))
+			out = append(out, diskSessionInfo(ctx, id, slug, path, !s.isClosed()))
 		}
 	}
 	return out, nil
@@ -1561,7 +1572,23 @@ func (s *Supervisor) OverviewRoster(ctx context.Context) ([]SessionInfo, error) 
 // {ID, Project, JournalPath, Live:false} snapshot rather than failing the
 // whole List — one unreadable journal must never hide every other session, and
 // nothing is cached for it, so it re-reads (and can recover) on the next call.
-func DiskSessionInfo(id, slug, path string) SessionInfo {
+func DiskSessionInfo(ctx context.Context, id, slug, path string) SessionInfo {
+	return diskSessionInfo(ctx, id, slug, path, true)
+}
+
+// diskSessionInfo is [DiskSessionInfo]'s body. cache gates only the write-BACK,
+// never the read: a false cache still serves a fresh sidecar and still derives
+// from the journal, so the row it returns is byte-for-byte the same either way.
+//
+// [Supervisor.List] passes !s.isClosed() because a CLOSED supervisor must not
+// write to the store. Without that, a List racing shutdown — the daemon serving
+// one last request while Close is in flight, at which point every session has
+// just stopped being live and so takes this offline path — creates a sidecar per
+// session AFTER the owner considers itself done with the directory. In
+// production that is merely work nobody asked for; against a test's temporary
+// root it is a write landing inside the RemoveAll that follows, which surfaced
+// as an intermittent "TempDir RemoveAll cleanup: directory not empty".
+func diskSessionInfo(ctx context.Context, id, slug, path string, cache bool) SessionInfo {
 	dir := filepath.Dir(path)
 	meta := readSessionMeta(sidecarPath(dir, id))
 	info := SessionInfo{
@@ -1610,7 +1637,12 @@ func DiskSessionInfo(id, slug, path string) SessionInfo {
 
 	info.Title = firstUserSnippet(entries)
 
-	if statErr == nil {
+	// Skip the write-back once ctx is done. The row above is already correct, so
+	// the only thing forfeited is a warm cache — while a caller that has given up
+	// must not leave a trail of newly created files behind it. That is wasted
+	// work in production and, in tests, a write racing the teardown that follows
+	// the abandoned call.
+	if cache && statErr == nil && ctx.Err() == nil {
 		_ = cacheDerived(dir, id, derivedMeta{
 			Cwd:            info.Cwd,
 			Title:          info.Title,

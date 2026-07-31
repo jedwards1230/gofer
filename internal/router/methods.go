@@ -605,13 +605,20 @@ func (s *Supervisor) List(ctx context.Context) ([]supervisor.SessionInfo, error)
 			return nil, fmt.Errorf("router: list project %s: %w", slug, err)
 		}
 		for _, id := range ids {
+			// Per-SESSION cancellation check — see the matching comment in
+			// [supervisor.Supervisor.List]. DiskSessionInfo honors no ctx of its
+			// own, so without this a cancelled fetch still walks (and caches)
+			// every session in the project.
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			seen[id] = struct{}{}
 			if info, ok := live[id]; ok {
 				out = append(out, info)
 				continue
 			}
 			path := filepath.Join(sessionsDir, slug, id+".jsonl")
-			out = append(out, supervisor.DiskSessionInfo(id, slug, path))
+			out = append(out, supervisor.DiskSessionInfo(ctx, id, slug, path))
 		}
 	}
 	// A live session whose journal is not on disk yet (a just-spawned worker
