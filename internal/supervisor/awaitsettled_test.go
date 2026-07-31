@@ -39,6 +39,32 @@ func TestAwaitSettled_ReturnsImmediately(t *testing.T) {
 				return entry.ID
 			},
 		},
+		{
+			// Issue #313, and the case this table was missing: session/load
+			// RESUMES before it waits, and a resumed-but-unprompted session
+			// derives StatusIdle — not StatusNeedsInput. While settledInRoster
+			// recognised only needs-input, this wait was unsatisfiable by
+			// construction and burned its full bound (measured: 2.0002s) on
+			// every cold attach.
+			//
+			// It is safe to treat as settled for the same reason the offline
+			// case above is: no turn has run here, so there is no async journal
+			// append to wait out. Resume makes the row live; it does not create
+			// a writer.
+			name: "resumed-but-unprompted session is idle with no live writer",
+			setup: func(t *testing.T, h *harness) string {
+				t.Helper()
+				entry, err := h.sup.Resume(context.Background(), "reloaded-id", supervisor.ResumeOptions{Cwd: "/proj", Model: "m"})
+				if err != nil {
+					t.Fatalf("Resume: %v", err)
+				}
+				if entry.Status != supervisor.StatusIdle {
+					t.Fatalf("resumed session status = %v, want %v — this case no longer exercises the #313 path",
+						entry.Status, supervisor.StatusIdle)
+				}
+				return entry.ID
+			},
+		},
 	}
 
 	for _, tt := range tests {

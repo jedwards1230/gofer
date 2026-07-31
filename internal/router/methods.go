@@ -720,8 +720,23 @@ func (s *Supervisor) AwaitSettled(ctx context.Context, id string) error {
 	return awaitHandleSettled(ctx, h)
 }
 
-// awaitHandleSettled blocks until h's cached row reports idle
-// ([supervisor.StatusNeedsInput]) or ctx fires, returning ctx.Err() on the
+// settledStatus reports whether a cached roster status means id's journal is
+// safe to fold completely — the router-side twin of internal/supervisor's
+// settledInRoster, and it must agree with it (issue #313).
+//
+// [supervisor.StatusNeedsInput] is issue #137's signal: a turn ran on the worker
+// and its async journal append is done. [supervisor.StatusIdle] is a session the
+// worker brought back off disk and has not been prompted since — no turn ran, so
+// there is no journaling window to wait out and its journal is already durable.
+// resumeOffline seeds exactly that status for a freshly spawned worker (see the
+// SessionInfo it returns), so omitting it here made the wait unsatisfiable by
+// construction and burned the full LoadSettleTimeout on every cold attach.
+func settledStatus(s supervisor.SessionStatus) bool {
+	return s == supervisor.StatusNeedsInput || s == supervisor.StatusIdle
+}
+
+// awaitHandleSettled blocks until h's cached row reports at rest
+// ([supervisor.StatusNeedsInput] or [supervisor.StatusIdle]) or ctx fires, returning ctx.Err() on the
 // latter. It is the shared settle-wait [Supervisor.AwaitSettled] (issue #137)
 // and [Supervisor.Drain] both use: it observes the cached row's Status —
 // maintained by h's watchSession goroutine — and blocks on h.settleCh, which
@@ -740,7 +755,7 @@ func (s *Supervisor) AwaitSettled(ctx context.Context, id string) error {
 func awaitHandleSettled(ctx context.Context, h *workerHandle) error {
 	for {
 		info := h.info.Load()
-		if info == nil || info.Status == supervisor.StatusNeedsInput {
+		if info == nil || settledStatus(info.Status) {
 			return nil
 		}
 		select {

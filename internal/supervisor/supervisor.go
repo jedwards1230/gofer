@@ -1801,12 +1801,45 @@ func (s *Supervisor) AwaitSettled(ctx context.Context, id string) error {
 	}
 }
 
-// settledInRoster reports whether snap holds id and, if so, whether it is idle
-// (reporting [StatusNeedsInput]). present=false means id is not in the snapshot.
+// settledInRoster reports whether snap holds id and, if so, whether its journal
+// is safe to fold completely. present=false means id is not in the snapshot.
+//
+// BOTH resting statuses count as settled, and [StatusIdle] is the load-bearing
+// half (issue #313):
+//
+//   - [StatusNeedsInput] — a turn ran here and finished. This is the signal
+//     issue #137 identified: the pump publishes it only after Session.Prompt
+//     returns, i.e. after the runner's awaitJournaled barrier, so it proves the
+//     turn's async journal append is done.
+//   - [StatusIdle] — the session came back off disk via [Supervisor.Resume] and
+//     has not been prompted since (see managed.deriveStatus's `m.resumed &&
+//     m.pending == 0` case). NO turn has run here, so there is no async
+//     journaling window to wait out: the journal was written by a previous
+//     process and is already durable. This is the same reasoning #137 used to
+//     return immediately for an offline session with no live writer — a resume
+//     does not create a writer, it only makes the row live.
+//
+// Omitting StatusIdle was a latency bug, not a safety margin. It was also a
+// REGRESSION rather than an oversight: when the wait landed (31bae7c,
+// 2026-07-20) a resumed-untouched session still derived StatusNeedsInput and the
+// wait returned promptly. StatusIdle arrived four days later in 4471b76
+// (2026-07-24, "stop reloaded sessions from mislabeling as 'Needs input'"),
+// which silently moved that state out from under this condition. session/load
+// resumes BEFORE waiting (see internal/daemon's handleSessionLoad), so from then
+// on the wait was unsatisfiable by construction and burned its full
+// LoadSettleTimeout — 2s of dead time on EVERY attach to a resumed session, cold
+// or warm, for that session's whole unprompted life.
+//
+// The narrowness matters. A session that IS prompted clears managed.resumed
+// inside enqueue, under the same mutex that appends to the queue, so from the
+// first prompt onward it can only derive StatusWorking and then
+// StatusNeedsInput — it can never present as StatusIdle with a turn in flight.
+// A resumed session holding a pending permission has pending != 0 and derives
+// StatusNeedsInput, so it is covered by the first case rather than this one.
 func settledInRoster(snap []SessionInfo, id string) (settled, present bool) {
 	for _, si := range snap {
 		if si.ID == id {
-			return si.Status == StatusNeedsInput, true
+			return si.Status == StatusNeedsInput || si.Status == StatusIdle, true
 		}
 	}
 	return false, false

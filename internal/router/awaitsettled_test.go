@@ -78,6 +78,23 @@ func TestRouterAwaitSettled_ReturnsImmediately(t *testing.T) {
 				return "unseeded-sess"
 			},
 		},
+		{
+			// Issue #313's router half. resumeOffline seeds a freshly spawned
+			// worker's row as StatusIdle, and session/load resumes BEFORE it
+			// waits — so while awaitHandleSettled recognised only needs-input,
+			// this wait was unsatisfiable by construction and burned its full
+			// bound on every cold attach (measured: 2.02s end to end).
+			//
+			// Idle means the worker brought the session back off disk and has
+			// not been prompted since: no turn ran, so there is no async journal
+			// append to wait out.
+			name: "resumed handle reporting idle is already settled",
+			setup: func(t *testing.T, s *Supervisor) string {
+				idle := supervisor.StatusIdle
+				putHandle(t, s, "resumed-sess", &idle)
+				return "resumed-sess"
+			},
+		},
 	}
 
 	for _, tt := range tests {
