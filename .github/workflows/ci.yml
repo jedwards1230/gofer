@@ -88,6 +88,24 @@ jobs:
       # Fail loudly if gopls did not land on PATH: without this the tests below
       # would skip and the job would pass green, recreating the exact blind spot.
       - run: gopls version
+      # Drop setup-go's compiler problem matcher for THIS JOB ONLY.
+      #
+      # These tests deliberately write `fmt.Println(thisIdentifierDoesNotExist)`
+      # into a scratch file so gopls emits a real diagnostic, then assert that
+      # diagnostic reaches the tool result — the broken code IS the fixture. The
+      # test logs gopls's output, which reads
+      # `main.go:7:14: undefined: thisIdentifierDoesNotExist [compiler]`, and the
+      # Go matcher parses that shape as a compile error and raises a CI
+      # annotation. The result was a fully passing job reporting "3 errors" in
+      # its summary.
+      #
+      # That is worse than cosmetic: annotations that are routinely wrong are
+      # annotations people stop reading, so a real compile error would land in
+      # the same ignored pile. Removing the matcher here loses nothing — this job
+      # runs no build whose compiler output anyone needs annotated, and every
+      # other job keeps its matcher. Job-scoped because the removal only affects
+      # this runner.
+      - run: echo "::remove-matcher owner=go::"
       - run: go test -count=1 -v -run 'TestLive_|LSP' ./internal/lspdiag/ ./internal/supervisor/ 2>&1 | tee lsp.log
       # Guard against the tests silently reverting to skipped: assert at least
       # one live test actually ran, and that none were skipped.
