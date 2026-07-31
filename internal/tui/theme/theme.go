@@ -36,6 +36,14 @@ type Theme struct {
 	// selection bar (see [Theme.RowHighlightStyle]).
 	Highlight string
 
+	// HighlightArmed is Highlight's variant for a focused row while a ctrl-x
+	// delete confirm is armed on it (see [Theme.RowHighlightArmedStyle]): the
+	// same bar, tinted toward Danger's hue at Highlight's own lightness, so it
+	// reads as "armed, on this row" without brightening or flashing — the
+	// restrained shift docs/TUI.md's two-press confirm calls for, not an
+	// alarm.
+	HighlightArmed string
+
 	// State markers. Plain runes, not styled output — color is applied by the
 	// caller (marker-only styling), so the glyph carries state only through the
 	// style it is rendered in.
@@ -59,7 +67,8 @@ func Test() Theme {
 		Warn:   "#f9e2af",
 		Danger: "#f38ba8",
 
-		Highlight: "#45475a",
+		Highlight:      "#45475a",
+		HighlightArmed: "#5a4145",
 
 		GlyphHuman: "○",
 		GlyphAgent: "●",
@@ -117,6 +126,18 @@ func (t Theme) RowHighlightStyle() lipgloss.Style {
 		return s
 	}
 	return s.Background(lipgloss.Color(t.Highlight))
+}
+
+// RowHighlightArmedStyle is [Theme.RowHighlightStyle]'s variant for a focused
+// row while its ctrl-x delete confirm is armed: same full-width background
+// bar, [Theme.HighlightArmed] in place of [Theme.Highlight]. Gated by
+// [Theme.Profile] the same way — a no-op under [termenv.Ascii].
+func (t Theme) RowHighlightArmedStyle() lipgloss.Style {
+	s := lipgloss.NewStyle()
+	if t.Profile == termenv.Ascii {
+		return s
+	}
+	return s.Background(lipgloss.Color(t.HighlightArmed))
 }
 
 // SelectionStyle styles the mouse click-drag selection highlight (reverse

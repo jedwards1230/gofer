@@ -1415,6 +1415,12 @@ human-eye check of real rendered frames, `vhs/` holds on-demand
 - `roster-overview` — the roster with mixed states, showing the status words
   in color (yellow working/awaiting vs green finished) — the state that now
   lives only in color.
+- `roster-delete-confirm` — the armed `ctrl+x` delete confirm, as a
+  before/after pair (`-before` / plain). The row highlight's shift from
+  `Highlight` to `HighlightArmed` is a COLOR change, so a single armed frame
+  shows a color but not a change; the pair is what makes the "just enough to
+  signal a state change" judgement possible. Drives one press only — the first
+  `ctrl+x` never reaches the Supervisor — so the scene deletes nothing.
 - `panel-model-daemon-refresh` — the #162 before/after: a daemon-backed
   roster whose header adopts a new default model mid-run, captured as two
   screenshots of one continuous process (`-before` / `-after`).

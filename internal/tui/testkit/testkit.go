@@ -162,7 +162,8 @@ func styleTags() map[string]string {
 		// so it still arrives as a FLAT alternation of single-SGR opens the scan
 		// below handles — a background open, a foreground open, a reset, another
 		// background open — never a combined fg+bg escape.
-		open(th.RowHighlightStyle()): "highlight",
+		open(th.RowHighlightStyle()):      "highlight",
+		open(th.RowHighlightArmedStyle()): "armed-highlight",
 	}
 }
 

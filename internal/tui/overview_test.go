@@ -102,6 +102,21 @@ func TestGoldenStyledOverviewFocusHighlight(t *testing.T) {
 	testkit.AssertGoldenStyled(t, "overview_focus_highlight", testkit.Render(o, testkit.Width, testkit.Height))
 }
 
+// TestGoldenStyledOverviewFocusHighlightArmed is
+// TestGoldenStyledOverviewFocusHighlight's armed sibling: with a ctrl-x
+// delete confirm pending on the focused row ([Overview.WithCtrlXArmed]), the
+// full-width bar swaps from [theme.Theme.RowHighlightStyle] to
+// [theme.Theme.RowHighlightArmedStyle] — the styled golden shows
+// <armed-highlight> in place of <highlight>, still spanning every column
+// (status word, summary, and trailing age) the same way the unarmed bar does.
+func TestGoldenStyledOverviewFocusHighlightArmed(t *testing.T) {
+	o := tui.NewOverview(testkit.ColorTheme(), tui.GoldenMeta()).
+		WithSessions(rosterFixture()).
+		MoveDown().MoveDown().
+		WithCtrlXArmed(true)
+	testkit.AssertGoldenStyled(t, "overview_focus_highlight_armed", testkit.Render(o, testkit.Width, testkit.Height))
+}
+
 // TestGoldenOverviewGrouped renders the grouped view: Working / Needs input /
 // Finished sections, each recency-sorted, with per-section counts in the
 // header.
