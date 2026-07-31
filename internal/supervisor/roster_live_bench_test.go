@@ -155,14 +155,36 @@ func benchLiveRoot(b *testing.B, sessions, turns int) *supervisor.Supervisor {
 // +39 stray failed LiveSnapshotJournalDepth/turns=8 (77 -> 116), and the same
 // +39 would have failed the 134-alloc rows too (134 -> 173 is +29%).
 //
-// Batching raises the measured work WITHOUT changing what is measured, which
-// is checkable rather than asserted: every batched figure divides by this
-// constant back to the exact pre-batch number — 1,540/20 = 77 allocs,
-// 36,080,160/20 = 1,804,008 B, and so on for every row. The curve these
-// benchmarks exist for is identical, just scaled; the stray margin becomes
-// ~385 instead of ~19.
+// Batching raises the measured work WITHOUT changing what is measured, and
+// that is checkable — so here is the check, including where it does not come
+// out clean.
 //
-// Divide any reported figure by this constant for the per-read cost.
+// Five of the nine committed rows divide by this constant back to the exact
+// pre-batch number. Figures below are as committed in bench/baseline.txt, not
+// idealised:
+//
+//	LiveSnapshotJournalDepth/turns=8   1,540/20 = 77    1,387,040/20 = 69,352
+//	LiveSnapshotJournalDepth/turns=64  1,540/20 = 77    9,169,440/20 = 458,472
+//	OverviewRosterLive/live=8          2,680/20 = 134   1,745,600/20 = 87,280
+//
+// The other four do not, and the reason is the noise this constant exists to
+// shrink rather than eliminate. The largest case:
+//
+//	LiveSnapshotJournalDepth/turns=256 1,543/20 = 77.15 36,080,448/20 = 1,804,022.4
+//	                        pre-batch:            77                   1,804,008
+//
+// — that is +3 allocations and +288 bytes of stray allocation spread across 20
+// reads, or 0.2% against a 25% gate. OverviewRosterLiveJournalDepth/turns=64
+// and /turns=256 carry +2 allocs/+208 B and +3 allocs/+224 B;
+// OverviewRosterLive/live=32 carries +16 B and no extra allocation.
+//
+// The residual lands on the longest-running rows and on none of the short ones,
+// which is exactly what a process-wide counter predicts: a longer timed window
+// catches more of whatever the other goroutines happen to do. Batching cannot
+// drive that to zero — it makes it 0.2% instead of 50%.
+//
+// Divide any reported figure by this constant for the per-read cost, and expect
+// a small residual on the deeper rows.
 const liveCallsPerOp = 20
 
 // assertAllLive fails the benchmark unless every row in the roster is a LIVE
