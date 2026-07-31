@@ -142,7 +142,7 @@ func longTranscriptEvents() []event.Event {
 func colorTranscript(th theme.Theme) tui.Model {
 	m := tui.New(th)
 	for _, e := range longTranscriptEvents() {
-		m = m.Ingest(e)
+		m.Ingest(e)
 	}
 	return m
 }

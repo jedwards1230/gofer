@@ -59,9 +59,9 @@ func TestMarkdownRendersCompleteBlocksProgressively(t *testing.T) {
 		"Some **bold** text.\n\n" +
 		"```go\nfunc main() {" // unclosed fence: the incomplete tail
 
-	streaming := New(theme.Test()).
-		Ingest(event.NewMessageStarted(sidMD, event.MessageText)).
-		Ingest(event.NewMessageDelta(sidMD, event.MessageText, streamed))
+	streaming := ingested(theme.Test(),
+		event.NewMessageStarted(sidMD, event.MessageText),
+		event.NewMessageDelta(sidMD, event.MessageText, streamed))
 	streamOut := ansi.Strip(streaming.View(testkit.Width, testkit.Height))
 	if strings.Contains(streamOut, "**bold**") {
 		t.Errorf("a COMPLETE block mid-stream should be glamoured (no raw **bold**), got:\n%s", streamOut)
@@ -74,7 +74,8 @@ func TestMarkdownRendersCompleteBlocksProgressively(t *testing.T) {
 	}
 
 	// On settle the whole message renders (fence now closed): no raw markers left.
-	settled := streaming.Ingest(event.NewMessageFinished(sidMD, event.MessageText, markdownSample))
+	settled := streaming
+	settled.Ingest(event.NewMessageFinished(sidMD, event.MessageText, markdownSample))
 	out := ansi.Strip(settled.View(testkit.Width, testkit.Height))
 	if strings.Contains(out, "**bold**") {
 		t.Errorf("settled render still shows the raw **bold** markers; markdown was not rendered:\n%s", out)
@@ -96,9 +97,9 @@ func TestStreamingHalfFenceNeverGlamoured(t *testing.T) {
 	// One complete paragraph, then an unclosed fence whose body is literal
 	// markdown that MUST NOT be interpreted while raw.
 	const streamed = "Intro paragraph.\n\n```\n**not bold** inside a fence"
-	m := New(theme.Test()).
-		Ingest(event.NewMessageStarted(sidMD, event.MessageText)).
-		Ingest(event.NewMessageDelta(sidMD, event.MessageText, streamed))
+	m := ingested(theme.Test(),
+		event.NewMessageStarted(sidMD, event.MessageText),
+		event.NewMessageDelta(sidMD, event.MessageText, streamed))
 	out := ansi.Strip(m.View(testkit.Width, testkit.Height))
 	if !strings.Contains(out, "```") {
 		t.Errorf("the unclosed fence delimiter must show raw, got:\n%s", out)
@@ -161,9 +162,9 @@ func TestSplitMarkdownBlocks(t *testing.T) {
 // memo must not make the second render differ from the first).
 func TestMarkdownRenderIsDeterministic(t *testing.T) {
 	build := func() Model {
-		return New(theme.Test()).
-			Ingest(event.NewMessageStarted(sidMD, event.MessageText)).
-			Ingest(event.NewMessageFinished(sidMD, event.MessageText, markdownSample))
+		return ingested(theme.Test(),
+			event.NewMessageStarted(sidMD, event.MessageText),
+			event.NewMessageFinished(sidMD, event.MessageText, markdownSample))
 	}
 	m := build()
 	first := m.View(testkit.Width, testkit.Height)
@@ -182,9 +183,9 @@ func TestMarkdownRenderIsDeterministic(t *testing.T) {
 // the same message wraps to more rows at a narrow width than at a wide one.
 func TestMarkdownReflowsToWidth(t *testing.T) {
 	prose := "The quick brown fox jumps over the lazy dog while reviewing the refactored authentication middleware."
-	m := New(theme.Test()).
-		Ingest(event.NewMessageStarted(sidMD, event.MessageText)).
-		Ingest(event.NewMessageFinished(sidMD, event.MessageText, prose))
+	m := New(theme.Test())
+	m.Ingest(event.NewMessageStarted(sidMD, event.MessageText))
+	m.Ingest(event.NewMessageFinished(sidMD, event.MessageText, prose))
 	wide := len(m.transcriptLines(80))
 	narrow := len(m.transcriptLines(30))
 	if narrow <= wide {
@@ -247,9 +248,10 @@ func TestMarkdownCodeBlockCopiesVerbatimAndSelectable(t *testing.T) {
 func TestMarkdownColorDoesNotChangeLayout(t *testing.T) {
 	const width = 48
 	build := func(th theme.Theme) Model {
-		return New(th).
-			Ingest(event.NewMessageStarted(sidMD, event.MessageText)).
-			Ingest(event.NewMessageFinished(sidMD, event.MessageText, markdownSample))
+		m := New(th)
+		m.Ingest(event.NewMessageStarted(sidMD, event.MessageText))
+		m.Ingest(event.NewMessageFinished(sidMD, event.MessageText, markdownSample))
+		return m
 	}
 	plain := build(theme.Test()).View(width, testkit.Height)
 	colored := build(testkit.ColorTheme()).View(width, testkit.Height)

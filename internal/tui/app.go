@@ -622,11 +622,11 @@ func (a *App) switchSession(id string) tea.Cmd {
 // just a.sess.
 func (a *App) ingestAttach(ev event.Event) {
 	if a.scr != screenAttach || a.autoscrollEnabled() {
-		a.sess = a.sess.Ingest(ev)
+		a.sess.Ingest(ev)
 		return
 	}
 	before := len(a.sess.transcriptLines(a.width))
-	a.sess = a.sess.Ingest(ev)
+	a.sess.Ingest(ev)
 	if delta := len(a.sess.transcriptLines(a.width)) - before; delta > 0 {
 		a.scroll += delta
 	}

@@ -31,18 +31,19 @@ func TestIngestTracksTurnActive(t *testing.T) {
 		t.Fatal("a fresh Model is turnActive; want idle")
 	}
 
-	m = m.Ingest(event.NewTurnStarted(s))
+	m.Ingest(event.NewTurnStarted(s))
 	if !m.turnActive {
 		t.Error("TurnStarted did not set turnActive")
 	}
 
-	m = m.Ingest(event.NewTurnFinished(s, "end_turn", provider.Usage{}))
+	m.Ingest(event.NewTurnFinished(s, "end_turn", provider.Usage{}))
 	if m.turnActive {
 		t.Error("TurnFinished did not clear turnActive")
 	}
 
 	// A turn that errors with no TurnFinished must still clear the flag.
-	m = m.Ingest(event.NewTurnStarted(s)).Ingest(event.NewSessionError(s, "boom", false))
+	m.Ingest(event.NewTurnStarted(s))
+	m.Ingest(event.NewSessionError(s, "boom", false))
 	if m.turnActive {
 		t.Error("SessionError did not clear turnActive — the indicator would stick after a failure")
 	}
@@ -55,7 +56,7 @@ func TestIngestTracksTurnActive(t *testing.T) {
 // hiding it mid-turn — goes red.
 func TestWithThinkingGate(t *testing.T) {
 	const s = "sess-x"
-	active := func() Model { return New(theme.Test()).Ingest(event.NewTurnStarted(s)) }
+	active := func() Model { return ingested(theme.Test(), event.NewTurnStarted(s)) }
 
 	tests := []struct {
 		name string
@@ -69,7 +70,11 @@ func TestWithThinkingGate(t *testing.T) {
 			// mid-flight), but an approval prompt owns the footer — "awaiting you",
 			// not "working" — so the indicator must be suppressed.
 			"turn in flight + pending approval: suppressed",
-			active().Ingest(event.NewPermissionRequested(s, "perm-1", "bash", nil, nil)),
+			func() Model {
+				m := active()
+				m.Ingest(event.NewPermissionRequested(s, "perm-1", "bash", nil, nil))
+				return m
+			}(),
 			false,
 		},
 		{

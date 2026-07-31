@@ -10,10 +10,24 @@ package tui
 import (
 	"time"
 
+	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
 	"github.com/jedwards1230/gofer/internal/config"
+	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
+
+// ingested returns a Model rendered through th with evs applied in order. It
+// replaces the chained New(th).Ingest(a).Ingest(b) form, which [Model.Ingest]'s
+// pointer receiver deliberately no longer supports as an expression — see its
+// doc for why the value-returning shape had to go (gofer#308).
+func ingested(th theme.Theme, evs ...event.Event) Model {
+	m := New(th)
+	for _, e := range evs {
+		m.Ingest(e)
+	}
+	return m
+}
 
 // GoldenNow is the fixed reference instant every golden-test fixture ages its
 // sessions against, so relative-age output (humanAge/humanDuration) is

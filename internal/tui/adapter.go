@@ -55,7 +55,7 @@ func (p Program) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return p, nil
 
 	case EventMsg:
-		p.inner = p.inner.Ingest(msg.Event)
+		p.inner.Ingest(msg.Event)
 		return p, nil
 
 	case tea.KeyPressMsg:

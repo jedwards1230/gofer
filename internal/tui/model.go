@@ -162,13 +162,20 @@ type item struct {
 	compactingSince time.Time
 }
 
-// Model is gofer's minimal attach surface. It is immutable from the
-// caller's perspective: [Model.Ingest] and the input-editing methods return
-// an updated copy rather than mutating in place, so a fixed event sequence
-// replays to the same rendered output in every test. The one exception is
-// [Model.TakeSubmitted], which has a pointer receiver and mutates in place to
-// ensure its take-once semantics (each submitted prompt is observed exactly
-// once).
+// Model is gofer's minimal attach surface. The input-editing methods and the
+// render-local composition helpers ([Model.WithThinking] and friends) are
+// value-returning and leave the receiver untouched, so a fixed event sequence
+// replays to the same rendered output in every test.
+//
+// The TRANSCRIPT is different: [Model.Ingest] takes a pointer receiver and
+// mutates in place, because a Model owns its transcript state (items,
+// toolIndex, toolAgents, pendingEchoFolds) outright. Deriving two Models from
+// one prior and ingesting into both is not supported — see Ingest's doc for
+// why the value-returning form had to go (gofer#308: it made replay quadratic,
+// 1.6s and ~9GB to open a 5,000-turn session).
+//
+// [Model.TakeSubmitted] likewise has a pointer receiver, there to ensure its
+// take-once semantics (each submitted prompt is observed exactly once).
 type Model struct {
 	theme theme.Theme
 
@@ -296,28 +303,33 @@ func New(th theme.Theme) Model {
 	}
 }
 
-// Ingest applies e to the transcript and returns the updated Model. Event
-// kinds the minimal attach surface doesn't render (session lifecycle,
-// permission resolution) are accepted and ignored, so a caller can forward
-// the full stream unfiltered.
-func (m Model) Ingest(e event.Event) Model {
-	m.items = append([]item(nil), m.items...)
-	toolIndex := make(map[string]int, len(m.toolIndex))
-	for k, v := range m.toolIndex {
-		toolIndex[k] = v
-	}
-	m.toolIndex = toolIndex
-	toolAgents := make(map[string]string, len(m.toolAgents))
-	for k, v := range m.toolAgents {
-		toolAgents[k] = v
-	}
-	m.toolAgents = toolAgents
-	// Clone the fold queue up front, alongside items/maps: Model is value-copied
-	// per frame, so the MessageFinished{User} case below reslicing this to pop the
-	// head must not write through to a prior Model's shared backing array. Same
-	// nil-when-empty idiom as m.items above.
-	m.pendingEchoFolds = append([]string(nil), m.pendingEchoFolds...)
-
+// Ingest applies e to the transcript IN PLACE. Event kinds the minimal attach
+// surface doesn't render (session lifecycle, permission resolution) are
+// accepted and ignored, so a caller can forward the full stream unfiltered.
+//
+// It takes a POINTER RECEIVER, and that is the whole contract: a Model's
+// transcript state (items, toolIndex, toolAgents, pendingEchoFolds) belongs to
+// exactly one owner, and Ingest mutates that owner's state rather than
+// deriving a fresh copy. Deriving two Models from one prior is not supported —
+// the signature makes the attempt impossible to write by accident.
+//
+// It used to deep-copy items and rebuild both tool maps on entry so that a
+// prior Model stayed observable, which made session replay QUADRATIC:
+// ingesting n events copied 1+2+…+n items, costing 1.6s and ~9GB to open a
+// 5,000-turn session (gofer#308). The copy could not be made cheap while
+// keeping value semantics — MessageDelta writes THROUGH to an existing element
+// (m.items[idx].text += …) and ToolCallFinished to an older one, so no spare-
+// capacity or ownership-watermark trick avoids it; only not copying does.
+//
+// Dropping the copy is safe because no caller retains a prior: App holds one
+// Model and the bubbletea adapter one more, and both replace it on every
+// event. The render-local composition helpers ([Model.WithThinking] and
+// friends) still return copies and are now the ONLY value-semantics surface —
+// each one allocates a fresh items array before appending, so a render-local
+// block can never reach the durable transcript. That is the invariant
+// TestWithHelpersDoNotAliasBaseModel pins; docs/TESTING.md records the
+// mutation evidence for both it and the quadratic copy it replaced.
+func (m *Model) Ingest(e event.Event) {
 	switch ev := e.(type) {
 	case event.TurnStarted:
 		// A turn is now in flight — the agent is generating. Drives the thinking
@@ -369,7 +381,7 @@ func (m Model) Ingest(e event.Event) Model {
 			content := ev.Content
 			if len(m.pendingEchoFolds) > 0 && strings.HasPrefix(content, m.pendingEchoFolds[0]) {
 				content = strings.TrimPrefix(content, m.pendingEchoFolds[0])
-				m.pendingEchoFolds = m.pendingEchoFolds[1:] // safe: the queue was cloned at the top of Ingest
+				m.pendingEchoFolds = m.pendingEchoFolds[1:] // safe: the queue is this Model's own (see Ingest's doc)
 			}
 			// A pure `!` turn (no typed text) strips to nothing: the sigil block is
 			// the whole user turn, so add no empty user message.
@@ -552,7 +564,6 @@ func (m Model) Ingest(e event.Event) Model {
 		// through untouched.
 	}
 
-	return m
 }
 
 // openIndex returns the item index currently streaming the given message
