@@ -22,6 +22,17 @@ Tape/scenario names follow one slug schema, `<area>-<view>[-<state>]`
 - `roster-overview.tape` — the roster screen with mixed session states,
   capturing the ● status markers in color (yellow working / awaiting input
   incl. the ●2 pending count vs green finished).
+- `roster-delete-confirm.tape` — the armed `ctrl+x` delete confirm, captured as
+  a **before/after pair** (`roster-delete-confirm-before` /
+  `roster-delete-confirm`). The thing under review is a colour change — the
+  focused row's highlight shifts from the neutral `Highlight` to the warm
+  `HighlightArmed` — and one frame of the armed state can only show a colour,
+  not a change, so the pair is what makes "just enough to signal a state
+  change" reviewable. The dispatch-bar hint swaps in the same two frames; the
+  Ascii goldens pin that text but cannot see the highlight, which is the gap
+  this covers. One press only: the first `ctrl+x` is pure client state and
+  never reaches the Supervisor, so the scene deletes nothing. Reuses the
+  `panel-status-overview` scenario.
 - `roster-peek.tape` — the peek card: the roster-only session summary opened
   with **space** on an empty dispatch bar (enter/→ *attach* instead). Peek does
   not subscribe to the session's event stream, so the card renders purely from
