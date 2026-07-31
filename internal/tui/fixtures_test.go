@@ -6,6 +6,9 @@ package tui
 // color_layout_test.go) — the standard export_test pattern: this file is only
 // compiled for tests, but its exported names are reachable from tui_test the
 // same as any other exported package identifier.
+//
+// It also carries `ingested`, which is unexported on purpose — it hands back a
+// Model, so only this package's internal tests can do anything with one.
 
 import (
 	"time"
