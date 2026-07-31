@@ -21,7 +21,8 @@ tool — and how you avoid writing a test that looks thorough and proves nothing
 | Process isolation | real detached `session-worker` processes | every PR | crash isolation, socket lifecycle | performance |
 | Race | `go test -race ./...` | every PR + push | data races | logic errors a race doesn't expose |
 | LSP live | real `gopls` round trip | `lsp-live` job | actual language-server behaviour | — (**skips** without gopls; see below) |
-| Benchmarks | `scripts/bench.sh --check` | every PR (allocs only) | work that scales with input size | correctness |
+| Benchmarks | `scripts/bench.sh --check` | every PR (allocs only) | work that scales with input size | correctness; **waiting**; CPU-bound compare/sort |
+| Cost assertions | ordinary `go test` on wall-clock | every PR | settle waits, super-linear CPU work | anything allocation-shaped (the gate has that) |
 | Worker fleet | ~50 real processes, `workerbench` tag | manual only | RSS, spawn latency at scale | asserts almost nothing by design |
 
 ## Unit and golden tests
@@ -158,6 +159,57 @@ against a combined benchmark.
 
 Assert something inside the loop. A benchmark whose subject silently stops doing
 the work reads as a spectacular optimisation.
+
+### A benchmark's fixture decides what its number means
+
+Two ways a benchmark can run, pass, and measure nothing — both found in gofer's
+own suite (gofer#315), both invisible while green:
+
+- **It never reaches the branch it is named after.** `BenchmarkOverviewRoster`
+  built its fixture with `store.CreateWithID` and `supervisor.New`, which
+  registers nothing live, so `liveByID()` was empty and the roster's live branch
+  was never taken. It measured exactly the half that could not contain the cost
+  being looked for. The fix is a guard *inside* the benchmark — see
+  `assertAllLive` in `internal/supervisor/roster_live_bench_test.go`. A row count
+  cannot catch this: a live row and a disk row are both one entry in the slice.
+- **It stubs the expensive dependency to zero.** Every App render benchmark built
+  through `GoldenCommandEnv`, whose `Config` closure returns an empty struct
+  without touching disk — so it measured a frame in which the per-frame config
+  reads were free, which the shipped app's are not.
+
+A third, softer version: a fixture that under-weights the content. The transcript
+benchmarks ingested one line of plain text per message, which never reaches the
+markdown, code-block or tool-result paths; realistic content costs ~9x the
+allocations. Every absolute figure in the baseline was that optimistic, and a
+regression confined to those paths barely moved the gated number.
+
+When one of these is fixed the numbers go **up**, and that is not a regression —
+it is the benchmark starting to measure what it always claimed to. Say so in the
+PR, per benchmark, with the before and after.
+
+### Two classes the gate cannot see, by construction
+
+The allocation gate is blind to two kinds of cost, and no amount of tuning it
+helps. Both need an ordinary wall-clock assertion instead:
+
+- **Waiting.** A settle wait, a backoff, a poll interval — all allocate nothing.
+  gofer#313's root cause was in this class. `internal/mcpconn`'s
+  `TestAwaitReadyBurnsItsBoundOnEveryCallWhileAServerHangs` covers the surviving
+  instance: a hanging MCP server leaves the manager unsettled, so every session
+  create pays the full ready timeout again.
+- **CPU-bound compare and sort.** `matchFilePaths` scans and sorts up to 5,000
+  paths on every keystroke while an `@` token is open — in **five** allocations,
+  so a benchmark of it would gate on nothing at all. See
+  `internal/tui/filemention_cost_test.go`.
+
+Write these as a **ratio against the same code at a smaller input**, not as a
+millisecond budget. A budget loose enough to survive a shared runner is loose
+enough to pass the regression it was written for — the first draft of the
+`matchFilePaths` assertion used a 20ms ceiling and stayed green against a
+deliberately quadratic mutation that took ~10ms. Comparing 4x the input against
+1x removes the machine from the assertion: linear work lands near 4x and
+quadratic near 16x on a fast laptop and a loaded runner alike. Pick the threshold
+from *both* measured endpoints — healthy and mutated — never from theory.
 
 ## Worker-fleet benchmark (M6, off by default)
 
