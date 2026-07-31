@@ -202,8 +202,38 @@ helps. Both need an ordinary wall-clock assertion instead:
   so a benchmark of it would gate on nothing at all. See
   `internal/tui/filemention_cost_test.go`.
 
-Write these as a **ratio against the same code at a smaller input**, not as a
-millisecond budget. A budget loose enough to survive a shared runner is loose
+### The allocation counters are process-wide
+
+`testing.B` derives `allocs/op` and `B/op` from `runtime.ReadMemStats`, whose
+`Mallocs` counter covers the **whole process**. Every allocation made by every
+goroutine inside the timed region is charged to the benchmark, whether or not
+the benchmark caused it. Parking a single allocating goroutine beside
+`BenchmarkLiveSnapshotJournalDepth` moves it from a rock-steady 77 allocs/op to
+821–1,563.
+
+That matters for any benchmark whose fixture holds **live goroutines** — the
+roster benchmarks resume real sessions, and each one is three goroutines plus
+whatever the SDK runner starts. Two rules follow:
+
+- **Give the measurement enough work that strays stay inside tolerance.** At 77
+  allocs/op the 25% gate leaves a margin of ~19 stray allocations; CI failed on
+  +39. `liveCallsPerOp` batches 20 reads per iteration, so the same stray is
+  0.13% instead of 50%. Batching is safe precisely because it is checkable:
+  every batched figure must divide back to the exact per-call number.
+- **Quiesce before the window.** `b.Cleanup` tears the previous sub-benchmark's
+  fixture down as the next one begins, so its garbage and finalizers land in the
+  next window. Two `runtime.GC()` calls before the loop retire them (the first
+  queues finalizers, the second runs them). `b.Loop()` performs its own
+  `b.ResetTimer()` on the first call, so anything before it is excluded.
+
+**Warm the function you are actually measuring**, not a cousin of it. The same
+CI failure was compounded by a warm-up that called `OverviewRoster` while the
+benchmark measured `Roster` — a different entry point — so the first-ever call
+to the measured path happened inside the timed region and its one-time costs
+were charged to whichever sub-benchmark ran first.
+
+Write wall-clock assertions as a **ratio against the same code at a smaller
+input**, not as a millisecond budget. A budget loose enough to survive a shared runner is loose
 enough to pass the regression it was written for — the first draft of the
 `matchFilePaths` assertion used a 20ms ceiling and stayed green against a
 deliberately quadratic mutation that took ~10ms. Comparing 4x the input against

@@ -39,6 +39,7 @@ package supervisor_test
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"testing"
 	"time"
 
@@ -134,6 +135,36 @@ func benchLiveRoot(b *testing.B, sessions, turns int) *supervisor.Supervisor {
 	return sup
 }
 
+// liveCallsPerOp is how many roster reads ONE benchmark iteration makes, in
+// every benchmark in this file. It is a signal-to-noise measure, needed
+// because of how testing counts allocations.
+//
+// testing.B derives allocs/op and B/op from runtime.ReadMemStats, whose
+// Mallocs counter is PROCESS-WIDE. Every allocation made by every goroutine
+// inside the timed region is therefore charged to the benchmark. That is not a
+// theory: parking one goroutine that allocates in a loop alongside this
+// benchmark moves it from a rock-steady 77 allocs/op to 821-1,563, and B/op
+// from 69,352 to 134,736.
+//
+// These fixtures hold LIVE sessions, and a live session is three goroutines
+// (pump, permission watch, decision watch) plus whatever the SDK runner
+// starts — two dozen or more at eight sessions, none of which the benchmark
+// controls. Unbatched, one roster read allocated 77-134 times in tens of
+// microseconds, so the 25% gate tolerance left a margin of only ~19-33 stray
+// allocations. That is too thin for a fixture like this, and CI proved it: a
+// +39 stray failed LiveSnapshotJournalDepth/turns=8 (77 -> 116), and the same
+// +39 would have failed the 134-alloc rows too (134 -> 173 is +29%).
+//
+// Batching raises the measured work WITHOUT changing what is measured, which
+// is checkable rather than asserted: every batched figure divides by this
+// constant back to the exact pre-batch number — 1,540/20 = 77 allocs,
+// 36,080,160/20 = 1,804,008 B, and so on for every row. The curve these
+// benchmarks exist for is identical, just scaled; the stray margin becomes
+// ~385 instead of ~19.
+//
+// Divide any reported figure by this constant for the per-read cost.
+const liveCallsPerOp = 20
+
 // assertAllLive fails the benchmark unless every row in the roster is a LIVE
 // row. It is the guard the benchmarks next door needed and did not have: their
 // fixture silently produced zero live rows, so the branch under test never ran
@@ -163,17 +194,20 @@ func BenchmarkOverviewRosterLive(b *testing.B) {
 		b.Run(fmt.Sprintf("live=%d", sessions), func(b *testing.B) {
 			sup := benchLiveRoot(b, sessions, 8)
 			ctx := context.Background()
-			assertAllLive(b, sup, sessions)
+			assertAllLive(b, sup, sessions) // also warms the measured call
+
+			quiesce()
 
 			b.ReportAllocs()
-			b.ResetTimer()
 			for b.Loop() {
-				got, err := sup.OverviewRoster(ctx)
-				if err != nil {
-					b.Fatalf("OverviewRoster: %v", err)
-				}
-				if len(got) != sessions {
-					b.Fatalf("roster = %d sessions, want %d", len(got), sessions)
+				for range liveCallsPerOp {
+					got, err := sup.OverviewRoster(ctx)
+					if err != nil {
+						b.Fatalf("OverviewRoster: %v", err)
+					}
+					if len(got) != sessions {
+						b.Fatalf("roster = %d sessions, want %d", len(got), sessions)
+					}
 				}
 			}
 		})
@@ -197,17 +231,20 @@ func BenchmarkOverviewRosterLiveJournalDepth(b *testing.B) {
 			const sessions = 8
 			sup := benchLiveRoot(b, sessions, turns)
 			ctx := context.Background()
-			assertAllLive(b, sup, sessions)
+			assertAllLive(b, sup, sessions) // also warms the measured call
+
+			quiesce()
 
 			b.ReportAllocs()
-			b.ResetTimer()
 			for b.Loop() {
-				got, err := sup.OverviewRoster(ctx)
-				if err != nil {
-					b.Fatalf("OverviewRoster: %v", err)
-				}
-				if len(got) != sessions {
-					b.Fatalf("roster = %d sessions, want %d", len(got), sessions)
+				for range liveCallsPerOp {
+					got, err := sup.OverviewRoster(ctx)
+					if err != nil {
+						b.Fatalf("OverviewRoster: %v", err)
+					}
+					if len(got) != sessions {
+						b.Fatalf("roster = %d sessions, want %d", len(got), sessions)
+					}
 				}
 			}
 		})
@@ -224,6 +261,8 @@ func BenchmarkOverviewRosterLiveJournalDepth(b *testing.B) {
 // the sweep above checkable rather than asserted: subtract this from the
 // OverviewRoster number at the same depth and what remains is the disk side,
 // which the benchmarks next door already show is flat on this axis.
+// Its reported figures are per [liveCallsPerOp] calls, not per call — see
+// that constant.
 func BenchmarkLiveSnapshotJournalDepth(b *testing.B) {
 	for _, turns := range []int{8, 64, 256} {
 		b.Run(fmt.Sprintf("turns=%d", turns), func(b *testing.B) {
@@ -232,17 +271,52 @@ func BenchmarkLiveSnapshotJournalDepth(b *testing.B) {
 			ctx := context.Background()
 			assertAllLive(b, sup, sessions)
 
+			// Warm the function THIS benchmark measures, which assertAllLive
+			// does not: it calls OverviewRoster, and Roster is a different
+			// entry point (snapshotLive, no disk walk). Nothing else in this
+			// package benchmarks Roster, so without this line the very first
+			// Roster call in the whole process happens INSIDE the timed
+			// region, and every first-call cost on that path — lazily built
+			// runtime metadata, a cold branch, a first map growth — is charged
+			// to turns=8 alone. That is what CI saw: 116 allocs on turns=8
+			// while turns=64 and turns=256 reproduced byte-for-byte.
+			if got, err := sup.Roster(ctx); err != nil {
+				b.Fatalf("warm Roster: %v", err)
+			} else if len(got) != sessions {
+				b.Fatalf("warm Roster = %d sessions, want %d", len(got), sessions)
+			}
+
+			quiesce()
+
+			// No b.ResetTimer(): b.Loop() performs one itself on its first
+			// call (testing.B.loopSlowPath), so the window opens here and
+			// everything above — including the two GCs — is already excluded.
 			b.ReportAllocs()
-			b.ResetTimer()
 			for b.Loop() {
-				got, err := sup.Roster(ctx)
-				if err != nil {
-					b.Fatalf("Roster: %v", err)
-				}
-				if len(got) != sessions {
-					b.Fatalf("roster = %d sessions, want %d", len(got), sessions)
+				for range liveCallsPerOp {
+					got, err := sup.Roster(ctx)
+					if err != nil {
+						b.Fatalf("Roster: %v", err)
+					}
+					if len(got) != sessions {
+						b.Fatalf("roster = %d sessions, want %d", len(got), sessions)
+					}
 				}
 			}
 		})
 	}
+}
+
+// quiesce retires the PREVIOUS sub-benchmark's teardown before the next one
+// starts measuring. b.Cleanup closes eight live sessions and their journals
+// when a sub-benchmark ends, so the one that follows would otherwise open its
+// window on a heap full of that garbage and its pending finalizers — and,
+// because the allocation counters are process-wide, be charged for collecting
+// it. Two cycles: the first queues finalizers, the second runs them.
+//
+// It is called BEFORE b.Loop(), which performs its own b.ResetTimer() on the
+// first call (testing.B.loopSlowPath), so none of this lands in the measurement.
+func quiesce() {
+	runtime.GC()
+	runtime.GC()
 }
