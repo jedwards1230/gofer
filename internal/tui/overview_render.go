@@ -503,12 +503,24 @@ func (o Overview) row(s SessionInfo, width int, showStatus bool, lay rosterLayou
 // segment. So the background open is re-inserted after every interior reset, so
 // the bar survives each nested reset and covers the whole row.
 //
-// It is a no-op under the Ascii golden profile, where [Theme.RowHighlightStyle]
-// emits no escape: the padded plain line is returned unchanged and the Ascii
-// golden pins it, while a styled golden pins the bar.
+// While o.ctrlXArmed is set, this is necessarily the armed row — the field
+// only ever mirrors a first ctrl-x press against the currently selected
+// session (see [Overview.ctrlXArmed] and [App.confirmDestroy]) and every key
+// press disarms it before the next render — so the bar swaps to
+// [Theme.RowHighlightArmedStyle] in place of [Theme.RowHighlightStyle]: the
+// same full-width bar, a different background token, signaling "waiting for
+// the confirm" on exactly this row.
+//
+// It is a no-op under the Ascii golden profile, where both styles emit no
+// escape: the padded plain line is returned unchanged and the Ascii golden
+// pins it, while a styled golden pins the bar (armed or not).
 func (o Overview) highlightLine(line string, width int) string {
 	line = padTo(line, width)
-	sentinel := o.theme.RowHighlightStyle().Render("\x00")
+	style := o.theme.RowHighlightStyle()
+	if o.ctrlXArmed {
+		style = o.theme.RowHighlightArmedStyle()
+	}
+	sentinel := style.Render("\x00")
 	i := strings.IndexByte(sentinel, 0)
 	if i < 0 {
 		// Render should preserve the sentinel byte; if a future lipgloss ever
