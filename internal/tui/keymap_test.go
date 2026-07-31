@@ -12,6 +12,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/jedwards1230/gofer/internal/config"
+	"github.com/jedwards1230/gofer/internal/tui/testkit"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
 
@@ -109,9 +110,22 @@ func TestGlobalBindingsDoNotCollide(t *testing.T) {
 	for _, probe := range keyProbes() {
 		var matched []string
 		for _, b := range globalKeymap() {
-			if b.match(probe.key) {
-				matched = append(matched, b.Keys)
+			if !b.match(probe.key) {
+				continue
 			}
+			// A GATED row (keyBinding.enabled) does not steal its key: when
+			// the gate is closed dispatchGlobalKey reports the press
+			// unhandled and the screen/input keymap sees it exactly as
+			// before. That is what lets ctrl+a mean "select the screen" on
+			// an empty input bar and "move to line start" once it has text,
+			// so a gated row is deliberately exempt from the collision rule
+			// below. The exemption is narrow on purpose: the gate must
+			// exist, and TestCtrlAFallsThroughToInputWhenBarHasText proves
+			// this particular one actually closes.
+			if b.enabled != nil {
+				continue
+			}
+			matched = append(matched, b.Keys)
 		}
 		if len(matched) > 1 {
 			t.Errorf("%s is claimed by %d global bindings (%v) — two rows cannot own one key", probe.name, len(matched), matched)
@@ -182,4 +196,56 @@ func TestEveryScopeIsRendered(t *testing.T) {
 			t.Errorf("binding %q is scoped %v, which keyScopeOrder omits — it renders nowhere in /help", b.Keys, b.Scope)
 		}
 	}
+}
+
+// TestCtrlAFallsThroughToInputWhenBarHasText proves the gate on the ctrl+a
+// global row actually closes. This is the half that makes the row safe to
+// share a key with the input keymap at all: with text in the dispatch bar
+// ctrl+a must reach applyInputKey's "move to line start" unchanged, and
+// dispatchGlobalKey must report the press UNHANDLED rather than swallowing it
+// into a no-op — a swallowed key looks identical to a working one in a
+// screenshot and is why the gate is tested directly rather than inferred from
+// TestGlobalBindingsDoNotCollide's exemption.
+func TestCtrlAFallsThroughToInputWhenBarHasText(t *testing.T) {
+	ctrlA := tea.Key{Code: 'a', Mod: tea.ModCtrl}
+
+	t.Run("empty bar selects", func(t *testing.T) {
+		a := NewApp(theme.Test(), newInternalFakeSup(GoldenRoster()), GoldenMeta(), GoldenCommandEnv())
+		mdl, _ := a.Update(tea.WindowSizeMsg{Width: testkit.Width, Height: testkit.Height})
+		a = mdl.(App)
+
+		next, _, handled := dispatchGlobalKey(a, ctrlA)
+		if !handled {
+			t.Fatal("ctrl+a on an empty dispatch bar was not handled by the global table")
+		}
+		app, ok := next.(App)
+		if !ok {
+			t.Fatalf("dispatchGlobalKey returned %T, want App", next)
+		}
+		if app.sel == nil {
+			t.Error("ctrl+a on an empty dispatch bar installed no selection")
+		}
+	})
+
+	t.Run("bar with text falls through", func(t *testing.T) {
+		a := NewApp(theme.Test(), newInternalFakeSup(GoldenRoster()), GoldenMeta(), GoldenCommandEnv())
+		mdl, _ := a.Update(tea.WindowSizeMsg{Width: testkit.Width, Height: testkit.Height})
+		a = mdl.(App)
+		mdl, _ = a.Update(tea.KeyPressMsg{Code: 'h', Text: "h"})
+		a = mdl.(App)
+		if a.inputEmpty() {
+			t.Fatal("precondition failed: dispatch bar is still empty after typing")
+		}
+
+		next, cmd, handled := dispatchGlobalKey(a, ctrlA)
+		if handled {
+			t.Error("ctrl+a was claimed by the global table while the dispatch bar held text — it must fall through to the input keymap")
+		}
+		if cmd != nil {
+			t.Error("a declined global binding produced a Cmd")
+		}
+		if app, ok := next.(App); ok && app.sel != nil {
+			t.Error("a declined ctrl+a still installed a selection")
+		}
+	})
 }

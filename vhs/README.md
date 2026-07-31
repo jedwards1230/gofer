@@ -48,6 +48,16 @@ Tape/scenario names follow one slug schema, `<area>-<view>[-<state>]`
   this covers. One press only: the first `ctrl+x` is pure client state and
   never reaches the Supervisor, so the scene deletes nothing. Reuses the
   `panel-status-overview` scenario.
+- `roster-select-all.tape` — `ctrl+a` select-all, captured as a **before/after
+  pair** (`roster-select-all-before` / `roster-select-all`). The claim under
+  review is that the reverse video reaches the rows OUTSIDE the roster body —
+  the identity header at the top, the dispatch bar and hint row at the bottom
+  (#307). Ascii goldens render without colour and cannot see a highlight at
+  all, so this is the only check on it. Pressed with an empty dispatch bar,
+  which is the gate: with text in the bar `ctrl+a` stays "move to line start"
+  and nothing highlights. Read-only — select-all only installs a client-side
+  selection and writes the clipboard. Reuses the `panel-status-overview`
+  scenario.
 - `roster-peek.tape` — the peek card: the roster-only session summary opened
   with **space** on an empty dispatch bar (enter/→ *attach* instead). Peek does
   not subscribe to the session's event stream, so the card renders purely from

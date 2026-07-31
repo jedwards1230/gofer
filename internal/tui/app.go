@@ -1755,13 +1755,13 @@ func (a App) render() string {
 	// highlight on top of the fully composed frame — after every other
 	// overlay (panel/footer) so the highlight always draws over whatever it
 	// covers, on whichever screen actually participates in selection. The
-	// highlight is clamped to [App.transcriptRegion] — the active screen's
-	// own scrollable content — so a drag that extends into the input box,
-	// the usage/status footer, the identity header, or an open panel never
-	// paints those rows (see transcriptRegion's doc for why: they sit
-	// outside the row range highlightSelection is handed).
+	// range is [selectableRegion] over this very frame: every rendered row,
+	// including the identity header, the usage/status footer, the input box,
+	// and any open panel or menu. It MUST be the same range
+	// [App.selectedText] uses, or the painted highlight and the copied text
+	// disagree about what is selected (issue #307).
 	if a.sel != nil && a.mouseSelectable() {
-		top, bottom, ok := a.transcriptRegion()
+		top, bottom, ok := selectableRegion(strings.Count(content, "\n") + 1)
 		if ok {
 			content = highlightSelection(content, *a.sel, a.theme, top, bottom)
 		}

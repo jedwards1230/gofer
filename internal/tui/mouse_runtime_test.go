@@ -125,10 +125,10 @@ func TestProgramEmitsMouseEnableSequence(t *testing.T) {
 // emission (captured-output test, like the mouse-enable test)": it drives a
 // real tea.Program (same in-memory input/output harness as
 // TestProgramEmitsMouseEnableSequence above) through a plain left-button
-// click/drag/release over a roster row — INSIDE the overview's
-// transcript-region equivalent, not its identity header (row 1, which
-// [App.transcriptRegion] deliberately excludes from selection — see
-// mouse_test.go's TestSelectionHighlightAndCopyExcludeChrome) — and asserts
+// click/drag/release over a roster row — the roster body rather than the
+// identity header, which since #307 is equally selectable (see mouse_test.go's
+// TestSelectionReachesChrome); this test just needs one stable row of known
+// text, and the roster row is it — and asserts
 // the raw output bytes carry bubbletea's OSC 52 clipboard-set sequence
 // ("\x1b]52;c;<base64>\x07" — tea.SetClipboard, per the ansi package's
 // SetSystemClipboard) for the exact text that selection covers ("wire", row

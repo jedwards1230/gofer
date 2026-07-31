@@ -198,14 +198,103 @@ func (a App) transcriptRegion() (top, bottom int, ok bool) {
 	}
 }
 
+// selectableRegion returns the inclusive [top, bottom] row range selection and
+// its highlight actually operate on: EVERY row the composed frame renders, in
+// the same absolute row coordinates a.sel, highlightSelection, and
+// selectedText already use.
+//
+// This is deliberately wider than [App.transcriptRegion]. Selection used to
+// clamp to that narrower range — the active screen's own scrollable content —
+// which meant the identity header (version, model, cwd, the awaiting/working/
+// idle counts), the usage/status footer, the dispatch bar, and any open panel
+// or menu could be neither highlighted nor copied. Every one of those rows is
+// rendered text a user can read on screen, so every one of them is text they
+// can reasonably expect to select and copy; excluding them made "select the
+// screen" silently return a fragment (issue #307).
+//
+// [App.transcriptRegion] is left in place but now has NO non-test caller: it
+// answers a real and different question (which rows are the active screen's
+// own scrollable body) and its frame-layout arithmetic is covered by tests
+// worth keeping, but nothing in the selection path consults it any more.
+// Deleting it, or repointing those tests at [App.frameLayout] directly, is a
+// deliberate follow-up rather than something to do silently in a selection
+// change.
+//
+// It takes the frame's row count rather than re-rendering, so a caller that
+// already holds the composed frame (all three of them do) never renders twice
+// to ask which of its own rows are selectable.
+//
+// ok is false only when the frame has no rows at all.
+func selectableRegion(lineCount int) (top, bottom int, ok bool) {
+	if lineCount <= 0 {
+		return 0, 0, false
+	}
+	return 0, lineCount - 1, true
+}
+
 // mouseSelectable reports whether a's current screen participates in
-// click-drag selection — the same overview+attach gate [App.handleWheel]
-// uses (peek carries no scrollable content of its own; a command
-// panel/menu/approval overlay composes OVER whichever screen is showing
-// without stopping selection on the screen underneath it, matching how
-// wheel scroll already behaves regardless of those overlays).
+// click-drag selection. Every screen does: a screen that renders text renders
+// text a user can want to copy, and the previous overview+attach-only gate
+// refused peek outright (issue #307).
+//
+// Note what this gate did NOT cause, since #307 attributes it here: a command
+// panel (/config, /status, /help) is an OVERLAY — `a.scr` stays screenOverview
+// while it is open — so a panel always passed even the old gate. What made a
+// panel unselectable was the region clamp, [App.transcriptRegion], whose doc
+// excludes "the command menu/panel" in as many words; [selectableRegion]
+// replaced it. TestSelectionOnAPanelAndPeekScreens pins one half against each,
+// because a test covering only one goes green against the other regression.
+//
+// It stays a named predicate rather than being inlined away because the
+// question it answers ("can this screen be selected?") is a real one that a
+// future screen with genuinely nothing selectable could answer differently —
+// and because two call sites (handleMouseClick and App.render's highlight
+// overlay) must agree on the answer.
 func (a App) mouseSelectable() bool {
-	return a.scr == screenOverview || a.scr == screenAttach
+	return true
+}
+
+// inputEmpty reports whether the text-entry surface of the current screen has
+// no pending text — the overview's dispatch bar, or the peek/attach input.
+// It is what gates ctrl+a between "select the whole screen" and the input
+// keymap's "move to line start" (see [keyBinding.enabled]).
+func (a App) inputEmpty() bool {
+	if a.scr == screenOverview {
+		return a.over.InputEmpty()
+	}
+	return a.sess.InputEmpty()
+}
+
+// selectAll selects every rendered row of the current frame and copies the
+// result to the system clipboard, the keyboard counterpart to dragging over
+// the whole screen. The selection it installs is an ordinary [selectionState],
+// so it highlights like any other, is copyable again, and clears on the next
+// key press or click exactly like a dragged one.
+//
+// The end column is the frame's widest row rather than that row's own width:
+// [App.selectedText] clamps the end bound per row (`clampInt(x1+1, 0, width)`),
+// so one over-wide value selects each row to its own end, whatever its length.
+//
+// No rows (an unrendered or zero-height frame) or a frame that normalizes to
+// nothing is a no-op with no Cmd — never an empty clipboard write, which would
+// silently destroy whatever the user had copied before.
+func (a App) selectAll() (App, tea.Cmd) {
+	lines := strings.Split(ansi.Strip(a.render()), "\n")
+	top, bottom, ok := selectableRegion(len(lines))
+	if !ok {
+		return a, nil
+	}
+	widest := 0
+	for _, line := range lines {
+		widest = max(widest, ansi.StringWidth(line))
+	}
+	a.sel = &selectionState{startX: 0, startY: top, curX: widest, curY: bottom}
+
+	text := a.selectedText()
+	if text == "" {
+		return a, nil
+	}
+	return a, tea.SetClipboard(text)
 }
 
 // handleMouseClick starts a new selection at the clicked cell — a fresh
@@ -335,12 +424,9 @@ func (s *selectionState) extendWord(a App, cx, cy int) {
 // It reads the same ANSI-stripped frame [App.selectedText] does, so the columns
 // it returns line up with the cell columns the selection/highlight math uses.
 func (a App) wordBoundsAt(x, y int) (start, end int, ok bool) {
-	top, bottom, regionOK := a.transcriptRegion()
-	if !regionOK || y < top || y > bottom {
-		return 0, 0, false
-	}
 	lines := strings.Split(ansi.Strip(a.render()), "\n")
-	if y < 0 || y >= len(lines) {
+	top, bottom, regionOK := selectableRegion(len(lines))
+	if !regionOK || y < top || y > bottom {
 		return 0, 0, false
 	}
 	return wordBoundsCells(lines[y], x)
@@ -409,21 +495,24 @@ func (a App) handleMouseRelease(msg tea.MouseReleaseMsg) (App, tea.Cmd) {
 // column to the line's end, every full line in between whole, and the
 // release line from its own start to the release column — the standard
 // terminal click-drag selection shape. The span is clamped to
-// [App.transcriptRegion] first, so a drag that runs into the input box, the
-// usage/status footer, the identity header, or an open panel never copies
-// those rows — only the transcript/roster content itself. "" when nothing is
-// selected or the (region-clamped) span covers no cells (e.g. a selection
-// scrolled entirely out of the current frame, or entirely outside the
-// transcript region).
+// [selectableRegion] — every rendered row — so a drag that runs into the
+// input box, the usage/status footer, the identity header, or an open panel
+// copies those rows too (#307). The result is then run through
+// [normalizeCopy], so the clipboard never receives the frame's right-hand
+// padding or its runs of blank filler rows.
+//
+// "" when nothing is selected, the span covers no cells (e.g. a selection
+// scrolled entirely out of the current frame), or everything it covers is
+// whitespace.
 func (a App) selectedText() string {
 	if a.sel == nil {
 		return ""
 	}
-	top, bottom, ok := a.transcriptRegion()
+	lines := strings.Split(ansi.Strip(a.render()), "\n")
+	top, bottom, ok := selectableRegion(len(lines))
 	if !ok {
 		return ""
 	}
-	lines := strings.Split(ansi.Strip(a.render()), "\n")
 	spanY0, x0, spanY1, x1 := a.sel.span()
 
 	// The loop range is [spanY0, spanY1] intersected with the transcript
@@ -464,7 +553,45 @@ func (a App) selectedText() string {
 		}
 		out = append(out, ansi.Cut(line, left, right))
 	}
-	return strings.Join(out, "\n")
+	return normalizeCopy(out)
+}
+
+// normalizeCopy turns the raw per-row cuts of a selection into the text that
+// actually reaches the clipboard: every row right-trimmed, no leading or
+// trailing blank rows, and any interior run of blank rows collapsed to one.
+//
+// It exists because the frame is a fixed grid and the clipboard is not. Rows
+// are padded out to the frame width to paint their background, and the screen
+// below the roster is padded with blank rows to the terminal's height — so a
+// selection copied verbatim carries a block of trailing spaces on every line
+// plus a long tail of empty ones. That is invisible on screen and very visible
+// the moment it is pasted anywhere.
+//
+// Interior blank rows collapse rather than vanish because they carry real
+// structure in a transcript (the gap between two messages); a run of them is
+// grid padding, but one of them is a paragraph break. Trimming happens on the
+// COPY path only — [highlightSelection] still paints exactly the cells the
+// drag covered, so what the user sees selected is unchanged.
+func normalizeCopy(rows []string) string {
+	trimmed := make([]string, 0, len(rows))
+	blank := 0
+	for _, row := range rows {
+		row = strings.TrimRight(row, " \t")
+		if row == "" {
+			blank++
+			continue
+		}
+		// Emit at most one blank row for the run that preceded this one, and
+		// none at all if nothing has been emitted yet (leading blanks).
+		if blank > 0 && len(trimmed) > 0 {
+			trimmed = append(trimmed, "")
+		}
+		blank = 0
+		trimmed = append(trimmed, row)
+	}
+	// A trailing run is deliberately dropped: `blank` is never flushed after
+	// the loop.
+	return strings.Join(trimmed, "\n")
 }
 
 // highlightSelection overlays sel's span on content (App.render's output,
@@ -489,12 +616,12 @@ func (a App) selectedText() string {
 // untouched, only the selected run itself is affected. A span with no
 // covered cells on a given line (e.g.
 // every row outside [y0,y1]) leaves that line untouched. regionTop/
-// regionBottom (App.transcriptRegion, inclusive, in the same absolute row
-// coordinates as content) clamp the painted rows to the active screen's own
-// scrollable content — never the input box, the usage/status footer, the
-// identity header, or an open panel/menu — the same clamp [App.selectedText]
-// applies so the highlight and the copied text always agree on what's
-// selected. Content outside [regionTop, regionBottom] is never painted, full
+// regionBottom ([selectableRegion], inclusive, in the same absolute row
+// coordinates as content) bound the painted rows to the rows the frame
+// actually has — the SAME range [App.selectedText] uses, which is the
+// invariant that matters here: the highlight and the copied text must always
+// agree on what is selected, so these two must never be handed different
+// regions. Content outside [regionTop, regionBottom] is never painted, full
 // stop, even when sel's span extends past it: same reasoning as
 // selectedText's raw-span column bounds (see its comment) — a row inside the
 // region that the clamped range still covers is fully painted, not bounded

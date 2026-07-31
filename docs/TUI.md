@@ -817,10 +817,16 @@ a tradeoff, the app **owns** selection instead: `mouse.go` tracks a
 coordinates — the same space `App.render`'s own output uses) from
 `tea.MouseClickMsg` (left button only) through `tea.MouseMotionMsg` (motion
 while the left button stays held — cell-motion mode never reports it
-otherwise) to `tea.MouseReleaseMsg`, on whichever of overview/attach is
-showing (the same gate `handleWheel` uses; peek has no selectable content of
-its own, and a command panel/menu/approval overlay composes *over* the
-screen without stopping selection on it either, matching wheel scroll).
+otherwise) to `tea.MouseReleaseMsg`, on **every** screen — a screen that renders text
+renders text worth copying, so `mouseSelectable` no longer singles out overview
+and attach. That gate was never the whole story, and it is worth being precise
+because the two halves fail differently: a command panel/menu/approval overlay
+keeps `a.scr == screenOverview` while it is open, so it always passed
+`mouseSelectable` and was excluded by the REGION clamp instead
+(`transcriptRegion` returns the roster body and excludes the panel by
+construction). The screen the old gate genuinely refused was **peek**. Widening
+both is what makes every screen selectable;
+`TestSelectionOnAPanelAndPeekScreens` pins one against each.
 
 `App.render` overlays the selection's span as reverse video after every
 other overlay, cutting each covered line via `ansi.Cut` into its
@@ -850,24 +856,41 @@ a fresh `selectionState`, clearing any previous one outright) or **any key
 press** (`App.Update`'s `tea.KeyPressMsg` case drops `a.sel`); it does *not*
 clear on scroll, so wheel/PgUp-PgDn during or after a selection is fine.
 
-Both the highlight and the copy are clamped to `App.transcriptRegion` —
-the active screen's own scrollable content, computed via the same
-`frameLayout` row-budget arithmetic `render` uses (so the two can't drift
-apart): the attach transcript (plus whatever of its identity header is
-still scrolled into view) or the overview roster body. On the attach screen
-that measurement now goes through the *same* `App.attachModel` helper `render`
-draws from — the fully composed model with the background-agents and `!`/`!!`
-shell-run blocks appended to the transcript — so those tail blocks are inside
-the selectable region and a `$ ls` shell block (or a background-agents line)
-can be selected and copied like any other transcript row. Before that shared
-helper, `render` drew the composed blocks but `transcriptRegion` measured the
-bare `a.sess` without them, so the tail blocks fell below the computed region
-and could not be selected. A drag that runs off
-the transcript into the input box and its framing rules, off the bottom
-into the usage/status footer, past the top into the identity header, or
-over a command panel/menu never paints or copies those rows — a row the
-clamped range still covers is painted/copied in full, not bounded by a
-click/release column that itself landed outside the region.
+**Everything rendered is selectable.** Both the highlight and the copy are
+bounded by `selectableRegion` — every row the composed frame has. A drag that
+runs off the transcript into the input box and its framing rules, down into the
+usage/status footer, up into the identity header, or over a command panel/menu
+paints and copies those rows like any other. A row the range covers is
+painted/copied in full, not bounded by a click/release column that landed on a
+different row.
+
+This replaced a narrower rule (selection clamped to `App.transcriptRegion`, the
+active screen's own scrollable body). That clamp stopped an overshooting drag
+from capturing the `> ` prompt, but the cost was that the header, footer, status
+line, and every command panel could be read on screen and never copied. The
+whitespace normalization below is what makes the wider selection pleasant to
+paste, which was the original complaint's real substance.
+
+**Select all: `ctrl+a`.** On an **empty** input bar `ctrl+a` selects the whole
+frame and copies it in one press; with text in the bar it stays the readline
+"move to line start". That gate lives on the global keymap row itself
+(`keyBinding.enabled` — a gated row reports the press *unhandled* so it falls
+through to the input keymap untouched), and it is the same "empty dispatch bar"
+idiom `space`, `?`, and `→` already use on the overview.
+
+**The clipboard gets text, not a grid.** `normalizeCopy` right-trims every row,
+drops leading/trailing blank rows, and collapses interior runs of blank rows to
+one. Rows are padded to the frame width to paint their background and the area
+below the roster is padded to the terminal height — invisible on screen, very
+visible when pasted. A single interior blank row survives because it is a real
+paragraph break in a transcript; a run of them is grid filler. Normalization is
+on the **copy** path only, so the highlight still shows exactly the cells the
+drag covered.
+
+On the attach screen the frame goes through the *same* `App.attachModel` helper
+`render` draws from — the fully composed model with the background-agents and
+`!`/`!!` shell-run blocks appended — so a `$ ls` shell block (or a
+background-agents line) selects and copies like any other transcript row.
 
 **Word selection.** A **double-click** (two left clicks on the same cell within
 `doubleClickWindow`, 500ms — bubbletea v2 reports no click count, so the app
@@ -1422,6 +1445,10 @@ human-eye check of real rendered frames, `vhs/` holds on-demand
 - `roster-overview` — the roster with mixed states, showing the status words
   in color (yellow working/awaiting vs green finished) — the state that now
   lives only in color.
+- `roster-select-all` — `ctrl+a` select-all, as a before/after pair
+  (`-before` / plain). Checks that the reverse video covers the identity
+  header and the dispatch bar/hint rows, not just the roster body (#307);
+  Ascii goldens cannot see a highlight, so this is the only check on it.
 - `roster-delete-confirm` — the armed `ctrl+x` delete confirm, as a
   before/after pair (`-before` / plain). The row highlight's shift from
   `Highlight` to `HighlightArmed` is a COLOR change, so a single armed frame
