@@ -248,7 +248,11 @@ func composedAttach(b *testing.B, url, sessionID string, wantEvents int) tui.Mod
 			if !ok {
 				b.Fatalf("subscription closed after %d/%d replayed events", i, wantEvents)
 			}
-			m = m.Ingest(ev)
+			// Ingest is a pointer method that mutates in place and returns
+			// nothing as of #308's fix — it used to return a rebuilt Model,
+			// which was the whole-transcript copy per event that made replay
+			// quadratic. Assigning its result no longer compiles.
+			m.Ingest(ev)
 		case <-deadline.C:
 			b.Fatalf("timed out after %s waiting for replayed event %d/%d", composedAttachWait, i, wantEvents)
 		}
