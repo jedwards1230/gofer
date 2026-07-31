@@ -27,9 +27,13 @@ package tui
 //     only through a command this screen never mentions. See
 //     [effortPickerView.offOnly].
 //
-// NOTE the level set here does not yet reach a provider request at all — see
-// docs/TUI.md's "Reasoning effort does not reach the provider yet (SDK gap)".
-// That is a gap below this file, not in it.
+// The level set here DOES reach a provider request. It did not through
+// agent-sdk-go v0.18.x — the effort was plumbed gofer-side and went inert one
+// hop below the last layer anyone tested — but v0.19.0 (SDK issue #88, commit
+// 83f0a2c) made a named effort self-enabling via Thinking.Active(), and both
+// adapters now gate on that rather than on .Enabled. gofer pins a later SDK, so
+// mid-session /thinking reaches the wire. See docs/TUI.md's "Reasoning effort
+// reaches the provider (SDK gap closed in v0.19.0)".
 //
 // Like statusView/modelPickerView it is a pure value: every method returns an
 // updated copy, so a fixed key sequence replays to the same rendered output in
