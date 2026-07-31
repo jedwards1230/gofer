@@ -206,6 +206,21 @@ type App struct {
 	// a held selection leaves the arm pointing at the session it was armed on.
 	ctrlXArmed string
 
+	// pendingSelect is the session id [App.confirmDestroy] wants selected once
+	// the roster refresh that reflects its kill/archive lands — the row that
+	// occupied the deleted session's position AS RENDERED at confirm time (see
+	// [Overview.SuccessorID]). "" means no destructive op is in flight (the
+	// steady-state value; the ordinary rosterMsg handling applies). Consumed
+	// exactly once by the next rosterMsg ([Overview.WithSessionsSelecting])
+	// and cleared there, or by a failed opDoneMsg below — a delete that never
+	// happened has no successor to jump to, and the session that failed to
+	// delete is still on the roster and stays selected under the ordinary
+	// preserve-by-id resolution. Selecting by identity rather than a raw row
+	// index matters here because deleting the only session in a cwd group
+	// also removes that group's header, and because the roster sorts by
+	// activity, so row order is not guaranteed stable across a refetch.
+	pendingSelect string
+
 	// statusSev is how a.status is COLORED (issue #161). The status line is
 	// the only feedback channel several actions have — notably /model — so
 	// rendering a success in the same red as an HTTP 400 actively tells the
@@ -814,6 +829,14 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case rosterMsg:
 		if msg.err != nil {
 			a.setStatus(sevDanger, msg.err.Error())
+		} else if a.pendingSelect != "" {
+			// A destructive op (confirmDestroy) is landing: prefer the captured
+			// successor over the ordinary preserve-by-id-else-top resolution,
+			// consumed exactly once regardless of whether the successor is
+			// still present (WithSessionsSelecting falls back to the ordinary
+			// resolution itself).
+			a.over = a.over.WithSessionsSelecting(msg.sessions, a.pendingSelect)
+			a.pendingSelect = ""
 		} else {
 			a.over = a.over.WithSessions(msg.sessions)
 		}
@@ -933,6 +956,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case opDoneMsg:
 		if msg.err != nil {
 			a.setStatus(sevDanger, msg.err.Error())
+			// A failed op deleted nothing, so any successor confirmDestroy
+			// captured for it is moot — the target session is still on the
+			// roster and the ordinary preserve-by-id resolution already keeps
+			// it selected.
+			a.pendingSelect = ""
 		}
 		return a, nil
 
@@ -1178,6 +1206,11 @@ func (a App) confirmDestroy(prevArmed string) (tea.Model, tea.Cmd) {
 	}
 	if prevArmed == s.ID {
 		// Second press, same session still selected: act on its CURRENT state.
+		// Capture the row that should take focus once s.ID drops out of the
+		// roster — the next row down AS RENDERED, or the new last row if s is
+		// currently last — before the delete makes s.ID unresolvable. See
+		// [Overview.SuccessorID] and [App.pendingSelect].
+		a.pendingSelect = a.over.SuccessorID(s.ID)
 		if s.Status == StatusFinished || s.Status == StatusIdle {
 			return a, a.doArchive(s.ID)
 		}

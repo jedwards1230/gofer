@@ -93,6 +93,62 @@ func (o Overview) WithSessions(sessions []SessionInfo) Overview {
 	return o
 }
 
+// WithSessionsSelecting is [Overview.WithSessions], but tries prefer as the
+// new selection FIRST, before falling back to the ordinary
+// preserve-by-id-else-first-row resolution. It exists for the roster refresh
+// that lands after a ctrl-x kill/archive: the deleted session's id is about
+// to be unresolvable, and the ordinary fallback would land on the first row
+// of the WHOLE list rather than the row that took the deleted session's
+// place — see [App.confirmDestroy] and [Overview.SuccessorID], which computes
+// prefer. An empty prefer (no row followed the deleted session, e.g. it was
+// the roster's only row) defers straight to the ordinary resolution.
+func (o Overview) WithSessionsSelecting(sessions []SessionInfo, prefer string) Overview {
+	o.sessions = append([]SessionInfo(nil), sessions...)
+	if prefer != "" {
+		for _, s := range o.renderedOrder() {
+			if s.ID == prefer {
+				o.selectedID = prefer
+				return o
+			}
+		}
+	}
+	o.selectedID = o.resolveSelection(o.selectedID)
+	return o
+}
+
+// SuccessorID returns the id of the row that should take focus once id drops
+// out of the roster — the next row down in the CURRENT rendered order, or the
+// new last row if id is currently last, or "" if id has no siblings (the
+// roster becomes empty). Computed against [Overview.renderedOrder], which is
+// already header-free, so deleting the only session in a cwd group lands on
+// the next real session row rather than a header — no special-casing needed.
+// "" is also returned when id is not currently selected/rendered at all.
+//
+// The result is captured BEFORE the delete fires (id is still present) and
+// applied by [Overview.WithSessionsSelecting] once the refresh reflecting the
+// delete lands — selecting by identity, not a raw index, because the roster
+// sorts by activity and row order is not guaranteed stable across a refetch.
+func (o Overview) SuccessorID(id string) string {
+	rows := o.renderedOrder()
+	idx := -1
+	for i, s := range rows {
+		if s.ID == id {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		return ""
+	}
+	if idx+1 < len(rows) {
+		return rows[idx+1].ID
+	}
+	if idx > 0 {
+		return rows[idx-1].ID
+	}
+	return ""
+}
+
 // ToggleView flips between the flat and grouped orderings, keeping the
 // selected session selected across the reorder.
 func (o Overview) ToggleView() Overview {
