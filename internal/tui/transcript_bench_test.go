@@ -18,34 +18,22 @@ package tui_test
 // [BenchmarkAppRenderMassiveTranscript] (app_internal_test.go) is the
 // complementary whole-App render at one deliberately absurd size; these are the
 // scaling curves underneath it.
+//
+// Both ingest [tui.GoldenBenchTurns] — prose, a fenced code block, a tool call
+// and a multi-line tool result per turn. They used to ingest one line of plain
+// text per message, which made every absolute number here about 8x optimistic
+// and left a markdown/code-block/tool-result regression barely visible in the
+// gated figure (gofer#315, item 3). See GoldenBenchTurn's doc for the full
+// rationale.
 
 import (
 	"fmt"
 	"testing"
 
-	"github.com/jedwards1230/agent-sdk-go/event"
-
 	"github.com/jedwards1230/gofer/internal/tui"
 	"github.com/jedwards1230/gofer/internal/tui/testkit"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
-
-const benchSID = "0192a1b2-c3d4-7e5f-8a90-000000000001"
-
-// benchTurns is one exchange per turn — a user message and an assistant reply —
-// which is the smallest unit that reads as a "turn" in the transcript.
-func benchTurns(turns int) []event.Event {
-	evs := make([]event.Event, 0, turns*2)
-	for i := range turns {
-		evs = append(evs,
-			event.NewMessageFinished(benchSID, event.MessageUser,
-				fmt.Sprintf("turn %d: wire the websocket ACP listener", i)),
-			event.NewMessageFinished(benchSID, event.MessageText,
-				fmt.Sprintf("turn %d: the listener already accepts upgrades; it just never forwards the session events, so I'll wire the fan-out", i)),
-		)
-	}
-	return evs
-}
 
 // BenchmarkTranscriptIngest measures replaying a whole session's stream — the
 // work done between opening a session and seeing its first frame.
@@ -55,7 +43,7 @@ func benchTurns(turns int) []event.Event {
 func BenchmarkTranscriptIngest(b *testing.B) {
 	for _, turns := range []int{100, 1000, 5000} {
 		b.Run(fmt.Sprintf("turns=%d", turns), func(b *testing.B) {
-			evs := benchTurns(turns)
+			evs := tui.GoldenBenchTurns(turns)
 
 			b.ReportAllocs()
 			b.ResetTimer()
@@ -87,7 +75,7 @@ func BenchmarkTranscriptView(b *testing.B) {
 	for _, turns := range []int{100, 1000, 5000} {
 		b.Run(fmt.Sprintf("turns=%d", turns), func(b *testing.B) {
 			m := tui.New(theme.Test())
-			for _, ev := range benchTurns(turns) {
+			for _, ev := range tui.GoldenBenchTurns(turns) {
 				m.Ingest(ev)
 			}
 

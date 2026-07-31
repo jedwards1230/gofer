@@ -21,7 +21,8 @@ tool — and how you avoid writing a test that looks thorough and proves nothing
 | Process isolation | real detached `session-worker` processes | every PR | crash isolation, socket lifecycle | performance |
 | Race | `go test -race ./...` | every PR + push | data races | logic errors a race doesn't expose |
 | LSP live | real `gopls` round trip | `lsp-live` job | actual language-server behaviour | — (**skips** without gopls; see below) |
-| Benchmarks | `scripts/bench.sh --check` | every PR (allocs only) | work that scales with input size | correctness |
+| Benchmarks | `scripts/bench.sh --check` | every PR (allocs only) | work that scales with input size | correctness; **waiting**; CPU-bound compare/sort |
+| Cost assertions | ordinary `go test` on wall-clock | every PR | settle waits, super-linear CPU work | anything allocation-shaped (the gate has that) |
 | Worker fleet | ~50 real processes, `workerbench` tag | manual only | RSS, spawn latency at scale | asserts almost nothing by design |
 
 ## Unit and golden tests
@@ -158,6 +159,113 @@ against a combined benchmark.
 
 Assert something inside the loop. A benchmark whose subject silently stops doing
 the work reads as a spectacular optimisation.
+
+### A benchmark's fixture decides what its number means
+
+Two ways a benchmark can run, pass, and measure nothing — both found in gofer's
+own suite (gofer#315), both invisible while green:
+
+- **It never reaches the branch it is named after.** `BenchmarkOverviewRoster`
+  built its fixture with `store.CreateWithID` and `supervisor.New`, which
+  registers nothing live, so `liveByID()` was empty and the roster's live branch
+  was never taken. It measured exactly the half that could not contain the cost
+  being looked for. The fix is a guard *inside* the benchmark — see
+  `assertAllLive` in `internal/supervisor/roster_live_bench_test.go`. A row count
+  cannot catch this: a live row and a disk row are both one entry in the slice.
+- **It stubs the expensive dependency to zero.** Every App render benchmark built
+  through `GoldenCommandEnv`, whose `Config` closure returns an empty struct
+  without touching disk — so it measured a frame in which the per-frame config
+  reads were free, which the shipped app's are not.
+
+A third, softer version: a fixture that under-weights the content. The transcript
+benchmarks ingested one line of plain text per message, which never reaches the
+markdown, code-block or tool-result paths; realistic content costs ~9x the
+allocations. Every absolute figure in the baseline was that optimistic, and a
+regression confined to those paths barely moved the gated number.
+
+When one of these is fixed the numbers go **up**, and that is not a regression —
+it is the benchmark starting to measure what it always claimed to. Say so in the
+PR, per benchmark, with the before and after.
+
+### Two classes the gate cannot see, by construction
+
+The allocation gate is blind to two kinds of cost, and no amount of tuning it
+helps. Both need an ordinary wall-clock assertion instead:
+
+- **Waiting.** A settle wait, a backoff, a poll interval — all allocate nothing.
+  gofer#313's root cause was in this class. `internal/mcpconn`'s
+  `TestAwaitReadyBurnsItsBoundOnEveryCallWhileAServerHangs` covers the surviving
+  instance: a hanging MCP server leaves the manager unsettled, so every session
+  create pays the full ready timeout again.
+- **CPU-bound compare and sort.** `matchFilePaths` scans and sorts up to 5,000
+  paths on every keystroke while an `@` token is open — in **five** allocations,
+  so a benchmark of it would gate on nothing at all. See
+  `internal/tui/filemention_cost_test.go`.
+
+### The allocation counters are process-wide
+
+`testing.B` derives `allocs/op` and `B/op` from `runtime.ReadMemStats`, whose
+`Mallocs` counter covers the **whole process**. Every allocation made by every
+goroutine inside the timed region is charged to the benchmark, whether or not
+the benchmark caused it. Parking a single allocating goroutine beside
+`BenchmarkLiveSnapshotJournalDepth` moves it from a rock-steady 77 allocs/op to
+821–1,563.
+
+That matters for any benchmark whose fixture holds **live goroutines** — the
+roster benchmarks resume real sessions, and each one is three goroutines plus
+whatever the SDK runner starts. Two rules follow:
+
+- **Give the measurement enough work that strays stay inside tolerance.** At 77
+  allocs/op the 25% gate leaves a margin of ~19 stray allocations; CI failed on
+  +39. `liveCallsPerOp` batches 20 reads per iteration, so the same stray is
+  0.13% instead of 50%. Batching is safe precisely because it is checkable:
+  every batched figure must divide back to the exact per-call number.
+- **Quiesce before the window.** `b.Cleanup` tears the previous sub-benchmark's
+  fixture down as the next one begins, so its garbage and finalizers land in the
+  next window. Two `runtime.GC()` calls before the loop retire them (the first
+  queues finalizers, the second runs them). `b.Loop()` performs its own
+  `b.ResetTimer()` on the first call, so anything before it is excluded.
+
+**Warm the function you are actually measuring**, not a cousin of it. The same
+CI failure was compounded by a warm-up that called `OverviewRoster` while the
+benchmark measured `Roster` — a different entry point — so the first-ever call
+to the measured path happened inside the timed region and its one-time costs
+were charged to whichever sub-benchmark ran first.
+
+Write wall-clock assertions as a **ratio against the same code at a smaller
+input**, not as a millisecond budget.
+
+#### Size the input step so the threshold is not a machine constant
+
+A ratio removes the machine's absolute speed from the assertion; it does **not**
+remove the machine. Measured on the same commit, `matchFilePaths` at a 4x input
+step read a healthy **4.0x** on darwin/arm64 and a healthy **6.6x** on
+linux/amd64 CI (EPYC 7763, GOMAXPROCS=4) — a 1.65x inflation, against a 6.0
+threshold picked from local runs. It went red on healthy code (2026-07-31).
+
+The fix is the input step, not the threshold. Linear costs `k`x for a `k`x
+input and quadratic costs `k²`x, so the healthy/broken separation *is* `k`:
+
+| input step | healthy | quadratic (measured) | separation |
+|---|---|---|---|
+| 4x | 4.0x | 14.6x | ~3.6x |
+| 16x | 14.5x | 257.5x | **~17.8x** |
+
+At 4x, runner noise consumed most of the gap. At 16x the threshold can sit far
+from both endpoints — 100x is 6.8x above healthy and 2.5x below quadratic — so
+it encodes the linear-vs-quadratic distinction rather than one machine's timing.
+**Raising the threshold to quiet a failure is the move to avoid; widening the
+input step is the one that helps.**
+
+Log the observed ratio unconditionally, pass or fail. Wall-clock behaviour on
+the actual runner is exactly the data the next person writing a timing assertion
+needs, and a number that only prints on failure is a number nobody ever sees. A budget loose enough to survive a shared runner is loose
+enough to pass the regression it was written for — the first draft of the
+`matchFilePaths` assertion used a 20ms ceiling and stayed green against a
+deliberately quadratic mutation that took ~10ms. Comparing 4x the input against
+1x removes the machine from the assertion: linear work lands near 4x and
+quadratic near 16x on a fast laptop and a loaded runner alike. Pick the threshold
+from *both* measured endpoints — healthy and mutated — never from theory.
 
 ## Worker-fleet benchmark (M6, off by default)
 

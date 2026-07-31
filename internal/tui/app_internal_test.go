@@ -1520,22 +1520,27 @@ func TestViewEnablesMouseMode(t *testing.T) {
 // transcript" property Part B's docs/TUI.md section describes) without a
 // wall-clock assertion in the regular gate (flaky in CI). Run explicitly
 // with `go test ./internal/tui -run '^$' -bench BenchmarkAppRenderMassiveTranscript`.
+//
+// Two things about its fixture were fixed in gofer#315, and both moved its
+// number UP without anything getting slower:
+//
+//   - It ingested one line of plain text per turn. It now ingests
+//     [GoldenBenchTurns] — prose, a fenced code block, a tool call and a
+//     multi-line tool result — because a transcript benchmark whose content
+//     never reaches the markdown or tool-result paths cannot see a regression
+//     in them.
+//   - It built through [GoldenCommandEnv], whose Config closure returns an
+//     empty struct without touching disk, so every per-frame config read cost
+//     nothing. It now reads a real config.json through the same
+//     [config.CachedLoader] cmd/gofer wires up. The config-SIZE axis lives in
+//     [BenchmarkAppRenderConfigSize]; this one just stops pretending the reads
+//     are free.
 func BenchmarkAppRenderMassiveTranscript(b *testing.B) {
-	meta := GoldenMeta()
-	meta.AttachSessionID = "sess-x"
-	a := NewApp(theme.Test(), &internalFakeSup{}, meta, GoldenCommandEnv())
-	mdl, _ := a.Update(tea.WindowSizeMsg{Width: testkit.Width, Height: testkit.Height})
-	a = mdl.(App)
+	env, _, reads := benchConfigEnv(b, benchConfigSmall(), true)
+	a := newBenchApp(b, env, 5000)
+	assertRenderReadsConfig(b, a, reads)
 
-	const turns = 5000
-	for i := 0; i < turns; i++ {
-		mdl, _ = a.Update(sessEventMsg{
-			id: "sess-x",
-			ev: event.NewMessageFinished("sess-x", event.MessageUser, fmt.Sprintf("turn %d", i)),
-		})
-		a = mdl.(App)
-	}
-
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		a.scroll = i % 200 // simulate wheel notches moving the window each render

@@ -23,6 +23,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -392,6 +393,10 @@ func daemonRefreshCommandEnv() tui.CommandEnv {
 // (Create/Send/Interrupt/Kill/Archive/SetModel/SetEffort/Reply/AnswerDecision)
 // are no-ops; none of these tapes exercises them.
 type vhsSupervisor struct {
+	// mu guards sessions. Roster is served from a tea.Cmd goroutine while
+	// Kill/Archive mutate from another, so the two need a lock — a canned
+	// roster that was only ever read did not.
+	mu       sync.Mutex
 	sessions []tui.SessionInfo
 	broker   *event.Broker
 
@@ -439,7 +444,9 @@ func (s *vhsSupervisor) seed(events ...event.Event) {
 }
 
 func (s *vhsSupervisor) Roster(context.Context) ([]tui.SessionInfo, error) {
-	return s.sessions, nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]tui.SessionInfo(nil), s.sessions...), nil
 }
 
 // Subscribe hands back a real subscription off the private broker, replaying
@@ -471,9 +478,42 @@ func (s *vhsSupervisor) Send(context.Context, string, string) error { return nil
 
 func (s *vhsSupervisor) Interrupt(context.Context, string) error { return nil }
 
-func (s *vhsSupervisor) Kill(context.Context, string) error { return nil }
+// Kill marks id terminal rather than returning a bare nil, because the state
+// roster-delete-lands.tape photographs IS the roster changing: gofer#322 made a
+// roster-mutating op refetch immediately instead of leaving the stale row on
+// screen until the next 1s poll, and against a Supervisor whose roster never
+// changes there is nothing for that refetch to reveal — the tape would render
+// two identical frames and read as decoration.
+//
+// StatusFinished, not removal: a kill terminates the session and KEEPS its
+// journal (repo invariant #4), so the row stays on the roster as a terminal
+// one. Removal is what Archive does.
+func (s *vhsSupervisor) Kill(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.sessions {
+		if s.sessions[i].ID == id {
+			s.sessions[i].Status = tui.StatusFinished
+			s.sessions[i].Summary = "killed"
+		}
+	}
+	return nil
+}
 
-func (s *vhsSupervisor) Archive(context.Context, string) error { return nil }
+// Archive drops id from the roster — see [vhsSupervisor.Kill] for why these
+// two mutate at all.
+func (s *vhsSupervisor) Archive(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := s.sessions[:0]
+	for _, sess := range s.sessions {
+		if sess.ID != id {
+			out = append(out, sess)
+		}
+	}
+	s.sessions = out
+	return nil
+}
 
 func (s *vhsSupervisor) SetModel(context.Context, string, string) error { return nil }
 

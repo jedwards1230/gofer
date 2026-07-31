@@ -11,6 +11,8 @@ package tui
 // Model, so only this package's internal tests can do anything with one.
 
 import (
+	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/jedwards1230/agent-sdk-go/event"
@@ -19,6 +21,86 @@ import (
 	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
+
+// BenchSessionID is the session id every transcript benchmark's fixture events
+// carry, shared so the fixture and the App the benchmark drives agree on it.
+const BenchSessionID = "0192a1b2-c3d4-7e5f-8a90-000000000001"
+
+// GoldenBenchTurn returns ONE realistic turn's worth of events: a user message,
+// an assistant reply carrying prose and a fenced code block, and a tool call
+// with a multi-line result.
+//
+// It exists because every transcript benchmark used to ingest a single line of
+// plain text per message (`turn %d: ...`), and a benchmark's fixture decides
+// what its number means (gofer#315, item 3). Plain one-line text skips the
+// markdown path almost entirely: no fenced block to highlight, no tool-result
+// block to lay out, no wrapping. Measured against the same render, realistic
+// content costs roughly 8x the allocations and 11x the bytes of the plain
+// fixture — so every absolute figure in bench/baseline.txt was that optimistic,
+// and a regression confined to markdown, code-block or tool-result rendering
+// barely moved the gated number.
+//
+// The content varies with i so the markdown memo (markdown.go) cannot serve
+// every turn from one cache entry, which is what a real conversation looks
+// like. It is not RANDOM: the benchmark must stay byte-identical run to run for
+// its allocation counts to be comparable at all.
+func GoldenBenchTurn(i int) []event.Event {
+	input, _ := json.Marshal(map[string]string{
+		"path":    fmt.Sprintf("internal/daemon/listener_%d.go", i),
+		"pattern": "func (l *Listener) Accept",
+	})
+	return []event.Event{
+		event.NewMessageFinished(BenchSessionID, event.MessageUser,
+			fmt.Sprintf("turn %d: the websocket listener accepts the upgrade but never forwards session events to the subscriber — can you wire the fan-out and cover the late-subscriber case?", i)),
+		event.NewToolCallStarted(BenchSessionID, fmt.Sprintf("call-%d", i), "grep", input),
+		event.NewToolCallFinished(BenchSessionID, fmt.Sprintf("call-%d", i), input,
+			fmt.Sprintf(`internal/daemon/listener_%d.go:41:func (l *Listener) Accept(ctx context.Context) error {
+internal/daemon/listener_%d.go:52:	conn, err := l.upgrader.Upgrade(w, r, nil)
+internal/daemon/listener_%d.go:58:	if err != nil {
+internal/daemon/listener_%d.go:59:		return fmt.Errorf("daemon: upgrade: %%w", err)
+internal/daemon/listener_%d.go:60:	}
+internal/daemon/listener_%d.go:64:	sub := l.broker.Subscribe(event.FilterAll, 64)
+internal/daemon/listener_%d.go:65:	defer sub.Close()
+internal/daemon/listener_%d.go:71:	for ev := range sub.C() {
+internal/daemon/listener_%d.go:72:		if err := conn.WriteJSON(envelope(ev)); err != nil {
+internal/daemon/listener_%d.go:73:			return err
+internal/daemon/listener_%d.go:74:		}
+internal/daemon/listener_%d.go:75:	}`, i, i, i, i, i, i, i, i, i, i, i, i),
+			false, nil),
+		event.NewMessageFinished(BenchSessionID, event.MessageText,
+			fmt.Sprintf(`Found it. `+"`Accept`"+` subscribes **after** the upgrade completes, so anything the
+session published between the client's connect and that subscribe is dropped —
+which is exactly the late-subscriber case you hit on turn %d.
+
+The fix is to subscribe before the upgrade and hand the subscription to the
+pump:
+
+`+"```go"+`
+func (l *Listener) Accept(ctx context.Context) error {
+	sub := l.broker.Subscribe(event.FilterAll, %d)
+	conn, err := l.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		sub.Close()
+		return fmt.Errorf("daemon: upgrade: %%%%w", err)
+	}
+	return l.pump(ctx, conn, sub)
+}
+`+"```"+`
+
+That closes the window without buffering unboundedly: the broker's retained
+backlog covers the replay, and the subscription's own buffer bounds the rest.`, i, 64+i)),
+	}
+}
+
+// GoldenBenchTurns is [GoldenBenchTurn] repeated, in order — the whole
+// transcript a size-sweeping benchmark ingests.
+func GoldenBenchTurns(turns int) []event.Event {
+	evs := make([]event.Event, 0, turns*4)
+	for i := range turns {
+		evs = append(evs, GoldenBenchTurn(i)...)
+	}
+	return evs
+}
 
 // ingested returns a Model rendered through th with evs applied in order. It
 // replaces the chained New(th).Ingest(a).Ingest(b) form, which [Model.Ingest]'s

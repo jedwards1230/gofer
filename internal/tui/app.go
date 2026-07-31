@@ -344,6 +344,23 @@ type rosterTickMsg struct{}
 type rosterMsg struct {
 	sessions []SessionInfo
 	err      error
+
+	// adhoc marks a snapshot that came from an OUT-OF-BAND refresh
+	// ([App.fetchRosterNow]) rather than from the poll tick, and it exists to
+	// keep the poll a single chain.
+	//
+	// The tick is self-perpetuating through this message: every rosterMsg
+	// schedules the next rosterTickMsg, which fetches, which produces the next
+	// rosterMsg. That is exactly one live chain as long as the ONLY thing
+	// producing a rosterMsg is the tick. An extra fetchRoster issued from
+	// anywhere else therefore does not just refresh once — its result re-arms
+	// the tick a SECOND time and the app polls at 2 Hz forever, then 3 Hz after
+	// the next one. Refreshing on every archive/kill (gofer#322) would make
+	// that per-action.
+	//
+	// So an ad-hoc refresh updates the roster and stops there; the chain the
+	// tick already owns keeps ticking on its own schedule.
+	adhoc bool
 }
 
 // subReadyMsg carries the result of subscribing to one session's event
@@ -407,7 +424,24 @@ type resumedMsg struct {
 
 // opDoneMsg carries the error, if any, from a fire-and-forget Supervisor Op
 // (Send/Interrupt/Kill/Archive).
-type opDoneMsg struct{ err error }
+type opDoneMsg struct {
+	err error
+
+	// refreshRoster asks [App.Update] to refetch the roster the moment this op
+	// lands, instead of leaving the change invisible until the next poll
+	// (gofer#322). Set by the ops that MUTATE the roster —
+	// [App.doKill]/[App.doKillTree]/[App.doArchive] — and by nothing else: a
+	// Send or a permission Reply changes no row, so refetching for one would
+	// buy nothing.
+	//
+	// It refetches on the ERROR path too, deliberately. Two reasons: a failed
+	// [App.doKillTree] is a PARTIAL failure by construction (it attempts every
+	// id and reports only the first error), so rows really did change even
+	// though err is non-nil; and re-reading the daemon is the cheapest way to
+	// guarantee the UI never asserts an outcome that did not happen — it shows
+	// what is, rather than what the op was asked to do.
+	refreshRoster bool
+}
 
 // Init satisfies tea.Model: it kicks off the first roster fetch, plus — when
 // the app opened straight into an attach (via OverviewMeta.AttachSessionID) —
@@ -419,10 +453,23 @@ func (a App) Init() tea.Cmd {
 	return a.fetchRoster
 }
 
-// fetchRoster fetches a fresh roster snapshot from the Supervisor.
+// fetchRoster fetches a fresh roster snapshot from the Supervisor. This is the
+// POLL's fetch: its result re-arms the tick (see [rosterMsg.adhoc]), so it must
+// be issued only from Init — which starts the one chain — and from
+// rosterTickMsg, which continues it.
 func (a App) fetchRoster() tea.Msg {
 	sessions, err := a.sup.Roster(context.Background())
 	return rosterMsg{sessions: sessions, err: err}
+}
+
+// fetchRosterNow is [App.fetchRoster] for an out-of-band refresh: same fetch,
+// but the resulting snapshot does not re-arm the poll tick. Every refresh that
+// is NOT the tick — a roster-mutating op landing (gofer#322), a daemon restart
+// — goes through here, so the poll stays one chain no matter how many of them
+// happen. See [rosterMsg.adhoc].
+func (a App) fetchRosterNow() tea.Msg {
+	sessions, err := a.sup.Roster(context.Background())
+	return rosterMsg{sessions: sessions, err: err, adhoc: true}
 }
 
 // subscribe subscribes to id's event stream via the Supervisor.
@@ -511,10 +558,17 @@ func (a App) doInterrupt(id string) tea.Cmd {
 }
 
 // doKill interrupts and terminates id via the Supervisor.
+//
+// It asks for an immediate roster refresh on success ([opDoneMsg.refreshRoster],
+// gofer#322): the roster is a POLLED snapshot, so without one the row the user
+// just killed keeps rendering its old status for up to rosterInterval — a
+// destructive key that appears to have done nothing, which invites a second
+// press. Correctness follows the daemon rather than a local guess about what
+// the op did, and the refetch is cheap since gofer#298's sidecar cache.
 func (a App) doKill(id string) tea.Cmd {
 	return func() tea.Msg {
 		err := a.sup.Kill(context.Background(), id)
-		return opDoneMsg{err: err}
+		return opDoneMsg{err: err, refreshRoster: true}
 	}
 }
 
@@ -537,15 +591,18 @@ func (a App) doKillTree(ids []string) tea.Cmd {
 				firstErr = err
 			}
 		}
-		return opDoneMsg{err: firstErr}
+		return opDoneMsg{err: firstErr, refreshRoster: true}
 	}
 }
 
-// doArchive drops id from the roster via the Supervisor.
+// doArchive drops id from the roster via the Supervisor. Like [App.doKill] it
+// refreshes the roster on success (gofer#322) — archive is the case the bug was
+// reported against: the row stayed on screen for up to a second after the
+// confirming ctrl+x.
 func (a App) doArchive(id string) tea.Cmd {
 	return func() tea.Msg {
 		err := a.sup.Archive(context.Background(), id)
-		return opDoneMsg{err: err}
+		return opDoneMsg{err: err, refreshRoster: true}
 	}
 }
 
@@ -859,6 +916,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			a.over = a.over.WithSessions(msg.sessions)
 		}
+		if msg.adhoc {
+			// An out-of-band snapshot must not re-arm the tick — that would add
+			// a second poll chain alongside the one already running. See
+			// [rosterMsg.adhoc].
+			return a, nil
+		}
 		return a, tea.Tick(rosterInterval, func(time.Time) tea.Msg { return rosterTickMsg{} })
 
 	case rosterTickMsg:
@@ -1010,6 +1073,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// it selected.
 			a.pendingSelect = ""
 		}
+		if msg.refreshRoster {
+			// gofer#322: a kill/archive lands here, and the roster is a polled
+			// snapshot — so without this the mutated row keeps rendering until
+			// the next tick, up to rosterInterval later. fetchRosterNow, not
+			// fetchRoster: this must not start a second poll chain.
+			return a, a.fetchRosterNow
+		}
 		return a, nil
 
 	case daemonRestartMsg:
@@ -1025,7 +1095,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// daemon this restart just replaced (see [App.doRestartDaemon]).
 		a.setStatus(sevOK, "Daemon restarted; roster restored.")
 		a.over = a.over.WithDaemonVersion(msg.version)
-		return a, a.fetchRoster
+		return a, a.fetchRosterNow
 
 	case permissionExplainedMsg:
 		// A ctrl+e explain landing (dialog.go). It never resolves or dismisses
@@ -1389,10 +1459,15 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// session, including this one. The two read as a pair: ctrl-x kills the
 		// row, ctrl-t stops what the row fanned out.
 		//
-		// The status note is the whole feedback channel here: the roster is a
-		// polled snapshot, so the killed rows keep rendering as Working for up to
-		// rosterInterval, and a bulk destructive key that looks like it did
-		// nothing invites a second press.
+		// The status note is what makes the key acknowledge itself IMMEDIATELY,
+		// before the kills have even been issued: it names how many rows are
+		// being stopped, at dispatch time. It used to be the whole feedback
+		// channel — the roster was a purely polled snapshot, so the killed rows
+		// kept rendering as Working for up to rosterInterval, and a bulk
+		// destructive key that looks like it did nothing invites a second press.
+		// [App.doKillTree] now refreshes the roster the moment the sweep lands
+		// (gofer#322), so the rows themselves update without waiting for the
+		// poll; this note still covers the window while the sweep is in flight.
 		ids := a.over.Descendants(a.over.SelectedID())
 		if len(ids) == 0 {
 			a.setStatus(sevWarn, "No subagents under this session.")
