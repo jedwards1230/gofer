@@ -133,6 +133,13 @@ Practical notes, learned the hard way:
   Against a canned Supervisor that returns instantly, an in-flight indicator
   appears and vanishes inside one frame with nothing to photograph. See
   `vhsSupervisor.compactHold`.
+- **Mock enough session history that the frame shows a real situation.** A
+  widget captured over an empty transcript is technically correct and still
+  misleading — it shows the thing while misrepresenting what produces it.
+  `vhsSupervisor.seed` publishes a scripted conversation onto the broker's
+  retained backlog, so it is on screen the moment the tape attaches; seed it
+  that way rather than publishing on a timer, or the frame starts depending on
+  whether the publish beat the subscribe.
 - **Reuse an existing scenario when only the driving keys differ** — most tapes
   need no new harness scenario at all (`roster-peek`, `roster-delete-confirm`).
 - **Look at the rendered frame before committing it.** A tape that runs

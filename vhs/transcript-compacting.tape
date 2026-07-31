@@ -21,15 +21,17 @@
 # (vhs-baseline.yml), so a frame captured on a bucket boundary would flip
 # between two values and churn the baseline forever — see gofer#297.
 #
-# The transcript ABOVE the indicator is empty, which is a property of every
-# canned-App scene in this harness (vhsSupervisor.Subscribe hands back a live
-# but silent subscription — see its doc). It is worth naming because compaction
-# is precisely about a LONG history being replaced, so an empty transcript
-# undersells the situation even though the indicator itself is exactly right.
-# Populating it means retaining a scripted backlog on the broker for the App to
-# replay on attach (event.WithReplay, must-deliver tier only) — deliberately not
-# done here, because that reintroduces publish-vs-subscribe ordering into a tape
-# whose whole point is a frame that renders identically on every run.
+# The transcript ABOVE the indicator is a MOCKED conversation — two completed
+# turns with a tool call in each (harness: compactableHistory). That history is
+# the point, not set dressing: compaction exists to replace a long context, so
+# an indicator floating over an empty transcript would show the widget while
+# misrepresenting the situation that produces it. The usage footer the seeded
+# turns leave behind (31775in) is what makes "worth compacting" concrete.
+#
+# The history is seeded through the broker's RETAINED backlog
+# (vhsSupervisor.seed), so it is already on screen when the tape attaches. That
+# is deliberate: a timed publish racing the subscribe would make the captured
+# frame depend on which won, and this frame is committed and diffed.
 #
 # Run via scripts/tui-vhs.sh (it prebuilds vhs/.bin/harness first). Outputs a
 # GIF plus a PNG under vhs/out/. The GIF is where the counter is seen actually

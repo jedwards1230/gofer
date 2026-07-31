@@ -249,7 +249,49 @@ func (m overviewModel) View() tea.View {
 func compactingApp() tea.Model {
 	sup := newVHSSupervisor(cannedSessions())
 	sup.compactHold = 30 * time.Second
+	sup.seed(compactableHistory()...)
 	return commandViewAppOver(cannedCommandEnv(), sup)
+}
+
+// compactableHistory is the mocked conversation the compaction scene renders
+// UNDER its indicator: two completed turns with a tool call in each.
+//
+// The history is the point, not set dressing. Compaction exists to replace a
+// long context, so an indicator floating over an empty transcript shows the
+// widget while misrepresenting the situation that produces it — the frame has
+// to look like a session with something worth compacting. Two turns is the
+// smallest history that reads as "a conversation in progress" rather than "one
+// exchange."
+//
+// Seeded through the broker's retained backlog (see [vhsSupervisor.seed]), so
+// it is already on screen when the tape attaches, with no publish-vs-subscribe
+// race to make the captured frame timing-dependent. The ids are the attached
+// session's ("sess-1"), matching the canned roster.
+func compactableHistory() []event.Event {
+	const s = "sess-1"
+	return []event.Event{
+		event.NewMessageStarted(s, event.MessageUser),
+		event.NewMessageFinished(s, event.MessageUser, "Wire the websocket ACP listener and get the handshake streaming."),
+		event.NewTurnStarted(s),
+		event.NewMessageStarted(s, event.MessageText),
+		event.NewMessageFinished(s, event.MessageText, "Reading the existing listener first."),
+		event.NewToolCallStarted(s, "call-1", "read", json.RawMessage(`{}`)),
+		event.NewToolCallFinished(s, "call-1", json.RawMessage(`{"path":"internal/daemon/listener.go"}`), "182 lines", false, nil),
+		event.NewMessageStarted(s, event.MessageText),
+		event.NewMessageFinished(s, event.MessageText, "The listener already accepts upgrades; it just never forwards the session events. I'll wire the fan-out."),
+		event.NewTurnFinished(s, "end_turn", provider.Usage{InputTokens: 18420, OutputTokens: 260}),
+
+		event.NewMessageStarted(s, event.MessageUser),
+		event.NewMessageFinished(s, event.MessageUser, "Good. Add a test that proves the handshake replays to a late subscriber."),
+		event.NewTurnStarted(s),
+		event.NewMessageStarted(s, event.MessageText),
+		event.NewMessageFinished(s, event.MessageText, "Adding it against the broker's retained backlog."),
+		event.NewToolCallStarted(s, "call-2", "bash", json.RawMessage(`{}`)),
+		event.NewToolCallFinished(s, "call-2", json.RawMessage(`{"command":"go test ./internal/daemon/ -run Handshake"}`), "ok  github.com/jedwards1230/gofer/internal/daemon  0.412s", false, nil),
+		event.NewMessageStarted(s, event.MessageText),
+		event.NewMessageFinished(s, event.MessageText, "Green. The late subscriber receives the full handshake."),
+		event.NewTurnFinished(s, "end_turn", provider.Usage{InputTokens: 31775, OutputTokens: 415}),
+	}
 }
 
 func commandViewApp(env tui.CommandEnv) tea.Model {
@@ -364,15 +406,48 @@ type vhsSupervisor struct {
 }
 
 func newVHSSupervisor(sessions []tui.SessionInfo) *vhsSupervisor {
-	return &vhsSupervisor{sessions: sessions, broker: event.NewBroker()}
+	// WithReplay retains a must-deliver backlog, which is what lets [seed] mock
+	// a session's prior conversation BEFORE anything attaches: Subscribe replays
+	// it, so the history is there the instant the tape opens the session. Doing
+	// it through retention rather than a timed publish is deliberate — a
+	// publish racing the subscribe would make the captured frame depend on which
+	// won, and these frames are committed and diffed.
+	//
+	// Only stream deltas are lossy (event.TierOf), so every event a scripted
+	// conversation is built from — message started/finished, tool call
+	// started/finished, turn started/finished — is retained.
+	return &vhsSupervisor{sessions: sessions, broker: event.NewBroker(event.WithReplay(replayCap))}
+}
+
+// replayCap bounds the mocked backlog. It also bounds what a scene can seed:
+// [vhsSupervisor.seed] refuses to exceed it rather than silently dropping the
+// OLDEST events, which would truncate a scripted conversation from the top and
+// look like a rendering bug.
+const replayCap = 64
+
+// seed mocks a session's prior conversation by publishing it into the broker
+// before any client attaches. The events replay in publish order on Subscribe.
+func (s *vhsSupervisor) seed(events ...event.Event) {
+	if len(events) > replayCap {
+		panic(fmt.Sprintf("harness: seeded %d events, replay backlog holds %d — "+
+			"the oldest would be dropped and the transcript would render truncated",
+			len(events), replayCap))
+	}
+	for _, e := range events {
+		s.broker.Publish(e)
+	}
 }
 
 func (s *vhsSupervisor) Roster(context.Context) ([]tui.SessionInfo, error) {
 	return s.sessions, nil
 }
 
+// Subscribe hands back a real subscription off the private broker, replaying
+// whatever [vhsSupervisor.seed] mocked. The buffer is sized to the replay cap:
+// a subscription too small to hold the backlog would stall the replay, so the
+// two bounds are tied together rather than picked independently.
 func (s *vhsSupervisor) Subscribe(context.Context, string) (*event.Subscription, error) {
-	return s.broker.Subscribe(event.FilterAll, 8), nil
+	return s.broker.Subscribe(event.FilterAll, replayCap), nil
 }
 
 func (s *vhsSupervisor) Create(context.Context, string, tui.CreateOptions) (tui.SessionInfo, error) {

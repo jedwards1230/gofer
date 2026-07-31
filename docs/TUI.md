@@ -1416,7 +1416,9 @@ human-eye check of real rendered frames, `vhs/` holds on-demand
   transcript's tail. Needs the harness's blocking `Compact`
   (`vhsSupervisor.compactHold`) for the state to exist long enough to capture,
   and screenshots mid-second so the truncating counter reads the same on every
-  render.
+  render. The transcript beneath is a mocked two-turn conversation seeded onto
+  the broker's retained backlog (`vhsSupervisor.seed`), so the indicator is
+  captured over a context worth compacting rather than an empty screen.
 - `roster-overview` — the roster with mixed states, showing the status words
   in color (yellow working/awaiting vs green finished) — the state that now
   lives only in color.
