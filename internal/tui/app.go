@@ -129,6 +129,21 @@ type App struct {
 	shellRuns []shellRun
 	shellSeq  int
 
+	// compactingSince is when an explicit `/compact` was dispatched, or the
+	// zero time when none is in flight. It drives the transient "compacting
+	// context…" indicator at the transcript tail ([Model.WithCompacting]) and
+	// the elapsed seconds it counts, and it is what [compactTickMsg] reschedules
+	// itself on — so the once-per-second tick exists only while a compaction
+	// does, and stops on its own.
+	//
+	// This covers the EXPLICIT path only. Automatic compaction (the pump's
+	// maybeAutoCompact) is triggered daemon-side, and the Event contract carries
+	// only session.compacted — the COMPLETION. There is no session.compacting
+	// event to hang an indicator on, so an automatic compaction still shows
+	// nothing until it lands; closing that gap is an agent-sdk-go contract
+	// change, not a TUI one (see gofer #300).
+	compactingSince time.Time
+
 	// shellQueue is the sticky reply-now/queue mode ctrl+r toggles (keymap.go).
 	// false (the default) is reply-now: a finished `!` run on the attach screen
 	// flushes everything pending through composePrompt and fires a turn at once
@@ -741,13 +756,17 @@ func (a App) promptModel() Model {
 // rendered below the computed selectable region and could not be selected or
 // copied. Measuring and drawing through one model is what closes that gap.
 //
-// WithThinking is appended LAST so the indicator sits below the shell/background
-// blocks at the very tail, and so both consumers count the same extra row.
+// The two transient indicators are appended LAST so they sit below the
+// shell/background blocks at the very tail, and so both consumers count the same
+// extra rows. They are mutually exclusive in practice — Compact is idle-only
+// ([supervisor.Supervisor.Compact] refuses a running session with ErrRunning),
+// so a turn cannot be in flight while a compaction is.
 func (a App) attachModel() Model {
 	return a.promptModel().
 		WithBackgroundAgents(a.over.Children(a.sessID)).
 		WithShellRuns(a.shellRuns).
-		WithThinking()
+		WithThinking().
+		WithCompacting(a.compactingSince)
 }
 
 // currentSessionInfo returns the roster snapshot for whichever session is
@@ -952,6 +971,35 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sessionsListedMsg:
 		return a.applySessionsListed(msg), nil
+
+	case compactTickMsg:
+		// Re-arm only while a compaction is actually in flight, so the tick dies
+		// with the operation instead of running for the process's life. The frame
+		// this msg triggers is the whole point — the indicator's elapsed seconds
+		// are recomputed from a.compactingSince on every render.
+		if a.compactingSince.IsZero() {
+			return a, nil
+		}
+		return a, compactTick()
+
+	case compactDoneMsg:
+		// Whichever way it ended, the operation is over: drop the indicator so it
+		// cannot outlive the work it describes (the bug this replaced — an
+		// optimistic "Compacting context…" status note that nothing ever cleared,
+		// leaving a FINISHED compaction looking permanently in progress).
+		a.compactingSince = time.Time{}
+		if msg.err != nil {
+			a.setStatus(sevDanger, msg.err.Error())
+			return a, nil
+		}
+		// Success is reported by the itemSessionCompacted block the
+		// session.compacted event appends to the transcript — the durable record.
+		// A status note on top of it would be a second, redundant voice, so the
+		// off-screen note set at dispatch is simply retired here.
+		if a.status == compactingNote {
+			a.clearStatus()
+		}
+		return a, nil
 
 	case opDoneMsg:
 		if msg.err != nil {

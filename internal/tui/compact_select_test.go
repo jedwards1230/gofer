@@ -34,6 +34,48 @@ func TestCompactNoAttachedSessionReportsDanger(t *testing.T) {
 	}
 }
 
+// dispatchCompact runs `/compact <args>` on an ATTACHED session and returns the
+// model MID-FLIGHT — the compaction dispatched, its result not yet delivered —
+// alongside the batch's resolved messages, which the caller replays to end it.
+//
+// It exists because runCompact returns a tea.Batch — the op call AND the
+// indicator's tick — and the shared `press` helper drives exactly one Cmd, so a
+// batch reaches App.Update as a tea.BatchMsg it has no case for and BOTH halves
+// vanish silently (the failure mode TestSyncMenuReturnsAtMostOneCmd exists to
+// catch elsewhere). Expanding the batch here is what keeps these tests
+// exercising the real path rather than going quietly vacuous.
+//
+// The messages come back UNAPPLIED, and that split is the point: it is what
+// lets a test observe the in-flight frame and the settled frame separately,
+// which is the whole property under test.
+func dispatchCompact(t *testing.T, m tea.Model, args string) (tea.Model, []tea.Msg) {
+	t.Helper()
+	m = type_(t, m, "/compact"+args)
+	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("/compact returned no Cmd; the op must be dispatched")
+	}
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok {
+		t.Fatal("/compact must return a batch (the Compact op AND the indicator tick); " +
+			"a single Cmd means one of the two was dropped")
+	}
+	msgs := make([]tea.Msg, 0, len(batch))
+	for _, c := range batch {
+		msgs = append(msgs, c())
+	}
+	return m, msgs
+}
+
+// settle replays every message dispatchCompact collected, ending the
+// compaction.
+func settle(m tea.Model, msgs []tea.Msg) tea.Model {
+	for _, msg := range msgs {
+		m, _ = m.Update(msg)
+	}
+	return m
+}
+
 // TestCompactBareAttachedDispatchesEmptyInstructions covers the bare
 // `/compact` form: an attached session dispatches Compact with "" —
 // runner.Runner.Compact's own signal to fall back to its default
@@ -43,14 +85,14 @@ func TestCompactBareAttachedDispatchesEmptyInstructions(t *testing.T) {
 	m := newTestApp(t, sup)
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // attach the selected session
 
-	m = dispatchSlash(t, m, "/compact")
+	m, _ = dispatchCompact(t, m, "")
 
 	wantOp := "compact:" + attachedSessionID + ":"
 	if len(sup.ops) != 1 || sup.ops[0] != wantOp {
 		t.Fatalf("sup.ops = %v; want one entry %q", sup.ops, wantOp)
 	}
-	if got := content(m); !strings.Contains(got, "Compacting context") {
-		t.Fatalf("expected the optimistic compacting status note, got:\n%s", got)
+	if got := content(m); !strings.Contains(got, "compacting context…") {
+		t.Fatalf("expected the in-flight compacting indicator, got:\n%s", got)
 	}
 }
 
@@ -62,37 +104,66 @@ func TestCompactArgAttachedForwardsInstructions(t *testing.T) {
 	m := newTestApp(t, sup)
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 
-	m = dispatchSlash(t, m, "/compact focus on the open TODOs")
+	m, _ = dispatchCompact(t, m, " focus on the open TODOs")
 
 	wantOp := "compact:" + attachedSessionID + ":focus on the open TODOs"
 	if len(sup.ops) != 1 || sup.ops[0] != wantOp {
 		t.Fatalf("sup.ops = %v; want one entry %q", sup.ops, wantOp)
 	}
-	// The dispatch itself must be visibly acknowledged (the optimistic
-	// "Compacting…" note — see runCompact's doc) rather than a silent op with
-	// nothing on screen until the async result lands; the compaction's actual
-	// transcript record (once session.compacted arrives) is pinned separately
-	// by TestGoldenSessionCompacted.
-	got := content(m)
-	if !strings.Contains(got, "Compacting context") {
-		t.Fatalf("expected the optimistic compacting status note, got:\n%s", got)
+	// The dispatch must be visibly acknowledged while it runs (see runCompact's
+	// doc) rather than a silent op with nothing on screen until the async result
+	// lands; the compaction's actual transcript record (once session.compacted
+	// arrives) is pinned separately by TestGoldenSessionCompacted.
+	if got := content(m); !strings.Contains(got, "compacting context…") {
+		t.Fatalf("expected the in-flight compacting indicator, got:\n%s", got)
+	}
+}
+
+// TestCompactIndicatorRetiresOnSuccess is the regression anchor for the bug
+// this indicator replaced: compaction's only progress signal used to be an
+// OPTIMISTIC status note that nothing ever cleared, so a compaction that had
+// fully finished — its summary already rendered in the transcript — still read
+// as permanently in progress.
+//
+// The assertion is deliberately the PAIR. "Absent at the end" alone would pass
+// against an indicator that never rendered at all, which is a different bug
+// wearing the same result.
+func TestCompactIndicatorRetiresOnSuccess(t *testing.T) {
+	sup := newFakeSup(tui.GoldenRoster())
+	m := newTestApp(t, sup)
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	m, msgs := dispatchCompact(t, m, "")
+	if got := content(m); !strings.Contains(got, "compacting context…") {
+		t.Fatalf("indicator missing while the compaction is in flight, got:\n%s", got)
+	}
+
+	m = settle(m, msgs)
+
+	if got := content(m); strings.Contains(got, "compacting context…") {
+		t.Fatalf("the indicator outlived the compaction that finished, got:\n%s", got)
 	}
 }
 
 // TestCompactFailurePropagatesAsDanger asserts a Supervisor-side rejection
 // (here standing in for supervisor.ErrRunning / runner.ErrNothingToCompact)
-// overrides the optimistic status note through the ordinary opDoneMsg error
-// path, the same as any other dispatched op.
+// surfaces as a danger note AND retires the indicator — a refused compaction
+// must not keep claiming to be running any more than a finished one.
 func TestCompactFailurePropagatesAsDanger(t *testing.T) {
 	sup := newFakeSup(tui.GoldenRoster())
 	sup.compactErr = errors.New("session is running or has queued work")
 	m := newTestApp(t, sup)
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 
-	m = dispatchSlash(t, m, "/compact")
+	m, msgs := dispatchCompact(t, m, "")
+	m = settle(m, msgs)
 
-	if got := content(m); !strings.Contains(got, "session is running or has queued work") {
+	got := content(m)
+	if !strings.Contains(got, "session is running or has queued work") {
 		t.Fatalf("expected the propagated failure note, got:\n%s", got)
+	}
+	if strings.Contains(got, "compacting context…") {
+		t.Fatalf("the indicator outlived the compaction that failed, got:\n%s", got)
 	}
 }
 

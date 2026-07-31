@@ -60,7 +60,7 @@ type step struct {
 // vocabulary is spelled out, so the two never drift apart. Slugs follow
 // `<area>-<view>[-<state>]`, kebab-case: transcript-* (the attach scenes),
 // roster-* (the overview scene), panel-* (the command-panel scenes).
-const scenarioHelp = "transcript-tool-call | transcript-approval | roster-overview | panel-status-overview | panel-status | panel-config | panel-model | panel-model-empty | panel-model-daemon-refresh | panel-thinking | panel-usage | panel-stats | panel-help | panel-resume"
+const scenarioHelp = "transcript-tool-call | transcript-approval | transcript-compacting | roster-overview | panel-status-overview | panel-status | panel-config | panel-model | panel-model-empty | panel-model-daemon-refresh | panel-thinking | panel-usage | panel-stats | panel-help | panel-resume"
 
 func main() {
 	scenario := flag.String("scenario", "transcript-tool-call", "scripted scene to play: "+scenarioHelp)
@@ -90,6 +90,11 @@ func main() {
 		// command (and any navigation) that selects which tab is on screen. The
 		// panel-resume scene additionally reads [vhsSupervisor.ListSessions].
 		model = commandViewApp(cannedCommandEnv())
+	case "transcript-compacting":
+		// An attach scene that nonetheless builds the real App, because the
+		// state under capture is reached by DISPATCHING a slash command, not by
+		// replaying an event stream — the tape types /compact itself.
+		model = compactingApp()
 	case "panel-model-empty":
 		model = commandViewApp(emptyCommandEnv())
 	case "panel-model-daemon-refresh":
@@ -232,14 +237,86 @@ func (m overviewModel) View() tea.View {
 // panel-model scene's ✓ active mark is [modelPickerView.activeModel] matching
 // a row's id verbatim, so a display-name shorthand here would silently mark
 // nothing.
+// compactingApp is the transcript-compacting scene: the same canned App every
+// panel-* scene uses, but over a Supervisor whose Compact BLOCKS. The tape
+// attaches to a session and dispatches /compact; the call is still in flight
+// when the screenshot is taken, which is the only way the in-progress
+// indicator exists to be captured at all.
+//
+// The hold is generous relative to the tape's own timeline: it must outlast
+// the capture, and overshooting costs nothing because the tape quits with
+// Ctrl+C long before it elapses (and Compact honors ctx regardless).
+func compactingApp() tea.Model {
+	sup := newVHSSupervisor(cannedSessions())
+	sup.compactHold = 30 * time.Second
+	sup.seed(compactableHistory()...)
+	return commandViewAppOver(cannedCommandEnv(), sup)
+}
+
+// compactableHistory is the mocked conversation the compaction scene renders
+// UNDER its indicator: two completed turns with a tool call in each.
+//
+// The history is the point, not set dressing. Compaction exists to replace a
+// long context, so an indicator floating over an empty transcript shows the
+// widget while misrepresenting the situation that produces it — the frame has
+// to look like a session with something worth compacting. Two turns is the
+// smallest history that reads as "a conversation in progress" rather than "one
+// exchange."
+//
+// Seeded through the broker's retained backlog (see [vhsSupervisor.seed]), so
+// it is already on screen when the tape attaches, with no publish-vs-subscribe
+// race to make the captured frame timing-dependent. The ids are the attached
+// session's ("sess-1"), matching the canned roster.
+func compactableHistory() []event.Event {
+	const s = "sess-1"
+	return []event.Event{
+		event.NewMessageStarted(s, event.MessageUser),
+		event.NewMessageFinished(s, event.MessageUser, "Wire the websocket ACP listener and get the handshake streaming."),
+		event.NewTurnStarted(s),
+		event.NewMessageStarted(s, event.MessageText),
+		event.NewMessageFinished(s, event.MessageText, "Reading the existing listener first."),
+		event.NewToolCallStarted(s, "call-1", "read", json.RawMessage(`{}`)),
+		event.NewToolCallFinished(s, "call-1", json.RawMessage(`{"path":"internal/daemon/listener.go"}`), "182 lines", false, nil),
+		event.NewMessageStarted(s, event.MessageText),
+		event.NewMessageFinished(s, event.MessageText, "The listener already accepts upgrades; it just never forwards the session events. I'll wire the fan-out."),
+		event.NewTurnFinished(s, "end_turn", provider.Usage{InputTokens: 18420, OutputTokens: 260}),
+
+		event.NewMessageStarted(s, event.MessageUser),
+		event.NewMessageFinished(s, event.MessageUser, "Good. Add a test that proves the handshake replays to a late subscriber."),
+		event.NewTurnStarted(s),
+		event.NewMessageStarted(s, event.MessageText),
+		event.NewMessageFinished(s, event.MessageText, "Adding it against the broker's retained backlog."),
+		event.NewToolCallStarted(s, "call-2", "bash", json.RawMessage(`{}`)),
+		event.NewToolCallFinished(s, "call-2", json.RawMessage(`{"command":"go test ./internal/daemon/ -run Handshake"}`), "ok  github.com/jedwards1230/gofer/internal/daemon  0.412s", false, nil),
+		event.NewMessageStarted(s, event.MessageText),
+		event.NewMessageFinished(s, event.MessageText, "Green. The late subscriber receives the full handshake."),
+		event.NewTurnFinished(s, "end_turn", provider.Usage{InputTokens: 31775, OutputTokens: 415}),
+	}
+}
+
 func commandViewApp(env tui.CommandEnv) tea.Model {
+	return commandViewAppOver(env, newVHSSupervisor(cannedSessions()))
+}
+
+// cannedSessions is the two-session roster every canned-App scene renders:
+// one working, one awaiting input. Shared rather than inlined so the compaction
+// scene's roster is the SAME roster as the panel scenes' — a scene that quietly
+// rendered a different session set would make its frame incomparable with the
+// rest of the baseline.
+func cannedSessions() []tui.SessionInfo {
 	now := fixedNow
-	sessions := []tui.SessionInfo{
+	return []tui.SessionInfo{
 		{ID: "sess-1", Title: "wire the websocket ACP listener", Summary: "streaming the daemon handshake", Status: tui.StatusWorking, Model: "claude-fable-5", Cwd: "~/orchestration", Updated: now.Add(-30 * time.Second)},
 		{ID: "sess-2", Title: "keycloak path-b groundwork", Summary: "turn finished — awaiting the next prompt", Status: tui.StatusNeedsInput, Model: "claude-sonnet-5", Cwd: "~/orchestration", Updated: now.Add(-5 * time.Minute)},
 	}
-	meta := tui.OverviewMeta{App: "gofer", Version: "0.4.0", Model: "claude-fable-5", Cwd: "~/orchestration", Now: now}
-	return tui.NewApp(theme.Default(), newVHSSupervisor(sessions), meta, env)
+}
+
+// commandViewAppOver builds the canned App over a caller-supplied Supervisor,
+// which is what lets the compaction scene swap in a blocking Compact without
+// duplicating the roster or the meta.
+func commandViewAppOver(env tui.CommandEnv, sup *vhsSupervisor) tea.Model {
+	meta := tui.OverviewMeta{App: "gofer", Version: "0.4.0", Model: "claude-fable-5", Cwd: "~/orchestration", Now: fixedNow}
+	return tui.NewApp(theme.Default(), sup, meta, env)
 }
 
 // cannedCommandEnv is the [tui.CommandEnv] most panel-* scenes read: a fixed
@@ -317,18 +394,60 @@ func daemonRefreshCommandEnv() tui.CommandEnv {
 type vhsSupervisor struct {
 	sessions []tui.SessionInfo
 	broker   *event.Broker
+
+	// compactHold is how long Compact blocks before returning. Zero (every
+	// scene but transcript-compacting) returns immediately, as every other
+	// write op does. The compaction scene needs the opposite: the in-progress
+	// indicator lives exactly as long as the call does, so against an
+	// instant-returning Compact it would appear and vanish inside one frame,
+	// with nothing left to photograph. Holding the call is what makes the state
+	// under capture actually exist.
+	compactHold time.Duration
 }
 
 func newVHSSupervisor(sessions []tui.SessionInfo) *vhsSupervisor {
-	return &vhsSupervisor{sessions: sessions, broker: event.NewBroker()}
+	// WithReplay retains a must-deliver backlog, which is what lets [seed] mock
+	// a session's prior conversation BEFORE anything attaches: Subscribe replays
+	// it, so the history is there the instant the tape opens the session. Doing
+	// it through retention rather than a timed publish is deliberate — a
+	// publish racing the subscribe would make the captured frame depend on which
+	// won, and these frames are committed and diffed.
+	//
+	// Only stream deltas are lossy (event.TierOf), so every event a scripted
+	// conversation is built from — message started/finished, tool call
+	// started/finished, turn started/finished — is retained.
+	return &vhsSupervisor{sessions: sessions, broker: event.NewBroker(event.WithReplay(replayCap))}
+}
+
+// replayCap bounds the mocked backlog. It also bounds what a scene can seed:
+// [vhsSupervisor.seed] refuses to exceed it rather than silently dropping the
+// OLDEST events, which would truncate a scripted conversation from the top and
+// look like a rendering bug.
+const replayCap = 64
+
+// seed mocks a session's prior conversation by publishing it into the broker
+// before any client attaches. The events replay in publish order on Subscribe.
+func (s *vhsSupervisor) seed(events ...event.Event) {
+	if len(events) > replayCap {
+		panic(fmt.Sprintf("harness: seeded %d events, replay backlog holds %d — "+
+			"the oldest would be dropped and the transcript would render truncated",
+			len(events), replayCap))
+	}
+	for _, e := range events {
+		s.broker.Publish(e)
+	}
 }
 
 func (s *vhsSupervisor) Roster(context.Context) ([]tui.SessionInfo, error) {
 	return s.sessions, nil
 }
 
+// Subscribe hands back a real subscription off the private broker, replaying
+// whatever [vhsSupervisor.seed] mocked. The buffer is sized to the replay cap:
+// a subscription too small to hold the backlog would stall the replay, so the
+// two bounds are tied together rather than picked independently.
 func (s *vhsSupervisor) Subscribe(context.Context, string) (*event.Subscription, error) {
-	return s.broker.Subscribe(event.FilterAll, 8), nil
+	return s.broker.Subscribe(event.FilterAll, replayCap), nil
 }
 
 func (s *vhsSupervisor) Create(context.Context, string, tui.CreateOptions) (tui.SessionInfo, error) {
@@ -360,7 +479,21 @@ func (s *vhsSupervisor) SetModel(context.Context, string, string) error { return
 
 func (s *vhsSupervisor) SetEffort(context.Context, string, string) error { return nil }
 
-func (s *vhsSupervisor) Compact(context.Context, string, string) error { return nil }
+// Compact holds for [vhsSupervisor.compactHold] before succeeding, so the
+// transcript-compacting scene can capture an in-progress compaction. It honors
+// ctx so the tape's Ctrl+C still exits promptly rather than waiting out the
+// hold.
+func (s *vhsSupervisor) Compact(ctx context.Context, _, _ string) error {
+	if s.compactHold == 0 {
+		return nil
+	}
+	select {
+	case <-time.After(s.compactHold):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 func (s *vhsSupervisor) Reply(context.Context, string, string, tui.PermissionDecision) error {
 	return nil

@@ -1412,6 +1412,13 @@ human-eye check of real rendered frames, `vhs/` holds on-demand
   the header, block rhythm). `transcript-approval` — a turn ending in the
   inline permission prompt, with a failed call's red error marker and dimmed
   body above it.
+- `transcript-compacting` — the in-progress compaction indicator at the attach
+  transcript's tail. Needs the harness's blocking `Compact`
+  (`vhsSupervisor.compactHold`) for the state to exist long enough to capture,
+  and screenshots mid-second so the truncating counter reads the same on every
+  render. The transcript beneath is a mocked two-turn conversation seeded onto
+  the broker's retained backlog (`vhsSupervisor.seed`), so the indicator is
+  captured over a context worth compacting rather than an empty screen.
 - `roster-overview` — the roster with mixed states, showing the status words
   in color (yellow working/awaiting vs green finished) — the state that now
   lives only in color.
@@ -2103,12 +2110,32 @@ input — and it is **leading-only**, so `that worked!` and
 build). `/compact` is idle-only (block-if-busy, like `/kill`/`/archive`) and
 carries no `ArgHint` — every string is a valid instruction, the same reason
 `/new` declines one — forwarding args space-joined to
-`Supervisor.Compact`; success is reported OPTIMISTICALLY (a "Compacting
-context…" status note before the async call resolves) since the real visible
-effect is the `session.compacted` transcript block Ingest appends once it
-actually arrives (model.go, `itemSessionCompacted` — accent-styled like the
-background-agents summary, never silent: message count, a `~before → after`
-token line explicitly labeled an *estimate*, the model, and the summary text).
+`Supervisor.Compact`. It has TWO visible halves, progress and result, because
+compaction is a full summarizer model call over the folded history that streams
+nothing for as long as it runs:
+
+- **Progress** is a transient `⋯ compacting context… (42s)` at the transcript
+  tail (model.go, `itemCompacting` via `Model.WithCompacting`) — deliberately the
+  same muted `⋯` grammar as the turn-in-flight `⋯ working…`, since both mean "an
+  operation you cannot see is running." The elapsed counter is the only evidence
+  of progress that exists, so it is load-bearing, not decoration; a
+  once-per-second `compactTickMsg` advances it and stops when the operation does.
+  Dispatched from OFF the attach screen (peek, the panel), where that tail row is
+  not on screen, a "Compacting context…" status note stands in instead.
+  Everything is retired by `compactDoneMsg`, on success and failure alike.
+  This replaces an earlier OPTIMISTIC status note that nothing ever cleared —
+  `opDoneMsg`'s success path is a deliberate no-op, so a *finished* compaction
+  read as permanently in progress.
+- **Result** is the `session.compacted` transcript block Ingest appends when it
+  actually arrives (model.go, `itemSessionCompacted` — accent-styled like the
+  background-agents summary, never silent: message count, a `~before → after`
+  token line explicitly labeled an *estimate*, the model, and the summary text).
+
+Note the progress half covers the EXPLICIT path only. Automatic compaction is
+triggered daemon-side and the Event contract carries only `session.compacted`,
+the completion — there is no `session.compacting` to hang an indicator on, so an
+automatic compaction still shows nothing until it lands. Closing that is an
+agent-sdk-go contract change (gofer#300), not a TUI one.
 `/context` opens the command-panel Context tab (`panelContext`, between Stats
 and Resume): a fill bar plus in-use/free token counts read off
 `SessionInfo.LastUsage`/`ContextWindow` — the SAME measured figures the
