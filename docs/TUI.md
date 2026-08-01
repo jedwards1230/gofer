@@ -2279,12 +2279,30 @@ it is a request to another process.
 
 **Where the answer comes from, and why it may not come at all.** MCP
 connections and skill directories belong to whichever process owns the
-supervisor. The local backend reads its own `supervisor.Capabilities`; the
-daemon backend calls `gofer/capabilities` over the wire and **only** the wire
+supervisor. The local backend reads its own `supervisor.Capabilities`; both
+daemon-backed entrypoints — bare `gofer` attached to a daemon, and
+`gofer attach` — call `gofer/capabilities` over the wire and **only** the wire
 (`cmd/gofer/capabilities_wire.go`). Neither may fall back to the other, and the
 shared `buildCommandEnv` leaves the closure nil, because a daemon-attached panel
 rendering this process's `config.json` would describe a different machine while
-looking entirely correct.
+looking entirely correct. Each backend binds it in exactly one named place
+(`attachCommandEnv`, and `selectTUIBackend`'s two branches); an entrypoint that
+forgets renders UNKNOWN forever against a perfectly healthy daemon, which is
+safe but indistinguishable from an unreachable one, so both are pinned by test.
+
+**The MCP tab describes the connection MANAGER, not `config.json`.** The manager
+is built once at supervisor construction and its snapshot only knows the servers
+it was built with, while `mcp.servers` is re-read live. Reading the live file to
+build the list produced a real fabrication: a server added after startup was
+enabled and — because the manager had never heard of it — absent from the
+snapshot's `Down` list, so it rendered a green **connected** for a server that
+had never been dialed. Every server field therefore comes from the
+construction-time config. A newly added server is correctly absent, and the
+panel says so rather than omitting it silently: when the live file no longer
+matches, it shows **`config.json changed since startup — restart gofer to
+apply`**. That is a comparison of two values in hand, not a guess. Timeout-only
+edits do not raise it — they change how the manager behaves, not which servers
+it holds, and a notice that fires on every open gets trained away.
 
 Under `gofer daemon --workers` there is **no answer to give**: the router
 process owns no supervisor and therefore no MCP manager (each session's worker
@@ -2307,6 +2325,7 @@ current data cannot answer honestly, and each is ABSENT rather than blank-filled
 | Never-connected vs connected-then-dropped | `Snapshot.Down` carries both, undifferentiated, by its own documentation. The tab says "not connected" and stops there. |
 | Why a server is down | Connect and `tools/list` failures are logged and dropped; nothing stores them. |
 | A loaded skill's source path | `skill.Meta` records none. Re-walking the discovery directories to guess the winner goes wrong precisely when a first-directory candidate failed to load for an unrelated reason. The LOSING file of a shadowing IS knowable (it arrives as a diagnostic) and is shown. |
+| A project skills directory, when the caller names no cwd | `Skills.Directories` joins cwd unconditionally, so an empty one yields the *relative* `.gofer/skills` — resolved against the daemon's own working directory and reported as though it were the caller's project. The report covers the store root alone instead. |
 
 The first three are `internal/mcpconn`'s to fix — jedwards1230/gofer#302 —
 which is why the tab names that issue on screen: the line retires itself when

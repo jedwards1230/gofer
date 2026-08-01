@@ -486,6 +486,14 @@ CONFIGURED transport, whether it is enabled, and whether it held a live
 connection at snapshot time, plus the total federated tool count and — under
 index mode — the configured resident/index-only split.
 
+Every server field comes from the config the manager was **built** with, not a
+live re-read: the manager's server set is fixed at construction, so a server
+added to `config.json` afterwards is absent from `Snapshot().Down` simply
+because the manager has never heard of it — and treating that absence as health
+rendered a confident "connected" for a server that had never been dialed. The
+live file is compared only to report that it has **drifted**, so a correct
+omission does not become a silent one.
+
 It deliberately shows **no per-server tool count, no down-reason, and no
 never-connected-vs-dropped distinction**, because `Manager.Snapshot` cannot
 answer any of the three: its tool list is flat (attributing a tool by parsing
