@@ -549,7 +549,10 @@ func (a App) handlePanelKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.Key()
 	switch {
 	case key.Mod.Contains(tea.ModCtrl) && key.Code == 'c':
-		return a, tea.Quit
+		// Double-tap confirm (gofer#314): see [App.confirmQuit]. Esc (below)
+		// stays the panel's own, un-confirmed way out, so requiring a second
+		// ctrl+c to quit cannot strand a user who only meant to close the panel.
+		return a.confirmQuit()
 	case key.Code == tea.KeyEscape:
 		p, closePanel := a.panel.handleEscape()
 		if closePanel {

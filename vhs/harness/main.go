@@ -14,7 +14,8 @@
 // records is the same render path a real gofer session produces. Pick the
 // scene with -scenario (see [scenarioHelp] for the slug list — every slug
 // follows `<area>-<view>[-<state>]`); the process holds the final frame
-// until the tape quits it (Ctrl+C) or the safety hold elapses.
+// until the tape quits it (Ctrl+C, TWICE — see the double-tap quit confirm,
+// gofer#314) or the safety hold elapses.
 package main
 
 import (
@@ -109,8 +110,12 @@ func main() {
 		os.Exit(2)
 	}
 
-	// tea.WithInput(os.Stdin) lets the tape's Ctrl+C reach handleKey, which
-	// quits the program; the same key path a real attach uses.
+	// tea.WithInput(os.Stdin) lets the tape's Ctrl+C reach handleKey, the same
+	// key path a real attach uses — which now means the double-tap quit
+	// confirm (gofer#314): a first Ctrl+C only arms, a second (immediately
+	// following, with no other key between) quits. A tape that wants a
+	// prompt frame in between (see roster-quit-confirm.tape) types Ctrl+C
+	// once; one that just wants the harness to exit promptly types it twice.
 	p := tea.NewProgram(model, tea.WithInput(os.Stdin))
 
 	go func() {

@@ -59,8 +59,9 @@ func isQuit(cmd tea.Cmd) bool {
 }
 
 // TestQuitCommandQuits pins /quit (and its /exit alias) returning exactly
-// tea.Quit — the same one line ctrl-c is bound to on every screen, with no
-// teardown of its own (app.go/panel.go/dialog.go all just return tea.Quit).
+// tea.Quit — the same Cmd a CONFIRMED (second) ctrl-c produces on every
+// screen (see [tui.App]'s confirmQuit, gofer#314), with no teardown of its
+// own (app.go/panel.go/dialog.go all funnel through it).
 func TestQuitCommandQuits(t *testing.T) {
 	for _, name := range []string{"/quit", "/exit"} {
 		t.Run(name, func(t *testing.T) {
@@ -77,19 +78,24 @@ func TestQuitCommandQuits(t *testing.T) {
 }
 
 // TestQuitMatchesCtrlC is the equivalence check behind /quit staying trivial:
-// the command and the key must produce the same Cmd, so a teardown added to
-// one is visibly missing from the other.
+// the command and a CONFIRMED ctrl-c (its first press only arms, see
+// gofer#314's double-tap confirm) must produce the same Cmd, so a teardown
+// added to one is visibly missing from the other.
 func TestQuitMatchesCtrlC(t *testing.T) {
 	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
+	m, armCmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if armCmd != nil {
+		t.Fatal("first ctrl-c returned a Cmd; it should only arm the quit confirm")
+	}
 	_, keyCmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	m2 := newTestApp(t, newFakeSup(tui.GoldenRoster()))
 	_, cmdCmd := dispatchSlashCmd(t, m2, "/quit")
 
 	if !isQuit(keyCmd) {
-		t.Fatal("ctrl-c no longer returns tea.Quit; this test's premise is stale")
+		t.Fatal("the second ctrl-c no longer returns tea.Quit; this test's premise is stale")
 	}
 	if reflect.ValueOf(keyCmd).Pointer() != reflect.ValueOf(cmdCmd).Pointer() {
-		t.Error("/quit and ctrl-c returned different Cmds — one of the two grew a teardown the other skips")
+		t.Error("/quit and a confirmed ctrl-c returned different Cmds — one of the two grew a teardown the other skips")
 	}
 }
 

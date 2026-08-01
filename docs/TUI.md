@@ -56,6 +56,26 @@ bar is empty; every other key types into it — so `space` on non-empty text is 
 ordinary space, and `R` on non-empty text is an ordinary character — and `enter`
 on non-empty text starts a new session, or dispatches a `/` command.
 
+**`ctrl-c` quits gofer — a two-press confirm** (issue #314), the same shape as
+`ctrl-x`'s delete confirm above: the first `ctrl-c` arms and shows "ctrl-c
+again to quit" on the status line, but touches nothing; the second, pressed
+immediately after with no other key in between, quits (`tea.Quit`); any other
+key disarms. It is **global**, not just the overview's: the same
+`App.confirmQuit` runs from the live global-keymap row (`keymap.go`, reached
+from the overview, peek, attach, and the open autocomplete popup) and from
+every overlay that claims `ctrl-c` ahead of it — the command panel, the
+pending-approval prompt (including its nested amend editor), and the
+pending-decision prompt — so there is one arm/confirm implementation, not one
+per site that could drift. Quitting mid-overlay never strands anyone: each of
+those overlays keeps its own single-press `Esc` out (closing the panel,
+dismissing the approval, cancelling the decision) untouched by the arm, so a
+`ctrl-c` confirm can never become the only way out of a modal state. The
+single-session `gofer run`/`gofer resume` view (`tui.Program`, driven by
+`cmd/gofer`'s `driveTUI`) mirrors the same two-press shape independently,
+since it shares no code with the roster `App` — but its `Esc` stays a
+**single**-press quit/cancel, deliberately: it is that view's only way to
+interrupt an in-flight turn, with no other screen to back out to first.
+
 In the flat view the rows are grouped by working directory (a cwd header per
 group, most-recently-active dir first); `↑`/`↓` and the default selection follow
 that exact on-screen order rather than the raw recency order, and the focused
@@ -405,7 +425,9 @@ option answers with it, `Type something.` opens its editor and a **second**
 `Enter` submits, `Chat about this` answers with the chat hatch); `Esc` leaves
 typing mode, or — when not typing — resolves the prompt per
 [`session.prompt_esc_scope`](#esc-on-a-prompt) (by default stopping the whole
-turn; opt-in, cancelling just this decision); `ctrl+c` quits. While typing, the
+turn; opt-in, cancelling just this decision); `ctrl+c` is the double-tap quit
+confirm (below) — a first press arms without touching the prompt, a second
+quits. While typing, the
 hint reads `Enter to submit · Esc to cancel` and every unclaimed key goes to the
 shared input keymap, so digits type digits. `j`/`k` are deliberately unbound —
 every list here is arrow-only, and vi keys would fight the free-text row.
@@ -683,7 +705,8 @@ nothing when it has no children (with text, the key belongs to the input keymap,
 not to navigation); `ctrl-x` deletes the selected
 session (a two-press confirm — press twice);
 `ctrl-t` stops the selected row's subagents;
-`ctrl-c` quits. In peek, `up`/`down` move
+`ctrl-c` is the double-tap quit confirm — press twice
+(below). In peek, `up`/`down` move
 the selection, `enter` opens the session (or sends the reply when the `❯` input
 has text), `esc` closes to the overview (and `space` does too with an empty
 reply), and `ctrl+x` deletes (press twice to confirm).
@@ -1960,8 +1983,11 @@ column rather than the name column, since the name column is padded to its
 widest entry and one long `ArgHint` would otherwise truncate every other row's
 summary. Its **Keys** section renders from `keymap.go`, a new declarative table.
 That table is honestly two-tier: its **global** rows (`ctrl+c`, `ctrl+y`) are
-LIVE — `App.handleKey` dispatches through `dispatchGlobalKey`, replacing the
-per-screen `ctrl+c` copies — while the per-screen rows are **descriptive only
+LIVE — `App.handleKey` dispatches through `dispatchGlobalKey` for the
+overview/peek/attach/menu paths, and the command-panel/approval/decision
+overlays that claim `ctrl+c` ahead of it (see above) call the SAME
+`App.confirmQuit` the row's action does, rather than each carrying its own
+copy of the quit behavior (issue #314) — while the per-screen rows are **descriptive only
 and can drift**, because several of those bindings are conditional on state a
 table can't express (a bare → attaches only from an *empty* dispatch bar) and
 routing them all through the table is a whole-TUI key refactor, not this
@@ -1985,11 +2011,14 @@ doesn't consume).
 **Built (session-lifecycle commands)**: `/quit` (alias `/exit`), `/new`, and
 `/resume` — the three of the P0 session-lifecycle set the SDK can back today.
 
-`/quit` returns exactly `tea.Quit`, the same one line ctrl-c is bound to on
-every screen and over the panel; the daemon connection, the subscription, and
-the reconstruction core are owned and closed by `cmd/gofer` once the program
-returns, so there is no teardown for the command to duplicate (and no
-confirmation, which would make it more ceremonious than the key it mirrors).
+`/quit` returns exactly `tea.Quit`, the same Cmd a **confirmed** (second)
+ctrl-c produces everywhere it's bound (see the two-press confirm above); the
+daemon connection, the subscription, and the reconstruction core are owned and
+closed by `cmd/gofer` once the program returns, so there is no teardown for
+the command to duplicate. `/quit` itself carries no arm/confirm of its own —
+typing it out and pressing Enter is already the deliberate gesture the
+double-tap approximates — so adding one would make the command more
+ceremonious than the key it mirrors.
 
 `/new` starts a fresh session — new id, new journal — through the same
 `Supervisor.Create` seam a prompt typed into the dispatch bar takes, and lands

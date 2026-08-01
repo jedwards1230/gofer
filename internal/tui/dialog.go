@@ -56,7 +56,11 @@ import (
 func (a App) handleApprovalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.Key()
 	if key.Mod.Contains(tea.ModCtrl) && key.Code == 'c' {
-		return a, tea.Quit
+		// Double-tap confirm (gofer#314): see [App.confirmQuit]. Esc
+		// (escapeApproval, below) stays the prompt's own un-confirmed way out —
+		// including out of the nested amend editor, whose own Esc cancels the
+		// edit — so a second ctrl+c to quit here cannot strand anyone.
+		return a.confirmQuit()
 	}
 	if a.sess.AmendingApproval() {
 		return a.handleAmendKey(key)
@@ -221,8 +225,11 @@ func (a App) doReply(sessionID, id string, d PermissionDecision) tea.Cmd {
 // something." enters typing mode and a SECOND Enter submits what was typed;
 // "Chat about this" answers with the chat escape hatch), Esc leaves an editor
 // or — when in neither — CANCELS the whole request (see [App.cancelDecision];
-// the hint line has always promised "Esc to cancel"), and ctrl+c quits, the
-// last of those exactly as [App.handleApprovalKey] does.
+// the hint line has always promised "Esc to cancel"), and ctrl+c is the
+// double-tap quit confirm ([App.confirmQuit], gofer#314), the last of those
+// exactly as [App.handleApprovalKey] does. Esc staying a single, un-confirmed
+// way out is what makes requiring a second ctrl+c here safe: it was never the
+// only escape from this prompt.
 //
 // A MULTI-question request binds three more: Tab/shift+tab (and ←/→, which is
 // what the tab strip's end arrows advertise — a rendered affordance that did
@@ -255,7 +262,7 @@ func (a App) handleDecisionKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	tabs := p.multi() && !editing
 	switch {
 	case key.Mod.Contains(tea.ModCtrl) && key.Code == 'c':
-		return a, tea.Quit
+		return a.confirmQuit()
 
 	// The notes editor claims Enter and Esc ahead of the row keymap below, so
 	// saving a note can never be read as answering the question it annotates.

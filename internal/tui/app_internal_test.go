@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -27,6 +28,18 @@ import (
 	"github.com/jedwards1230/gofer/internal/tui/testkit"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
+
+// isQuitCmd reports whether cmd is exactly tea.Quit — the package-tui twin of
+// session_commands_test.go's tui_test-scoped isQuit, needed here because the
+// internal ctrl+c double-tap tests (gofer#314) construct their Apps through
+// unexported messages and so must live in this package. bubbletea's Quit is a
+// function value, not comparable with ==, hence the reflect identity check.
+func isQuitCmd(cmd tea.Cmd) bool {
+	if cmd == nil {
+		return false
+	}
+	return reflect.ValueOf(cmd).Pointer() == reflect.ValueOf(tea.Cmd(tea.Quit)).Pointer()
+}
 
 // internalFakeSup is a minimal Supervisor backed by real event.Brokers,
 // just enough to resolve App's subscribe/waitForEvent plumbing for the
