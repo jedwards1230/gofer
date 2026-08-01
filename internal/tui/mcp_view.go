@@ -80,6 +80,12 @@ func (v mcpView) lines(height int) []string {
 	if line := schemaModeLine(mcp); line != "" {
 		tail = append(tail, line)
 	}
+	if mcp.ConfigDrifted {
+		// Above the omission line, because unlike that one this is ACTIONABLE
+		// and explains why a server the reader just configured is missing from
+		// the list above.
+		tail = append(tail, v.theme.WarnStyle().Render("config.json changed since startup — restart gofer to apply"))
+	}
 	tail = append(tail, v.omissionLine())
 	return fitRows(head, rows, tail, height)
 }

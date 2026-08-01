@@ -10,6 +10,7 @@ package supervisor_test
 import (
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/jedwards1230/gofer/internal/capability"
@@ -56,6 +57,99 @@ func TestCapabilitiesReportsEveryConfiguredServer(t *testing.T) {
 		if s.Connected {
 			t.Errorf("%s: Connected = true; nothing here can connect", tc.name)
 		}
+	}
+}
+
+// TestCapabilitiesDescribeTheManagerNotTheLiveConfig is the regression for the
+// fabricated "connected".
+//
+// In production [supervisor.Config.MCP] is a LIVE re-read of config.json
+// (cmd/gofer's mcpConfigResolver), while the connection manager is built once
+// at New and its Snapshot.Down only ever iterates that construction-time set.
+// Deriving a server list from the live config therefore reported a server added
+// AFTER startup as connected: it was enabled, and it was absent from Down for
+// the trivial reason that the manager had never heard of it. The panel rendered
+// a confident green "connected" for a server that had never been dialed — in
+// exactly the situation that sends someone to /mcp.
+//
+// The resolver here returns a DIFFERENT set on every call after the first,
+// which is what the original test's static closure could not express and why
+// nothing caught this.
+func TestCapabilitiesDescribeTheManagerNotTheLiveConfig(t *testing.T) {
+	var calls atomic.Int64
+	atStart := config.MCP{Servers: []config.MCPServer{
+		{Name: "present-at-start", Command: "/nonexistent/mcp-server"},
+	}}
+	live := config.MCP{Servers: []config.MCPServer{
+		{Name: "present-at-start", Command: "/nonexistent/mcp-server"},
+		{Name: "added-later", Command: "/nonexistent/mcp-server"},
+	}}
+	sup := newCapSupervisor(t, t.TempDir(), supervisor.Config{
+		MCP: func() config.MCP {
+			if calls.Add(1) == 1 {
+				return atStart
+			}
+			return live
+		},
+	})
+
+	mcp := sup.Capabilities(t.TempDir()).MCP
+	if len(mcp.Servers) != 1 || mcp.Servers[0].Name != "present-at-start" {
+		t.Fatalf("the report must describe the manager's own server set, got %+v", mcp.Servers)
+	}
+	if mcp.Servers[0].Connected {
+		t.Error("a server pointed at a nonexistent binary must never read as connected")
+	}
+	// The drift is not swallowed: omitting the added server is right, but doing
+	// so silently would leave an operator who just edited config.json with no
+	// explanation for why it is missing.
+	if !mcp.ConfigDrifted {
+		t.Error("a config.json that gained a server since startup must be reported as drifted")
+	}
+}
+
+// TestCapabilitiesReportNoDriftWhenConfigIsStable is the negative half: an
+// unchanged file must not raise the notice, or it would fire on every open and
+// be trained away. Timeout-only edits deliberately do not count — they change
+// how the manager behaves, not WHICH servers it holds.
+func TestCapabilitiesReportNoDriftWhenConfigIsStable(t *testing.T) {
+	ms := 1234
+	base := []config.MCPServer{{Name: "steady", Command: "/nonexistent/mcp-server"}}
+	var calls atomic.Int64
+	sup := newCapSupervisor(t, t.TempDir(), supervisor.Config{
+		MCP: func() config.MCP {
+			if calls.Add(1) == 1 {
+				return config.MCP{Servers: base}
+			}
+			return config.MCP{Servers: base, ConnectTimeoutMS: &ms}
+		},
+	})
+	if sup.Capabilities(t.TempDir()).MCP.ConfigDrifted {
+		t.Error("a timeout-only edit must not be reported as server drift")
+	}
+}
+
+// TestCapabilitiesWithoutCwdReportsOnlyTheStoreRoot covers the empty-cwd
+// request (the wire's cwd is omitempty, so any client that omits it lands
+// here). [config.Skills.Directories] joins cwd unconditionally, so "" yields
+// the RELATIVE ".gofer/skills" — which would be scanned against whatever
+// working directory the daemon happens to have and then reported verbatim as
+// though it were the caller's project.
+func TestCapabilitiesWithoutCwdReportsOnlyTheStoreRoot(t *testing.T) {
+	root := t.TempDir()
+	writeCapSkill(t, filepath.Join(root, "skills", "global-only"), "global-only", "a store-root skill")
+
+	skills := newCapSupervisor(t, root, supervisor.Config{}).Capabilities("").Skills
+	if len(skills.Directories) != 1 || skills.Directories[0] != filepath.Join(root, "skills") {
+		t.Fatalf("an absent cwd must report the store root alone, got %v", skills.Directories)
+	}
+	for _, dir := range skills.Directories {
+		if !filepath.IsAbs(dir) {
+			t.Errorf("a relative directory %q would resolve against this process's cwd, not the caller's", dir)
+		}
+	}
+	if len(skills.Loaded) != 1 || skills.Loaded[0].Name != "global-only" {
+		t.Errorf("the store-root skill must still load, got %+v", skills.Loaded)
 	}
 }
 

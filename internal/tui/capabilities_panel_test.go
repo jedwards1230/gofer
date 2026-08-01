@@ -137,6 +137,38 @@ func TestMCPPanelReflectsBackendState(t *testing.T) {
 	}
 }
 
+// TestMCPPanelReportsConfigDrift covers the row that keeps a correct omission
+// from being a silent one.
+//
+// The server list describes the connection manager, so a server added to
+// config.json after startup is rightly absent — the manager holds no state for
+// it. Without this notice the operator who just made that edit sees a panel
+// that neither lists their server nor explains why, which is its own quiet
+// wrongness. The notice must also stay OFF when nothing changed, or it becomes
+// noise the reader learns to skip.
+func TestMCPPanelReportsConfigDrift(t *testing.T) {
+	panelWith := func(drifted bool) string {
+		env := tui.GoldenCommandEnv()
+		env.Capabilities = func(context.Context) (capability.Answer, error) {
+			return capability.Answer{Known: true, Snapshot: capability.Snapshot{
+				MCP: capability.MCP{
+					Servers:       []capability.Server{{Name: "github", ConfiguredTransport: "stdio", Enabled: true, Connected: true}},
+					SchemaMode:    "preload",
+					ConfigDrifted: drifted,
+				},
+			}}, nil
+		}
+		return content(dispatchSlash(t, newPanelApp(t, env), "/mcp"))
+	}
+
+	if got := panelWith(true); !strings.Contains(got, "config.json changed since startup") {
+		t.Errorf("drifted config must be reported, got:\n%s", got)
+	}
+	if got := panelWith(false); strings.Contains(got, "config.json changed since startup") {
+		t.Errorf("a stable config must not raise the drift notice, got:\n%s", got)
+	}
+}
+
 // TestMCPPanelReportsNoServersDistinctlyFromUnknown pins the distinction the
 // whole [capability.Answer] two-level shape exists for: a backend that
 // answered "nothing configured" and one that could not answer at all must not

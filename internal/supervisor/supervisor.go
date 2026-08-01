@@ -247,6 +247,15 @@ type Supervisor struct {
 	// server list itself is NOT re-read here.
 	mcpConfig func() config.MCP
 
+	// mcpAtStart is the config.MCP mcpManager was actually BUILT from, captured
+	// at New. It exists because mcpConfig is typically a live re-read of
+	// config.json (cmd/gofer's mcpConfigResolver), so the two drift the moment
+	// an operator edits the file — and the manager's own view never moves.
+	// [Supervisor.Capabilities] must describe the manager, not the file: see
+	// capabilities.go for the fabricated "connected" that reading the live
+	// config produced.
+	mcpAtStart config.MCP
+
 	mu     sync.Mutex
 	roster map[string]*managed
 	closed bool
@@ -362,7 +371,8 @@ func New(cfg Config) (*Supervisor, error) {
 	// list is a construction-time snapshot rather than re-read per session.
 	// Start connects every enabled server ASYNCHRONOUSLY and returns
 	// immediately, so this never delays New.
-	mcpManager := mcpconn.NewManager(mcpconn.Config{MCP: mcpConfig()})
+	mcpAtStart := mcpConfig()
+	mcpManager := mcpconn.NewManager(mcpconn.Config{MCP: mcpAtStart})
 	mcpManager.Start(context.Background())
 
 	toolsConfig := cfg.Tools
@@ -406,6 +416,7 @@ func New(cfg Config) (*Supervisor, error) {
 		skillsConfig:     skillsConfig,
 		lspManager:       lspdiag.NewManager(),
 		mcpConfig:        mcpConfig,
+		mcpAtStart:       mcpAtStart,
 		mcpManager:       mcpManager,
 		roster:           make(map[string]*managed),
 		watchers:         make(map[*watcher]struct{}),

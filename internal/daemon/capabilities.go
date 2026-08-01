@@ -64,14 +64,25 @@ var _ CapabilityReporter = (*supervisor.Supervisor)(nil)
 // only reads it once a connection is served. [isGoferNativeMethod] classifies
 // the name from its "gofer/" prefix, so no second registration is needed.
 func init() {
+	// Assignment into a map is silent about collisions, and this registration
+	// is the one in the package that is not visible in handlers.go's literal —
+	// so a future entry there for the same method would clobber one of the two
+	// handlers with nothing to notice. Fail at process start instead: this is a
+	// programming error in gofer's own source, reachable by no input.
+	if _, dup := methodTable[methodGoferCapabilities]; dup {
+		panic("daemon: duplicate registration of " + methodGoferCapabilities)
+	}
 	methodTable[methodGoferCapabilities] = handleGoferCapabilities
 }
 
 // capabilitiesParams is gofer/capabilities' request shape.
 type capabilitiesParams struct {
 	// Cwd is the client's working directory, for resolving the project skills
-	// directory. Optional: an empty value simply resolves no project
-	// directory.
+	// directory (<cwd>/.gofer/skills). Optional: an omitted value reports on
+	// the daemon's store root ALONE, with no project directory — it is never
+	// resolved against the daemon's own working directory, which would answer
+	// about a directory the caller never named. See
+	// [supervisor.Supervisor.Capabilities].
 	Cwd string `json:"cwd,omitempty"`
 }
 

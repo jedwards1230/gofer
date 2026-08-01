@@ -61,6 +61,17 @@ type MCP struct {
 	// SchemaMode is the resolved tools.schema_mode ("preload" or "index").
 	SchemaMode string `json:"schema_mode,omitempty"`
 
+	// ConfigDrifted reports that mcp.servers in config.json no longer matches
+	// the list the connection manager was BUILT from — a server added, removed,
+	// enabled, disabled, or re-transported since the process started.
+	//
+	// Servers above describes the manager, so a newly added server is correctly
+	// absent from it (the manager holds no state for one). This flag is what
+	// keeps that omission from being silent: without it, an operator who just
+	// edited config.json sees a panel that neither lists their server nor says
+	// why. It is a comparison of two values in hand, not an inference.
+	ConfigDrifted bool `json:"config_drifted,omitempty"`
+
 	// ResidentTools and IndexOnlyTools split ConnectedTools by whether a tool
 	// is in the configured resident set, and are populated ONLY under index
 	// mode (under preload every tool's schema is in context and the split is
@@ -153,7 +164,11 @@ type Diagnostic struct {
 // Known is false for a daemon that predates gofer/capabilities, and for a
 // `gofer daemon --workers` router — which owns no supervisor and therefore no
 // MCP manager at all (each session's worker process owns its own).
+// Answer is deliberately UNTAGGED. It is never marshaled: the wire carries
+// {supported, snapshot} (internal/daemon), and a client mints the Answer from
+// that. Tagging it would invite someone to send it instead, producing a second
+// on-the-wire representation of "unknown" for the two ends to disagree about.
 type Answer struct {
-	Known    bool     `json:"known"`
-	Snapshot Snapshot `json:"snapshot"`
+	Known    bool
+	Snapshot Snapshot
 }

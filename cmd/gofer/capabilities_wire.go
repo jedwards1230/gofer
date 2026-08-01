@@ -29,6 +29,7 @@ import (
 	"github.com/jedwards1230/gofer/internal/capability"
 	"github.com/jedwards1230/gofer/internal/daemon"
 	"github.com/jedwards1230/gofer/internal/supervisor"
+	"github.com/jedwards1230/gofer/internal/tui"
 )
 
 // daemonCapabilities returns the [tui.CommandEnv.Capabilities] closure for the
@@ -55,6 +56,26 @@ func localCapabilities(sup *supervisor.Supervisor, cwd string) func(context.Cont
 	return func(context.Context) (capability.Answer, error) {
 		return capability.Answer{Known: true, Snapshot: sup.Capabilities(cwd)}, nil
 	}
+}
+
+// attachCommandEnv is `gofer attach`'s [tui.CommandEnv]: the shared local
+// builder plus the daemon capability closure bound to THIS connection.
+//
+// It exists because the shared builder deliberately leaves Capabilities nil
+// (see the file doc), and `gofer attach` is always daemon-backed — so calling
+// buildCommandEnv alone left /mcp and /skills permanently UNKNOWN on the one
+// entrypoint CLAUDE.md describes as the daemon-attached TUI, against a daemon
+// that could answer perfectly. It failed SAFE rather than lying, which is why
+// nothing caught it: an unwired closure and an unreachable daemon are
+// indistinguishable on screen.
+//
+// Wrapping it in a named function rather than repeating two lines at the call
+// site is the point: there is now one place per backend that binds this, and
+// TestAttachWiresDaemonCapabilities pins that attach uses it.
+func attachCommandEnv(c *daemon.Client, root, cwd string) tui.CommandEnv {
+	env := buildCommandEnv(root, cwd)
+	env.Capabilities = daemonCapabilities(c, cwd)
+	return env
 }
 
 // classifyCapabilities turns a gofer/capabilities result into the

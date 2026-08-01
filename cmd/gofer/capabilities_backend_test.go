@@ -16,6 +16,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/jedwards1230/gofer/internal/daemon"
@@ -159,6 +160,68 @@ func TestSharedCommandEnvBuilderLeavesCapabilitiesNil(t *testing.T) {
 	env := buildCommandEnv(t.TempDir(), t.TempDir())
 	if env.Capabilities != nil {
 		t.Error("buildCommandEnv must leave Capabilities nil — only a specific backend may bind it (gofer#303)")
+	}
+}
+
+// TestAttachWiresDaemonCapabilities is the regression for `gofer attach`
+// rendering /mcp and /skills as permanently UNKNOWN.
+//
+// runAttach built its env with the shared buildCommandEnv, which by contract
+// leaves Capabilities nil — so on the one entrypoint CLAUDE.md calls the
+// daemon-attached TUI, both tabs said UNKNOWN against a daemon that could
+// answer perfectly. It failed SAFE rather than lying, which is exactly why
+// nothing caught it: an unwired closure and an unreachable daemon look
+// identical on screen.
+func TestAttachWiresDaemonCapabilities(t *testing.T) {
+	addr := testDaemon(t, "", fauxProvider)
+	c, err := daemon.Dial(context.Background(), addr, "")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	clientRoot := t.TempDir()
+	writeBackendSkill(t, filepath.Join(clientRoot, "skills", "attach-client-only"), "attach-client-only")
+
+	env := attachCommandEnv(c, clientRoot, t.TempDir())
+	if env.Capabilities == nil {
+		t.Fatal("gofer attach supplied no Capabilities closure — /mcp and /skills are permanently UNKNOWN there")
+	}
+	answer, err := env.Capabilities(context.Background())
+	if err != nil {
+		t.Fatalf("Capabilities: %v", err)
+	}
+	if !answer.Known {
+		t.Fatal("a live daemon implementing gofer/capabilities must answer Known on the attach path too")
+	}
+	// Same wire-not-local guard the bare-`gofer` path gets: the closure must be
+	// bound to the connection, not to this process's store root.
+	for _, s := range answer.Snapshot.Skills.Loaded {
+		if s.Name == "attach-client-only" {
+			t.Fatalf("the attach closure read THIS process's store root: %+v", answer.Snapshot.Skills.Loaded)
+		}
+	}
+}
+
+// TestAttachDoesNotUseTheSharedEnvBuilderDirectly guards the WIRING, which the
+// behavioral test above cannot reach: runAttach requires an interactive
+// terminal and returns before building an env under test.
+//
+// It is a source-level assertion on purpose, and narrow: the regression is
+// someone "simplifying" attach.go back to the shared builder, which compiles,
+// passes every other test, and silently turns both tabs off. Reading the one
+// call site is a cheaper and more direct guard than a TTY harness.
+func TestAttachDoesNotUseTheSharedEnvBuilderDirectly(t *testing.T) {
+	src, err := os.ReadFile("attach.go")
+	if err != nil {
+		t.Fatalf("read attach.go: %v", err)
+	}
+	if strings.Contains(string(src), "buildCommandEnv(") {
+		t.Error("attach.go must build its env via attachCommandEnv — the shared buildCommandEnv leaves Capabilities nil, " +
+			"which renders /mcp and /skills permanently UNKNOWN on the daemon-attached TUI")
+	}
+	if !strings.Contains(string(src), "attachCommandEnv(") {
+		t.Error("attach.go no longer calls attachCommandEnv")
 	}
 }
 
