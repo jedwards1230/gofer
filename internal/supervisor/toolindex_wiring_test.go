@@ -22,6 +22,7 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/tool"
 
 	"github.com/jedwards1230/gofer/internal/config"
+	"github.com/jedwards1230/gofer/internal/subagent"
 	"github.com/jedwards1230/gofer/internal/supervisor"
 )
 
@@ -37,6 +38,10 @@ func newToolsHarness(t *testing.T, tools func() config.Tools, search func() conf
 		Root:   h.root,
 		Tools:  tools,
 		Search: search,
+		// Read through the harness, not captured by value, so a test can set
+		// h.subagents after construction and still have it reach the next
+		// session — see the field's doc.
+		SubagentsConfig: func() config.Subagents { return h.subagents },
 		NewSession: func(_ context.Context, opts runner.Options) (supervisor.Session, error) {
 			id := "sess-" + strconv.FormatInt(atomic.AddInt64(&nextID, 1), 10)
 			fs := h.register(id, opts.Cwd)
@@ -87,11 +92,18 @@ func createSession(t *testing.T, h *harness) *fakeSession {
 }
 
 // TestSessionGuard_PreloadModeByteIdentical proves the fail-safe default
-// (zero config.Tools, zero config.Search) produces EXACTLY the registry
-// gofer built before this feature existed: the 8 SDK builtins plus
-// ask_user, no tool_search, no web_search. Preload mode must never add a
-// tool to a session's Specs() that an unconfigured operator did not have
-// before — that is what makes this round purely additive.
+// (zero config.Tools, zero config.Search, zero config.Subagents) produces
+// EXACTLY the registry gofer built before these features existed: the 8 SDK
+// builtins plus ask_user, no tool_search, no web_search, no spawn_subagent.
+// Preload mode must never add a tool to a session's Specs() that an
+// unconfigured operator did not have before — that is what makes this round
+// purely additive.
+//
+// The spawn tool is checked BOTH ways deliberately: absent from Specs() (what
+// the model is shown, and what the request's prompt-cache prefix is derived
+// from) AND unresolvable through Get() (what the model could still CALL). A
+// registry that advertised nothing but resolved the name would leave the
+// capability quietly reachable.
 func TestSessionGuard_PreloadModeByteIdentical(t *testing.T) {
 	h := newToolsHarness(t, func() config.Tools { return config.Tools{} }, func() config.Search { return config.Search{} })
 	sess := createSession(t, h)
@@ -113,6 +125,40 @@ func TestSessionGuard_PreloadModeByteIdentical(t *testing.T) {
 	}
 	if _, ok := sess.tools.Get("web_search"); ok {
 		t.Error("preload mode registered web_search with search unconfigured")
+	}
+	if _, ok := sess.tools.Get(subagent.ToolName); ok {
+		t.Errorf("preload mode resolved %s with subagents unconfigured — subagents are opt-in", subagent.ToolName)
+	}
+}
+
+// TestSessionGuard_SpawnRegisteredOnlyWhenConfigured is
+// [TestSessionGuard_WebSearchRegisteredOnlyWhenSelected]'s subagent-axis twin,
+// and the direct assertion behind the standing opt-in constraint: the spawn
+// tool must be absent (from Get AND from Specs) until an operator sets
+// `subagents.enabled`, and present the moment they do.
+func TestSessionGuard_SpawnRegisteredOnlyWhenConfigured(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  config.Subagents
+		want bool
+	}{
+		{"disabled (zero value)", config.Subagents{}, false},
+		{"explicitly disabled", config.Subagents{Enabled: false, Agents: []string{"go-developer"}}, false},
+		{"enabled", config.Subagents{Enabled: true}, true},
+		{"enabled with an agent list", config.Subagents{Enabled: true, Agents: []string{"go-developer"}}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := newToolsHarness(t, func() config.Tools { return config.Tools{} }, func() config.Search { return config.Search{} })
+			h.subagents = c.cfg
+			sess := createSession(t, h)
+			if _, ok := sess.tools.Get(subagent.ToolName); ok != c.want {
+				t.Fatalf("Get(%s) ok = %v, want %v", subagent.ToolName, ok, c.want)
+			}
+			if got := hasName(specNames(sess.tools), subagent.ToolName); got != c.want {
+				t.Fatalf("Specs() advertises %s = %v, want %v", subagent.ToolName, got, c.want)
+			}
+		})
 	}
 }
 

@@ -173,6 +173,17 @@ type managed struct {
 	// restart, the same live-reload shape [Config.PermissionMode] and
 	// [Config.Permissions] already follow. Never nil after newManaged.
 	compaction func() config.Compaction
+
+	// reportParent delivers THIS session's one child→parent report (see
+	// [Subagents.Report]), or nil when there is nothing to report to: a root
+	// session, or a child on a gofer that never opted into subagents. It is set
+	// once by [Supervisor.register] BEFORE the pump goroutine starts and never
+	// written again, so the pump reads it without a lock — the goroutine start
+	// is the publish.
+	reportParent func(ctx context.Context, parentID, text string) error
+	// reportOnce bounds the report to exactly one delivery per session. See
+	// [managed.reportToParentOnce] for why one, and not one per settled turn.
+	reportOnce sync.Once
 }
 
 // newManaged builds a managed session ready to register: idle, empty queue,
@@ -469,6 +480,11 @@ func (m *managed) pump() {
 		// be partial/absent, and there is nothing to react to.
 		if err == nil {
 			m.maybeAutoCompact()
+			// A subagent's answer to the brief it was spawned with. AFTER the
+			// compaction check on purpose: compaction is this session's own
+			// bookkeeping and must not delay (or be delayed by) telling the
+			// parent it is done.
+			m.reportToParentOnce()
 		}
 
 		// turn.finished: cost and Updated changed even if the next loop
@@ -706,6 +722,45 @@ func (m *managed) maybeAutoCompact() {
 		}
 		m.sess.Emit(event.NewSessionError(m.id, fmt.Sprintf("automatic compaction: %s", err.Error()), false))
 	}
+}
+
+// reportToParentOnce delivers this CHILD session's result to its parent, at
+// most once for the session's whole life. Called only from pump, after a clean
+// turn — a cancelled or failed turn produced no answer to report, and the
+// session stays live to try again.
+//
+// # Why once, and not once per settled turn
+//
+// The report IS the answer to the brief the child was spawned with, and it
+// arrives at the parent as a PROMPT. A parent that reacts to it by steering the
+// child would get a second report, which it might react to again: two sessions
+// prompting each other with no human in the loop is an unbounded loop that
+// looks, from the outside, exactly like two agents working. Bounding it here —
+// structurally, with a sync.Once, rather than by a heuristic about what the
+// parent said — makes the fan-in per child exactly one message. A parent that
+// wants more from a child steers it directly; that conversation has a human
+// watching it.
+//
+// # Why the whole thing is best-effort, but never silent
+//
+// A failed report is emitted as a non-fatal session.error on the CHILD's own
+// stream rather than failing anything: the child's work is already done and
+// journaled, so there is nothing left to fail. It must not be swallowed either
+// — a parent waiting on a child that finished, reported into the void, and
+// looks idle is the exact confusing state this whole path exists to prevent.
+// The Once is consumed either way: a report that could not be delivered is not
+// retried on the next turn, for the loop-bounding reason above.
+func (m *managed) reportToParentOnce() {
+	if m.reportParent == nil || m.parentID == "" {
+		return
+	}
+	m.reportOnce.Do(func() {
+		text := formatSubagentReport(m.id, m.agent, lastAssistantText(m.sess.Fold()))
+		if err := m.reportParent(m.baseCtx, m.parentID, text); err != nil {
+			m.sess.Emit(event.NewSessionError(m.id,
+				fmt.Sprintf("reporting to parent session %s: %s", m.parentID, err.Error()), false))
+		}
+	})
 }
 
 // shouldAutoCompact reports whether usage's measured token footprint has

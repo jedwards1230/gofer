@@ -251,10 +251,17 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 			// gofer/hello binaryVersion to classify skew. effectiveVersion() is
 			// the SAME derivation every worker stamps itself with (see
 			// runSessionWorker), so identical local builds compare equal.
-			Version:    effectiveVersion(),
-			SelfExe:    selfExe,
-			Logger:     logger,
-			MaxWorkers: *maxWorkers,
+			Version: effectiveVersion(),
+			SelfExe: selfExe,
+			// The dial-back coordinates every spawned worker uses to create
+			// subagent sessions and deliver a finished child's report. Both are
+			// already resolved above (ValidateListen ran against this exact
+			// pair), so the router hands down what it is about to bind rather
+			// than re-deriving it.
+			RouterAddr:  *listen,
+			RouterToken: bearerToken,
+			Logger:      logger,
+			MaxWorkers:  *maxWorkers,
 		})
 		if rerr != nil {
 			return fmt.Errorf("build router: %w", rerr)
@@ -294,6 +301,11 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 			Search: searchConfigResolver(rootDir),
 			// Same reasoning, for skills.* — see skillsConfigResolver.
 			Skills: skillsConfigResolver(rootDir),
+			// Same re-read-per-session shape, for subagents.* — see
+			// subagentsConfigResolver. Config.Subagents (the SEAM) is left nil
+			// deliberately: the in-process daemon's answer to "where does a spawn
+			// go" is this same supervisor, which supervisor.New installs itself.
+			SubagentsConfig: subagentsConfigResolver(rootDir),
 			// Attach a per-session telemetry observer at registration, before the
 			// session's first turn — subscribing here (rather than after a turn
 			// has already started) means Events' replay backlog is still empty,
@@ -729,6 +741,26 @@ func skillsConfigResolver(root string) func() config.Skills {
 			return config.Skills{}
 		}
 		return cfg.Skills
+	}
+}
+
+// subagentsConfigResolver is [supervisor.Config.SubagentsConfig] for a process
+// rooted at root — searchConfigResolver's subagent-axis twin, same shape and
+// reason: a `subagents.*` write governs the next session this process starts
+// rather than only the next process.
+//
+// A config that won't load resolves to the zero [config.Subagents] — DISABLED,
+// the fail-safe [config.Subagents.IsEnabled] itself falls back to: no spawn tool
+// registered at all, and no child→parent report path. That polarity matters more
+// here than for the other sections: subagents are opt-in, so a transiently
+// unreadable config must never be the reason a session gains a tool.
+func subagentsConfigResolver(root string) func() config.Subagents {
+	return func() config.Subagents {
+		cfg, err := config.Load(config.DefaultPath(root))
+		if err != nil {
+			return config.Subagents{}
+		}
+		return cfg.Subagents
 	}
 }
 

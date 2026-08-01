@@ -116,6 +116,27 @@ type Config struct {
 	// resolves via [os.Executable] at construction (unless NewWorkerCmd is set,
 	// which bypasses selfExe entirely).
 	SelfExe string
+
+	// RouterAddr and RouterToken are the address and bearer token a spawned
+	// worker DIALS BACK on to create subagent sessions and to deliver a finished
+	// child's report (see internal/worker's RouterSubagents). They are this
+	// router's own daemon listen address and token — already resolved before
+	// router.New runs (cmd/gofer's runDaemon validates the listen/token pair
+	// first) — handed down so a worker can reach the one process that mints
+	// sessions.
+	//
+	// Empty RouterAddr leaves agent-initiated spawning unavailable INSIDE
+	// workers: the worker is started without a link and its supervisor keeps the
+	// in-process default, which a single-session daemon cannot use to spawn a
+	// sibling. That is the correct degradation for an embedder that drives the
+	// router directly (every test in this package), not a configuration to fix.
+	//
+	// RouterToken is passed to the worker through its ENVIRONMENT, never argv:
+	// /proc/<pid>/cmdline is world-readable while /proc/<pid>/environ is not, and
+	// this repo already refuses to put the daemon token on a command line
+	// anywhere else (see cmd/gofer's writeDaemonEnvToken).
+	RouterAddr  string
+	RouterToken string
 	// Logger receives the router's structured logs. Nil discards them.
 	Logger *slog.Logger
 	// NewWorkerCmd, when non-nil, replaces the default worker command builder
@@ -270,6 +291,12 @@ type Supervisor struct {
 	selfExe string
 	log     *slog.Logger
 
+	// routerAddr/routerToken mirror Config.RouterAddr/RouterToken — the
+	// dial-back coordinates every spawned worker is handed (see
+	// buildWorkerCmd). Read-only after New.
+	routerAddr  string
+	routerToken string
+
 	// store enumerates on-disk sessions for List's offline half (store.List per
 	// project slug — a directory read, never a cached journal). History uses a
 	// throwaway store instead, for a fresh fold (see [Supervisor.History]).
@@ -405,6 +432,8 @@ func New(cfg Config) (*Supervisor, error) {
 		model:        cfg.Model,
 		version:      cfg.Version,
 		selfExe:      selfExe,
+		routerAddr:   cfg.RouterAddr,
+		routerToken:  cfg.RouterToken,
 		log:          logger,
 		store:        store,
 		newWorkerCmd: cfg.NewWorkerCmd,
@@ -561,11 +590,25 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts supervisor.
 	}, nil
 }
 
+// WorkerRouterTokenEnv is the environment variable a spawned worker reads its
+// router dial-back bearer token from (see [Config.RouterToken]). Exported so
+// cmd/gofer's `session-worker` reads the same name the router writes, rather
+// than the two agreeing by coincidence.
+//
+// It is an env var and not a flag value because /proc/<pid>/cmdline is
+// world-readable on Linux while /proc/<pid>/environ is owner-only: putting a
+// daemon bearer token in argv would publish it to every local account.
+const WorkerRouterTokenEnv = "GOFER_ROUTER_TOKEN"
+
 // buildWorkerCmd shapes the (unstarted) worker process command. The default
-// execs `gofer session-worker --session <uuid> --root <root> [--model <model>]`;
-// a test overrides it via Config.NewWorkerCmd. Stdio is deliberately left unset
-// here — [daemon.SpawnDetached] redirects stdout+stderr to the per-worker log
-// file at Start.
+// execs `gofer session-worker --session <uuid> --root <root> [--model <model>]
+// [--router <addr>]`; a test overrides it via Config.NewWorkerCmd. Stdio is
+// deliberately left unset here — [daemon.SpawnDetached] redirects stdout+stderr
+// to the per-worker log file at Start.
+//
+// --router is passed to EVERY worker, not just ones expected to spawn: a child
+// session may itself delegate, and the depth cap — not the wiring — is what
+// bounds how far that goes.
 func (s *Supervisor) buildWorkerCmd(ctx context.Context, sessionID, model, cwd string) *exec.Cmd {
 	if s.newWorkerCmd != nil {
 		return s.newWorkerCmd(ctx, sessionID, model, cwd)
@@ -574,9 +617,19 @@ func (s *Supervisor) buildWorkerCmd(ctx context.Context, sessionID, model, cwd s
 	if model != "" {
 		args = append(args, "--model", model)
 	}
+	if s.routerAddr != "" {
+		args = append(args, "--router", s.routerAddr)
+	}
 	cmd := exec.CommandContext(ctx, s.selfExe, args...)
 	if cwd != "" {
 		cmd.Dir = cwd
+	}
+	if s.routerAddr != "" && s.routerToken != "" {
+		// Appended to the inherited environment (exec.Cmd with a nil Env would
+		// pass os.Environ() through anyway) so the worker keeps everything else
+		// it needs; a later entry wins, so this overrides an inherited value of
+		// the same name.
+		cmd.Env = append(os.Environ(), WorkerRouterTokenEnv+"="+s.routerToken)
 	}
 	return cmd
 }

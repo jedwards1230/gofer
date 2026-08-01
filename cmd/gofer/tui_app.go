@@ -206,6 +206,11 @@ func selectTUIBackend(ctx context.Context, df *daemonFlags, cwd, root string, st
 		Tools:            toolsConfigResolver(rootDir),
 		Search:           searchConfigResolver(rootDir),
 		Skills:           skillsConfigResolver(rootDir),
+		// Same re-read-per-session shape, for subagents.* — see
+		// subagentsConfigResolver. The seam is left nil, so supervisor.New wires
+		// spawn/report to this same in-process supervisor: the daemonless
+		// backend hosts every session itself, so a child belongs here too.
+		SubagentsConfig: subagentsConfigResolver(rootDir),
 	})
 	if err != nil {
 		return tuiBackend{}, fmt.Errorf("build supervisor: %w", err)

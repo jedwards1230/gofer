@@ -12,6 +12,7 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/runner"
 
 	"github.com/jedwards1230/gofer/internal/config"
+	"github.com/jedwards1230/gofer/internal/router"
 	"github.com/jedwards1230/gofer/internal/supervisor"
 	"github.com/jedwards1230/gofer/internal/telemetry"
 	"github.com/jedwards1230/gofer/internal/worker"
@@ -39,6 +40,18 @@ func runSessionWorker(ctx context.Context, args []string, stdout, stderr io.Writ
 	session := fs.String("session", "", "REQUIRED: the pinned session uuid the router pre-generated")
 	model := fs.String("model", "", "default model for the session (default: the sole logged-in provider's model)")
 	root := fs.String("root", "", "session store root (default ~/.gofer)")
+	// The router's own listen address, so this worker can dial BACK to create
+	// subagent sessions and deliver a finished child's report (see
+	// internal/worker.RouterSubagents). Empty — a worker started by hand, or by
+	// a router with no RouterAddr — leaves agent-initiated spawning unavailable
+	// in this worker, which is the correct degradation: a single-session daemon
+	// cannot host a sibling session, so there is nowhere local for a spawn to go.
+	routerAddr := fs.String("router", "", "the router's listen address for subagent spawn/report dial-back (default: none)")
+	// Same explicit env-fallback convention as `gofer daemon`'s --token, and for
+	// a stronger reason: the router passes this through the ENVIRONMENT
+	// precisely so a daemon bearer token never lands in a world-readable
+	// /proc/<pid>/cmdline. The flag exists for hand-invocation only.
+	routerToken := fs.String("router-token", "", "bearer token for --router (default: $"+router.WorkerRouterTokenEnv+")")
 	// Same explicit env-fallback convention as `gofer daemon` (see runDaemon):
 	// the flag default is "", and $GOFER_LOG_LEVEL is applied below.
 	logLevel := fs.String("log-level", "", "log level: debug, info, warn, or error (default: $GOFER_LOG_LEVEL, or \"info\")")
@@ -110,7 +123,32 @@ func runSessionWorker(ctx context.Context, args []string, stdout, stderr io.Writ
 	}()
 	logger = wrappedLogger
 
-	sup, err := supervisor.New(supervisor.Config{
+	// The subagent seam must exist BEFORE the supervisor, because
+	// supervisor.Config takes it by value at construction — while the seam
+	// itself reads the supervisor back (for the parent's model/cwd). sup is
+	// therefore declared here and closed over lazily, the same shape runDaemon
+	// uses for its out-of-turn event relay's `var d *daemon.Daemon`.
+	//
+	// It dials nothing until a session actually spawns, so a worker whose
+	// session never delegates pays nothing even if the router is unreachable.
+	// Nil when no --router was given: supervisor.New then installs its
+	// in-process default, which a single-session daemon can never satisfy — but
+	// the spawn tool is not registered at all unless subagents.enabled is set,
+	// so the only way to reach that state is an operator who opted in on a
+	// worker with no dial-back, who gets a clear tool error rather than silence.
+	var sup *supervisor.Supervisor
+	var subagents supervisor.Subagents
+	if addr := *routerAddr; addr != "" {
+		token := *routerToken
+		if token == "" {
+			token = os.Getenv(router.WorkerRouterTokenEnv)
+		}
+		seam := worker.NewRouterSubagents(addr, token, func() *supervisor.Supervisor { return sup }, logger)
+		subagents = seam
+		defer func() { _ = seam.Close() }()
+	}
+
+	sup, err = supervisor.New(supervisor.Config{
 		Root:        rootDir,
 		Permissions: cfg.Engine,
 		// Same config-driven subagent depth cap as `gofer daemon`: the worker
@@ -139,6 +177,12 @@ func runSessionWorker(ctx context.Context, args []string, stdout, stderr io.Writ
 		Search: searchConfigResolver(rootDir),
 		// Same reasoning for skills.* — see skillsConfigResolver.
 		Skills: skillsConfigResolver(rootDir),
+		// Same re-read-per-session shape, for subagents.* — see
+		// subagentsConfigResolver. Unlike the in-process daemon this worker DOES
+		// supply the seam: its own daemon is capped at one session, so a spawn
+		// has to leave the process (see internal/worker.RouterSubagents).
+		SubagentsConfig: subagentsConfigResolver(rootDir),
+		Subagents:       subagents,
 		// Pin the sole session's id to --session (design Option A) through the
 		// SDK's pre-assigned-session-id seam: runner.New creates the session with
 		// this exact id, leaving entry-id generation on the store default.

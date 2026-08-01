@@ -1266,9 +1266,19 @@ nothing changes for a root session. `ParentID`/`Agent`/`Depth` ride the roster
 wire (`parentId`/`agent`/`depth`, all omitempty) through to `tui.SessionInfo`;
 `session/new` carries the request half in ACP's `_meta` (`gofer/parent`,
 `gofer/agent`) and reports what it assigned back (plus `gofer/depth`).
-`gofer run --parent <id> --agent <name>` is the CLI spawner. WHO spawns children
-from inside a turn is still open — there is deliberately no agent-facing spawn
-tool.
+`gofer run --parent <id> --agent <name>` is the CLI spawner.
+
+**Built (agent-initiated, opt-in).** A running session can now spawn children of
+its own via the `spawn_subagent` tool (`internal/subagent`), registered ONLY when
+`subagents.enabled` is set — with the section unset a session's tool surface is
+byte-identical to one built before it existed, so a user who wants nothing to do
+with session trees sees none of this. The tool returns as soon as the child
+exists; when the child's first turn settles, its final assistant text arrives at
+the parent as a queued PROMPT (exactly one per child), which is why a report
+never interrupts a turn and shows up in the parent's transcript as an ordinary
+user message rather than a new widget. Under `--workers` the router creates every
+child — a worker is a single-session daemon. See docs/PRD.md's "Agent-initiated
+subagents".
 
 **Built (the render).** The overview renders the parent at the root with its
 children indented beneath it — a depth-first tree, siblings by the usual recency

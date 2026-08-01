@@ -2,12 +2,19 @@ package router
 
 import (
 	"context"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/jedwards1230/agent-sdk-go/provider"
+
+	"github.com/jedwards1230/gofer/internal/daemon"
 	"github.com/jedwards1230/gofer/internal/supervisor"
+	"github.com/jedwards1230/gofer/internal/worker"
 )
 
 // subagent_test.go covers the M6 half of the parent/child session primitive: the
@@ -148,6 +155,202 @@ func TestCreateSubagentThroughWorker(t *testing.T) {
 		t.Errorf("live row = {parent %q, agent %q, depth %d}, want {%q, go-developer, 1}",
 			row.ParentID, row.Agent, row.Depth, parent.ID)
 	}
+}
+
+// TestBuildWorkerCmdCarriesTheRouterDialBack pins the router-side half of the
+// D2 wiring: every worker is told where to dial back, and the bearer token
+// travels in the ENVIRONMENT rather than argv.
+//
+// The token placement is a real property, not a style choice: /proc/<pid>/cmdline
+// is world-readable on Linux while /proc/<pid>/environ is owner-only, so a token
+// on the command line would publish the daemon's RCE credential to every local
+// account. This repo already refuses to put it in a unit file or argv anywhere
+// else (see cmd/gofer's writeDaemonEnvToken).
+func TestBuildWorkerCmdCarriesTheRouterDialBack(t *testing.T) {
+	tests := []struct {
+		name      string
+		addr      string
+		token     string
+		wantArgs  bool
+		wantToken bool
+	}{
+		{"no router configured", "", "", false, false},
+		{"loopback router, no token", "127.0.0.1:7333", "", true, false},
+		{"router with a token", "127.0.0.1:7333", "s3cret", true, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := New(Config{
+				Root:        t.TempDir(),
+				SelfExe:     "/usr/local/bin/gofer",
+				RouterAddr:  tc.addr,
+				RouterToken: tc.token,
+			})
+			if err != nil {
+				t.Fatalf("router.New: %v", err)
+			}
+			t.Cleanup(func() { _ = s.Close() })
+
+			cmd := s.buildWorkerCmd(context.Background(), "sess-uuid", "faux", t.TempDir())
+			hasRouter := slices.Contains(cmd.Args, "--router")
+			if hasRouter != tc.wantArgs {
+				t.Fatalf("argv %v carries --router = %v, want %v", cmd.Args, hasRouter, tc.wantArgs)
+			}
+			if tc.wantArgs && !slices.Contains(cmd.Args, tc.addr) {
+				t.Errorf("argv %v does not carry the router addr %q", cmd.Args, tc.addr)
+			}
+			if tc.token != "" {
+				for _, arg := range cmd.Args {
+					if strings.Contains(arg, tc.token) {
+						t.Fatalf("the bearer token leaked into argv (%v) — /proc/<pid>/cmdline is world-readable", cmd.Args)
+					}
+				}
+			}
+			gotToken := slices.Contains(cmd.Env, WorkerRouterTokenEnv+"="+tc.token) && tc.token != ""
+			if gotToken != tc.wantToken {
+				t.Fatalf("worker env carries %s = %v, want %v", WorkerRouterTokenEnv, gotToken, tc.wantToken)
+			}
+			if tc.wantToken && len(cmd.Env) < 2 {
+				t.Errorf("worker env was replaced rather than extended: %v", cmd.Env)
+			}
+		})
+	}
+}
+
+// TestWorkerSpawnRoutesThroughRouter is the D2 decision, end to end: a spawn
+// ORIGINATING IN A WORKER results in the ROUTER creating the child, in its own
+// worker process, with the parent link the worker asked for. A worker never
+// creates a session itself — its embedded daemon is capped at one — so this is
+// the only path that can exist.
+//
+// It drives the real [worker.RouterSubagents] against a real router-hosted
+// daemon over a TOKEN-REQUIRED listener. The token half matters: the loopback
+// default masks auth in dev, so a dial-back that forgot to forward the token
+// would pass every other test in this package and fail only on a hardened
+// deployment.
+func TestWorkerSpawnRoutesThroughRouter(t *testing.T) {
+	shortRuntimeDir(t)
+	root := t.TempDir()
+	cwd := t.TempDir()
+	const token = "router-token"
+
+	sup, err := New(Config{Root: root, NewWorkerCmd: fauxWorkerSeam(root)})
+	if err != nil {
+		t.Fatalf("router.New: %v", err)
+	}
+	t.Cleanup(func() {
+		killWorkers(sup)
+		_ = sup.Close()
+	})
+
+	d := daemon.New(sup, daemon.Config{DefaultModel: "faux", BearerToken: token})
+	srv := httptest.NewServer(d.Handler())
+	t.Cleanup(srv.Close)
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	parent, err := sup.Create(ctx, "", supervisor.CreateOptions{Cwd: cwd})
+	if err != nil {
+		t.Fatalf("Create parent: %v", err)
+	}
+
+	// The seam exactly as `gofer session-worker --router <addr>` builds it. sup
+	// is nil here: this test drives the seam from OUTSIDE a worker process, so
+	// there is no local roster to inherit the parent's model/cwd from — which is
+	// itself worth exercising, since that fallback must never block a spawn.
+	seam := worker.NewRouterSubagents(addr, token, nil, nil)
+	t.Cleanup(func() { _ = seam.Close() })
+
+	childID, err := seam.Spawn(ctx, parent.ID, "go-developer", "investigate the flaky build")
+	if err != nil {
+		t.Fatalf("worker spawn through the router: %v", err)
+	}
+	if childID == "" || childID == parent.ID {
+		t.Fatalf("spawn returned child id %q", childID)
+	}
+
+	// The ROUTER created it — it is one of the router's live workers, with the
+	// link the worker's seam asked for and a depth the CHILD's own worker
+	// derived from the shared store.
+	rows, err := sup.Roster(ctx)
+	if err != nil {
+		t.Fatalf("Roster: %v", err)
+	}
+	child := findRouterInfo(rows, childID)
+	if child == nil {
+		t.Fatalf("the router has no live worker for the spawned child %s: %+v", childID, rows)
+	}
+	if child.ParentID != parent.ID {
+		t.Errorf("child ParentID = %q, want %q", child.ParentID, parent.ID)
+	}
+	if child.Agent != "go-developer" {
+		t.Errorf("child Agent = %q, want go-developer", child.Agent)
+	}
+	if child.Depth != 1 {
+		t.Errorf("child Depth = %d, want 1", child.Depth)
+	}
+
+	// And the REPORT half of the same seam: a finished child's result routed
+	// back to the parent's worker as its next prompt.
+	if err := seam.Report(ctx, parent.ID, "subagent go-developer finished: the flake is a shared temp dir"); err != nil {
+		t.Fatalf("worker report through the router: %v", err)
+	}
+	waitForHistoryContaining(t, ctx, sup, parent.ID, "the flake is a shared temp dir")
+}
+
+// TestWorkerSpawnWithoutTokenIsRefused is the negative of the auth half: the
+// same dial-back with no token must fail rather than silently create a session,
+// so a misconfigured worker is loud instead of mysteriously idle.
+func TestWorkerSpawnWithoutTokenIsRefused(t *testing.T) {
+	shortRuntimeDir(t)
+	root := t.TempDir()
+
+	sup, err := New(Config{Root: root, NewWorkerCmd: fauxWorkerSeam(root)})
+	if err != nil {
+		t.Fatalf("router.New: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Close() })
+
+	d := daemon.New(sup, daemon.Config{DefaultModel: "faux", BearerToken: "router-token"})
+	srv := httptest.NewServer(d.Handler())
+	t.Cleanup(srv.Close)
+
+	seam := worker.NewRouterSubagents(strings.TrimPrefix(srv.URL, "http://"), "", nil, nil)
+	t.Cleanup(func() { _ = seam.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := seam.Spawn(ctx, "some-parent", "go-developer", "go"); err == nil {
+		t.Fatal("an unauthenticated dial-back spawned a session")
+	}
+}
+
+// waitForHistoryContaining polls a session's folded history until it carries
+// want. The report rides a fire-and-forget session/prompt (see
+// RouterSubagents.firePrompt), so there is nothing to await synchronously —
+// which is the point: a report must never block the reporting child's pump.
+func waitForHistoryContaining(t *testing.T, ctx context.Context, s *Supervisor, id, want string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		msgs, err := s.History(ctx, id)
+		if err == nil && messagesContain(msgs, want) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("session %s never received a prompt containing %q", id, want)
+}
+
+func messagesContain(msgs []provider.Message, want string) bool {
+	for _, m := range msgs {
+		if strings.Contains(m.Text(), want) {
+			return true
+		}
+	}
+	return false
 }
 
 // findRouterInfo returns the row for id, or nil.
