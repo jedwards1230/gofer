@@ -147,6 +147,10 @@ func selectTUIBackend(ctx context.Context, df *daemonFlags, cwd, root string, st
 		env.DaemonDefaultModel = func(ctx context.Context) (string, error) {
 			return daemonDefaultModelErr(ctx, c)
 		}
+		// The /mcp + /skills panels' data source, bound to THIS connection and
+		// to nothing else — see capabilities_wire.go's file doc for why it
+		// must never fall back to the local supervisor below.
+		env.Capabilities = daemonCapabilities(c, cwd)
 		return tuiBackend{
 			sup:   b,
 			close: b.Close,
@@ -220,6 +224,11 @@ func selectTUIBackend(ctx context.Context, df *daemonFlags, cwd, root string, st
 	// #156). The TUI keeps its header in step itself via
 	// [tui.Overview.WithDefaultModel]; re-resolving on each create keeps
 	// config.json the one source of truth for what actually runs.
+	// The local twin of the daemon branch's env.Capabilities: this process owns
+	// the supervisor, so its MCP manager and skill directories ARE the ones the
+	// panels describe. Set only on this branch; the two never cross.
+	env.Capabilities = localCapabilities(sup, cwd)
+
 	model := resolveOverviewModel(ctx, rootDir)
 	return tuiBackend{
 		sup: tuibridge.New(sup, func(ctx context.Context) string {

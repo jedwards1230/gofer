@@ -10,15 +10,15 @@ claude-sonnet-5 · ~/orchestration
 
 
 
-
-
 ────────────────────────────────────────────────────────────────────────────────
-[Status] Config Model Thinking Usage Stats Context MCP Skills Resume Help
+Status Config Model Thinking Usage Stats Context [MCP] Skills Resume Help
 ────────────────────────────────────────────────────────────────────────────────
-Version: 0.3.0
-Session: —
-Session ID: —
-Cwd: ~/orchestration
-Providers: not signed in
-Model: claude-sonnet-5
+MCP servers: 1 connected of 4 configured
+  github          stdio (configured)  connected
+  linear          http (configured)   not connected
+  legacy-ws       ? (configured)      unsupported transport
+  scratch         stdio (configured)  disabled
+Federated tools: 7 total across connected servers
+Tool schemas: index (configured) — 6 index-only, 1 resident
+Not reported (gofer#302): per-server tools, down-reason, down-since
 ←/→ to switch tabs · esc to close
