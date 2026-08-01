@@ -89,14 +89,27 @@ func (d *Daemon) startSessionObserver(sessionID string) {
 		// Not an error for the caller: a session that cannot be subscribed to is
 		// one this daemon is not hosting live, and the RPC that got here has its
 		// own reporting for that.
+		//
+		// WARN, not Debug: on the session/new path Create has already succeeded,
+		// so nothing else reports this and nothing retries — the session would run
+		// for the worker's whole life with out-of-turn events reaching no client,
+		// silently reinstating the bug this observer exists to fix. That is worth a
+		// line someone will actually see.
 		d.releaseSessionObserver(obs)
-		d.log.Debug("out-of-turn observer: subscribe failed", "session", sessionID, "err", err)
+		d.log.Warn("out-of-turn observer: subscribe failed; out-of-turn events will not reach clients",
+			"session", sessionID, "err", err)
 		return
 	}
 
 	go func() {
-		defer sub.Close()
+		// Close the subscription BEFORE releasing the registry slot, so a
+		// concurrent start can never hold a second live subscription alongside
+		// this one. Deferred calls run LIFO, so this ordering is the reverse of
+		// how it reads. (Either order is safe today — past the loop this
+		// goroutine can no longer deliver — but this way the invariant is local
+		// instead of resting on that argument.)
 		defer d.releaseSessionObserver(obs)
+		defer sub.Close()
 		for {
 			select {
 			case <-d.ctx.Done():
@@ -117,6 +130,17 @@ func (d *Daemon) startSessionObserver(sessionID string) {
 				// drives. Their promptHandlerActive check is what stands this
 				// observer down while a session/prompt handler in this daemon is
 				// already fanning the session's events out.
+				//
+				// BroadcastRawEvent is the half that carries the fix: its
+				// gofer/event frame is what wirestream reconstructs on the router
+				// side. BroadcastSessionUpdate's ACP projection currently has NO
+				// consumer in worker mode — the worker's only peer is the router's
+				// client, whose Reconstructor dispatches just the gofer/* methods
+				// and drops session/update on the floor. It is kept for symmetry
+				// with the in-process watcher and with the EventRelay contract, so
+				// an ACP-speaking peer attached directly to a worker would work;
+				// noted here so the cost is a deliberate choice rather than a
+				// mystery to whoever next profiles this path.
 				d.BroadcastRawEvent(sessionID, raw)
 				d.BroadcastSessionUpdate(sessionID, e)
 			}

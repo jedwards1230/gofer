@@ -66,8 +66,8 @@ Legend: **Y** carried · **—** not carried (annotated below) · **n/a** cannot
 | `tool.call.started` | Y | Y | Y | Y | Y |
 | `tool.call.delta` | — f | Y | Y | Y | Y |
 | `tool.call.finished` | Y | Y | Y | Y | Y |
-| `permission.requested` | Y g | Y h | n/a i | Y h | Y |
-| `permission.resolved` | Y g | Y h | n/a i | Y h | Y |
+| `permission.requested` | Y g | Y h | — i | Y h | Y |
+| `permission.resolved` | Y g | Y h | — i | Y h | Y |
 | `session.error` | — j | Y | Y | Y | Y |
 
 `ToSessionUpdate` (`acp/project_out.go:41-203`) projects **8** event types — not the 9 an earlier
@@ -83,7 +83,8 @@ session roster, so there is nothing to project these onto.
 **b — `session.spawned` is deliberate, and the reason is the sidecar.** gofer records session
 parentage in its own on-disk artifact, not from this event: `internal/supervisor/sidecar.go`
 defines `sessionMeta{ParentID, Agent, Depth}`, written as `<id>.meta.json` beside the journal
-(`supervisor.go:761`), per CLAUDE.md's "visible artifacts over hidden state". gofer never calls
+(written at `supervisor.go:706`, writer at `sidecar.go:163`), per CLAUDE.md's "visible
+artifacts over hidden state". gofer never calls
 the SDK's emitter (`runner.Runner.Spawn` — zero call sites across `internal/` and `cmd/`), so
 the event is *structurally never emitted* in gofer's runtime. **Adding a handler would create a
 second source of truth for parentage**, which is worse than the empty cell. The subagent roster
@@ -94,7 +95,7 @@ tree and drill-in already work, from the sidecar. Leave this row alone.
 `message.finished` projects only for `MessageKind == MessageUser` (`:53`); assistant text and
 reasoning already streamed as deltas, so re-projecting the finished message would duplicate them.
 
-**d — Deliberate, and already documented in the TUI.** `internal/tui/model.go:562-565` names
+**d — Deliberate, and already documented in the TUI.** `internal/tui/model.go:561-564` names
 these lifecycle kinds and states they "carry no transcript-visible state in the minimal attach
 surface", falling through untouched. The roster, not the transcript, is where they surface.
 
@@ -110,16 +111,29 @@ tool call carries the output.
 Reading only that switch makes these look like gaps; they are not.
 
 **h — Carried on dedicated wire methods, not `gofer/event`.** Both the in-turn broadcast
-(`handlers.go:993`, `:1018`) and wirestream (`reconstruct.go:578-603`) special-case permissions
+(`handlers.go:1010`, `:1035`) and wirestream (`reconstruct.go:578-603`) special-case permissions
 onto `gofer/permission_requested` / `_resolved`. `reconstruct.go:367-369` documents it:
 "permission.* deliberately never arrives via gofer/event".
 
-**i — Structurally cannot occur out of turn.** Permission events fire synchronously inside an
-active turn, so `promptHandlerActive` always suppresses the out-of-turn relay for them
-(`event_relay.go:97-99`). Not a gap — an unreachable cell.
+**i — Emitted out of turn in one case, and dropped downstream. Harmless, but not unreachable.**
+The obvious reading is that permissions only fire inside an active turn, so `promptHandlerActive`
+(`event_relay.go:97-99`) always suppresses the out-of-turn relay for them. That is *almost* right
+and the exception matters: a turn can run on a worker with **no** prompt handler in the worker
+daemon — an adopted session finishing a turn its original router started
+(`internal/router/router.go:1063`), where the original `session/prompt` died with its connection
+and `endPromptHandler` already ran while the turn continued on the supervisor pump. In that
+window a `permission.requested` *is* marshalled and shipped as a `gofer/event` frame.
+
+Nothing breaks, because `handleGoferEvent`'s switch has no permission case, so the frame hits
+`default` and is discarded — the same outcome the deliberate design intends
+(`reconstruct.go:367-369`). The real permission path is the dedicated `gofer/permission_*`
+methods either way. Recorded rather than smoothed over because "unreachable" and "reachable but
+dropped" are different invariants, and a future filter added to `handleGoferEvent` would turn the
+second into a live duplicate-delivery bug. This predates the worker-side observer: the in-process
+watcher relays `liveSub.C` equally unfiltered.
 
 **j — ACP has no error stop reason.** `StopReasonFor` returns `ok=false` for `"error"`
-(`acp/project_out.go:209-224`), documenting that "a session.error event carries that signal
+(`acp/project_out.go:209-226`), documenting that "a session.error event carries that signal
 instead". A protocol limitation, not a gofer choice.
 
 ## The gaps
@@ -146,7 +160,7 @@ before reaching either `rec.broker.Publish(ev)` or the `r.sink(...)` push seam. 
 - In-process is unaffected — that path has no wirestream hop and its watchers are generic.
 
 **GAP 3 — `session.info` has no live path into the TUI.** No `case` for it in `Model.Ingest`,
-and it is *not* named in the deliberate fall-through comment at `model.go:562-565`. Titles are
+and it is *not* named in the deliberate fall-through comment at `model.go:561-564`. Titles are
 sourced instead from the roster snapshot on the ~1s tick (`status.go:77-80`,
 `overview_render.go:554`, `peek.go:76`), so a rename during an active attach is invisible until
 the next refresh. Minor, and self-correcting — recorded because "not handled and not documented
