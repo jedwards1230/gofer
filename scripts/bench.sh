@@ -29,14 +29,28 @@
 # A baseline line may carry an optional 4th field, `allocs-only`, which gates
 # that benchmark on allocs/op and NOT on B/op.
 #
-# It exists for CONCURRENT benchmarks. At -benchtime 1x a fan-out benchmark runs
-# one iteration, so how much buffer its peer goroutines happen to allocate is
-# decided by scheduling: BenchmarkBroadcastRawEvent's B/op was measured swinging
+# It exists for CONCURRENT benchmarks. Go charges allocations PROCESS-WIDE, so a
+# fan-out benchmark's peer goroutines land in the timed window too, and at
+# -benchtime 1x whether any given peer's read lands inside it is decided by
+# scheduling: BenchmarkBroadcastRawEvent's B/op was measured swinging
 # 3,920 -> 12,120 (+209%) between identical runs of identical code. No threshold
-# both catches a real regression there and stays quiet, which is the
-# crying-wolf failure this script exists to avoid. Its allocation COUNT is stable,
-# and is what that benchmark's own doc calls its evidence — so the count is what
-# gates it.
+# both catches a real regression there and stays quiet, which is the crying-wolf
+# failure this script exists to avoid.
+#
+# The allocation COUNT is NOT immune to that stray. An earlier version of this
+# comment asserted it was, and gofer#334 measured otherwise: the same mechanism
+# moves the count, just with smaller amplitude. What is actually true — and what
+# makes the count gateable — is that the stray is a small ABSOLUTE number that
+# does not grow with the work one iteration does.
+#
+# So the obligation sits on the BENCHMARK, not on the gate: a concurrent
+# benchmark must batch enough work per iteration that the 25% tolerance is a
+# large multiple of that stray. Where it does, the count gates normally and
+# nothing here is relaxed. Where it does not, the baseline number is a coin flip
+# — BroadcastRawEvent's un-batched baseline of 15 allocs/op sat ~1 allocation
+# from failing on UNMODIFIED code, and did fail gofer#332, a PR that touched no
+# file in the package under test. It now batches 128 broadcasts per iteration.
+# docs/TESTING.md carries the sizing rule and how to re-derive it.
 #
 # This is a per-benchmark, stated exemption visible in the baseline, not a blanket
 # weakening: every non-concurrent benchmark still gates on both metrics.
