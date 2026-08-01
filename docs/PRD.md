@@ -87,7 +87,9 @@ gofer daemon stop|restart [--root dir]  # stop a running daemon (driving its ser
 gofer session-worker        # single-session daemon on a unix socket; spawned by the router
                             #   (M6), not meant to be run directly. --router <addr> is the
                             #   dial-back the router hands it so its session can spawn
-                            #   subagents (token via $GOFER_ROUTER_TOKEN, never argv)
+                            #   subagents; --router-token-file names a 0600 file the worker
+                            #   reads once and deletes (never argv, never the environment —
+                            #   the agent's own bash tool inherits that)
 gofer acp serve             # ACP over stdio (editors, stdio→ws bridges) — NOT IMPLEMENTED
 gofer ps [--all]            # roster (--all includes archived; later: fleet)
 gofer kill|archive <id>     # stop running / clear finished (journal kept)
@@ -540,21 +542,44 @@ FIFO steering queue a human's message uses. A parent mid-turn or mid-compaction
 therefore runs the report the instant it is free, rather than being interrupted:
 `enqueue` takes the session's mutex, `maybeAutoCompact` runs on the pump without
 holding it (`internal/supervisor`'s `TestSubagentReportLandsAfterParentCompaction`
-pins the ordering). Exactly ONE report per child, bounded structurally with a
-`sync.Once`: the report is the answer to the brief, and a parent that reacted to
-it by steering the child would otherwise get another, which is an unbounded
-two-agent loop with no human in it.
+pins the ordering).
+
+**Exactly ONE report per child, durably.** The report is the answer to the
+brief; a parent that reacted by steering the child would otherwise get another,
+which is an unbounded two-agent loop with no human in it. The bound is a
+`reported` flag in the child's own `.meta.json` sidecar, claimed *before*
+delivery — so the failure direction is at-most-once (a parent that waits, which
+a human notices) rather than at-least-once (the loop). It cannot be in-memory
+only: a `sync.Once` belongs to a live session object, and `gofer resume
+<child-id>` builds a new one, so an in-memory bound re-armed the report on every
+resume. The `sync.Once` is kept only as the in-process fast path. The report
+also runs under `context.WithoutCancel` of the session's base context plus its
+own deadline, because the LAST report of a session's life is exactly the one
+racing a `Kill` that cancels it.
 
 **One seam, two deployments.** `supervisor.Subagents` (`Spawn`/`Report`) is the
 only abstraction. The in-process daemon answers it with its own `Create`/`Send`.
 Under `--workers`, **the ROUTER creates every child and a worker never creates a
 session**: a worker's embedded daemon is built with `MaxSessions: 1` — a worker
 IS a single-session daemon — so it structurally cannot host a sibling. The
-worker dials the router back (`--router <addr>`, bearer token via the
-`GOFER_ROUTER_TOKEN` environment, never argv) and uses the existing
+worker dials the router back (`--router <addr>`) and uses the existing
 `session/new` `_meta` and `session/prompt` wire, adding no protocol. That keeps
 exactly one place in gofer that mints sessions and forks processes — the same
 place that enforces `--max-workers`.
+
+**The dial-back credential reaches a worker through neither argv nor the
+environment.** It is written as a 0600 `<workers-dir>/<uuid>.token` file the
+worker reads once and deletes at startup — the same out-of-band shape a
+service-managed daemon's own token already uses. Both obvious channels leak, in
+different directions: `/proc/<pid>/cmdline` is world-readable, so argv publishes
+a token equivalent to arbitrary code execution as the daemon's user to every
+local account; and the *environment* is readable by the **agent itself**, since
+the SDK's bash tool execs with `cmd.Env` unset and gofer's sandbox scrubs
+nothing, so a model could simply run `env`. The whole hand-off is additionally
+gated on `subagents.enabled` — a gofer whose operator never opted in hands its
+workers nothing and spawns them exactly as before. Because a worker's dial-back
+is fixed when the worker forks, enabling subagents under `--workers` takes a
+daemon restart (the same shape as adding an MCP server).
 
 **The sidecar stays the single authority for parentage.** `Supervisor.Create`
 now also forwards `ParentID`/`Depth`/`MaxDepth` into `runner.Options`, which
@@ -568,6 +593,21 @@ the on-disk `<id>.meta.json`, and `event.SessionSpawned` is deliberately still
 unhandled: a handler would create a second, divergent record of the same fact. A
 root session forwards zero values, which the SDK omits, so an unchanged root
 session's journal stays byte-identical.
+
+**`Supervisor.resolveParent` is the SOLE depth-cap enforcement.** `runner.New`
+does not check `Depth > MaxDepth` — only `Runner.Spawn` does, and gofer never
+calls it (see above). Forwarding `MaxDepth` therefore records policy for the
+SDK's own use; it is not a backstop, and nothing behind gofer will catch a cap
+gofer fails to enforce.
+
+The forwarding itself is **not** gated on the subagents opt-in, which is
+deliberate and worth stating: a child created by the operator path
+(`gofer run --parent`) on a subagents-*disabled* gofer now records
+`parent_id`/`depth` in its journal's root meta entry where it previously
+recorded nothing. That is strictly additive, has no reader in gofer, and makes
+the journal agree with the sidecar it always had — but "byte-identical" is a
+claim about a ROOT session's journal and about a session's tool surface, and it
+does not cover this.
 
 ## On-disk layout & config precedence
 

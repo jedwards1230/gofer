@@ -8,15 +8,45 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/jedwards1230/agent-sdk-go/runner"
 
 	"github.com/jedwards1230/gofer/internal/config"
-	"github.com/jedwards1230/gofer/internal/router"
 	"github.com/jedwards1230/gofer/internal/supervisor"
 	"github.com/jedwards1230/gofer/internal/telemetry"
 	"github.com/jedwards1230/gofer/internal/worker"
 )
+
+// readRouterTokenFile reads the router dial-back bearer token from path and
+// DELETES the file, so the credential exists on disk only for the moment
+// between the router writing it and this worker starting.
+//
+// An empty path is not an error: a router on a loopback bind with no bearer
+// token configures none, and a worker with no token dials an unauthenticated
+// router exactly as it did before this existed.
+//
+// A path that was given but cannot be read IS an error, and deliberately fails
+// worker startup. The alternative — carrying on with an empty token — produces a
+// worker whose every spawn dies with an opaque 401 several minutes later, inside
+// a tool call, with nothing pointing back at the real cause.
+//
+// The delete is best-effort and never fails startup: the router sweeps a
+// leftover token file with the rest of the worker's runtime artifacts (see
+// internal/router's removeWorkerArtifacts).
+func readRouterTokenFile(path string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+	b, err := os.ReadFile(path) // #nosec G304 -- the path comes from our own parent router's argv, not from a session.
+	if err != nil {
+		return "", fmt.Errorf("session-worker: read --router-token-file: %w", err)
+	}
+	if rmErr := os.Remove(path); rmErr != nil && !os.IsNotExist(rmErr) {
+		_ = rmErr
+	}
+	return strings.TrimSpace(string(b)), nil
+}
 
 // runSessionWorker implements `gofer session-worker`: a single-session daemon
 // that binds a unix-domain socket ([daemon.WorkerSocketPath]), prints a
@@ -47,11 +77,12 @@ func runSessionWorker(ctx context.Context, args []string, stdout, stderr io.Writ
 	// in this worker, which is the correct degradation: a single-session daemon
 	// cannot host a sibling session, so there is nowhere local for a spawn to go.
 	routerAddr := fs.String("router", "", "the router's listen address for subagent spawn/report dial-back (default: none)")
-	// Same explicit env-fallback convention as `gofer daemon`'s --token, and for
-	// a stronger reason: the router passes this through the ENVIRONMENT
-	// precisely so a daemon bearer token never lands in a world-readable
-	// /proc/<pid>/cmdline. The flag exists for hand-invocation only.
-	routerToken := fs.String("router-token", "", "bearer token for --router (default: $"+router.WorkerRouterTokenEnv+")")
+	// A PATH, never the token itself, and deliberately not an env var either:
+	// the token is read once from this 0600 file and the file is deleted
+	// immediately (see readRouterTokenFile). See router.Config.RouterToken for
+	// why both of the obvious channels leak — argv to every local user, the
+	// environment to the agent's own bash tool.
+	routerTokenFile := fs.String("router-token-file", "", "path to a 0600 file holding the --router bearer token; read once and deleted")
 	// Same explicit env-fallback convention as `gofer daemon` (see runDaemon):
 	// the flag default is "", and $GOFER_LOG_LEVEL is applied below.
 	logLevel := fs.String("log-level", "", "log level: debug, info, warn, or error (default: $GOFER_LOG_LEVEL, or \"info\")")
@@ -139,9 +170,13 @@ func runSessionWorker(ctx context.Context, args []string, stdout, stderr io.Writ
 	var sup *supervisor.Supervisor
 	var subagents supervisor.Subagents
 	if addr := *routerAddr; addr != "" {
-		token := *routerToken
-		if token == "" {
-			token = os.Getenv(router.WorkerRouterTokenEnv)
+		// Consumed and deleted HERE, at startup, before the supervisor exists
+		// and long before any tool call can run — so the credential is in this
+		// process's memory only, never on disk for the session's lifetime and
+		// never in an environment the agent's shell inherits.
+		token, terr := readRouterTokenFile(*routerTokenFile)
+		if terr != nil {
+			return terr
 		}
 		seam := worker.NewRouterSubagents(addr, token, func() *supervisor.Supervisor { return sup }, logger)
 		subagents = seam

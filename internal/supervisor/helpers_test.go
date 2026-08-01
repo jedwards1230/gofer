@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -573,8 +574,19 @@ func newHarnessWithConfig(t *testing.T, mutate func(*supervisor.Config)) *harnes
 
 // register builds and records a fakeSession at the on-disk path a real
 // FileStore would use for id under cwd's project slug.
+//
+// The DIRECTORY is really created (the journal file itself is not — these fakes
+// journal nothing). That matters because the supervisor writes real artifacts
+// BESIDE a session's journal — the `<id>.meta.json` sidecar, and in particular
+// the durable one-report-per-child claim (see managed.reportToParentOnce) —
+// and a fake whose directory does not exist would make every one of those
+// writes fail for reasons that have nothing to do with the code under test.
 func (h *harness) register(id, cwd string) *fakeSession {
-	path := filepath.Join(h.root, "sessions", session.Slugify(cwd), id+".jsonl")
+	dir := filepath.Join(h.root, "sessions", session.Slugify(cwd))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		h.t.Fatalf("harness: create session dir: %v", err)
+	}
+	path := filepath.Join(dir, id+".jsonl")
 	fs := newFakeSession(id, path)
 	h.mu.Lock()
 	h.sessions[id] = fs

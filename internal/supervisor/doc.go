@@ -98,7 +98,9 @@
 // instead, since its own daemon hosts exactly one session. A finished child
 // delivers its final assistant text to its parent as that parent's next PROMPT,
 // through the ordinary FIFO queue — so it never interrupts a turn, and never
-// more than once per child (see [managed.reportToParentOnce]).
+// more than once per child. That bound is DURABLE, recorded in the child's own
+// sidecar rather than in the live session object, so it survives the kill and
+// resume that would otherwise re-arm it (see [managed.reportToParentOnce]).
 //
 // # Prompt queue and steering
 //

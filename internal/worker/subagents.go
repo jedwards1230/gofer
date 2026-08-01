@@ -23,6 +23,18 @@ const routerCallTimeout = 15 * time.Second
 // routerDialTimeout bounds the dial-back to the router.
 const routerDialTimeout = 10 * time.Second
 
+// routerPromptCeiling bounds a fired session/prompt — the child's first turn,
+// and a report delivered to a parent. It is a CEILING on the goroutine, not an
+// expectation of how long a turn takes: session/prompt blocks server-side for
+// the whole turn, so a legitimate one can run for many minutes.
+//
+// It exists because a worker is long-lived and these calls are fire-and-forget.
+// Without a bound, every spawn or report against a far session that wedges
+// (a permission nobody answers, a hung provider) parks a goroutine and its
+// connection state for the worker's entire remaining life, and nothing ever
+// reaps them. An hour is far past any real turn and far short of forever.
+const routerPromptCeiling = time.Hour
+
 // RouterSubagents is the `--workers` implementation of
 // [supervisor.Subagents]: a worker dials the ROUTER to create child sessions
 // and to deliver a finished child's report.
@@ -154,15 +166,20 @@ func (r *RouterSubagents) Close() error {
 // for why it is never awaited. An empty prompt is a no-op (a spawn with no brief
 // creates an idle child, matching Supervisor.Create's own empty-prompt path).
 //
-// context.Background, not a caller ctx: the turn this starts outlives the tool
-// call that started it, exactly as [wirestream.Reconstructor.Send]'s does. A
-// failure is logged rather than returned — there is nobody left to return it to.
+// A context derived from Background rather than from a caller's, because the
+// turn this starts outlives the tool call that started it — exactly as
+// [wirestream.Reconstructor.Send]'s does — but bounded by
+// [routerPromptCeiling] so a wedged far session cannot accumulate goroutines
+// over a long-lived worker's life. A failure is logged rather than returned;
+// there is nobody left to return it to.
 func (r *RouterSubagents) firePrompt(client *daemon.Client, sessionID, prompt string) {
 	if prompt == "" {
 		return
 	}
 	go func() {
-		_, err := client.Call(context.Background(), acp.MethodSessionPrompt, acp.PromptRequest{
+		ctx, cancel := context.WithTimeout(context.Background(), routerPromptCeiling)
+		defer cancel()
+		_, err := client.Call(ctx, acp.MethodSessionPrompt, acp.PromptRequest{
 			SessionID: sessionID,
 			Prompt:    []acp.ContentBlock{acp.TextBlock(prompt)},
 		})

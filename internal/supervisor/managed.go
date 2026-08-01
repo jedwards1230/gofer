@@ -724,6 +724,11 @@ func (m *managed) maybeAutoCompact() {
 	}
 }
 
+// reportDeadline bounds one child→parent report delivery. Generous, because the
+// worker path's Report is a wire round trip to the router, and short enough that
+// a session's teardown is never held open by an unreachable parent.
+const reportDeadline = 30 * time.Second
+
 // reportToParentOnce delivers this CHILD session's result to its parent, at
 // most once for the session's whole life. Called only from pump, after a clean
 // turn — a cancelled or failed turn produced no answer to report, and the
@@ -735,28 +740,69 @@ func (m *managed) maybeAutoCompact() {
 // arrives at the parent as a PROMPT. A parent that reacts to it by steering the
 // child would get a second report, which it might react to again: two sessions
 // prompting each other with no human in the loop is an unbounded loop that
-// looks, from the outside, exactly like two agents working. Bounding it here —
-// structurally, with a sync.Once, rather than by a heuristic about what the
-// parent said — makes the fan-in per child exactly one message. A parent that
-// wants more from a child steers it directly; that conversation has a human
-// watching it.
+// looks, from the outside, exactly like two agents working. Bounding it makes
+// the fan-in per child exactly one message. A parent that wants more from a
+// child steers it directly; that conversation has a human watching it.
 //
-// # Why the whole thing is best-effort, but never silent
+// # The bound is DURABLE, not just in-memory
+//
+// The sync.Once alone would be wrong, and was: it belongs to this [managed],
+// and a killed-then-resumed child is a NEW managed with a NEW Once, so `gofer
+// resume <child-id>` (or the TUI's /resume) re-armed the report on every reopen
+// and the parent got another copy per resume. The authoritative claim is the
+// `reported` flag in the child's own sidecar (see [claimReport]); the Once is
+// kept in front of it purely as the cheap in-process fast path, so a session
+// that reports and then runs ten more turns pays one read-modify-write, not
+// eleven.
+//
+// The claim is taken BEFORE delivery, so the failure direction is at-most-once:
+// losing a report leaves a parent waiting, which a human notices, while
+// duplicating one is the loop this bound exists to prevent.
+//
+// # Why the delivery is best-effort, but never silent
 //
 // A failed report is emitted as a non-fatal session.error on the CHILD's own
 // stream rather than failing anything: the child's work is already done and
 // journaled, so there is nothing left to fail. It must not be swallowed either
 // — a parent waiting on a child that finished, reported into the void, and
 // looks idle is the exact confusing state this whole path exists to prevent.
-// The Once is consumed either way: a report that could not be delivered is not
+// The claim is consumed either way: a report that could not be delivered is not
 // retried on the next turn, for the loop-bounding reason above.
 func (m *managed) reportToParentOnce() {
 	if m.reportParent == nil || m.parentID == "" {
 		return
 	}
 	m.reportOnce.Do(func() {
+		dir := filepath.Dir(m.sess.JournalPath())
+		won, err := claimReport(dir, m.id)
+		if err != nil {
+			// The claim is what makes at-most-once true, so a claim that could
+			// not be persisted must not be treated as won — reporting anyway
+			// would re-arm on the next resume, which is the bug this replaced.
+			// Loud rather than silent: the parent is waiting either way.
+			m.sess.Emit(event.NewSessionError(m.id,
+				fmt.Sprintf("could not record the subagent report claim, so no report was sent to parent session %s: %s",
+					m.parentID, err.Error()), false))
+			return
+		}
+		if !won {
+			// A prior run of this session already reported (kill → resume →
+			// another settled turn). Nothing to do, silently: this is the
+			// bound working, not a failure.
+			return
+		}
+
+		// WithoutCancel, plus a deadline of its own. m.baseCtx is cancelled by
+		// Kill/Archive/Close, and the LAST report of a session's life is exactly
+		// the one most likely to race a teardown — inheriting that cancellation
+		// would fail the delivery with context.Canceled, emit a session.error
+		// nobody is left watching, and burn the (already-persisted) claim. The
+		// deadline is what keeps "uncancellable" from meaning "unbounded".
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(m.baseCtx), reportDeadline)
+		defer cancel()
+
 		text := formatSubagentReport(m.id, m.agent, lastAssistantText(m.sess.Fold()))
-		if err := m.reportParent(m.baseCtx, m.parentID, text); err != nil {
+		if err := m.reportParent(ctx, m.parentID, text); err != nil {
 			m.sess.Emit(event.NewSessionError(m.id,
 				fmt.Sprintf("reporting to parent session %s: %s", m.parentID, err.Error()), false))
 		}

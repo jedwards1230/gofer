@@ -129,12 +129,26 @@ type Config struct {
 	// workers: the worker is started without a link and its supervisor keeps the
 	// in-process default, which a single-session daemon cannot use to spawn a
 	// sibling. That is the correct degradation for an embedder that drives the
-	// router directly (every test in this package), not a configuration to fix.
+	// router directly (every test in this package), and for a gofer whose
+	// operator never enabled subagents — cmd/gofer leaves BOTH fields empty in
+	// that case, so nothing about a worker changes.
 	//
-	// RouterToken is passed to the worker through its ENVIRONMENT, never argv:
-	// /proc/<pid>/cmdline is world-readable while /proc/<pid>/environ is not, and
-	// this repo already refuses to put the daemon token on a command line
-	// anywhere else (see cmd/gofer's writeDaemonEnvToken).
+	// # RouterToken never reaches a worker's argv OR its environment
+	//
+	// It is delivered through a 0600 file the worker reads once and DELETES at
+	// startup (see [WorkerRouterTokenPath]), which is the pattern this repo
+	// already uses for a service-managed daemon's own token (cmd/gofer's
+	// writeDaemonEnvToken). Neither of the two obvious channels is safe:
+	//
+	//   - argv, because /proc/<pid>/cmdline is world-readable, so the daemon's
+	//     bearer token — which is equivalent to arbitrary code execution as the
+	//     daemon's user — would be published to every local account.
+	//   - the ENVIRONMENT, because the agent itself reads it. The SDK's bash
+	//     tool runs exec.CommandContext with cmd.Env unset
+	//     (agent-sdk-go/tool/bash.go), so a child process inherits the worker's
+	//     whole environment and a model can print the token with `env`.
+	//     internal/sandbox scrubs no variables. An env var is safe from other
+	//     USERS and wide open to the very agent the worker exists to contain.
 	RouterAddr  string
 	RouterToken string
 	// Logger receives the router's structured logs. Nil discards them.
@@ -590,25 +604,86 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts supervisor.
 	}, nil
 }
 
-// WorkerRouterTokenEnv is the environment variable a spawned worker reads its
-// router dial-back bearer token from (see [Config.RouterToken]). Exported so
-// cmd/gofer's `session-worker` reads the same name the router writes, rather
-// than the two agreeing by coincidence.
+// WorkerRouterTokenPath returns the path of a worker's router dial-back token
+// file, `<WorkersDir>/<uuid>.token` — the 0600 hand-off [Config.RouterToken]
+// travels through, alongside the worker's other per-session runtime files.
 //
-// It is an env var and not a flag value because /proc/<pid>/cmdline is
-// world-readable on Linux while /proc/<pid>/environ is owner-only: putting a
-// daemon bearer token in argv would publish it to every local account.
-const WorkerRouterTokenEnv = "GOFER_ROUTER_TOKEN"
+// Exported so cmd/gofer's `session-worker` and this package agree on one
+// location rather than by coincidence. The worker reads it ONCE at startup and
+// removes it immediately (see cmd/gofer's readRouterTokenFile), so the
+// credential's window on disk is the worker's own startup, not the session's
+// lifetime.
+func WorkerRouterTokenPath(uuid string) (string, error) {
+	dir, err := daemon.WorkersDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, uuid+".token"), nil
+}
+
+// writeWorkerRouterToken writes the dial-back token for sessionID at mode 0600,
+// before the worker is spawned. A no-op when there is no token to hand over
+// (the loopback default, or an embedder with no auth), so the common case
+// leaves no file at all.
+//
+// It writes directly rather than atomically-via-rename: the file has exactly one
+// reader, which does not exist yet (the worker is spawned after this returns),
+// so there is no reader to tear. O_EXCL so a leftover file from a crashed
+// same-uuid worker is a loud error rather than a silently reused credential —
+// uuids are freshly minted per Create, so a collision means something is wrong.
+func writeWorkerRouterToken(sessionID, token string) error {
+	if token == "" {
+		return nil
+	}
+	path, err := WorkerRouterTokenPath(sessionID)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("write worker router token: %w", err)
+	}
+	if _, err := f.WriteString(token); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return fmt.Errorf("write worker router token: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return fmt.Errorf("write worker router token: %w", err)
+	}
+	return nil
+}
+
+// removeWorkerRouterToken sweeps a token file the worker never got to read —
+// a spawn that failed before the worker started, or one that died during
+// startup. Best-effort: the worker deletes it itself on the happy path, so this
+// is almost always a no-op.
+func removeWorkerRouterToken(sessionID string) {
+	if path, err := WorkerRouterTokenPath(sessionID); err == nil {
+		if rmErr := os.Remove(path); rmErr != nil && !os.IsNotExist(rmErr) {
+			_ = rmErr
+		}
+	}
+}
 
 // buildWorkerCmd shapes the (unstarted) worker process command. The default
 // execs `gofer session-worker --session <uuid> --root <root> [--model <model>]
-// [--router <addr>]`; a test overrides it via Config.NewWorkerCmd. Stdio is
-// deliberately left unset here — [daemon.SpawnDetached] redirects stdout+stderr
-// to the per-worker log file at Start.
+// [--router <addr> [--router-token-file <path>]]`; a test overrides it via
+// Config.NewWorkerCmd. Stdio is deliberately left unset here —
+// [daemon.SpawnDetached] redirects stdout+stderr to the per-worker log file at
+// Start.
 //
-// --router is passed to EVERY worker, not just ones expected to spawn: a child
-// session may itself delegate, and the depth cap — not the wiring — is what
-// bounds how far that goes.
+// --router is passed to EVERY worker the ROUTER was configured with a dial-back
+// for, not just ones expected to spawn: a child session may itself delegate, and
+// the depth cap — not the wiring — is what bounds how far that goes. When the
+// operator did not enable subagents, cmd/gofer leaves RouterAddr empty and none
+// of this is passed at all.
+//
+// cmd.Env is deliberately left NIL, so the worker inherits the router's
+// environment unchanged and gains nothing from this feature. See
+// [Config.RouterToken] for why a bearer token must reach a worker through
+// neither argv nor the environment.
 func (s *Supervisor) buildWorkerCmd(ctx context.Context, sessionID, model, cwd string) *exec.Cmd {
 	if s.newWorkerCmd != nil {
 		return s.newWorkerCmd(ctx, sessionID, model, cwd)
@@ -619,17 +694,17 @@ func (s *Supervisor) buildWorkerCmd(ctx context.Context, sessionID, model, cwd s
 	}
 	if s.routerAddr != "" {
 		args = append(args, "--router", s.routerAddr)
+		if s.routerToken != "" {
+			// The PATH, never the token. The file itself is written by
+			// spawnWorker just before the fork (see writeWorkerRouterToken).
+			if path, err := WorkerRouterTokenPath(sessionID); err == nil {
+				args = append(args, "--router-token-file", path)
+			}
+		}
 	}
 	cmd := exec.CommandContext(ctx, s.selfExe, args...)
 	if cwd != "" {
 		cmd.Dir = cwd
-	}
-	if s.routerAddr != "" && s.routerToken != "" {
-		// Appended to the inherited environment (exec.Cmd with a nil Env would
-		// pass os.Environ() through anyway) so the worker keeps everything else
-		// it needs; a later entry wins, so this overrides an inherited value of
-		// the same name.
-		cmd.Env = append(os.Environ(), WorkerRouterTokenEnv+"="+s.routerToken)
 	}
 	return cmd
 }
@@ -679,10 +754,23 @@ func (s *Supervisor) spawnWorker(ctx context.Context, sessionID, model, cwd stri
 	}
 	logPath := filepath.Join(workersDir, sessionID+".log")
 
+	// Hand over the dial-back credential BEFORE the fork, as a 0600 file the
+	// worker reads and deletes at startup — never argv, never the environment
+	// (see Config.RouterToken). A no-op when there is no token. A failure here
+	// fails the spawn rather than silently producing a worker that cannot
+	// authenticate: the alternative is a session whose every spawn attempt dies
+	// with an opaque 401 much later.
+	if err := writeWorkerRouterToken(sessionID, s.routerToken); err != nil {
+		return spawnedWorker{}, err
+	}
+
 	// Spawn detached (Setsid): the worker outlives a router restart (design §3).
 	cmd := s.buildWorkerCmd(context.Background(), sessionID, model, cwd)
 	pid, err := daemon.SpawnDetached(cmd, logPath)
 	if err != nil {
+		// The worker never started, so nothing will consume (or delete) the
+		// credential we just wrote.
+		removeWorkerRouterToken(sessionID)
 		return spawnedWorker{}, fmt.Errorf("spawn worker: %w", err)
 	}
 	// From here the process is live and MUST be reaped on any failure path.

@@ -12,11 +12,19 @@ package supervisor_test
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/jedwards1230/agent-sdk-go/provider"
+	"github.com/jedwards1230/agent-sdk-go/provider/faux"
+	"github.com/jedwards1230/agent-sdk-go/runner"
+	"github.com/jedwards1230/agent-sdk-go/session"
 
 	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/supervisor"
@@ -281,4 +289,157 @@ func TestSubagentReportDisabledWithoutConfig(t *testing.T) {
 	if got := reportPrompts(h.session(parent.ID)); len(got) != 0 {
 		t.Fatalf("parent ran a report turn with subagents disabled: %v", got)
 	}
+}
+
+// recordingSubagents is a [supervisor.Subagents] that records every report it
+// is handed, for a test whose parent is not itself a live session.
+type recordingSubagents struct {
+	mu      sync.Mutex
+	reports []string
+}
+
+func (r *recordingSubagents) Spawn(context.Context, string, string, string) (string, error) {
+	return "", errors.New("recordingSubagents: Spawn is not used by these tests")
+}
+
+func (r *recordingSubagents) Report(_ context.Context, _, text string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reports = append(r.reports, text)
+	return nil
+}
+
+func (r *recordingSubagents) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.reports)
+}
+
+// TestSubagentReportSurvivesResumeExactlyOnce is the resume-boundary regression
+// test, and it exists because an in-memory sync.Once cannot express the bound
+// the docs promise.
+//
+// The Once belongs to a [managed]. Kill a child and `gofer resume` it — a real,
+// user-reachable action from the CLI and the TUI's /resume — and the resumed
+// child is a NEW managed with a NEW Once, so its next settled turn reported to
+// the parent all over again. Every resume added another copy, which is the
+// unbounded parent↔child prompting loop the bound exists to prevent.
+//
+// It runs against REAL *runner.Runner sessions over the faux provider on
+// purpose: the fakeSession harness journals nothing, so the sidecar the durable
+// claim lives in has no journal to sit beside and lookupDiskSession cannot find
+// the session at all. A fake-based version of this test would be structurally
+// blind to the bug.
+func TestSubagentReportSurvivesResumeExactlyOnce(t *testing.T) {
+	root, cwd := t.TempDir(), t.TempDir()
+	store, err := session.NewFileStore(session.WithRoot(root))
+	if err != nil {
+		t.Fatalf("session.NewFileStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	seam := &recordingSubagents{}
+	sup, err := supervisor.New(supervisor.Config{
+		Root:            root,
+		Store:           store,
+		Subagents:       seam,
+		SubagentsConfig: func() config.Subagents { return config.Subagents{Enabled: true} },
+		NewSession: func(ctx context.Context, opts runner.Options) (supervisor.Session, error) {
+			opts.Store = store
+			opts.Provider = faux.New(faux.Default())
+			return runner.New(ctx, opts)
+		},
+		ResumeSession: func(ctx context.Context, id string, opts runner.Options) (supervisor.Session, error) {
+			opts.Store = store
+			opts.Provider = faux.New(faux.Default())
+			return runner.Resume(ctx, id, opts)
+		},
+	})
+	if err != nil {
+		t.Fatalf("supervisor.New: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Close() })
+
+	ctx := context.Background()
+	parent, err := sup.Create(ctx, "", supervisor.CreateOptions{Cwd: cwd, Model: "faux-1"})
+	if err != nil {
+		t.Fatalf("Create parent: %v", err)
+	}
+	child, err := sup.Create(ctx, "", supervisor.CreateOptions{
+		Cwd: cwd, Model: "faux-1", ParentID: parent.ID, Agent: "go-developer",
+	})
+	if err != nil {
+		t.Fatalf("Create child: %v", err)
+	}
+
+	runChildTurn := func(t *testing.T) {
+		t.Helper()
+		sub, serr := sup.Subscribe(ctx, child.ID)
+		if serr != nil {
+			t.Fatalf("Subscribe: %v", serr)
+		}
+		if serr := sup.Send(ctx, child.ID, "do the work"); serr != nil {
+			t.Fatalf("Send: %v", serr)
+		}
+		waitForTurnFinished(t, sub)
+		waitForStatus(t, sup, child.ID, supervisor.StatusNeedsInput)
+	}
+
+	runChildTurn(t)
+	waitForReports(t, seam, 1)
+
+	// The claim is durable, so it is visible on disk before any resume happens.
+	if !readReportedFlag(t, root, cwd, child.ID) {
+		t.Fatal("the child reported but its sidecar records no claim — the bound is in-memory only and will not survive a resume")
+	}
+
+	// Kill and resume: a brand-new managed, a brand-new sync.Once.
+	if err := sup.Kill(ctx, child.ID); err != nil {
+		t.Fatalf("Kill child: %v", err)
+	}
+	if _, err := sup.Resume(ctx, child.ID, supervisor.ResumeOptions{Cwd: cwd, Model: "faux-1"}); err != nil {
+		t.Fatalf("Resume child: %v", err)
+	}
+	runChildTurn(t)
+
+	// Give a second report every chance to land before declaring it absent: the
+	// report is delivered from the child's pump, which has already run its turn
+	// to completion above.
+	time.Sleep(150 * time.Millisecond)
+	if got := seam.count(); got != 1 {
+		t.Fatalf("parent received %d reports across a kill+resume, want exactly 1 (DUPLICATED — the bound did not survive the resume): %v",
+			got, seam.reports)
+	}
+}
+
+// waitForReports polls the seam until it has recorded want reports.
+func waitForReports(t *testing.T, seam *recordingSubagents, want int) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if seam.count() >= want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("the child's report was DROPPED: %d reports reached the parent, want %d", seam.count(), want)
+}
+
+// readReportedFlag reads the durable one-report claim out of the child's
+// sidecar. It asserts on the FILE rather than on any in-process state, which is
+// the whole point: the claim has to outlive the process.
+func readReportedFlag(t *testing.T, root, cwd, id string) bool {
+	t.Helper()
+	path := filepath.Join(root, "sessions", session.Slugify(cwd), id+".meta.json")
+	raw, err := os.ReadFile(path) //nolint:gosec // test-owned temp path
+	if err != nil {
+		t.Fatalf("read sidecar %s: %v", path, err)
+	}
+	var got struct {
+		Reported bool `json:"reported"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal sidecar %s: %v", raw, err)
+	}
+	return got.Reported
 }

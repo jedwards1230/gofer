@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"errors"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -158,14 +159,21 @@ func TestCreateSubagentThroughWorker(t *testing.T) {
 }
 
 // TestBuildWorkerCmdCarriesTheRouterDialBack pins the router-side half of the
-// D2 wiring: every worker is told where to dial back, and the bearer token
-// travels in the ENVIRONMENT rather than argv.
+// D2 wiring: a worker is told where to dial back, and the bearer token reaches
+// it through NEITHER argv NOR the environment.
 //
-// The token placement is a real property, not a style choice: /proc/<pid>/cmdline
-// is world-readable on Linux while /proc/<pid>/environ is owner-only, so a token
-// on the command line would publish the daemon's RCE credential to every local
-// account. This repo already refuses to put it in a unit file or argv anywhere
-// else (see cmd/gofer's writeDaemonEnvToken).
+// Both exclusions are real security properties, not style choices, and they
+// have different threat models — which is why each is asserted separately:
+//
+//   - argv, because /proc/<pid>/cmdline is world-readable on Linux, so a token
+//     on the command line publishes the daemon's RCE-equivalent credential to
+//     every other local account.
+//   - the ENVIRONMENT, because the AGENT reads it. The SDK's bash tool runs
+//     exec.CommandContext with cmd.Env unset (agent-sdk-go/tool/bash.go), so a
+//     tool call inherits the worker's whole environment and a model can print
+//     the token with `env`. internal/sandbox scrubs nothing. This is the more
+//     dangerous of the two: the agent is precisely the party the worker
+//     boundary exists to contain.
 func TestBuildWorkerCmdCarriesTheRouterDialBack(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -180,6 +188,7 @@ func TestBuildWorkerCmdCarriesTheRouterDialBack(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			shortRuntimeDir(t)
 			s, err := New(Config{
 				Root:        t.TempDir(),
 				SelfExe:     "/usr/local/bin/gofer",
@@ -199,22 +208,89 @@ func TestBuildWorkerCmdCarriesTheRouterDialBack(t *testing.T) {
 			if tc.wantArgs && !slices.Contains(cmd.Args, tc.addr) {
 				t.Errorf("argv %v does not carry the router addr %q", cmd.Args, tc.addr)
 			}
+
 			if tc.token != "" {
 				for _, arg := range cmd.Args {
 					if strings.Contains(arg, tc.token) {
 						t.Fatalf("the bearer token leaked into argv (%v) — /proc/<pid>/cmdline is world-readable", cmd.Args)
 					}
 				}
+				for _, kv := range cmd.Env {
+					if strings.Contains(kv, tc.token) {
+						t.Fatalf("the bearer token leaked into the worker's environment — the agent's own bash tool inherits it and can print it with `env`")
+					}
+				}
 			}
-			gotToken := slices.Contains(cmd.Env, WorkerRouterTokenEnv+"="+tc.token) && tc.token != ""
-			if gotToken != tc.wantToken {
-				t.Fatalf("worker env carries %s = %v, want %v", WorkerRouterTokenEnv, gotToken, tc.wantToken)
+			// A nil Env means "inherit the router's, unchanged", which is what
+			// keeps this feature from touching a worker's environment at all.
+			if cmd.Env != nil {
+				t.Errorf("buildWorkerCmd set cmd.Env (%v); it must stay nil so the worker's environment is untouched", cmd.Env)
 			}
-			if tc.wantToken && len(cmd.Env) < 2 {
-				t.Errorf("worker env was replaced rather than extended: %v", cmd.Env)
+
+			gotFlag := slices.Contains(cmd.Args, "--router-token-file")
+			if gotFlag != tc.wantToken {
+				t.Fatalf("argv %v carries --router-token-file = %v, want %v", cmd.Args, gotFlag, tc.wantToken)
 			}
 		})
 	}
+}
+
+// TestWriteWorkerRouterTokenIsOwnerOnly pins the file half of the hand-off: the
+// credential lands at mode 0600 and carries the token verbatim, and no file is
+// created at all when there is no token to hand over.
+func TestWriteWorkerRouterTokenIsOwnerOnly(t *testing.T) {
+	shortRuntimeDir(t)
+	dir, err := daemon.WorkersDir()
+	if err != nil {
+		t.Fatalf("WorkersDir: %v", err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	t.Run("no token writes no file", func(t *testing.T) {
+		if err := writeWorkerRouterToken("no-token-sess", ""); err != nil {
+			t.Fatalf("writeWorkerRouterToken: %v", err)
+		}
+		path, _ := WorkerRouterTokenPath("no-token-sess")
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("a tokenless router wrote a credential file (stat err = %v)", err)
+		}
+	})
+
+	t.Run("token file is 0600 and exact", func(t *testing.T) {
+		const tok = "s3cret"
+		if err := writeWorkerRouterToken("tok-sess", tok); err != nil {
+			t.Fatalf("writeWorkerRouterToken: %v", err)
+		}
+		path, _ := WorkerRouterTokenPath("tok-sess")
+		t.Cleanup(func() { _ = os.Remove(path) })
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat token file: %v", err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Errorf("token file mode = %o, want 0600", perm)
+		}
+		b, err := os.ReadFile(path) // #nosec G304 -- test-owned temp path
+		if err != nil {
+			t.Fatalf("read token file: %v", err)
+		}
+		if string(b) != tok {
+			t.Errorf("token file = %q, want %q", b, tok)
+		}
+	})
+
+	t.Run("removeWorkerArtifacts sweeps an unread token", func(t *testing.T) {
+		if err := writeWorkerRouterToken("swept-sess", "s3cret"); err != nil {
+			t.Fatalf("writeWorkerRouterToken: %v", err)
+		}
+		removeWorkerArtifacts("swept-sess")
+		path, _ := WorkerRouterTokenPath("swept-sess")
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("a worker's unread credential survived artifact cleanup (stat err = %v)", err)
+		}
+	})
 }
 
 // TestWorkerSpawnRoutesThroughRouter is the D2 decision, end to end: a spawn
