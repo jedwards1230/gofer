@@ -17,6 +17,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/jedwards1230/gofer/internal/daemon"
 )
 
 // TestDaemonBackendReadsCapabilitiesOverTheWireNotLocally is the process-level
@@ -102,6 +104,47 @@ func TestLocalBackendReadsItsOwnSupervisor(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("the local closure must read this process's own store root, got %+v", answer.Snapshot.Skills.Loaded)
+	}
+}
+
+// TestDaemonCapabilitiesFailureStaysUnknownAndReadsNothingLocally covers the
+// branch TestDaemonBackendReadsCapabilitiesOverTheWireNotLocally cannot: what
+// happens when the wire CANNOT answer.
+//
+// A live daemon that answers correctly proves the closure did not ALWAYS read
+// locally. It says nothing about the far more tempting bug — a fallback guarded
+// on "the daemon had no answer", which is inert on the happy path and fires
+// exactly when a user is least able to notice. So this test breaks the
+// connection first, and plants a skill under the cwd that any local read would
+// pick up.
+//
+// The assertion is that unknown STAYS unknown. Substituting a local snapshot
+// here would render a complete, confident panel about this machine while the
+// TUI says it is attached to a daemon.
+func TestDaemonCapabilitiesFailureStaysUnknownAndReadsNothingLocally(t *testing.T) {
+	addr := testDaemon(t, "", fauxProvider)
+	c, err := daemon.Dial(context.Background(), addr, "")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	// Break it: every subsequent call fails at the transport, which is the
+	// generic "no answer" this closure must not paper over.
+	if err := c.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	cwd := t.TempDir()
+	writeBackendSkill(t, filepath.Join(cwd, ".gofer", "skills", "cwd-local-skill"), "cwd-local-skill")
+
+	answer, err := daemonCapabilities(c, cwd)(context.Background())
+	if err == nil {
+		t.Error("a broken connection must surface its error to the closure's caller")
+	}
+	if answer.Known {
+		t.Fatalf("a failed wire read must stay UNKNOWN, got %+v", answer)
+	}
+	if len(answer.Snapshot.Skills.Loaded) != 0 || len(answer.Snapshot.MCP.Servers) != 0 {
+		t.Fatalf("the daemon closure fell back to a LOCAL read: %+v", answer.Snapshot)
 	}
 }
 

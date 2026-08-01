@@ -15,6 +15,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -332,6 +333,49 @@ func TestCapabilityTabsShareOneFetch(t *testing.T) {
 	}
 	if !strings.Contains(got, "commit-msg") {
 		t.Errorf("the Skills tab must reuse the answer /mcp already fetched, got:\n%s", got)
+	}
+}
+
+// TestCapabilityPanelOverflowIsReportedNotClipped covers the row budget. The
+// panel body is a fixed 13 rows and [commandPanel.View] clips unconditionally,
+// so an operator with more MCP servers than fit would otherwise see a list that
+// simply stops — with no indication anything is missing, which is the same
+// class of quiet wrongness as an unanswered panel reading as empty.
+//
+// The budget is NOT grown for these tabs: no constant is large enough for a
+// list an operator controls the length of, and growing it would re-capture
+// every golden in the package for a case that overflows one server later.
+func TestCapabilityPanelOverflowIsReportedNotClipped(t *testing.T) {
+	const servers = 40
+	env := tui.GoldenCommandEnv()
+	env.Capabilities = func(context.Context) (capability.Answer, error) {
+		snap := capability.Snapshot{MCP: capability.MCP{ConnectedTools: 1, SchemaMode: "preload"}}
+		for i := range servers {
+			snap.MCP.Servers = append(snap.MCP.Servers, capability.Server{
+				Name:                "srv-" + strconv.Itoa(i),
+				ConfiguredTransport: "stdio",
+				Enabled:             true,
+			})
+		}
+		return capability.Answer{Known: true, Snapshot: snap}, nil
+	}
+
+	got := content(dispatchSlash(t, newPanelApp(t, env), "/mcp"))
+	if !strings.Contains(got, "more") {
+		t.Errorf("an over-budget server list must report its overflow, got:\n%s", got)
+	}
+	// The tail rows carry the aggregate figures and the omission notice; an
+	// overflow that ate them would drop the panel's actual conclusions in
+	// favour of more rows of the list.
+	for _, want := range []string{"Federated tools:", "Not reported (gofer#302)"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("overflow must not displace the tail row %q, got:\n%s", want, got)
+		}
+	}
+	// And the last server must genuinely be off screen — otherwise the test
+	// would pass against a panel that grew instead of overflowing.
+	if strings.Contains(got, "srv-"+strconv.Itoa(servers-1)) {
+		t.Errorf("expected the tail of the list to be elided, got:\n%s", got)
 	}
 }
 
