@@ -14,9 +14,21 @@
 # it by hand (workflow_dispatch) to seed the baseline the first time. If a
 # future ruleset change blocks the instant merge (e.g. required checks), the
 # PR is left open for a human and the run still succeeds.
-name: VHS baseline
-run-name: VHS baseline · ${{ github.sha }}
-
+#
+# gofer#294: this doesn't need the PR-facing "skip is legible" treatment
+# vhs-capture.yml got (there's no PR check here for a reviewer to misread as
+# absent-means-passing — it's a push-to-main maintenance job that already
+# reports "baseline already current" to its own step summary on a no-op run).
+# It DOES share vhs-capture.yml's other risk: getting the path list wrong
+# staled the tracked baseline that every PR's capture branch diffs against.
+# The extra paths below mirror vhs-capture.yml's `changes` job reasoning —
+# see that file for the full derivation and why each one is there. Checked
+# against history first (`git log --grep='^vhs: refresh snapshot baseline'`):
+# every push that actually changed a snapshot PNG also touched internal/tui/**
+# or vhs/harness/** in the SAME push, so this filter has not observably gone
+# stale yet — but that held by author discipline (CONTRIBUTING.md's "capture
+# new TUI states as you go"), not by the filter being complete, which is the
+# same silent-staleness risk gofer#294 is about.
 on:
   push:
     branches: [main]
@@ -27,6 +39,11 @@ on:
       - scripts/tui-vhs.sh
       - .github/workflows/vhs-baseline.yml
       - .github/actions/render-vhs/**
+      - internal/supervisor/**
+      - internal/lspdiag/**
+      - internal/daemonbridge/**
+      - internal/tuibridge/**
+      - cmd/gofer/**
   workflow_dispatch:
 
 concurrency:

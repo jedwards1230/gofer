@@ -14,18 +14,22 @@
 # This is NOT a required check (own file, never gates merge). Fork PRs get a
 # read-only token, so they degrade to an artifact upload instead of a
 # push+comment. The tracked `main` baseline is maintained by vhs-baseline.yml.
+#
+# gofer#294: the render itself (setup-go + apt install + 15-tape sequential
+# render, ~275s measured on #292) is skipped on a PR that cannot possibly
+# change a rendered frame — see the `changes` job below for what "possibly"
+# means and why. Deliberately NOT a trigger-level `paths:` filter: that would
+# make a non-matching PR carry no check at all, indistinguishable from "CI
+# hasn't started yet" (the same shape as a conflicted PR getting no run, or
+# lsp-live skipping when gopls is absent). This workflow always triggers, so
+# it always reports something — either the real capture, or an explicit
+# skip-notice job that says so on the PR.
 name: VHS capture
 run-name: VHS capture · PR #${{ github.event.pull_request.number }}
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-    paths:
-      - internal/tui/**
-      - vhs/**
-      - scripts/tui-vhs.sh
-      - .github/workflows/vhs-capture.yml
-      - .github/actions/render-vhs/**
 
 # One run per PR; a newer push cancels the older render so capture-branch pushes
 # for the same PR never race each other.
@@ -38,7 +42,99 @@ permissions:
   pull-requests: write # maintain the sticky capture comment
 
 jobs:
+  # Decides whether this PR can possibly change a rendered VHS frame, so the
+  # expensive capture job only runs when it might produce a different pixel.
+  # Always runs (no path filter on the trigger), so its cost is one cheap
+  # `gh api` call plus, on a skip, one comment upsert — nowhere near the
+  # render's ~275s.
+  #
+  # The path list is the render binary's *actual* dependency surface, plus a
+  # few couplings the build graph can't see. Derivation:
+  #
+  #   go list -deps ./vhs/harness | grep jedwards1230/gofer/
+  #
+  # returns internal/config, internal/decision, internal/modelcatalog,
+  # internal/modelmeta, internal/permrationale, internal/telemetry,
+  # internal/tui (+layout,+theme), internal/usercmd, internal/versionskew —
+  # i.e. today only internal/tui/** actually renders visibly differing text
+  # for the canned scenarios in play; the rest of that dependency list is
+  # exercised by the harness but never shows up in a frame, so it is
+  # deliberately narrower than the true build graph:
+  #
+  #   - internal/tui/**                the renderers/theme/layout under capture
+  #   - vhs/**                         tapes, harness, committed snapshots
+  #   - scripts/tui-vhs.sh             the render entrypoint both lanes call
+  #   - .github/actions/render-vhs/**  shared install+render composite
+  #   - this file                      obviously
+  #
+  # Additionally, trigger on paths with NO import edge into vhs/harness today,
+  # but that gofer#294 flags as exactly the kind of drift a build-graph check
+  # can't see: a maintainer hand-mirrors these into the harness's canned
+  # scenarios as plain string/enum literals, so a wire-format change on the
+  # real side can silently stop matching what the harness fakes without ever
+  # tripping a compiler:
+  #
+  #   - internal/supervisor/**    defines the session status words
+  #                                (SessionStatus.String(): "working" /
+  #                                "finished" / …). vhs/harness/main.go hangs
+  #                                its canned roster rows straight off
+  #                                tui.StatusWorking/StatusFinished, and
+  #                                internal/daemonbridge.statusFromWire is the
+  #                                real string switch that keeps the two in
+  #                                sync outside VHS — a rename on either side
+  #                                is exactly the drift this exists to catch.
+  #   - internal/lspdiag/**       injects diagnostic text into tool-call
+  #                                results that the attach transcript renders;
+  #                                the harness's canned tool-call scenarios are
+  #                                meant to look like a real one.
+  #   - internal/daemonbridge/**  and internal/tuibridge/** are the two real
+  #                                wire->tui adapters (statusFromWire lives in
+  #                                daemonbridge) — the most likely place a
+  #                                status/label mismatch actually gets
+  #                                introduced.
+  #   - cmd/gofer/**              launches the real TUI outside VHS
+  #                                (model/prompt/config wiring); not on the
+  #                                harness's build path today, but the
+  #                                plausible next place a real-launch-only
+  #                                input starts mattering.
+  #
+  # None of those four are a proven live coupling the way internal/tui/** is —
+  # they're insurance against a change nobody notices no longer matches the
+  # harness. Erring toward running: a false positive costs ~275s of
+  # (cache-reduced) runner time; a false negative costs a stale baseline
+  # nobody catches until a PNG is eyeballed by hand.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      relevant: ${{ steps.check.outputs.relevant }}
+    steps:
+      - name: Check changed paths
+        id: check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          files="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/files" --paginate -q '.[].filename')"
+          relevant=false
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              internal/tui/*|vhs/*|scripts/tui-vhs.sh|.github/actions/render-vhs/*|.github/workflows/vhs-capture.yml|internal/supervisor/*|internal/lspdiag/*|internal/daemonbridge/*|internal/tuibridge/*|cmd/gofer/*)
+                relevant=true
+                ;;
+            esac
+          done <<<"$files"
+          echo "relevant=$relevant" >>"$GITHUB_OUTPUT"
+          if [ "$relevant" = "true" ]; then
+            echo "VHS capture: rendering-affecting paths changed — capture will run." >>"$GITHUB_STEP_SUMMARY"
+          else
+            echo "VHS capture: no rendering-affecting paths changed — capture will skip." >>"$GITHUB_STEP_SUMMARY"
+          fi
+
   capture:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     env:
       PR: ${{ github.event.pull_request.number }}
@@ -223,3 +319,49 @@ jobs:
             echo
             echo "Rendered frames are attached to this run as the **vhs-frames** artifact."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # gofer#294: the affirmative half of the skip. This always runs when
+  # `changes` found nothing rendering-affecting, so a reviewer sees a real
+  # statement ("capture skipped, and here is why") instead of the absence of
+  # a check — the same shape as a conflicted PR silently getting no CI run at
+  # all. Cheap: one `gh api` comment upsert, no checkout, no VHS install.
+  skip-notice:
+    needs: changes
+    if: needs.changes.outputs.relevant != 'true'
+    runs-on: ubuntu-latest
+    env:
+      PR: ${{ github.event.pull_request.number }}
+      SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+    steps:
+      - name: Post skip notice
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "VHS capture skipped: no rendering-affecting paths changed in this PR." >>"$GITHUB_STEP_SUMMARY"
+          if [ "$SAME_REPO" != "true" ]; then
+            echo "(fork PR — the sticky comment is same-repo only, same as the capture lane)" >>"$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # Same marker/upsert the capture job uses, so whichever job ran most
+          # recently (run vs. skip) is the comment's current state — no stale
+          # "capture ran" comment left behind by an earlier push that later
+          # became skip-eligible (e.g. a revert).
+          marker='<!-- vhs-capture-bot -->'
+          {
+            printf '%s\n\n' "$marker"
+            echo "### TUI visual capture"
+            echo
+            echo "**VHS capture skipped**: no rendering-affecting paths changed in this PR. Advisory lane — nothing to review here."
+          } > comment.md
+          existing="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate \
+            -q "[.[] | select(.body | contains(\"$marker\")) | .id] | first // empty")"
+          if [ -n "$existing" ]; then
+            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${existing}" \
+              -F body=@comment.md >/dev/null
+            echo "updated sticky comment ${existing} to skipped state"
+          else
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" \
+              -F body=@comment.md >/dev/null
+            echo "created sticky comment (skipped state)"
+          fi
