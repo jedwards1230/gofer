@@ -588,14 +588,20 @@ func TestContextOverflowNothingToCompactSurfacesOriginal(t *testing.T) {
 	}
 }
 
-// TestContextOverflowCompactionFailureJoinsBothHalves covers the generic
+// TestContextOverflowCompactionFailureSurfacesBothHalves covers the generic
 // compaction-failure branch: the remedy could not run for a reason that is not
 // "nothing to shrink". Both halves must reach the user — the turn did not fit,
 // AND the compaction that would have fixed it failed — because either alone is
-// misleading. The errors.Is assertion is the load-bearing one: classification
-// has to survive errors.Join, which it does because stdlib errors.Is traverses
-// every branch of a join.
-func TestContextOverflowCompactionFailureJoinsBothHalves(t *testing.T) {
+// misleading. The errors.Is assertion is load-bearing: classification has to
+// survive the wrapper, which it does because stdlib errors.Is traverses every
+// branch of a multi-error Unwrap.
+//
+// The single-line assertion is the other half, and it is why the branch does
+// not use errors.Join: Join formats with NEWLINES, and this message is emitted
+// as a session.error, which internal/render's Human.marker interpolates
+// verbatim into a documented one-line "· kind  detail" row. A multi-line detail
+// splits that row in the non-TUI render paths.
+func TestContextOverflowCompactionFailureSurfacesBothHalves(t *testing.T) {
 	sup, id, fs, sub := overflowHarness(t)
 	fs.failCompact(errors.New("summarizer unreachable"))
 
@@ -611,9 +617,14 @@ func TestContextOverflowCompactionFailureJoinsBothHalves(t *testing.T) {
 	if !strings.Contains(surfaced, provider.ErrContextOverflow.Error()) {
 		t.Errorf("surfaced error = %q, want it to carry the original overflow as well", surfaced)
 	}
+	if strings.Contains(surfaced, "\n") {
+		t.Errorf("surfaced error = %q, want a SINGLE-LINE message: internal/render's Human.marker "+
+			"interpolates a session.error detail verbatim into a one-line \"· kind  detail\" row, "+
+			"so a newline splits that row", surfaced)
+	}
 	err := sup.LastError(id)
 	if !errors.Is(err, provider.ErrContextOverflow) {
-		t.Errorf("LastError = %v, want errors.Is provider.ErrContextOverflow (classification survives the join)", err)
+		t.Errorf("LastError = %v, want errors.Is provider.ErrContextOverflow (classification survives the wrapper)", err)
 	}
 }
 

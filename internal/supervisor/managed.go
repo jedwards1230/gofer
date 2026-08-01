@@ -580,28 +580,35 @@ func (m *managed) recoverFromContextOverflow(text string, overflowErr error, ret
 			// problem the user actually has.
 			return overflowErr
 		}
-		// Every other compaction failure surfaces JOINED with the original
-		// rejection, because the user needs both halves — the turn did not
-		// fit, AND the automatic remedy could not run — and either alone is
-		// misleading.
+		// Every other compaction failure surfaces carrying BOTH halves,
+		// because the user needs both — the turn did not fit, AND the
+		// automatic remedy could not run — and either alone is misleading.
+		// See overflowRecoveryError for why that is a local type rather than
+		// errors.Join.
 		//
-		// Joining is safe for classification because stdlib errors.Is
-		// traverses EVERY branch of a join, and the overflow sentinel is
-		// answered by the provider adapters' own Is(target) methods (see
-		// provider/openai's APIError/StreamError) rather than by being a value
-		// in the chain — the SDK's contract promises only that it propagates
-		// unwrapped through the loop and the runner, which is what keeps those
-		// methods reachable here. That is also, USUALLY, what makes an
-		// interrupted recovery fall out correctly: a cancelled Compact tends to
-		// contribute context.Canceled, pump's emit filter sees it through the
-		// join, and an Esc stays silent as a cancelled turn should. Only
-		// "usually" — Compact returns a bare ctx.Err() when cancelled before it
-		// starts, but a cancellation mid-summarize surfaces through whatever
-		// the HTTP adapter wrapped it in (a *url.Error unwrapping to
-		// context.Canceled, in practice), which is adapter behavior and not an
-		// SDK-documented guarantee. A missed suppression costs one extra
-		// session.error line, never correctness.
-		return errors.Join(overflowErr, fmt.Errorf("compacting after context overflow: %w", err))
+		// Classification survives the wrapper because stdlib errors.Is
+		// traverses every branch of a multi-error Unwrap, and the overflow
+		// sentinel is answered by the provider adapters' own Is(target)
+		// methods (see provider/openai's APIError/StreamError) rather than by
+		// ever being a value in the chain. Nothing in the SDK guarantees that
+		// survival: its contract promises only that the sentinel propagates
+		// UNWRAPPED through the loop and the runner, which is what keeps those
+		// Is methods reachable for stdlib to find here.
+		//
+		// That traversal is also, USUALLY, what makes an interrupted recovery
+		// fall out correctly: a cancelled Compact tends to contribute
+		// context.Canceled, pump's emit filter sees it through the wrapper, and
+		// an Esc stays silent as a cancelled turn should. Only "usually" —
+		// Compact returns a bare ctx.Err() when cancelled before it starts, but
+		// a cancellation mid-summarize surfaces through whatever the HTTP
+		// adapter wrapped it in (a *url.Error unwrapping to context.Canceled,
+		// in practice), which is adapter behavior and not an SDK-documented
+		// guarantee. A missed suppression costs one extra session.error line,
+		// never correctness.
+		return &overflowRecoveryError{
+			overflow: overflowErr,
+			compact:  fmt.Errorf("compacting after context overflow: %w", err),
+		}
 	}
 
 	// The retry is a fresh dispatch, so bump updated and notify exactly as pump
@@ -621,6 +628,43 @@ func (m *managed) recoverFromContextOverflow(text string, overflowErr error, ret
 	// is the whole guarantee — a future edit that gives the retry a context
 	// from anywhere else must reinstate the closing check.
 	return m.sess.Prompt(retryCtx, text)
+}
+
+// overflowRecoveryError carries both halves of a failed overflow recovery —
+// the provider's original rejection, and the compaction failure that stopped
+// it being remedied — as one error that formats on a SINGLE LINE.
+//
+// It exists only because of that last word. [errors.Join] is otherwise exactly
+// this type and would be the obvious spelling, but its Error() separates
+// components with NEWLINES. This value reaches pump, which emits it as
+// event.NewSessionError(m.id, err.Error(), false), and internal/render's
+// Human.marker renders a session.error as a documented ONE-LINE row —
+// "· <kind>  <detail>\n", with detail interpolated verbatim. A newline inside
+// detail therefore splits that row in the non-TUI render paths (gofer demo and
+// the JSONL renderer). Joining with "; " keeps the row intact and loses
+// nothing a reader needs.
+//
+// So: do NOT "simplify" this back to errors.Join. The multi-line output is the
+// bug it was written to fix.
+type overflowRecoveryError struct {
+	overflow error // the provider's context-window rejection
+	compact  error // why the compaction that would have remedied it failed
+}
+
+// Error renders both halves on one line — see the type's doc for why that
+// matters.
+func (e *overflowRecoveryError) Error() string {
+	return e.overflow.Error() + "; " + e.compact.Error()
+}
+
+// Unwrap returns BOTH errors, in the multi-error form Go 1.20+ errors.Is
+// traverses. The single-error `Unwrap() error` form would silently drop a
+// branch, and each branch is load-bearing: callers classify the overflow half
+// with errors.Is(err, provider.ErrContextOverflow), and pump's own emit filter
+// classifies the compact half with errors.Is(err, context.Canceled) to keep an
+// interrupted recovery silent.
+func (e *overflowRecoveryError) Unwrap() []error {
+	return []error{e.overflow, e.compact}
 }
 
 // maybeAutoCompact checks the just-settled turn's measured usage against the
