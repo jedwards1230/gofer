@@ -221,6 +221,21 @@ type App struct {
 	// a held selection leaves the arm pointing at the session it was armed on.
 	ctrlXArmed string
 
+	// quitArmed is the ctrl+c double-tap confirm's arm state (gofer#314):
+	// false = nothing armed, true = a first ctrl+c has armed the quit. Unlike
+	// ctrlXArmed above, Update's key handler disarms it CONDITIONALLY — only on
+	// a key that is NOT itself ctrl+c — rather than unconditionally on every
+	// press. That is what lets every ctrl+c site ([App.confirmQuit], shared by
+	// the global keymap row and the panel/approval/decision overlays that each
+	// intercept ctrl+c ahead of it) read the arm a PRIOR press left behind
+	// without a prevArmed parameter: by the time any handler sees a ctrl+c key,
+	// this field still holds whatever the last press set it to, and by the time
+	// any handler sees any OTHER key, Update has already forced it back to
+	// false. See [App.confirmQuit]'s doc for the read side and
+	// [Program.quitArmed] (adapter.go) for the single-session TUI's mirrored,
+	// independent copy of the same shape.
+	quitArmed bool
+
 	// pendingSelect is the session id [App.confirmDestroy] wants selected once
 	// the roster refresh that reflects its kill/archive lands — the row that
 	// occupied the deleted session's position AS RENDERED at confirm time (see
@@ -1186,6 +1201,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyPressMsg:
 		a.clearStatus()
+		key := msg.Key()
 		// Capture and disarm the ctrl+x two-press confirm. Snapshotting it here —
 		// before any overlay or per-screen handler — and clearing a.ctrlXArmed
 		// (and the hint's mirror of it) is what makes the confirm momentary: ANY
@@ -1196,6 +1212,17 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		prevArmed := a.ctrlXArmed
 		a.ctrlXArmed = ""
 		a.over = a.over.WithCtrlXArmed(false)
+		// Disarm the ctrl+c double-tap quit confirm (gofer#314) — but only on a
+		// key that is NOT itself ctrl+c. Unlike ctrlXArmed above, this clear is
+		// CONDITIONAL: a ctrl+c key press leaves a.quitArmed untouched here so
+		// [App.confirmQuit] — called from wherever this key actually ends up
+		// dispatched (the global keymap, or the panel/approval/decision overlay
+		// that claims it first) — can read whatever the PREVIOUS press left
+		// behind. Every other key forces it back to false before any handler
+		// runs, exactly as ctrlXArmed's unconditional clear does for ctrl+x.
+		if !key.Mod.Contains(tea.ModCtrl) || key.Code != 'c' {
+			a.quitArmed = false
+		}
 		// Any key press clears an active/frozen mouse selection — docs/TUI.md's
 		// "clear the selection on the next click / a key press" contract (a
 		// fresh click already clears it via handleMouseClick installing a new
@@ -1299,6 +1326,52 @@ func (a App) handleKey(msg tea.KeyPressMsg, prevArmed string) (tea.Model, tea.Cm
 	default:
 		return a.handleOverviewKey(msg)
 	}
+}
+
+// quitArmedNote is the status-line text a first ctrl+c shows while armed,
+// shared by [App.confirmQuit] and [Program]'s mirrored copy (adapter.go) so
+// the two independent implementations read identically. It changes TEXT, not
+// just color (a.status renders in [sevWarn]'s style, but the Ascii golden
+// profile cannot see that) — the same reason the roster's ctrl+x confirm
+// swaps its hint text rather than relying on the row highlight alone.
+const quitArmedNote = "ctrl-c again to quit"
+
+// confirmQuit is the ctrl+c double-tap quit confirm (gofer#314), shared by
+// every site that intercepts ctrl+c on [App]: the live global-keymap row
+// (keymap.go, reached from the overview/peek/attach screens and the open
+// autocomplete menu, all of which fall through to [dispatchGlobalKey]) and
+// the three overlays that claim ctrl+c themselves ahead of it — the command
+// panel ([App.handlePanelKey]), the pending-approval prompt including its
+// nested amend editor ([App.handleApprovalKey]), and the pending-decision
+// prompt ([App.handleDecisionKey]). Every one of those sites is a one-line
+// `return a.confirmQuit()` in place of the old unconditional `return a,
+// tea.Quit` — see gofer#314's issue body for the full enumeration this PR's
+// description repeats.
+//
+// The FIRST press arms: it sets a.quitArmed and shows [quitArmedNote] on the
+// status line, but does NOT quit — mirroring [App.confirmDestroy]'s
+// arm-instead-of-act shape for ctrl+x. The SECOND press, while still armed,
+// quits outright. Any OTHER key disarms: Update's tea.KeyPressMsg case clears
+// a.quitArmed on every press that is not itself ctrl+c BEFORE any handler
+// runs (see the isCtrlC guard there), so confirmQuit reads a.quitArmed
+// directly rather than taking a prevArmed parameter the way confirmDestroy
+// does — every non-ctrl+c key has already forced it to false by the time any
+// handler sees the key, so a live true here can only mean "the previous key
+// was also ctrl+c".
+//
+// Quitting mid-modal is deliberately safe: every overlay this is reachable
+// from also has an Esc that leaves it WITHOUT quitting (the panel's
+// handleEscape, the approval's escapeApproval, the amend editor's own Esc
+// cancel, the decision's escapeDecision) — ctrl+c was never the only way out
+// of any of them, so requiring a second press to quit cannot strand a user
+// who only wanted to back out.
+func (a App) confirmQuit() (tea.Model, tea.Cmd) {
+	if a.quitArmed {
+		return a, tea.Quit
+	}
+	a.quitArmed = true
+	a.setStatus(sevWarn, quitArmedNote)
+	return a, nil
 }
 
 // confirmDestroy runs the roster/peek ctrl+x two-press confirm against the

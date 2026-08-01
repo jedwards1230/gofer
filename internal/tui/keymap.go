@@ -8,7 +8,15 @@ package tui
 //   - [globalKeymap]'s rows are LIVE. Each carries a match predicate and the
 //     action it runs, and [App.handleKey] dispatches through
 //     [dispatchGlobalKey] before it reaches any per-screen handler. There is
-//     exactly one definition of ctrl+c and ctrl+y, and /help reads it.
+//     exactly one definition of ctrl+c and ctrl+y, and /help reads it. ctrl+c
+//     is also claimed early by three overlays this table sits below (the
+//     command panel, the pending-approval prompt, the pending-decision
+//     prompt — see App.Update's dispatch precedence and panel.go/dialog.go),
+//     so "one definition" means those sites all call the row's own action,
+//     [App.confirmQuit], rather than each carrying its own copy of the quit
+//     behavior (gofer#314) — the table's run closure and the overlays'
+//     ctrl+c cases are the same function, not three definitions that happen
+//     to agree today.
 //   - [screenKeymap]'s rows are DESCRIPTIVE ONLY, and CAN DRIFT. Every screen
 //     in this package still owns an inline `switch` on tea.KeyPressMsg
 //     (app.go, panel.go, config_view.go, modelpicker.go, dialog.go,
@@ -121,9 +129,9 @@ func globalKeymap() []keyBinding {
 		{
 			Keys:  "ctrl+c",
 			Scope: scopeGlobal,
-			Desc:  "Quit gofer",
+			Desc:  "Quit gofer (press twice)",
 			match: func(k tea.Key) bool { return k.Mod.Contains(tea.ModCtrl) && k.Code == 'c' },
-			run:   func(a App) (tea.Model, tea.Cmd) { return a, tea.Quit },
+			run:   func(a App) (tea.Model, tea.Cmd) { return a.confirmQuit() },
 		},
 		{
 			Keys:  "ctrl+y",

@@ -1,7 +1,7 @@
   /usage                           Show this session's token and cost consumpti…
   /yolo [on|off]                   Toggle guardrails for new sessions
 Global
-  ctrl+c  Quit gofer
+  ctrl+c  Quit gofer (press twice)
   ctrl+y  Toggle guardrails for new sessions (same as /yolo)
   ctrl+a  Select the whole screen and copy it (empty input bar)
   alt+a   Copy the WHOLE transcript, scrolled-off content included (attach, emp…

@@ -303,13 +303,17 @@ func newBuiltinRegistry() Registry {
 	return r
 }
 
-// runQuit is /quit's [Command.Run]. Quitting the TUI is exactly tea.Quit
-// everywhere else it is bound (ctrl-c, on every screen and over the panel — see
-// app.go/panel.go/dialog.go), with no teardown of its own: the daemon
-// connection, the event subscription, and the reconstruction core are all owned
-// and closed by cmd/gofer once the program returns, not by the model. So this
-// command is that same one line, and adding a confirmation here would make the
-// command MORE ceremonious than the key it duplicates.
+// runQuit is /quit's [Command.Run]. Quitting the TUI is exactly tea.Quit —
+// the same Cmd a SECOND, confirming ctrl-c produces everywhere it's bound (on
+// every screen and over the panel/approval/decision overlays, all funneled
+// through [App.confirmQuit] — see app.go/panel.go/dialog.go and gofer#314),
+// with no teardown of its own: the daemon connection, the event subscription,
+// and the reconstruction core are all owned and closed by cmd/gofer once the
+// program returns, not by the model. /quit itself carries no arm/confirm of
+// its own — typing four characters and Enter is already the deliberate,
+// hard-to-fat-finger gesture ctrl+c's double-tap exists to approximate, so
+// adding a confirmation here would make the command MORE ceremonious than
+// the key it duplicates.
 func runQuit(a App, _ []string) (App, tea.Cmd) {
 	return a, tea.Quit
 }

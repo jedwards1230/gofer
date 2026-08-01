@@ -95,6 +95,22 @@ Tape/scenario names follow one slug schema, `<area>-<view>[-<state>]`
   journal. Needs `vhsSupervisor.Kill` to really mutate the canned roster —
   against a frozen one both frames would be identical. Reuses the
   `panel-status-overview` scenario.
+- `roster-quit-confirm.tape` — the armed `ctrl+c` double-tap quit confirm
+  (gofer#314), captured as a **before/after pair**
+  (`roster-quit-confirm-before` / `roster-quit-confirm`). Unlike
+  `roster-delete-confirm` above, the signal here is TEXT — a.status switches
+  from empty to "ctrl-c again to quit", rendered in the theme's warn style —
+  so an Ascii golden can already see the words; the tape's job is showing that
+  it renders in the same warn-yellow every other caution note uses (issue
+  #161's severity styling), which the Ascii profile cannot, and documenting
+  that the note is momentary rather than permanent chrome. This is the
+  GLOBAL confirm, not roster-specific — the same `App.confirmQuit` also runs
+  from the command panel and the pending-approval/decision overlays (see
+  `docs/TUI.md`'s "ctrl-c quits gofer" section) — captured once here since the
+  note renders identically on every screen. One press only: the first
+  `ctrl+c` is pure client state and never reaches `tea.Quit`. A second,
+  confirming `ctrl+c` follows the last screenshot only to end the recording
+  promptly. Reuses the `panel-status-overview` scenario.
 - `roster-select-all.tape` — `ctrl+a` select-all, captured as a **before/after
   pair** (`roster-select-all-before` / `roster-select-all`). The claim under
   review is that the reverse video reaches the rows OUTSIDE the roster body —

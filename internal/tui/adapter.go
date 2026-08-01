@@ -15,9 +15,14 @@ import (
 // to a live daemon session, esc will publish this instead of quitting
 // outright, and a caller will send the corresponding interrupt Op on
 // receiving it. This minimal in-process attach path has no such wiring, so
-// esc quits the attach [tea.Program] directly (see handleKey) — driveTUI in
-// cmd/gofer treats that quit as a cancellation of the in-flight run, the
-// same as ctrl-c.
+// esc quits the attach [tea.Program] directly, in ONE press (see handleKey) —
+// driveTUI in cmd/gofer treats that quit as a cancellation of the in-flight
+// run. ctrl-c reaches the same tea.Quit, but only on its SECOND press (see
+// [Program.confirmQuit], gofer#314); esc staying single-press is deliberate,
+// not an oversight this PR missed — esc is this minimal view's ONLY way to
+// interrupt an in-flight turn, and there is no other screen or overlay to
+// back out to first, so gating it behind a confirm would cost the one
+// immediate cancel this surface has.
 type InterruptMsg struct{}
 
 // EventMsg wraps a session event.Event so it can ride the bubbletea message
@@ -34,6 +39,15 @@ type Program struct {
 	inner  Model
 	width  int
 	height int
+
+	// quitArmed is this Program's own ctrl+c double-tap arm state (gofer#314)
+	// — [App.quitArmed]'s shape mirrored rather than shared, since Program is
+	// architecturally a wholly separate tea.Model (see the type doc above) with
+	// no App to call into. handleKey disarms it on every key that is not
+	// itself ctrl+c, exactly as App.Update does for a.quitArmed, so a first
+	// ctrl+c arms (see confirmQuit) and any OTHER key — never just a timeout —
+	// cancels it.
+	quitArmed bool
 }
 
 // NewProgram returns a bubbletea-ready Program wrapping a fresh [Model]
@@ -47,7 +61,8 @@ func (p Program) Init() tea.Cmd { return nil }
 
 // Update satisfies tea.Model: it resizes on [tea.WindowSizeMsg], ingests
 // forwarded session events on [EventMsg], and on key presses either edits
-// the input buffer or quits the program (ctrl-c, esc — see handleKey).
+// the input buffer or quits the program (esc immediately, ctrl-c on its
+// second press — see handleKey).
 func (p Program) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -69,9 +84,17 @@ func (p Program) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // TypeRune/Backspace/Submit) so it stays headlessly testable.
 func (p Program) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.Key()
+	isCtrlC := key.Mod.Contains(tea.ModCtrl) && key.Code == 'c'
+	// Disarm on anything that is NOT ctrl+c, mirroring App.Update's
+	// conditional clear of a.quitArmed (app.go) — see confirmQuit for the read
+	// side and [Program.quitArmed]'s doc for why this is a separate copy
+	// rather than a shared field.
+	if !isCtrlC {
+		p.quitArmed = false
+	}
 	switch {
-	case key.Mod.Contains(tea.ModCtrl) && key.Code == 'c':
-		return p, tea.Quit
+	case isCtrlC:
+		return p.confirmQuit()
 
 	case key.Code == tea.KeyEscape:
 		return p, tea.Quit
@@ -93,6 +116,23 @@ func (p Program) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return p, nil
 }
 
+// confirmQuit is the ctrl+c double-tap quit confirm (gofer#314) for this
+// single-session view — [App.confirmQuit]'s shape mirrored, not shared (see
+// [Program]'s type doc for why the two cannot share one method). The FIRST
+// press arms: it sets p.quitArmed, which [Program.View] renders as
+// [quitArmedNote] in place of App's status line — the same text, since the two
+// implementations share the constant even though they render it through
+// different paths. The SECOND press, while still armed, quits outright. Esc
+// stays a single, un-confirmed quit throughout (see [InterruptMsg]'s doc for
+// why that is deliberate), so this can never be the only way out.
+func (p Program) confirmQuit() (tea.Model, tea.Cmd) {
+	if p.quitArmed {
+		return p, tea.Quit
+	}
+	p.quitArmed = true
+	return p, nil
+}
+
 // View satisfies tea.Model, rendering the wrapped Model at the last known
 // terminal size. It requests the alternate screen so the live, height-clipped
 // frames never touch the normal buffer; bubbletea exits the alt screen on
@@ -105,9 +145,20 @@ func (p Program) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // top row of the alt-screen frame, and this is the single-session TUI's
 // render path (it renders [Model] directly, bypassing App.render, so it
 // needs its own copy of the same padding).
+//
+// While p.quitArmed is set, one extra trailing line carries [quitArmedNote] —
+// this Program's stand-in for App's status footer, which it has none of. The
+// content budget shrinks by that one row (mirroring how App.frameLayout
+// shrinks h for a.status) so the armed frame still totals p.height rows
+// rather than overflowing it.
 func (p Program) View() tea.View {
 	h := p.height - layout.TopPadding
-	body := strings.Repeat("\n", layout.TopPadding) + p.inner.View(p.width, h)
+	var footer string
+	if p.quitArmed {
+		footer = "\n" + p.inner.theme.WarnStyle().Render(quitArmedNote)
+		h--
+	}
+	body := strings.Repeat("\n", layout.TopPadding) + p.inner.View(p.width, h) + footer
 	v := tea.NewView(body)
 	v.AltScreen = true
 	return v
