@@ -71,9 +71,9 @@ make install                                       # local install, truthfully v
   (`gofer daemon`); see its package doc.
 - `internal/tui/` (bubbletea) — the attach/peek/overview frontend, plus the
   slash-command dispatcher and command panel (`/status`, `/config`, `/model`,
-  `/thinking`, `/usage`, `/stats`, `/resume`, `/help`), plus the
-  session-lifecycle commands `/new` and `/quit`, the `/yolo` guardrail toggle,
-  and the declarative keymap `/help` renders from.
+  `/thinking`, `/usage`, `/stats`, `/context`, `/mcp`, `/skills`, `/resume`,
+  `/help`), plus the session-lifecycle commands `/new` and `/quit`, the
+  `/yolo` guardrail toggle, and the declarative keymap `/help` renders from.
 - `internal/tuibridge/` — adapts the daemon supervisor to the TUI's narrow
   `Supervisor` interface (the single seam importing both).
 - `internal/render/` — turns a session's typed event stream into terminal
@@ -117,6 +117,13 @@ make install                                       # local install, truthfully v
   the next session, a dead one keeps its tools registered (degrading to
   `IsError`, working again after reconnect with no re-registration). See its
   package doc.
+- `internal/capability/` — the read-only runtime capability report `/mcp` and
+  `/skills` render: a stdlib-only leaf shared by the producer
+  (`supervisor.Capabilities`), the wire (`daemon`'s `gofer/capabilities`), and
+  the renderer (`internal/tui`). Its package doc is the authoritative list of
+  what the current data CANNOT answer — per-server tool attribution,
+  never-connected vs dropped, and a down-reason are absent by design, not
+  pending. See its doc before adding a field.
 - `internal/skillset/` — wires the SDK's `agent-sdk-go/skill` package
   (`SKILL.md` discovery with progressive disclosure) into a session:
   resolves `config.Skills` into a `skill.Load` call, applies

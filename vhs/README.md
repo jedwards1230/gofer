@@ -166,10 +166,32 @@ Tape/scenario names follow one slug schema, `<area>-<view>[-<state>]`
 - `panel-resume.tape` — the Resume tab: the session picker with a fetched
   listing applied (an offline session plus a live one). Listing only, no
   resume.
+- `panel-mcp.tape` — the MCP tab (jedwards1230/gofer#303), a **before/after
+  pair**: `panel-mcp` is a backend that answered (four servers, one per state
+  the tab has a distinct word for — connected / not connected / unsupported
+  transport / disabled — plus the federated tool total and the configured
+  index/resident split), and `panel-mcp-unknown` is the same tab against a
+  backend that CANNOT answer (a `gofer daemon --workers` router owns no MCP
+  manager; each session's worker owns its own). The pair is the whole point:
+  the regression this feature exists to prevent is an unanswered panel reading
+  as "no MCP servers configured", and only the two frames side by side show
+  that they are unmistakable.
+- `panel-skills.tape` — the Skills tab, the same before/after pair
+  (`panel-skills` / `panel-skills-unknown`). The answered frame carries the
+  four registers that have to read as one list rather than a scatter: ordinary
+  loaded rows, a muted disabled row, a yellow shadowed duplicate naming the
+  LOSING file, and a red skipped candidate — plus `skillset.Summarize`'s
+  operator line. Loaded rows deliberately carry no source path; the skill index
+  records none (see docs/TUI.md).
+
+Both capability scenes drive in-process closures, so neither performs network
+IO and neither frame varies with time.
 
 Each of the five panel-thinking/usage/stats/help/resume tapes reproduces the
 exact state its `internal/tui/testdata/app_panel_<tab>.golden` pins, so the
-color frame and the Ascii golden agree.
+color frame and the Ascii golden agree; `panel-mcp` / `panel-skills` do the
+same against `app_panel_mcp.golden` / `app_panel_skills.golden` and their
+`_unknown` twins.
 
 Run: `scripts/tui-vhs.sh [slug...]` (no arg = all tapes, e.g.
 `scripts/tui-vhs.sh panel-status panel-config`). It prebuilds
