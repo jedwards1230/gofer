@@ -132,9 +132,19 @@ alone would miss a leak of many tiny objects.
 single iteration, so how much buffer its peer goroutines happen to allocate is
 decided by scheduling — `BenchmarkBroadcastRawEvent`'s `B/op` was measured
 swinging 3,920 → 12,120 (**+209%**) between identical runs of identical code. No
-threshold there both catches a real regression and stays quiet. Its allocation
-*count* is stable, and is what that benchmark's own doc calls its evidence. The
-exemption is per-benchmark and visible in the baseline, not a blanket loosening.
+threshold there both catches a real regression and stays quiet. The exemption is
+per-benchmark and visible in the baseline, not a blanket loosening.
+
+**The exemption does not mean the count is immune** — that was the premise
+gofer#334 disproved. The same process-wide stray moves `allocs/op` too, just
+with smaller amplitude. What makes the count gateable is that the stray is a
+small *absolute* number that does **not** grow with the work one iteration does,
+so the fix is the batching rule below rather than a weaker gate. Un-batched,
+`BenchmarkBroadcastRawEvent`'s `peers=1` baseline of 15 allocs/op reproduced in
+only 18 of 40 runs of *unmodified* code and sat one allocation under the 18.75
+fail threshold; CI hit 19 and failed gofer#332, a PR that touched no file in the
+package under test. **A benchmark marked `allocs-only` must batch**, and the
+margin it batches for is the thing to check when its numbers move.
 
 In CI the lane writes a **job summary** — every benchmark's current allocs/op,
 B/op and ns/op with its delta against the baseline — on a pass as well as a
@@ -221,6 +231,17 @@ whatever the SDK runner starts. Two rules follow:
   fraction of a percent. Batching is safe precisely because it is checkable:
   every batched figure should divide back to the per-read number, exactly on
   most rows and to within a small residual on the longest-running ones.
+
+  This has now been the fix **twice** — `liveCallsPerOp` in the roster
+  benchmarks, `broadcastsPerOp` in `BenchmarkBroadcastRawEvent` (gofer#334) — so
+  treat it as the default remedy for a flaky allocation gate, ahead of
+  re-baselining or widening the tolerance. Both of those "fix" the alarm by
+  reducing what the gate can catch; batching does not. **Size the factor so the
+  25% margin is at least 4× the largest stray you measure**, and measure the
+  stray rather than assuming it: it is flat in the batch factor (so raising the
+  factor buys margin linearly) but scales with *concurrency* — the broadcast
+  benchmark's stray is +6 at `peers=1` and +60 at `peers=32`, because peer-side
+  reads dominate it. Sizing off the wrong row overstates the margin.
 - **Re-derive the batch factor whenever the measured cost changes.** It is sized
   against the *signal*, and the stray allocations are *noise* that does not move
   with it — so anything that makes the code cheaper shrinks the margin. When
