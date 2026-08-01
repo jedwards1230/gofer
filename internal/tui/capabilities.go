@@ -140,18 +140,37 @@ func loadingCapabilityLines(subject string) []string {
 // skills, so no fixed constant is large enough, and growing it would cost
 // every other golden in the package a re-capture for a case that still
 // overflows one server later.
+//
+// # Priority when even the notice does not fit
+//
+// On a short terminal the budget can be smaller than head+tail alone, leaving
+// NEGATIVE room for items. The ranking is head > notice > tail, and the notice
+// outranking the tail is the load-bearing part: the head asserts a count
+// ("MCP servers: 1 connected of 6 configured"), so a reader who loses the
+// aggregate figures still knows the list is incomplete, whereas a reader who
+// loses the notice is looking at a header claiming six servers above nothing at
+// all. An earlier revision handled only a POSITIVE budget and let the negative
+// case fall through every branch, dropping the items AND the notice — exactly
+// the silent clipping this function exists to prevent, at heights 7-9.
+//
+// The returned slice may therefore exceed height; each view's own View clips
+// from the END, which is what keeps the notice on screen and spends the
+// shortfall on the tail rows instead.
 func fitRows(head, items, tail []string, height int) []string {
 	out := make([]string, 0, len(head)+len(items)+len(tail))
 	out = append(out, head...)
 	room := height - len(head) - len(tail)
-	switch {
-	case room >= len(items):
+	if len(items) == 0 || room >= len(items) {
+		// Everything fits — and an empty list must never produce a "+0 more"
+		// notice, which a negative budget would otherwise reach.
 		out = append(out, items...)
-	case room >= 1:
-		// One row of the budget goes to the overflow notice itself.
-		shown := room - 1
-		out = append(out, items[:shown]...)
-		out = append(out, "  +"+strconv.Itoa(len(items)-shown)+" more")
+		return append(out, tail...)
 	}
+	// Overflow: one row goes to the notice, charged to the ITEMS before the
+	// tail. max clamps a negative budget to "show nothing, but say so" rather
+	// than leaving the case unhandled.
+	shown := max(room-1, 0)
+	out = append(out, items[:shown]...)
+	out = append(out, "  +"+strconv.Itoa(len(items)-shown)+" more")
 	return append(out, tail...)
 }

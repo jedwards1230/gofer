@@ -15,6 +15,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -196,9 +197,12 @@ func TestSkillsPanelReflectsBackendState(t *testing.T) {
 		"alpha-skill",
 		"(disabled)",
 		"(truncated)",
-		"shadowed",
-		"/globals/alpha-skill/SKILL.md",
-		"no frontmatter",
+		// Label and path TOGETHER: the bare path also appears in the Summary
+		// line below, so asserting it on its own passes even when the shadowed
+		// row drops its path entirely — which left the golden as the only thing
+		// pinning that row.
+		"shadowed  /globals/alpha-skill/SKILL.md",
+		"skipped   /globals/broken/SKILL.md: no frontmatter",
 		"skills: skipped /globals/alpha-skill/SKILL.md: dup (+1 more)",
 	} {
 		if !strings.Contains(got, want) {
@@ -376,6 +380,84 @@ func TestCapabilityPanelOverflowIsReportedNotClipped(t *testing.T) {
 	// would pass against a panel that grew instead of overflowing.
 	if strings.Contains(got, "srv-"+strconv.Itoa(servers-1)) {
 		t.Errorf("expected the tail of the list to be elided, got:\n%s", got)
+	}
+}
+
+// TestCapabilityPanelOverflowHoldsAtEveryTerminalHeight sweeps the height axis,
+// because the single default-sized case above could not see the bug it is
+// paired with: [fitRows] originally handled only a POSITIVE item budget, so a
+// terminal short enough to leave head+tail alone over budget fell through every
+// branch and dropped the items AND the "+N more" notice. At heights 7-9 the
+// panel rendered "MCP servers: 0 connected of 6 configured" above nothing at
+// all — a header asserting six servers over an empty list, with no indication
+// anything had been elided. That is precisely the silent clipping fitRows
+// exists to prevent, and one fixed height can never find it.
+//
+// The invariant: whenever the header is on screen AND the body has any row
+// beneath it, the list is either complete or carries the notice.
+//
+// The floor is asserted rather than skipped. Below that the body collapses to
+// the header alone, and there is genuinely nowhere to put a notice without
+// dropping the row that names what the panel is about — so the sweep pins where
+// that boundary is instead of quietly excusing a range of heights.
+func TestCapabilityPanelOverflowHoldsAtEveryTerminalHeight(t *testing.T) {
+	const servers = 6
+	env := tui.GoldenCommandEnv()
+	env.Capabilities = func(context.Context) (capability.Answer, error) {
+		snap := capability.Snapshot{MCP: capability.MCP{SchemaMode: "preload"}}
+		for i := range servers {
+			snap.MCP.Servers = append(snap.MCP.Servers, capability.Server{
+				Name:                "srv-" + strconv.Itoa(i),
+				ConfiguredTransport: "stdio",
+				Enabled:             true,
+			})
+		}
+		return capability.Answer{Known: true, Snapshot: snap}, nil
+	}
+
+	const (
+		header = "MCP servers: 0 connected of 6 configured"
+		footer = "←/→ to switch tabs"
+	)
+	headerOnly := 0
+	for height := 24; height >= 6; height-- {
+		t.Run("height="+strconv.Itoa(height), func(t *testing.T) {
+			var m tea.Model = tui.NewApp(theme.Test(), newFakeSup(tui.GoldenRoster()), tui.GoldenMeta(), env)
+			m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: height})
+			cmd := m.Init()
+			if cmd == nil {
+				t.Fatal("Init() returned a nil Cmd; expected the roster fetch")
+			}
+			m, _ = m.Update(cmd())
+			got := content(dispatchSlash(t, m, "/mcp"))
+
+			lines := strings.Split(got, "\n")
+			at := slices.IndexFunc(lines, func(l string) bool { return strings.Contains(l, header) })
+			if at < 0 {
+				// Shorter than the panel chrome itself; nothing is claimed, so
+				// there is nothing to be inconsistent with.
+				return
+			}
+			if at+1 >= len(lines) || strings.Contains(lines[at+1], footer) {
+				headerOnly++
+				return
+			}
+			complete := true
+			for i := range servers {
+				if !strings.Contains(got, "srv-"+strconv.Itoa(i)) {
+					complete = false
+				}
+			}
+			if !complete && !strings.Contains(got, "more") {
+				t.Errorf("height %d: the header claims %d servers but the list is neither complete nor marked elided:\n%s",
+					height, servers, got)
+			}
+		})
+	}
+	// Exactly one height (6) squeezes the body down to the header row. A jump
+	// here means the panel started losing rows at sizes that used to work.
+	if headerOnly != 1 {
+		t.Errorf("expected exactly one header-only height in the sweep, got %d", headerOnly)
 	}
 }
 
