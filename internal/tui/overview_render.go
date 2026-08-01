@@ -357,12 +357,17 @@ func (o Overview) rows(width int) (lines []string, selLine int) {
 
 // cwdLabel is the cwd group key/header text for a session: its own Cwd when
 // set, else the app-wide cwd from the header context (the common single-dir
-// case, and the fallback for disk-only rows with no journaled cwd).
+// case, and the fallback for disk-only rows with no journaled cwd) — run
+// through [displayHome] so a path under $HOME renders "~"-relative. This is
+// presentational only: the underlying [SessionInfo.Cwd]/[OverviewMeta.Cwd]
+// stay absolute wherever else they're read; [Overview.flatGroups] happens to
+// bucket by this same (now display-contracted) string, which is harmless
+// since contraction is deterministic per distinct absolute path.
 func (o Overview) cwdLabel(s SessionInfo) string {
 	if s.Cwd != "" {
-		return s.Cwd
+		return displayHome(s.Cwd)
 	}
-	return o.meta.Cwd
+	return displayHome(o.meta.Cwd)
 }
 
 // layout resolves the whole-roster render decisions [Overview.row] must not

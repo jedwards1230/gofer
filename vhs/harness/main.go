@@ -61,7 +61,7 @@ type step struct {
 // vocabulary is spelled out, so the two never drift apart. Slugs follow
 // `<area>-<view>[-<state>]`, kebab-case: transcript-* (the attach scenes),
 // roster-* (the overview scene), panel-* (the command-panel scenes).
-const scenarioHelp = "transcript-tool-call | transcript-approval | transcript-compacting | transcript-overflow-recovery | roster-overview | panel-status-overview | panel-status | panel-config | panel-model | panel-model-empty | panel-model-daemon-refresh | panel-thinking | panel-usage | panel-stats | panel-help | panel-resume"
+const scenarioHelp = "transcript-tool-call | transcript-approval | transcript-compacting | transcript-overflow-recovery | roster-overview | roster-cwd-home | panel-status-overview | panel-status | panel-status-cwd-home | panel-config | panel-model | panel-model-empty | panel-model-daemon-refresh | panel-thinking | panel-usage | panel-stats | panel-help | panel-resume"
 
 func main() {
 	scenario := flag.String("scenario", "transcript-tool-call", "scripted scene to play: "+scenarioHelp)
@@ -85,12 +85,16 @@ func main() {
 		script = approvalScene()
 	case "roster-overview":
 		model = overviewScene()
+	case "roster-cwd-home":
+		model = overviewCwdHomeScene()
 	case "panel-status-overview", "panel-status", "panel-config", "panel-model",
 		"panel-thinking", "panel-usage", "panel-stats", "panel-help", "panel-resume":
 		// Every command-panel tab shares one canned App; the tape types the slash
 		// command (and any navigation) that selects which tab is on screen. The
 		// panel-resume scene additionally reads [vhsSupervisor.ListSessions].
 		model = commandViewApp(cannedCommandEnv())
+	case "panel-status-cwd-home":
+		model = commandViewApp(cwdHomeCommandEnv())
 	case "transcript-compacting":
 		// An attach scene that nonetheless builds the real App, because the
 		// state under capture is reached by DISPATCHING a slash command, not by
@@ -196,6 +200,35 @@ func overviewScene() tea.Model {
 		{ID: "sess-2", Title: "explore three agent ecosystems", Summary: "blocked: approve Bash(kubectl delete pod)", Status: tui.StatusWorking, Pending: 2, Updated: now.Add(-2 * time.Minute)},
 		{ID: "sess-3", Title: "keycloak path-b groundwork", Summary: "turn finished — awaiting the next prompt", Status: tui.StatusNeedsInput, Updated: now.Add(-5 * time.Minute)},
 		{ID: "sess-4", Title: "authentik token exchange rfc 8693", Summary: "Keycloak Path-B foundation complete and verified", Status: tui.StatusFinished, Updated: now.Add(-time.Hour)},
+	}
+	return overviewModel{over: tui.NewOverview(theme.Default(), meta).WithSessions(sessions)}
+}
+
+// overviewCwdHomeScene builds the roster over sessions with absolute
+// (not pre-tilde'd, unlike every other scene's fixture Cwd) working
+// directories, so [tui.Overview]'s cwd group headers exercise the REAL
+// $HOME-contraction path (gofer#337) rather than rendering a literal "~"
+// string that never touches the code under test.
+//
+// roster-cwd-home.tape runs this scenario TWICE, with HOME set to a
+// different value each time — that env var, not a code difference, is the
+// only thing that changes between the two captured frames, so the pair
+// isolates exactly the feature: with HOME=/Users/justinother (matching
+// none of these paths) every header renders its full absolute path, the
+// pre-#337 appearance; with HOME=/Users/justin three of the four contract
+// to "~"-relative headers while the fourth — /Users/justinother/notes, a
+// SIBLING directory that merely shares "/Users/justin" as a text prefix —
+// renders unchanged in the SAME frame, which is the path-boundary trap
+// the issue exists to guard: a naive strings.HasPrefix would have
+// contracted it into the nonsensical "~other/notes".
+func overviewCwdHomeScene() tea.Model {
+	now := fixedNow
+	meta := tui.OverviewMeta{App: "gofer", Version: "0.4.0", Model: "fable-5", Now: now}
+	sessions := []tui.SessionInfo{
+		{ID: "sess-1", Title: "wire the websocket ACP listener", Summary: "streaming the daemon handshake", Status: tui.StatusWorking, Cwd: "/Users/justin/orchestration/repos/gofer", Updated: now.Add(-30 * time.Second)},
+		{ID: "sess-2", Title: "keycloak path-b groundwork", Summary: "turn finished — awaiting the next prompt", Status: tui.StatusNeedsInput, Cwd: "/Users/justin", Updated: now.Add(-5 * time.Minute)},
+		{ID: "sess-3", Title: "authentik token exchange rfc 8693", Summary: "Keycloak Path-B foundation complete and verified", Status: tui.StatusFinished, Cwd: "/Users/justin/orchestration", Updated: now.Add(-time.Hour)},
+		{ID: "sess-4", Title: "draft the Q3 planning notes", Summary: "sibling of $HOME — must NOT contract", Status: tui.StatusFinished, Cwd: "/Users/justinother/notes", Updated: now.Add(-2 * time.Hour)},
 	}
 	return overviewModel{over: tui.NewOverview(theme.Default(), meta).WithSessions(sessions)}
 }
@@ -419,6 +452,21 @@ func cannedCommandEnv() tui.CommandEnv {
 func emptyCommandEnv() tui.CommandEnv {
 	env := cannedCommandEnv()
 	env.Auth = func() ([]tui.ProviderAuth, error) { return nil, nil }
+	return env
+}
+
+// cwdHomeCommandEnv is the [tui.CommandEnv] panel-status-cwd-home reads:
+// cannedCommandEnv with an ABSOLUTE Cwd instead of the literal "~/orchestration"
+// string every other panel-* scene uses. That literal never touches
+// [displayHome] — it doesn't start with any real $HOME on any machine — so it
+// can't demonstrate the Status tab's "Cwd: " row contraction (gofer#337); an
+// absolute path can, the same way [overviewCwdHomeScene] does for the roster's
+// group headers, and for the same reason: panel-status-cwd-home.tape runs it
+// under two different HOME values so the ONLY variable between its two frames
+// is whether the real $HOME matches this Cwd.
+func cwdHomeCommandEnv() tui.CommandEnv {
+	env := cannedCommandEnv()
+	env.Cwd = "/Users/justin/orchestration"
 	return env
 }
 
