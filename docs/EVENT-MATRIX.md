@@ -80,15 +80,46 @@ discriminated *inside* the `ConfigOptionsUpdated` case body (`:175`), not a top-
 so at `acp/project_out.go:23-25`, which names `turn.started` explicitly. ACP has no notion of a
 session roster, so there is nothing to project these onto.
 
-**b — `session.spawned` is deliberate, and the reason is the sidecar.** gofer records session
-parentage in its own on-disk artifact, not from this event: `internal/supervisor/sidecar.go`
-defines `sessionMeta{ParentID, Agent, Depth}`, written as `<id>.meta.json` beside the journal
-(written at `supervisor.go:706`, writer at `sidecar.go:163`), per CLAUDE.md's "visible
-artifacts over hidden state". gofer never calls
-the SDK's emitter (`runner.Runner.Spawn` — zero call sites across `internal/` and `cmd/`), so
-the event is *structurally never emitted* in gofer's runtime. **Adding a handler would create a
-second source of truth for parentage**, which is worse than the empty cell. The subagent roster
-tree and drill-in already work, from the sidecar. Leave this row alone.
+**b — `session.spawned` is deliberate: gofer owns parentage end-to-end, on both sides of the SDK
+boundary.**
+
+Do not justify this row with "the SDK has no concept of a session parent" — that was true once
+and is **false at v0.23.0**, the version `go.mod` pins. The SDK models parentage as first-class
+journal state: `session/entry.go:117,123` persist `parent_id`/`depth` in the root `session_meta`
+entry, `runner/runner.go:275-276` writes them via `session.WithMetaParent`, and
+`runner/runner.go:420,443-444` recovers them on resume.
+
+What makes the cell correctly empty is narrower and more durable: **gofer opts out of the SDK's
+parentage on both sides.**
+
+- *Write side* — no `runner.Options` literal in gofer sets `ParentID` or `Depth`: not
+  `supervisor.go:682-686` (Create), not `:831-835` (Resume), not
+  `cmd/gofer/{exec.go:99, run.go:308, resume.go:118, session_worker.go:150}`. So the
+  `opts.ParentID != ""` guard at `runner/runner.go:275` never fires and the journal's parentage
+  fields stay omitted (both `omitempty`) on every gofer session.
+- *Read side* — `session.MetaOf`, `Runner.ParentID()` and `Runner.Depth()` have **zero** call
+  sites in gofer.
+
+Parentage lives solely in `internal/supervisor/sidecar.go`'s `sessionMeta{ParentID, Agent,
+Depth}` → `<id>.meta.json` (writer `sidecar.go:163`, call site `supervisor.go:706`), per
+CLAUDE.md's "visible artifacts over hidden state", with gofer's own depth cap in `resolveParent`
+(`supervisor.go:760-781`) rather than the SDK's. The event's sole emitter is `runner.Runner.Spawn`
+(`runner/runner.go:546`, the only publish site in the SDK), which gofer never calls — zero
+`.Spawn(` hits across `internal/` and `cmd/`. So it is structurally never emitted here.
+
+**Adding a handler would create a second source of truth for parentage.** The roster tree and
+drill-in already work from the sidecar (`overview.go:287,310,555`; `app.go:851`). This is not a
+"gap": a gap is information gofer wants and is not getting, and gofer has complete parentage from
+an artifact it owns.
+
+**Forward note.** This is a live fork in the road, not settled forever. If agent-initiated spawn
+is ever built on `Runner.Spawn`, the SDK would start both emitting `session.spawned` *and* writing
+`WithMetaParent` on paths gofer controls — producing exactly the dual source of truth this
+annotation exists to prevent. Whoever does that work has to pick one owner for parentage first.
+Related: `runner.New` does **not** enforce `Depth > MaxDepth` — `ErrMaxDepth`
+(`runner/runner.go:48`) is returned only from `Spawn` (`:530-531`) — so gofer's `resolveParent`
+cap is currently the *only* depth enforcement on every path it uses. Do not assume the SDK caps
+depth on the new/resume path.
 
 **c — Conditional, by design.** `turn.finished` projects to `usage_update` only when
 `ContextWindow > 0 && used > 0` (`:117`) — there is nothing to report otherwise.
