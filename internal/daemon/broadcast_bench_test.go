@@ -76,11 +76,19 @@ const benchSessionID = "11111111-2222-3333-4444-555555555555"
 // the timed region is charged to the benchmark. This fixture holds one drain
 // goroutine per attached peer, each blocked in p.conn.Reader, and a read
 // allocates. At one broadcast per iteration, whether that single frame's
-// peer-side reads landed inside the window was decided by the scheduler alone —
-// so message_delta/peers=1 reads 15, 17, 21 or 22 allocations over 30 runs of
-// IDENTICAL code, against a baseline of 15 whose 25% gate tolerance is 3
-// allocations. CI duly failed gofer#334 at 19 on a pull request that touched no
-// file in this package.
+// peer-side reads landed inside the window was decided by the scheduler alone.
+// Three independent measurements of message_delta/peers=1, every one of them on
+// IDENTICAL code:
+//
+//	unmodified main, 40 runs           15-18   baseline of 15 came back 18 times
+//	this file, batching removed        15-22   the N=1 column below
+//	ubuntu-latest CI                      19   the failure
+//
+// — against a baseline of 15 whose 25% gate tolerance is 3 allocations. The two
+// local ranges differ because the second was measured on a busier machine; the
+// gate does not care which it gets, only that its 18.75 threshold sits inside
+// all three. CI duly failed gofer#332 at 19, a pull request that touched no file
+// in this package, and gofer#334 is where that was run down.
 //
 // WHY 128. The stray is a small ABSOLUTE number that does not scale with the
 // measured work, so raising the work raises the margin and leaves the noise
