@@ -70,6 +70,12 @@ func TestContractHome(t *testing.T) {
 			home: "/Users/justin/",
 			want: "~/orchestration",
 		},
+		{
+			name: "home is the filesystem root — trimming must not empty it",
+			path: "/etc/hosts",
+			home: "/",
+			want: "~/etc/hosts",
+		},
 	}
 
 	for _, tc := range tests {
