@@ -80,14 +80,15 @@ const benchSessionID = "11111111-2222-3333-4444-555555555555"
 // Three independent measurements of message_delta/peers=1, every one of them on
 // IDENTICAL code:
 //
-//	unmodified main, 40 runs           15-18   baseline of 15 came back 18 times
-//	this file, batching removed        15-22   the N=1 column below
-//	ubuntu-latest CI                      19   the failure
+//	unmodified main, 40 runs      idle machine   15-18   15 came back 18 times
+//	this file, batching removed   busy machine   15-22   the N=1 column below
+//	ubuntu-latest CI              shared runner     19   the failure
 //
-// — against a baseline of 15 whose 25% gate tolerance is 3 allocations. The two
-// local ranges differ because the second was measured on a busier machine; the
-// gate does not care which it gets, only that its 18.75 threshold sits inside
-// all three. CI duly failed gofer#332 at 19, a pull request that touched no file
+// — against a baseline of 15 whose 25% gate tolerance is 3 allocations. The
+// middle row is the widest only because the machine was loaded, which is the
+// point: the stray tracks whatever else the box is doing, so no single number
+// here is THE range. The gate does not care which it gets, only that its 18.75
+// threshold sits inside all three. CI duly failed gofer#332 at 19, a pull request that touched no file
 // in this package, and gofer#334 is where that was run down.
 //
 // WHY 128. The stray is a small ABSOLUTE number that does not scale with the
