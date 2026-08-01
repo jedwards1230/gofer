@@ -403,6 +403,28 @@ func (m *managed) pump() {
 		m.notify()
 
 		err := m.sess.Prompt(turnCtx, text)
+
+		// Failure-triggered compaction: the SECOND, INDEPENDENT trigger, for
+		// the one case the post-flight threshold check below structurally
+		// cannot see (see recoverFromContextOverflow). Whatever the recovery
+		// settles on REPLACES err, so the rest of the loop body — the emit,
+		// the threshold check, the notify — treats the recovered turn exactly
+		// like any other: a successful retry reads as a clean turn, and a
+		// failed one as an ordinary turn failure.
+		//
+		// A plain `if`, not a `for`: that is the whole retry bound (see the
+		// function's doc), and it is why the original overflow can never be
+		// emitted twice — err no longer holds it once we are past here.
+		//
+		// It takes over retiring turnCtx, deliberately: it installs its OWN
+		// fresh turnCancel under mu BEFORE cancelling this one, so m.turnCancel
+		// never transiently names a spent context (see its doc for why that
+		// window matters now that real work sits behind it).
+		if errors.Is(err, provider.ErrContextOverflow) {
+			err = m.recoverFromContextOverflow(text, err, cancel)
+		}
+		// Idempotent — the recovery above already called it on the overflow
+		// path. Unconditional here so the ordinary path always retires turnCtx.
 		cancel()
 
 		m.mu.Lock()
@@ -453,6 +475,196 @@ func (m *managed) pump() {
 		// iteration immediately re-dispatches or goes idle.
 		m.notify()
 	}
+}
+
+// recoverFromContextOverflow reacts to a turn the provider REJECTED for
+// exceeding the model's context window ([provider.ErrContextOverflow]): it
+// announces the overflow, compacts, and re-issues the SAME turn text exactly
+// once. overflowErr is what Prompt returned; the returned error replaces it
+// in pump.
+//
+// Why this is a separate trigger from [maybeAutoCompact], not a replacement
+// for it. That one reacts to SETTLED usage — a real measurement off a turn
+// that actually ran — which is right for gradual growth and blind, by
+// construction, to a single turn that overshoots the window in one step (a
+// large read, a wide grep, a big bash output). The provider rejects the NEXT
+// call outright, and a rejection generates nothing: no stream, no usage, so
+// [Session.LastUsage] still reports the PREVIOUS turn's under-threshold
+// figure and the threshold check never fires. The session wedges with no
+// signal and no recovery but a manual /compact (jedwards1230/gofer#279). The
+// two triggers are additive: only the threshold one can act BEFORE a
+// rejection, and only this one can observe that a rejection happened at all.
+//
+// The reaction is the one [provider.ErrContextOverflow]'s doc prescribes —
+// compact, then re-issue the same turn. The sentinel is matched with
+// errors.Is and never by message text: each provider adapter normalizes its
+// own vendor signal onto it, so the wording is explicitly not part of the
+// contract (jedwards1230/agent-sdk-go#118).
+//
+// Deliberately NOT gated on [config.Compaction]'s Disabled/Threshold policy,
+// which the threshold trigger alone consults. That policy answers "when
+// should gofer compact AHEAD of trouble"; this path is the only way out of a
+// session that is already wedged, so honouring an opt-out here would mean
+// declining proactive compaction also declined ever recovering from the
+// overflow that decision makes more likely. See config.Compaction.Disabled.
+//
+// Bounded at exactly one retry, and bounded STRUCTURALLY rather than by a
+// counter: the retry is the single m.sess.Prompt call below, its result is
+// returned straight to pump PAST the `if` that got here, and this function
+// neither loops nor recurses. A second overflow therefore surfaces as an
+// ordinary turn failure. That bound is the point — compacting again against a
+// prompt that still does not fit is an infinite loop that burns tokens and
+// looks, from the outside, exactly like a hang.
+//
+// The bound is one RETRY, not one compaction. A retry that SUCCEEDS settles
+// like any other turn and so still reaches [maybeAutoCompact], which may
+// compact a second time for the same queued prompt if the retried turn's
+// measured usage crosses the threshold. That is correct — it is a real
+// measurement off a turn that really ran, which is exactly what that trigger
+// is for — and it cannot loop: maybeAutoCompact never re-dispatches.
+func (m *managed) recoverFromContextOverflow(text string, overflowErr error, retireTurnCtx context.CancelFunc) error {
+	// A FRESH turn context for the whole recovery: the original turnCtx is
+	// spent (Prompt has returned), so reusing it would make every call below
+	// an instant no-op. Published as m.turnCancel under mu so Interrupt/Kill
+	// cancel the compaction round trip and the retry alike.
+	//
+	// ORDER IS LOAD-BEARING at both ends. Install the fresh cancel BEFORE
+	// retiring the caller's, and clear to nil BEFORE cancelling on the way
+	// out: m.turnCancel must never transiently name a context nobody is
+	// running on. Interrupt reads it under mu and calls whatever it finds, so
+	// a spent func there is a lie that returns nil while the session goes on
+	// to run a whole summarizer round trip plus a retry turn the user asked
+	// to stop. nil is honest by comparison — it means "idle, nothing to
+	// interrupt", which is exactly true once the recovery has unwound. This
+	// is a TOCTOU on a correctly-locked field rather than a data race, so
+	// -race cannot see it either way.
+	retryCtx, cancel := context.WithCancel(m.baseCtx)
+	m.mu.Lock()
+	m.turnCancel = cancel
+	m.mu.Unlock()
+	retireTurnCtx()
+	defer func() {
+		m.mu.Lock()
+		m.turnCancel = nil
+		m.mu.Unlock()
+		cancel()
+	}()
+
+	// Announce BEFORE compacting, so the transcript reads notice →
+	// session.compacted → the answer. Compaction is never silent in gofer, and
+	// this case needs the notice more than the threshold-triggered one does:
+	// the rejected call produced no output, so the user never saw the failure
+	// that provoked it, and an unannounced compaction here reads as the
+	// session skipping a beat. event is an SDK package and gofer consumes the
+	// contract rather than extending it, so this reuses the existing
+	// session.error kind — non-fatal, because the session is not ending.
+	// Emitted outside mu, like every other Session call in this file.
+	m.sess.Emit(event.NewSessionError(m.id,
+		"context window exceeded — compacting the conversation and retrying this turn",
+		false))
+
+	if err := m.sess.Compact(retryCtx, ""); err != nil {
+		if errors.Is(err, runner.ErrNothingToCompact) {
+			// Nothing to shrink means the overshoot is a single oversized
+			// payload in THIS turn rather than accumulated history, so a retry
+			// would be rejected identically. The notice above promised a
+			// remedy, so say plainly that it did not apply — otherwise the
+			// transcript reads promise → raw rejection, and the user is left
+			// to guess whether the compaction silently failed.
+			m.sess.Emit(event.NewSessionError(m.id,
+				"nothing to compact — this turn's own payload exceeds the context window, "+
+					"so shortening the history cannot help; the turn was not retried",
+				false))
+			// Then surface the ORIGINAL rejection, not this one: "nothing to
+			// compact" describes the remedy that did not apply, not the
+			// problem the user actually has.
+			return overflowErr
+		}
+		// Every other compaction failure surfaces carrying BOTH halves,
+		// because the user needs both — the turn did not fit, AND the
+		// automatic remedy could not run — and either alone is misleading.
+		// See overflowRecoveryError for why that is a local type rather than
+		// errors.Join.
+		//
+		// Classification survives the wrapper because stdlib errors.Is
+		// traverses every branch of a multi-error Unwrap, and the overflow
+		// sentinel is answered by the provider adapters' own Is(target)
+		// methods (see provider/openai's APIError/StreamError) rather than by
+		// ever being a value in the chain. Nothing in the SDK guarantees that
+		// survival: its contract promises only that the sentinel propagates
+		// UNWRAPPED through the loop and the runner, which is what keeps those
+		// Is methods reachable for stdlib to find here.
+		//
+		// That traversal is also, USUALLY, what makes an interrupted recovery
+		// fall out correctly: a cancelled Compact tends to contribute
+		// context.Canceled, pump's emit filter sees it through the wrapper, and
+		// an Esc stays silent as a cancelled turn should. Only "usually" —
+		// Compact returns a bare ctx.Err() when cancelled before it starts, but
+		// a cancellation mid-summarize surfaces through whatever the HTTP
+		// adapter wrapped it in (a *url.Error unwrapping to context.Canceled,
+		// in practice), which is adapter behavior and not an SDK-documented
+		// guarantee. A missed suppression costs one extra session.error line,
+		// never correctness.
+		return &overflowRecoveryError{
+			overflow: overflowErr,
+			compact:  fmt.Errorf("compacting after context overflow: %w", err),
+		}
+	}
+
+	// The retry is a fresh dispatch, so bump updated and notify exactly as pump
+	// does for every other one — otherwise a slow recovery freezes the roster
+	// row's age at the ORIGINAL dispatch and the session looks stalled while it
+	// is in fact working. state is already stateRunning and stays there: the
+	// session never went idle, so this is not a run-state transition.
+	m.mu.Lock()
+	m.updated = m.clock()
+	m.mu.Unlock()
+	m.notify()
+
+	// Unlike pump's own dispatch this does NOT re-check m.closing under mu.
+	// It does not need to: retryCtx derives from m.baseCtx, and stop() sets
+	// closing and then cancels baseCtx, so a session that decides to stop
+	// during the recovery kills this turn through the context instead. That
+	// is the whole guarantee — a future edit that gives the retry a context
+	// from anywhere else must reinstate the closing check.
+	return m.sess.Prompt(retryCtx, text)
+}
+
+// overflowRecoveryError carries both halves of a failed overflow recovery —
+// the provider's original rejection, and the compaction failure that stopped
+// it being remedied — as one error that formats on a SINGLE LINE.
+//
+// It exists only because of that last word. [errors.Join] is otherwise exactly
+// this type and would be the obvious spelling, but its Error() separates
+// components with NEWLINES. This value reaches pump, which emits it as
+// event.NewSessionError(m.id, err.Error(), false), and internal/render's
+// Human.marker renders a session.error as a documented ONE-LINE row —
+// "· <kind>  <detail>\n", with detail interpolated verbatim. A newline inside
+// detail therefore splits that row in the non-TUI render paths (gofer demo and
+// the JSONL renderer). Joining with "; " keeps the row intact and loses
+// nothing a reader needs.
+//
+// So: do NOT "simplify" this back to errors.Join. The multi-line output is the
+// bug it was written to fix.
+type overflowRecoveryError struct {
+	overflow error // the provider's context-window rejection
+	compact  error // why the compaction that would have remedied it failed
+}
+
+// Error renders both halves on one line — see the type's doc for why that
+// matters.
+func (e *overflowRecoveryError) Error() string {
+	return e.overflow.Error() + "; " + e.compact.Error()
+}
+
+// Unwrap returns BOTH errors, in the multi-error form Go 1.20+ errors.Is
+// traverses. The single-error `Unwrap() error` form would silently drop a
+// branch, and each branch is load-bearing: callers classify the overflow half
+// with errors.Is(err, provider.ErrContextOverflow), and pump's own emit filter
+// classifies the compact half with errors.Is(err, context.Canceled) to keep an
+// interrupted recovery silent.
+func (e *overflowRecoveryError) Unwrap() []error {
+	return []error{e.overflow, e.compact}
 }
 
 // maybeAutoCompact checks the just-settled turn's measured usage against the

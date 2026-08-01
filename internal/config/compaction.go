@@ -25,9 +25,17 @@ type Compaction struct {
 	// (a value >= 1, which would fire on the very first turn).
 	ThresholdFraction *float64 `json:"threshold_fraction,omitempty"`
 
-	// Disabled turns the automatic trigger off entirely; the explicit
+	// Disabled turns the THRESHOLD trigger off entirely; the explicit
 	// `/compact` command stays available either way. Default false — automatic
 	// compaction runs unless an operator opts out.
+	//
+	// It does NOT disable the failure-triggered recovery gofer performs when a
+	// provider rejects a turn for exceeding the context window (see
+	// internal/supervisor's recoverFromContextOverflow). That path is not a
+	// policy about when to compact ahead of time — it is the only way out of an
+	// already-wedged session, and gating it here would mean opting out of
+	// proactive compaction also opted out of ever recovering from the overflow
+	// it makes more likely.
 	Disabled bool `json:"disabled,omitempty"`
 }
 

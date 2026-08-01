@@ -61,7 +61,7 @@ type step struct {
 // vocabulary is spelled out, so the two never drift apart. Slugs follow
 // `<area>-<view>[-<state>]`, kebab-case: transcript-* (the attach scenes),
 // roster-* (the overview scene), panel-* (the command-panel scenes).
-const scenarioHelp = "transcript-tool-call | transcript-approval | transcript-compacting | roster-overview | panel-status-overview | panel-status | panel-config | panel-model | panel-model-empty | panel-model-daemon-refresh | panel-thinking | panel-usage | panel-stats | panel-help | panel-resume"
+const scenarioHelp = "transcript-tool-call | transcript-approval | transcript-compacting | transcript-overflow-recovery | roster-overview | panel-status-overview | panel-status | panel-config | panel-model | panel-model-empty | panel-model-daemon-refresh | panel-thinking | panel-usage | panel-stats | panel-help | panel-resume"
 
 func main() {
 	scenario := flag.String("scenario", "transcript-tool-call", "scripted scene to play: "+scenarioHelp)
@@ -96,6 +96,10 @@ func main() {
 		// state under capture is reached by DISPATCHING a slash command, not by
 		// replaying an event stream — the tape types /compact itself.
 		model = compactingApp()
+	case "transcript-overflow-recovery":
+		// A settled sequence, not an in-flight state: the tape only attaches
+		// and photographs the seeded backlog (see overflowRecoveryHistory).
+		model = overflowRecoveryApp()
 	case "panel-model-empty":
 		model = commandViewApp(emptyCommandEnv())
 	case "panel-model-daemon-refresh":
@@ -292,6 +296,71 @@ func compactableHistory() []event.Event {
 		event.NewMessageStarted(s, event.MessageText),
 		event.NewMessageFinished(s, event.MessageText, "Green. The late subscriber receives the full handshake."),
 		event.NewTurnFinished(s, "end_turn", provider.Usage{InputTokens: 31775, OutputTokens: 415}),
+	}
+}
+
+// overflowRecoveryApp is the transcript-overflow-recovery scene: the
+// failure-triggered compaction sequence (jedwards1230/gofer#279) already
+// settled on screen. Unlike the compaction scene next door, nothing here is
+// in flight — the state under capture is a finished sequence of three
+// transcript blocks, so the scene needs no blocking seam and the frame carries
+// no live counter to churn the baseline (gofer#297).
+func overflowRecoveryApp() tea.Model {
+	sup := newVHSSupervisor(cannedSessions())
+	sup.seed(overflowRecoveryHistory()...)
+	return commandViewAppOver(cannedCommandEnv(), sup)
+}
+
+// overflowRecoveryHistory is the mocked stream the overflow-recovery scene
+// renders: one completed turn for context, the prompt that overflowed, and
+// then the three blocks the recovery produces — the notice, the compaction,
+// and the answer to the re-issued turn.
+//
+// The GAP is the whole point of the scene, and it is why the events are seeded
+// rather than described. A context-overflow rejection generates nothing: no
+// text, no tool call, no usage. So between the user's prompt and the notice
+// there is deliberately NO assistant output — the transcript really does jump
+// from the prompt straight to "context window exceeded". A reader has to be
+// able to see that the notice is the only thing standing between a prompt and
+// an unexplained compaction; without it the frame would show a session
+// silently skipping a beat, which is exactly the failure mode the notice
+// exists to prevent.
+//
+// Both blocks are ordinary events (session.error, session.compacted) rendered
+// by the ordinary items, so this scene adds no rendering path — it captures a
+// SEQUENCE that did not exist before, not a new widget.
+func overflowRecoveryHistory() []event.Event {
+	const s = "sess-1"
+	return []event.Event{
+		event.NewMessageStarted(s, event.MessageUser),
+		event.NewMessageFinished(s, event.MessageUser, "Wire the websocket ACP listener and get the handshake streaming."),
+		event.NewTurnStarted(s),
+		event.NewMessageStarted(s, event.MessageText),
+		event.NewMessageFinished(s, event.MessageText, "Reading the existing listener first."),
+		event.NewToolCallStarted(s, "call-1", "read", json.RawMessage(`{}`)),
+		event.NewToolCallFinished(s, "call-1", json.RawMessage(`{"path":"internal/daemon/listener.go"}`), "182 lines", false, nil),
+		event.NewMessageStarted(s, event.MessageText),
+		event.NewMessageFinished(s, event.MessageText, "The listener already accepts upgrades; it just never forwards the session events."),
+		event.NewTurnFinished(s, "end_turn", provider.Usage{InputTokens: 187420, OutputTokens: 260}),
+
+		// The prompt whose call the provider REJECTED. Nothing follows it,
+		// because a rejection produces nothing — see the doc above.
+		event.NewMessageStarted(s, event.MessageUser),
+		event.NewMessageFinished(s, event.MessageUser, "Now read every file under internal/daemon and summarize the fan-out."),
+
+		event.NewSessionError(s, "context window exceeded — compacting the conversation and retrying this turn", false),
+		event.NewSessionCompacted(s, "entry-482", 24, "claude-fable-5",
+			provider.Usage{InputTokens: 188110, OutputTokens: 1240},
+			// Kept inside the viewport width on purpose: blockRow text is not
+			// width-wrapped (renderSessionCompactedLines splits on \n only), so
+			// a longer summary hard-wraps to column 0 and the artifact would
+			// draw the eye away from the sequence this frame exists to show.
+			"Wired the websocket ACP listener; the handshake now replays to late subscribers."),
+
+		event.NewTurnStarted(s),
+		event.NewMessageStarted(s, event.MessageText),
+		event.NewMessageFinished(s, event.MessageText, "The fan-out lives in listener.go: every accepted upgrade registers a subscription the router drains."),
+		event.NewTurnFinished(s, "end_turn", provider.Usage{InputTokens: 24180, OutputTokens: 390}),
 	}
 }
 

@@ -34,6 +34,19 @@ Tape/scenario names follow one slug schema, `<area>-<view>[-<state>]`
   history is load-bearing: compaction replaces a long context, so an indicator
   over an empty transcript would show the widget while misrepresenting what
   produces it.
+- `transcript-overflow-recovery.tape` — the failure-triggered compaction
+  sequence (jedwards1230/gofer#279): a user prompt, then the non-fatal
+  `context window exceeded — compacting…` notice, then the `session.compacted`
+  block, then the retried turn's answer. Adds no rendering path — it captures
+  three EXISTING blocks in a stack that did not exist before, and what the
+  Ascii goldens cannot see is whether those three registers (muted error line,
+  accent structural block, ordinary text) read as one coherent explanation.
+  The deliberate GAP is the subject: an overflow rejection generates nothing,
+  so the transcript really does jump from prompt to notice with no assistant
+  output between — drop the notice and the frame visibly loses its
+  explanation. Entirely static (`overflowRecoveryHistory`, seeded via
+  `vhsSupervisor.seed`), so unlike the compaction tape above there is no
+  counter to capture mid-bucket and nothing for the baseline to churn on.
 - `roster-overview.tape` — the roster screen with mixed session states,
   capturing the ● status markers in color (yellow working / awaiting input
   incl. the ●2 pending count vs green finished).

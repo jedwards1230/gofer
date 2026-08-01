@@ -333,6 +333,13 @@ func (f *fakeSession) failEffort(err error) {
 // would deliver, without reimplementing the SDK's summarizer. Returns
 // compactErr when set (the seam [fakeSession.failCompact] arms), standing in
 // for an SDK rejection such as runner.ErrNothingToCompact.
+//
+// It deliberately IGNORES its ctx: it never blocks, so there is no window in
+// which a cancellation could land, and honoring the ctx would only change
+// behavior for a caller passing an already-dead one. A test that needs the
+// cancelled-compaction case therefore arms failCompact(context.Canceled) as a
+// STAND-IN for what a real summarizer round trip returns when interrupted —
+// see TestContextOverflowCancelledCompactionStaysSilent.
 func (f *fakeSession) Compact(_ context.Context, instructions string) error {
 	f.mu.Lock()
 	f.compactCalls = append(f.compactCalls, instructions)

@@ -2194,6 +2194,28 @@ triggered daemon-side and the Event contract carries only `session.compacted`,
 the completion — there is no `session.compacting` to hang an indicator on, so an
 automatic compaction still shows nothing until it lands. Closing that is an
 agent-sdk-go contract change (gofer#300), not a TUI one.
+
+The failure-triggered recovery (jedwards1230/gofer#279) is the one automatic
+case that *does* announce itself first, and it reuses the blocks above rather
+than adding a state. It opens with a non-fatal `session.error` line — *"context
+window exceeded — compacting the conversation and retrying this turn"* — and
+then reads one of two ways:
+
+- **Recovered**: `itemSessionCompacted`, then the answer to the re-issued turn.
+  Captured in `vhs/transcript-overflow-recovery.tape`.
+- **Nothing to shrink** (`runner.ErrNothingToCompact` — this turn's own payload
+  is what overflows, so no amount of history-trimming helps): a second
+  `session.error` saying nothing could be compacted and the turn was not
+  retried, then the original overflow error. No compacted block, no answer.
+
+The second notice exists because the first one makes a promise. Without it the
+transcript reads *"compacting and retrying"* → raw provider rejection, leaving
+the user to guess whether the compaction silently failed.
+
+The first notice is not decoration either. The rejection that provokes it
+produced no output at all, so without it a user watching the transcript sees an
+unexplained compaction where a reply should have been — indistinguishable from
+the session skipping a beat.
 `/context` opens the command-panel Context tab (`panelContext`, between Stats
 and Resume): a fill bar plus in-use/free token counts read off
 `SessionInfo.LastUsage`/`ContextWindow` — the SAME measured figures the

@@ -300,8 +300,27 @@ opinion. gofer supplies all three:
   threshold runs at full size; the trigger compacts the *next* one down),
   which `config.Compaction`'s 85% default threshold gives headroom for.
   `ContextWindow == 0` (an unregistered model) never triggers — an unknown
-  window is never treated as full. `config.Compaction.Disabled` turns the
-  trigger off entirely; `/compact` stays available either way.
+  window is never treated as full. `config.Compaction.Disabled` turns this
+  threshold trigger off; `/compact` stays available either way.
+- **Failure trigger — compact, then retry once** (jedwards1230/gofer#279). The
+  threshold check reads *settled* usage, so it is blind by construction to a
+  turn that overshoots the window in one step (a big read, a wide grep): the
+  provider rejects the *next* call, a rejection carries no usage, `LastUsage`
+  still reads under-threshold, and the session wedges with no signal.
+  `provider.ErrContextOverflow` (jedwards1230/agent-sdk-go#118) is the signal —
+  a sentinel matched with `errors.Is`, never message text. The pump answers it
+  with a visible notice, a compaction, and one re-issue of the same turn text.
+  Bounded structurally at one retry (a plain `if`, not a counter): a second
+  overflow surfaces as an ordinary turn failure, because compacting again
+  against a prompt that still doesn't fit is an infinite loop that reads as a
+  hang. The bound is one RETRY, not one compaction: a retry that succeeds
+  settles like any turn and still reaches the threshold check above, which may
+  legitimately compact again off that real measurement.
+  `runner.ErrNothingToCompact` means the overshoot is one oversized payload
+  rather than accumulated history, so a second notice says so, nothing is
+  retried, and the original rejection surfaces. Deliberately NOT gated on
+  `compaction.disabled` — that knob declines compacting *ahead* of trouble, not
+  the only way out of a session already stuck.
 - **Visibility is the hard constraint.** `event.SessionCompacted` is
   must-deliver and renders as a durable transcript block (`itemSessionCompacted`,
   accent-styled like the background-agents summary — a structural event, not
