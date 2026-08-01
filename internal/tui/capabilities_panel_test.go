@@ -137,6 +137,58 @@ func TestMCPPanelReflectsBackendState(t *testing.T) {
 	}
 }
 
+// TestMCPPanelSchemaModeRow covers all four schema-mode branches, including the
+// one that is unreachable from a same-version backend.
+//
+// gofer's own config.Tools.Schemas is a closed two-value enum that fails safe
+// to preload, but the mode arrives over the WIRE from a daemon that may be
+// newer than this client — the version skew gofer/hello exists to detect. The
+// row used to assert "every schema preloaded" for any non-index value, which
+// would have described an unrecognized future mode with the semantics of a
+// different one. Only an empty mode omits the row.
+func TestMCPPanelSchemaModeRow(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		mode        string
+		wantPresent string
+		wantAbsent  string
+	}{
+		{"index renders the split", "index", "index (configured) — 6 index-only, 1 resident", ""},
+		{"preload renders its own row", "preload", "preload (configured) — every schema preloaded", ""},
+		{
+			// The row must NOT claim preload semantics for a mode this binary
+			// has never heard of.
+			name:        "an unrecognized mode is named, not interpreted",
+			mode:        "hologram",
+			wantPresent: "hologram (configured) — unrecognized by this gofer",
+			wantAbsent:  "every schema preloaded",
+		},
+		{"an absent mode omits the row entirely", "", "", "Tool schemas:"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := tui.GoldenCommandEnv()
+			env.Capabilities = func(context.Context) (capability.Answer, error) {
+				return capability.Answer{Known: true, Snapshot: capability.Snapshot{
+					MCP: capability.MCP{
+						Servers:        []capability.Server{{Name: "github", ConfiguredTransport: "stdio", Enabled: true, Connected: true}},
+						ConnectedTools: 7,
+						SchemaMode:     tc.mode,
+						ResidentTools:  1,
+						IndexOnlyTools: 6,
+					},
+				}}, nil
+			}
+			got := content(dispatchSlash(t, newPanelApp(t, env), "/mcp"))
+			if tc.wantPresent != "" && !strings.Contains(got, tc.wantPresent) {
+				t.Errorf("missing %q:\n%s", tc.wantPresent, got)
+			}
+			if tc.wantAbsent != "" && strings.Contains(got, tc.wantAbsent) {
+				t.Errorf("must not contain %q:\n%s", tc.wantAbsent, got)
+			}
+		})
+	}
+}
+
 // TestMCPPanelReportsConfigDrift covers the row that keeps a correct omission
 // from being a silent one.
 //

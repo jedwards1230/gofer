@@ -118,11 +118,25 @@ func (v skillsView) skillLine(s capability.Skill) string {
 	return line
 }
 
-// diagnosticLine renders one refused candidate: its path plus the loader's own
-// reason, verbatim. A SHADOWED entry is labelled as such — that is the only
-// recoverable half of the precedence story (see [skillset.IsShadowed]) — and
-// an unlabelled one still carries the full reason, so a reworded SDK message
-// costs a label and no information.
+// diagnosticLine renders one candidate the loader refused. The two branches
+// deliberately show DIFFERENT amounts, so read them as two rows, not one:
+//
+//   - SHADOWED — the label plus the losing path, and NOT d.Detail. The label
+//     already carries the whole meaning ("this file lost its name to an earlier
+//     directory"), and the SDK's message for it only restates the skill name —
+//     which is on screen in the loaded list directly above — and the
+//     precedence rule, which is documented. At the panel's width the detail
+//     would push the path itself toward truncation, costing the one piece of
+//     information only this row has.
+//   - Everything else — the path plus d.Detail verbatim, because the reason is
+//     the entire content of the row. Nothing else on screen says why an
+//     oversized or malformed candidate was dropped.
+//
+// The shadowed classification is a substring test against an SDK message that
+// is not contractual (see [skillset.IsShadowed]), so a reworded message makes
+// an entry fall into the second branch — where it renders with its full reason.
+// A miss therefore costs a label and no information, which is why the short row
+// is safe to keep short.
 func (v skillsView) diagnosticLine(d capability.Diagnostic) string {
 	if d.Shadowed {
 		return v.theme.WarnStyle().Render("  shadowed  " + d.Path)

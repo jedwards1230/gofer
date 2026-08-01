@@ -154,19 +154,41 @@ func (v mcpView) omissionLine() string {
 
 // schemaModeLine renders how the federated tools reach the model — CONFIGURED
 // intent computed from tools.schema_mode plus tools.resident, not a reading of
-// any live tool index. It returns "" under preload mode, where every schema is
-// in context and the resident/indexed split describes nothing (status.go's
-// contingent-row idiom: the producer returns "" and the caller omits the row).
+// any live tool index.
+//
+// Four cases, one per branch:
+//
+//   - "" — the backend reported no schema mode at all. This is the ONLY case
+//     that returns "" and omits the row entirely (status.go's contingent-row
+//     idiom: the producer returns "" and the caller drops it). An empty mode
+//     means the report predates the field or carried no MCP section; rendering
+//     a mode name for it would be inventing one.
+//   - "index" — the resident/index-only split, which is the whole reason this
+//     row exists.
+//   - "preload" — its own line. The row is NOT suppressed here: "every schema
+//     is already in context" is a real answer to "how do my MCP tools reach the
+//     model", and silence would read as "unknown" rather than "preload".
+//   - anything else — named, WITHOUT claiming preload semantics. gofer's own
+//     [config.Tools.Schemas] is a closed two-value enum that fails safe to
+//     preload, so this is unreachable from a same-version backend — but the
+//     mode arrives over the wire from a daemon that may be NEWER than this
+//     client (the version skew gofer/hello exists to detect), and asserting
+//     "every schema preloaded" about a mode this binary has never heard of
+//     would be exactly the plausible-looking wrong answer this panel exists to
+//     avoid.
 func schemaModeLine(mcp capability.MCP) string {
-	if mcp.SchemaMode != "index" {
-		if mcp.SchemaMode == "" {
-			return ""
-		}
-		return "Tool schemas: " + mcp.SchemaMode + " (configured) — every schema preloaded"
+	switch mcp.SchemaMode {
+	case "":
+		return ""
+	case "index":
+		return "Tool schemas: index (configured) — " +
+			strconv.Itoa(mcp.IndexOnlyTools) + " index-only, " +
+			strconv.Itoa(mcp.ResidentTools) + " resident"
+	case "preload":
+		return "Tool schemas: preload (configured) — every schema preloaded"
+	default:
+		return "Tool schemas: " + mcp.SchemaMode + " (configured) — unrecognized by this gofer"
 	}
-	return "Tool schemas: index (configured) — " +
-		strconv.Itoa(mcp.IndexOnlyTools) + " index-only, " +
-		strconv.Itoa(mcp.ResidentTools) + " resident"
 }
 
 // padCell right-pads s to at least n columns, leaving an over-long value intact
