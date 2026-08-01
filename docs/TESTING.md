@@ -63,6 +63,14 @@ Rules:
   sockets. `cmd/gofer/session_worker_test.go` covers the worker entrypoint and
   its pinned session id; `internal/router/crashisolation_test.go` covers a
   killed worker leaving the router and its other sessions intact.
+- **out-of-turn delivery under `--workers`**:
+  `internal/router/outofturn_compact_test.go` drives a real `gofer/compact`
+  (idle-only by contract, so the "no prompt in flight" condition needs no timing
+  trick) on a session hosted by a real worker process, and asserts the resulting
+  `session.compacted` reaches a client that is *merely attached*. The whole
+  four-hop chain is the property, so a fake relay cannot stand in — note that
+  `internal/router/resume_test.go`'s `recordingRelay` stops two hops short, and a
+  green run there is **not** coverage for this.
 
 ## Visual capture (VHS)
 
