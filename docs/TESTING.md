@@ -217,9 +217,17 @@ whatever the SDK runner starts. Two rules follow:
 
 - **Give the measurement enough work that strays stay inside tolerance.** At 77
   allocs/op the 25% gate leaves a margin of ~19 stray allocations; CI failed on
-  +39. `liveCallsPerOp` batches 20 reads per iteration, so the same stray is
-  0.13% instead of 50%. Batching is safe precisely because it is checkable:
-  every batched figure must divide back to the exact per-call number.
+  +39. `liveCallsPerOp` batches reads per iteration so the same stray is a
+  fraction of a percent. Batching is safe precisely because it is checkable:
+  every batched figure should divide back to the per-read number, exactly on
+  most rows and to within a small residual on the longest-running ones.
+- **Re-derive the batch factor whenever the measured cost changes.** It is sized
+  against the *signal*, and the stray allocations are *noise* that does not move
+  with it — so anything that makes the code cheaper shrinks the margin. When
+  agent-sdk-go v0.22.1 cut the per-read cost from 77 to 45 allocations, the
+  weakest row's margin fell to 4.2x and the factor went 20 → 40. The rule is
+  written at the constant: below ~31 allocations per read, 20x stops giving a 4x
+  margin against the +39 stray CI actually produced.
 - **Quiesce before the window.** `b.Cleanup` tears the previous sub-benchmark's
   fixture down as the next one begins, so its garbage and finalizers land in the
   next window. Two `runtime.GC()` calls before the loop retire them (the first
