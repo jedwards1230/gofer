@@ -61,7 +61,7 @@ func (v statusView) lines() []string {
 		"Version: " + orDash(v.env.Version),
 		"Session: " + v.sessionName(),
 		"Session ID: " + v.sessionID(),
-		"Cwd: " + orDash(v.env.Cwd),
+		"Cwd: " + orDash(displayHome(v.env.Cwd)),
 	}
 	out = append(out, v.providerLines()...)
 	out = append(out, "Model: "+v.modelLine())

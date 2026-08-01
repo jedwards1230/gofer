@@ -50,6 +50,26 @@ Tape/scenario names follow one slug schema, `<area>-<view>[-<state>]`
 - `roster-overview.tape` — the roster screen with mixed session states,
   capturing the ● status markers in color (yellow working / awaiting input
   incl. the ●2 pending count vs green finished).
+- `roster-cwd-home.tape` — the flat view's cwd group headers contracting
+  `$HOME` to `~` (gofer#337), captured as a **before/after pair**
+  (`roster-cwd-home-before` / `roster-cwd-home`). Every other scene's fixture
+  Cwd is the literal string `"~/orchestration"`, which never starts with a
+  real absolute `$HOME` and so never touches the contraction code at all;
+  `overviewCwdHomeScene` instead seeds absolute working directories, and the
+  tape runs the harness twice with a different `HOME` env var each time so
+  `HOME` — not a code difference — is the only variable between the two
+  frames. The before frame (`HOME=/Users/nobody`, matching nothing) shows
+  every header as its full absolute path; the after frame
+  (`HOME=/Users/justin`) contracts three of the four to `~`-relative
+  spellings while the fourth, `/Users/justinother/notes` — a SIBLING
+  directory that only shares `/Users/justin` as a text prefix — stays
+  unchanged in the same frame, which is the path-boundary trap the issue
+  exists to guard against (a naive `strings.HasPrefix` would have contracted
+  it into `~other/notes`).
+- `panel-status-cwd-home.tape` — the companion to the tape above for the
+  Status tab's `Cwd: ` row (`internal/tui/status.go`), same technique and
+  same before/after pair (`panel-status-cwd-home-before` /
+  `panel-status-cwd-home`) over `cwdHomeCommandEnv`'s absolute Cwd.
 - `roster-delete-confirm.tape` — the armed `ctrl+x` delete confirm, captured as
   a **before/after pair** (`roster-delete-confirm-before` /
   `roster-delete-confirm`). The thing under review is a colour change — the
