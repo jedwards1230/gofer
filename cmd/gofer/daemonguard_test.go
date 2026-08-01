@@ -26,17 +26,18 @@ func deadPid(t *testing.T) int {
 	return cmd.Process.Pid
 }
 
-// TestPidAlive covers pidAlive's two ends: the current test process's own
-// pid (definitely alive) and a just-exited child's pid (definitely dead).
+// TestPidAlive covers daemon.ProcessAlive's two ends: the current test
+// process's own pid (definitely alive) and a just-exited child's pid
+// (definitely dead).
 func TestPidAlive(t *testing.T) {
-	if !pidAlive(os.Getpid()) {
-		t.Error("pidAlive(os.Getpid()) = false, want true")
+	if !daemon.ProcessAlive(os.Getpid()) {
+		t.Error("daemon.ProcessAlive(os.Getpid()) = false, want true")
 	}
-	if pidAlive(deadPid(t)) {
-		t.Error("pidAlive(deadPid) = true, want false")
+	if daemon.ProcessAlive(deadPid(t)) {
+		t.Error("daemon.ProcessAlive(deadPid) = true, want false")
 	}
-	if pidAlive(0) || pidAlive(-1) {
-		t.Error("pidAlive(0 or -1) = true, want false")
+	if daemon.ProcessAlive(0) || daemon.ProcessAlive(-1) {
+		t.Error("daemon.ProcessAlive(0 or -1) = true, want false")
 	}
 }
 

@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"os"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/jedwards1230/gofer/internal/config"
@@ -487,7 +486,7 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 	// Guarded: only remove the file if it still names OUR pid when we get
 	// here. A clean shutdown (the common case) always finds its own pid and
 	// removes it. A crash leaves the file in place — clients self-heal past
-	// a stale one (see the pidAlive/Probe check in guardLiveEndpoint, and
+	// a stale one (see the daemon.ProcessAlive/Probe check in guardLiveEndpoint, and
 	// dialDaemon's own dead-address handling); a LATER daemon that started
 	// after we crashed and overwrote the file with its own pid must NOT have
 	// its endpoint clobbered by this deferred cleanup running (it never does,
@@ -756,7 +755,7 @@ func guardLiveEndpoint(ctx context.Context, root, listenAddr string) error {
 		// as missing — WriteEndpoint replaces it below): either way, proceed.
 		return nil
 	}
-	if !pidAlive(existing.PID) {
+	if !daemon.ProcessAlive(existing.PID) {
 		return nil
 	}
 	dctx, cancel := context.WithTimeout(ctx, daemonDialTimeout)
@@ -786,26 +785,6 @@ func removeOwnEndpoint(root string, pid int) error {
 		return nil
 	}
 	return daemon.RemoveEndpoint(root)
-}
-
-// pidAlive reports whether a process with the given pid is currently
-// running — the liveness half of guardLiveEndpoint's stale-file detection.
-// Unix-only (this repo ships no Windows build): os.FindProcess always
-// succeeds on Unix regardless of whether pid is alive, so signal 0 is the
-// portable "is it there" probe — it performs error checking without
-// actually delivering a signal. A nil error, or EPERM (exists, just not
-// ours to signal), both mean alive; anything else (typically ESRCH /
-// [os.ErrProcessDone]) means gone.
-func pidAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	err = proc.Signal(syscall.Signal(0))
-	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 // parseLogLevel maps a --log-level flag value to a [slog.Level]. Only the

@@ -103,7 +103,7 @@ func TestRunDaemonStopStopsRunningDaemon(t *testing.T) {
 		t.Fatalf("runDaemonStop: %v (stderr=%q)", err, errBuf.String())
 	}
 
-	if pidAlive(pid) {
+	if daemon.ProcessAlive(pid) {
 		t.Errorf("daemon pid %d is still alive after `daemon stop`", pid)
 	}
 	if !strings.Contains(out.String(), "Stopped gofer daemon") {
@@ -205,7 +205,7 @@ func TestRunDaemonStopDrivesServiceManager(t *testing.T) {
 	if !strings.Contains(out.String(), "will not respawn") {
 		t.Errorf("stdout = %q, want it to tell the operator the service was stopped too", out.String())
 	}
-	if pidAlive(pid) {
+	if daemon.ProcessAlive(pid) {
 		t.Errorf("pid %d still alive: the service manager did not reap it, so stop must still signal it", pid)
 	}
 }
@@ -287,10 +287,10 @@ func TestRunDaemonRestartLeavesOneDaemonAtNewPID(t *testing.T) {
 	if !endpointGone {
 		t.Error("the endpoint file still existed when the replacement was started — restart must leave no window where it names a dead pid")
 	}
-	if pidAlive(oldPID) {
+	if daemon.ProcessAlive(oldPID) {
 		t.Errorf("restart left the old daemon (pid %d) running", oldPID)
 	}
-	if !pidAlive(newPID) {
+	if !daemon.ProcessAlive(newPID) {
 		t.Errorf("the replacement daemon (pid %d) is not running", newPID)
 	}
 	ep, err := daemon.ReadEndpoint(root)
