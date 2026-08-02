@@ -144,6 +144,11 @@ func (o Overview) Rail(width, height int) string {
 // lines topping the attach screen, its approval prompts, and its command-
 // menu/panel overlays, so every screen's identity chrome renders through one
 // styling definition instead of two copies drifting apart.
+//
+// The cwd renders through [displayHome], matching the roster's group headers
+// ([Overview.cwdLabel]) and the status panel — those three are the only places
+// a cwd is shown, and a header that spelled $HOME out while the group header
+// two lines below contracted the same path read as two different directories.
 func identityHeaderLines(th theme.Theme, meta OverviewMeta, width int) []string {
 	app := meta.App
 	if app == "" {
@@ -163,7 +168,7 @@ func identityHeaderLines(th theme.Theme, meta OverviewMeta, width int) []string 
 		if context != "" {
 			context += " · "
 		}
-		context += meta.Cwd
+		context += displayHome(meta.Cwd)
 	}
 
 	return []string{truncate(title, width), truncate(th.MutedStyle().Render(context), width)}
