@@ -20,6 +20,7 @@ import (
 
 	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/daemon"
+	"github.com/jedwards1230/gofer/internal/supervisor"
 	"github.com/jedwards1230/gofer/internal/worker"
 )
 
@@ -328,31 +329,139 @@ func TestSessionWorkerRequiresSession(t *testing.T) {
 // locally-installed seam let `spawn_subagent` mint children straight past both
 // the cap and the router.
 //
-// # Why this asserts on a log line
+// # It asserts the SEAM, because asserting the warning was not enough
 //
-// A worker's tool surface is not observable from outside it: `gofer/capabilities`
-// carries MCP servers and skills, not builtins, and driving the tool would need
-// a real model turn. What IS observable — and is the same decision — is the
-// startup warning runSessionWorker emits when it resolves the seam to nothing
-// while config asks for subagents. The warning is keyed off the RESOLVED seam,
-// not off the `--router` branch, so installing supervisor.LocalSubagents in
-// that branch removes the warning and fails this test (mutation-confirmed).
+// The first version of this test checked for the startup warning instead. That
+// warning is computed from the local variable BEFORE supervisor.New is reached,
+// so re-adding the fail-open default immediately above the call left the warning
+// intact — the mutation that restores the original bug passed this test AND the
+// entire repo suite. A test that cannot fail against the bug it names is worse
+// than no test, because it retires the question.
+//
+// The newSupervisor seam makes the real property observable: whatever
+// runSessionWorker actually hands supervisor.New. Both directions are covered —
+// nil without a dial-back, and a real worker.RouterSubagents with one — because
+// "always nil" would satisfy the first half alone.
 func TestSessionWorkerNeverInstallsLocalSubagents(t *testing.T) {
-	root := t.TempDir()
-	// The misconfiguration: opted in, with nothing to spawn through.
-	if err := config.Save(config.DefaultPath(root), config.Config{
-		Subagents: config.Subagents{Enabled: true},
-	}); err != nil {
-		t.Fatalf("seed config: %v", err)
-	}
+	for _, tc := range []struct {
+		name      string
+		withRoute bool
+	}{
+		{"no --router: no seam at all", false},
+		{"with --router: the router dial-back seam", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			// The misconfiguration the first case describes: opted in, with
+			// nothing to spawn through. Enabled in BOTH cases so the config
+			// switch is never what explains the difference.
+			if err := config.Save(config.DefaultPath(root), config.Config{
+				Subagents: config.Subagents{Enabled: true},
+			}); err != nil {
+				t.Fatalf("seed config: %v", err)
+			}
 
-	sessionID := uuid.Must(uuid.NewV7()).String()
-	// No --router: the one flag that would give this worker a legal answer.
-	_, stderr, stop := startSessionWorkerIn(t, root, "warn", sessionID)
-	stop()
+			var (
+				mu      sync.Mutex
+				gotCfg  supervisor.Config
+				gotCall bool
+			)
+			orig := newSupervisor
+			newSupervisor = func(cfg supervisor.Config) (*supervisor.Supervisor, error) {
+				mu.Lock()
+				gotCfg, gotCall = cfg, true
+				mu.Unlock()
+				return orig(cfg)
+			}
+			t.Cleanup(func() { newSupervisor = orig })
 
-	if got := stderr.String(); !strings.Contains(got, "no --router dial-back") {
-		t.Errorf("a worker with subagents.enabled and no --router did not warn that spawning is unavailable —\n"+
-			"it resolved a subagent seam it must not have.\nstderr: %s", got)
+			var extra []string
+			if tc.withRoute {
+				// A dial-back address is all this needs: the seam is built
+				// lazily and dials nothing until a spawn actually happens.
+				extra = []string{"--router", "127.0.0.1:7333"}
+			}
+			sessionID := uuid.Must(uuid.NewV7()).String()
+			_, _, stop := startSessionWorkerIn(t, root, "error", sessionID, extra...)
+			stop()
+
+			mu.Lock()
+			defer mu.Unlock()
+			if !gotCall {
+				t.Fatal("runSessionWorker never reached supervisor.New; this test asserts nothing")
+			}
+			if !tc.withRoute {
+				if gotCfg.Subagents != nil {
+					t.Fatal("a worker with no --router handed supervisor.New a NON-NIL Subagents factory — " +
+						"the only legal value here is nil, which is what makes `a worker never creates a session` structural")
+				}
+				return
+			}
+			if gotCfg.Subagents == nil {
+				t.Fatal("a worker WITH --router handed supervisor.New a nil Subagents factory; the dial-back seam was dropped")
+			}
+			// Resolve the factory and pin the implementation: the point is not
+			// merely that something was installed, but that it is the seam that
+			// leaves the process. supervisor.LocalSubagents would satisfy a
+			// non-nil check and is exactly the value that must never appear.
+			seam := gotCfg.Subagents(nil)
+			if _, ok := seam.(*worker.RouterSubagents); !ok {
+				t.Fatalf("worker installed %T; want *worker.RouterSubagents — a worker must route every spawn through the router", seam)
+			}
+		})
 	}
+}
+
+// TestReadRouterTokenFile covers the worker half of the dial-back credential
+// hand-off, which had no test at all: deleting its os.Remove left the entire
+// suite green, so nothing anywhere asserted that the credential stops existing
+// on disk once read.
+//
+// The delete is the property that makes the file safe. A 0600 file that is read
+// and LEFT lying there is a durable credential in the session store, which is
+// the state the file hand-off exists to avoid.
+func TestReadRouterTokenFile(t *testing.T) {
+	t.Run("empty path is not an error", func(t *testing.T) {
+		// A router on a loopback bind with no bearer token configures no
+		// dial-back token, and a worker with none dials an unauthenticated
+		// router exactly as it did before this existed.
+		got, err := readRouterTokenFile("")
+		if err != nil {
+			t.Fatalf("readRouterTokenFile(\"\") = error %v, want nil", err)
+		}
+		if got != "" {
+			t.Errorf("token = %q, want empty", got)
+		}
+	})
+
+	t.Run("a path that cannot be read is an error", func(t *testing.T) {
+		// Deliberately fatal to worker startup: carrying on with an empty token
+		// produces a spawn that dies with an opaque 401 minutes later, inside a
+		// tool call, pointing nowhere near the cause.
+		missing := filepath.Join(t.TempDir(), "nope.token")
+		if _, err := readRouterTokenFile(missing); err == nil {
+			t.Fatal("reading a missing token file returned nil error; a worker would start with no credential and fail confusingly later")
+		}
+	})
+
+	t.Run("a real file is read once and deleted", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "dial-back.token")
+		// Trailing newline on purpose: whatever writes this may add one, and a
+		// token compared with a stray \n fails auth for a reason nothing shows.
+		if err := os.WriteFile(path, []byte("s3cret-dial-back\n"), 0o600); err != nil {
+			t.Fatalf("seed token file: %v", err)
+		}
+
+		got, err := readRouterTokenFile(path)
+		if err != nil {
+			t.Fatalf("readRouterTokenFile: %v", err)
+		}
+		if got != "s3cret-dial-back" {
+			t.Errorf("token = %q, want %q (surrounding whitespace must be trimmed)", got, "s3cret-dial-back")
+		}
+		if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("token file still exists after being read (stat err = %v, want ErrNotExist) — "+
+				"the credential must not outlive the read", statErr)
+		}
+	})
 }

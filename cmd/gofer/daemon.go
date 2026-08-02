@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -238,12 +240,35 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 	// whatever it holds at the time an event actually arrives, never before
 	// daemon.New has returned (see the out-of-turn watcher's doc, below).
 	var d *daemon.Daemon
+	// dialBackToken is the credential a `--workers` router's workers present when
+	// they dial back to create a subagent session. Empty on every other path.
+	//
+	// It is MINTED here, freshly per daemon process, rather than being the
+	// operator's own bearer token. Handing a component the operator's credential
+	// makes any leak of it a disclosure of $GOFER_TOKEN — which an operator may
+	// reuse elsewhere and which outlives this process — so the two are kept
+	// separate. The daemon accepts it via daemon.Config.ExtraTokens; see that
+	// field for what this does and does not buy (separation, not privilege
+	// reduction — the wire authority is the same).
+	var dialBackToken string
 	if *workers {
 		// Each worker is spawned from THIS gofer binary (`gofer session-worker`),
 		// so the router needs its own executable path.
 		selfExe, exeErr := os.Executable()
 		if exeErr != nil {
 			return fmt.Errorf("build router: resolve gofer executable: %w", exeErr)
+		}
+		// Gated on the same opt-in as the address: an operator who never asked
+		// for subagents mints nothing and hands their workers nothing.
+		if cfg.Subagents.IsEnabled() && bearerToken != "" {
+			// Only meaningful when the daemon actually authenticates. With no
+			// bearer token the daemon accepts every connection, so a dial-back
+			// credential would be theatre.
+			t, terr := mintDialBackToken()
+			if terr != nil {
+				return fmt.Errorf("build router: mint subagent dial-back token: %w", terr)
+			}
+			dialBackToken = t
 		}
 		rsup, rerr := router.New(router.Config{
 			Root:  rootDir,
@@ -272,7 +297,7 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 			// never asked for subagents must not pay: nothing else about a
 			// worker changes when this feature is off.
 			RouterAddr:  routerDialBackAddr(cfg.Subagents, *listen),
-			RouterToken: routerDialBackToken(cfg.Subagents, bearerToken),
+			RouterToken: dialBackToken,
 			Logger:      logger,
 			MaxWorkers:  *maxWorkers,
 		})
@@ -391,8 +416,12 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 	}
 
 	d = daemon.New(sup, daemon.Config{
-		ListenAddr:   *listen,
-		BearerToken:  bearerToken,
+		ListenAddr:  *listen,
+		BearerToken: bearerToken,
+		// The worker dial-back credential, when this is a `--workers` daemon
+		// with subagents enabled. Nil otherwise, so a daemon that mints nothing
+		// accepts exactly what it always did.
+		ExtraTokens:  dialBackTokens(dialBackToken),
 		DefaultModel: modelID,
 		// Let a running daemon observe a later `session.model` config write
 		// instead of freezing its startup answer forever (issue #156). nil when
@@ -810,18 +839,45 @@ func routerDialBackAddr(cfg config.Subagents, listen string) string {
 	return net.JoinHostPort(host, port)
 }
 
-// routerDialBackToken is [routerDialBackAddr]'s token half: the daemon's own
-// bearer token when subagents are enabled, and "" otherwise.
+// dialBackTokenBytes is the entropy of a minted dial-back credential. 32 bytes
+// of crypto/rand is well past any brute-force concern for a loopback listener
+// and matches what a bearer token is expected to look like.
+const dialBackTokenBytes = 32
+
+// mintDialBackToken generates a fresh worker dial-back credential for THIS
+// daemon process.
 //
-// Kept as its own function rather than folded into the caller so the gate is
-// stated once per value and cannot drift — a router with an address but no
-// token dials unauthenticated, which against a token-required daemon is a
-// confusing 401 rather than a clean refusal.
-func routerDialBackToken(cfg config.Subagents, token string) string {
-	if !cfg.IsEnabled() {
-		return ""
+// Freshly minted rather than derived from the operator's bearer token, and
+// never persisted: it lives in this process's memory, reaches a worker only
+// through the 0600 read-once-and-deleted file internal/router writes, and dies
+// with the process. A restart therefore rotates it with no operator action,
+// which is the property a long-lived shared credential cannot have.
+//
+// An error is fatal to router startup rather than silently degrading to an
+// unauthenticated dial-back: a router with an address but no token dials
+// unauthenticated, which against a token-required daemon is a confusing 401
+// several minutes later inside a tool call.
+func mintDialBackToken() (string, error) {
+	b := make([]byte, dialBackTokenBytes)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
 	}
-	return token
+	return hex.EncodeToString(b), nil
+}
+
+// dialBackTokens shapes the minted credential for [daemon.Config.ExtraTokens]:
+// a one-element slice, or nil when nothing was minted.
+//
+// Nil rather than a slice holding "" matters — an empty entry in an accepted-
+// token list is the shape that turns "present but empty" into "authorized", and
+// daemon.authorized skips empties precisely because this kind of caller exists.
+// Returning nil means a daemon that mints nothing is configured exactly as it
+// was before this feature.
+func dialBackTokens(token string) []string {
+	if token == "" {
+		return nil
+	}
+	return []string{token}
 }
 
 // guardLiveEndpoint reports whether a still-running `gofer daemon` already

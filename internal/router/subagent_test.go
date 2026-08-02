@@ -189,6 +189,16 @@ func TestBuildWorkerCmdCarriesTheRouterDialBack(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			shortRuntimeDir(t)
+			// Put the credential in THIS process's environment, which is the
+			// router's environment as far as buildWorkerCmd is concerned. Every
+			// case sets it, including the ones with no dial-back token: the
+			// inheritance hop has nothing to do with whether subagents are
+			// configured, and a strip that only ran for the configured case
+			// would leave the common one exposed.
+			//
+			// Without this the GOFER_TOKEN assertion below is vacuous — there
+			// is nothing to strip, so it passes whether or not the code strips.
+			t.Setenv("GOFER_TOKEN", "operator-bearer-token")
 			s, err := New(Config{
 				Root:        t.TempDir(),
 				SelfExe:     "/usr/local/bin/gofer",
@@ -215,16 +225,32 @@ func TestBuildWorkerCmdCarriesTheRouterDialBack(t *testing.T) {
 						t.Fatalf("the bearer token leaked into argv (%v) — /proc/<pid>/cmdline is world-readable", cmd.Args)
 					}
 				}
+			}
+			// cmd.Env must be EXPLICIT. A nil Env means "inherit the router's,
+			// unchanged", which is how the token reached workers in the first
+			// place: it was never assigned in, it was already there. This
+			// assertion is checked BEFORE the scan below, because the scan is
+			// vacuous against a nil Env — a nil slice ranges zero times, which
+			// is exactly how the previous version of this test passed while the
+			// property it names was false.
+			if cmd.Env == nil {
+				t.Fatalf("buildWorkerCmd left cmd.Env nil, which means INHERIT — the worker would receive the router's whole environment, credentials included")
+			}
+			if tc.token != "" {
 				for _, kv := range cmd.Env {
 					if strings.Contains(kv, tc.token) {
-						t.Fatalf("the bearer token leaked into the worker's environment — the agent's own bash tool inherits it and can print it with `env`")
+						t.Fatalf("the dial-back token leaked into the worker's environment — the agent's own bash tool inherits it and can print it with `env`")
 					}
 				}
 			}
-			// A nil Env means "inherit the router's, unchanged", which is what
-			// keeps this feature from touching a worker's environment at all.
-			if cmd.Env != nil {
-				t.Errorf("buildWorkerCmd set cmd.Env (%v); it must stay nil so the worker's environment is untouched", cmd.Env)
+			// The credential the real chain actually carried, independent of
+			// this case's token: $GOFER_TOKEN is where a daemon's bearer token
+			// comes from by documented default, so an operator with it exported
+			// used to hand it to every model gofer runs.
+			for _, kv := range cmd.Env {
+				if strings.HasPrefix(kv, "GOFER_TOKEN=") {
+					t.Fatalf("GOFER_TOKEN survived into the worker's environment (%q) — a model can print it with `env`", kv)
+				}
 			}
 
 			gotFlag := slices.Contains(cmd.Args, "--router-token-file")

@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -133,22 +135,45 @@ type Config struct {
 	// operator never enabled subagents — cmd/gofer leaves BOTH fields empty in
 	// that case, so nothing about a worker changes.
 	//
-	// # RouterToken never reaches a worker's argv OR its environment
+	// # RouterToken reaches a worker through a 0600 file, and nothing else
 	//
 	// It is delivered through a 0600 file the worker reads once and DELETES at
 	// startup (see [WorkerRouterTokenPath]), which is the pattern this repo
 	// already uses for a service-managed daemon's own token (cmd/gofer's
 	// writeDaemonEnvToken). Neither of the two obvious channels is safe:
 	//
-	//   - argv, because /proc/<pid>/cmdline is world-readable, so the daemon's
-	//     bearer token — which is equivalent to arbitrary code execution as the
-	//     daemon's user — would be published to every local account.
+	//   - argv, because /proc/<pid>/cmdline is world-readable, so a token would
+	//     be published to every local account.
 	//   - the ENVIRONMENT, because the agent itself reads it. The SDK's bash
 	//     tool runs exec.CommandContext with cmd.Env unset
 	//     (agent-sdk-go/tool/bash.go), so a child process inherits the worker's
-	//     whole environment and a model can print the token with `env`.
-	//     internal/sandbox scrubs no variables. An env var is safe from other
-	//     USERS and wide open to the very agent the worker exists to contain.
+	//     whole environment and a model can print a token with `env`.
+	//     internal/sandbox scrubs no variables — it contains the filesystem and
+	//     the network, not the environment. An env var is safe from other USERS
+	//     and wide open to the very agent the worker exists to contain.
+	//
+	// # Not passing a secret is not the same as not leaking one
+	//
+	// An earlier version of this doc claimed the token "never reaches a worker's
+	// argv OR its environment" and left cmd.Env nil to prove it. That was false,
+	// and the way it was false is the lesson: a nil cmd.Env means INHERIT, so
+	// the worker got the router's whole environment — including $GOFER_TOKEN,
+	// which is where a daemon's bearer token comes from by documented default.
+	// The token was never assigned into the worker's environment because it was
+	// already there.
+	//
+	// [buildWorkerCmd] therefore sets cmd.Env EXPLICITLY, to the router's
+	// environment minus every known credential variable and minus anything
+	// holding this token by value (see workerEnv). The claim above is now a
+	// property of the code rather than of what this package refrains from doing.
+	//
+	// Two things this still does NOT promise. A credential in the router's
+	// environment under a name gofer does not know, whose value is not this
+	// token, reaches the worker — the value sweep covers the secret this package
+	// holds, not every secret an operator might export. And RouterToken carries
+	// the same wire authority as the daemon's own bearer token once presented
+	// (see daemon.Config.ExtraTokens); minting it separately bounds which
+	// credential leaks, not what the holder may do.
 	RouterAddr  string
 	RouterToken string
 	// Logger receives the router's structured logs. Nil discards them.
@@ -703,10 +728,58 @@ func (s *Supervisor) buildWorkerCmd(ctx context.Context, sessionID, model, cwd s
 		}
 	}
 	cmd := exec.CommandContext(ctx, s.selfExe, args...)
+	cmd.Env = workerEnv(os.Environ(), s.routerToken)
 	if cwd != "" {
 		cmd.Dir = cwd
 	}
 	return cmd
+}
+
+// credentialEnvVars are the environment variables gofer itself uses to carry a
+// credential. They are stripped from a worker's environment because the worker
+// runs a MODEL WITH A SHELL: the SDK's bash tool execs with cmd.Env nil, so the
+// agent's shell inherits whatever the worker has, and `env` walks straight past
+// internal/sandbox (which contains the filesystem and the network, not the
+// environment).
+//
+// This is the list of names, not of values — a variable is dropped whether or
+// not it currently holds anything, so a worker cannot read one that was set
+// after this list was written.
+var credentialEnvVars = []string{
+	// The daemon bearer token. `gofer daemon` reads it (see cmd/gofer's
+	// runDaemon), so an operator who exports it for their own daemon would
+	// otherwise hand it to every model gofer runs.
+	"GOFER_TOKEN",
+}
+
+// workerEnv returns the environment a worker process is started with: env,
+// minus every [credentialEnvVars] entry, minus any variable whose VALUE is the
+// dial-back token.
+//
+// The value sweep is the belt to the name list's braces. The name list can only
+// drop variables gofer knows about; if a credential reaches the router's
+// environment under a name nobody predicted (a wrapper script, a process
+// manager, a future flag), the value check still catches the one secret this
+// package actually holds. It is skipped for an empty token, which would
+// otherwise match every variable with an empty value.
+//
+// Returning a non-nil slice is load-bearing: a nil cmd.Env means "inherit the
+// parent's, unchanged", which is precisely the behavior this function exists to
+// prevent. Even with nothing to strip it returns the (possibly empty) copy, so
+// the invariant does not depend on whether a strip happened to occur.
+func workerEnv(env []string, dialBackToken string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		name, value, _ := strings.Cut(kv, "=")
+		if slices.Contains(credentialEnvVars, name) {
+			continue
+		}
+		if dialBackToken != "" && value == dialBackToken {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 // spawnedWorker is a freshly brought-up worker: its process, the dialed client
