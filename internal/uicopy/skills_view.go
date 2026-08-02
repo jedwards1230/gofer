@@ -26,7 +26,8 @@ func SkillsHeaderLoaded(n int) string {
 }
 
 // SkillsHeaderDisabled continues the header with how many of the loaded skills
-// skills.disabled excludes. Appended to [SkillsHeaderLoaded] only when nonzero.
+// the skills.disabled config excludes. Appended to [SkillsHeaderLoaded] only
+// when nonzero.
 func SkillsHeaderDisabled(n int) string {
 	return ", " + strconv.Itoa(n) + " disabled"
 }

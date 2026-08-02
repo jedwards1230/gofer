@@ -42,8 +42,8 @@ const (
 // CommandNewTakesNoArgs is /new's rejection of stray arguments.
 const CommandNewTakesNoArgs = "/new takes no arguments — it opens an empty session; type the prompt there"
 
-// CommandResumeWantsOneID reports that /resume was given got arguments where a
-// single session id was expected.
+// CommandResumeWantsOneID reports that /resume was called with got arguments
+// where exactly one session id was expected.
 func CommandResumeWantsOneID(got int) string {
 	return "/resume takes a single session id — got " + strconv.Itoa(got) + " arguments"
 }
@@ -53,8 +53,8 @@ func CommandResumeInvalidID(id string) string {
 	return "can't resume " + strconv.Quote(id) + ": not a valid session id"
 }
 
-// CommandModelWantsOneID reports that /model was given got arguments where a
-// single model id was expected.
+// CommandModelWantsOneID reports that /model was called with got arguments
+// where exactly one model id was expected.
 func CommandModelWantsOneID(got int) string {
 	return "/model takes a single model id — got " + strconv.Itoa(got) + " arguments"
 }
@@ -65,8 +65,8 @@ func CommandModelUnusable(id, reason string) string {
 	return "can't use model " + strconv.Quote(id) + ": " + reason
 }
 
-// CommandThinkingWantsOneLevel reports that /thinking was given got arguments
-// where a single effort level was expected.
+// CommandThinkingWantsOneLevel reports that /thinking was called with got
+// arguments where exactly one effort level was expected.
 func CommandThinkingWantsOneLevel(got int) string {
 	return "/thinking takes a single level — got " + strconv.Itoa(got) + " arguments"
 }
