@@ -493,7 +493,16 @@ func startReplacementDaemon(ctx context.Context, root string, out stopOutcome) (
 // advertised its endpoint. It is the non-printing core the TUI stale-daemon
 // banner's reconnect closure drives (see runTUI's selectTUIBackend), the same
 // stop→start→wait `gofer daemon restart` runs but without any stdout reporting.
-func restartDaemonProcess(ctx context.Context, root string) error {
+//
+// It is a var rather than a plain func for the same reason
+// [modelDiscoveryClient] is: the thing worth testing is what the REAL reconnect
+// closure does to the rest of the wiring once a restart succeeds — the bridge
+// swaps its connection, closes the old one, and every closure still holding the
+// old client silently stops working (see [daemonbridge.Supervisor.Client]).
+// Reaching that state through the real body would mean spawning an actual
+// daemon process, so a test stubs exactly this step and drives everything
+// around it unchanged. Production never reassigns it.
+var restartDaemonProcess = func(ctx context.Context, root string) error {
 	out, err := stopDaemon(ctx, root)
 	if err != nil {
 		return err

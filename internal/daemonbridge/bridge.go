@@ -191,6 +191,25 @@ func (s *Supervisor) emitCwdMissing(sessionID, cwd string) {
 // cur returns the current live connection snapshot. Never nil after [New].
 func (s *Supervisor) cur() *conn { return s.conn.Load() }
 
+// Client returns the [*daemon.Client] of the connection this bridge is using
+// RIGHT NOW. Never nil after [New].
+//
+// It exists for the consumer that needs to make a daemon call this bridge does
+// not itself expose — cmd/gofer binds [tui.CommandEnv.Capabilities] and
+// [tui.CommandEnv.DaemonDefaultModel] through it — and the whole point is that
+// it is a call-time lookup rather than a handle to keep.
+//
+// A caller must therefore call it PER USE and never cache the result: closing
+// over one client, the way those two closures originally did, survives exactly
+// until [Supervisor.RestartDaemon] swaps the connection and closes the old core
+// (which owns the client — see [conn]). After that the cached client is closed,
+// every call on it fails at the transport, and the panels fed by it go
+// permanently unavailable while the roster beside them polls the new daemon
+// perfectly happily. Pass the METHOD VALUE (`b.Client`) into such a closure, not
+// its result. It is the same "survive the swap" reason [Supervisor.cwdMissing]
+// lives on the Supervisor rather than on a conn.
+func (s *Supervisor) Client() *daemon.Client { return s.cur().client }
+
 // Close tears down the reconstruction core: it shuts the underlying client
 // connection down, waits for the demuxer goroutine to exit, and closes every
 // session's reconstructed broker so any live subscription observes a clean

@@ -78,9 +78,47 @@ func hermeticDaemonHome(t *testing.T) {
 // optional version is advertised verbatim as gofer/hello's binaryVersion (and
 // nowhere else), so a test can exercise the client's authoritative version-skew
 // handshake; omit it (the common case) for a daemon that reports no version.
+//
+// It is the default-everything form of [testDaemonAt], which a test needing to
+// pin the store root or the advertised default model calls directly.
 func testDaemon(t *testing.T, token string, newProvider func() provider.Provider, version ...string) string {
 	t.Helper()
-	root := t.TempDir()
+	var ver string
+	if len(version) > 0 {
+		ver = version[0]
+	}
+	return testDaemonAt(t, testDaemonSpec{token: token, version: ver}, newProvider)
+}
+
+// testDaemonSpec is [testDaemonAt]'s knobs. Every zero value is the
+// [testDaemon] default, so a test names only what it needs to tell one daemon
+// from another.
+type testDaemonSpec struct {
+	// root is the daemon's store root; "" ⇒ a fresh t.TempDir(). Naming it is
+	// what lets a test plant a skill only THIS daemon can report, which is the
+	// only way to prove which of two daemons answered a gofer/capabilities call.
+	root string
+	// token is the bearer token clients must present; "" ⇒ unauthenticated.
+	token string
+	// version is advertised verbatim as gofer/hello's binaryVersion (and nowhere
+	// else); "" ⇒ a daemon that reports no version.
+	version string
+	// defaultModel is advertised as gofer/hello's defaultModel; "" ⇒ "faux".
+	defaultModel string
+}
+
+// testDaemonAt is [testDaemon] with its defaults opened up — see
+// [testDaemonSpec]. It returns the same --daemon-flag-shaped address.
+func testDaemonAt(t *testing.T, spec testDaemonSpec, newProvider func() provider.Provider) string {
+	t.Helper()
+	root := spec.root
+	if root == "" {
+		root = t.TempDir()
+	}
+	defaultModel := spec.defaultModel
+	if defaultModel == "" {
+		defaultModel = "faux"
+	}
 	store, err := session.NewFileStore(session.WithRoot(root))
 	if err != nil {
 		t.Fatalf("session.NewFileStore: %v", err)
@@ -109,11 +147,7 @@ func testDaemon(t *testing.T, token string, newProvider func() provider.Provider
 	}
 	t.Cleanup(func() { _ = sup.Close() })
 
-	var ver string
-	if len(version) > 0 {
-		ver = version[0]
-	}
-	d := daemon.New(sup, daemon.Config{BearerToken: token, DefaultModel: "faux", Version: ver})
+	d := daemon.New(sup, daemon.Config{BearerToken: spec.token, DefaultModel: defaultModel, Version: spec.version})
 	srv := httptest.NewServer(d.Handler())
 	t.Cleanup(srv.Close)
 

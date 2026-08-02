@@ -142,15 +142,18 @@ func selectTUIBackend(ctx context.Context, df *daemonFlags, cwd, root string, st
 		// The live re-read of that daemon's default, for AFTER a /model write:
 		// the header seeded below is a one-shot startup snapshot, and without
 		// this the TUI would keep showing it until the process restarted
-		// (issue #162). Bound to this connection, so it answers about the same
-		// daemon the roster comes from.
+		// (issue #162). Bound to whichever connection the bridge holds when it
+		// is CALLED, so it answers about the same daemon the roster comes from
+		// even after the banner's restart replaced it —
+		// [daemonbridge.Supervisor.Client] has the failure a captured client
+		// produces.
 		env.DaemonDefaultModel = func(ctx context.Context) (string, error) {
-			return daemonDefaultModelErr(ctx, c)
+			return daemonDefaultModelErr(ctx, b.Client())
 		}
-		// The /mcp + /skills panels' data source, bound to THIS connection and
-		// to nothing else — see capabilities_wire.go's file doc for why it
-		// must never fall back to the local supervisor below.
-		env.Capabilities = daemonCapabilities(c, cwd)
+		// The /mcp + /skills panels' data source, bound to the bridge's current
+		// connection and to nothing else — see capabilities_wire.go's file doc
+		// for why it must never fall back to the local supervisor below.
+		env.Capabilities = daemonCapabilities(b.Client, cwd)
 		return tuiBackend{
 			sup:   b,
 			close: b.Close,

@@ -110,6 +110,10 @@ func runAttach(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 	}
 
 	_, _ = fmt.Fprintf(stderr, "gofer attach: connected to daemon at %s\n", df.addr)
+	// The command panel's env binds its capability closure to the BRIDGE's
+	// current connection (b.Client), never to c: the stale-daemon banner's
+	// restart swaps that connection and closes this one, which would leave /mcp
+	// and /skills permanently UNKNOWN — see [daemonbridge.Supervisor.Client].
 	app := tui.NewApp(theme.Default(), b, tui.OverviewMeta{
 		App:     "gofer",
 		Version: effectiveVersion(),
@@ -119,7 +123,7 @@ func runAttach(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 		// stale daemon — the stderr warning below is swallowed by the alt-screen.
 		DaemonVersion:   daemonBinaryVersion(ctx, c),
 		AttachSessionID: attachID,
-	}, attachCommandEnv(c, rootDir, cwd))
+	}, attachCommandEnv(b.Client, rootDir, cwd))
 
 	ctx, stop := interruptCtx(ctx)
 	defer stop()

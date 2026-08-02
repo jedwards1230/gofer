@@ -33,15 +33,20 @@ import (
 )
 
 // daemonCapabilities returns the [tui.CommandEnv.Capabilities] closure for the
-// DAEMON backend: one gofer/capabilities round trip on this connection,
+// DAEMON backend: one gofer/capabilities round trip on the CURRENT connection,
 // classified through [classifyCapabilities]. cwd is this client's working
 // directory, forwarded so the daemon reports the skills a session started here
 // would load.
 //
+// client is a supplier, not a client, and that is load-bearing: it is resolved
+// on every call so the panel follows the stale-daemon banner's restart onto the
+// replacement connection — see [daemonbridge.Supervisor.Client], which explains
+// what a cached one costs. Pass `b.Client`, never `b.Client()`.
+//
 // It has no local fallback and must never gain one — see the file doc.
-func daemonCapabilities(c *daemon.Client, cwd string) func(context.Context) (capability.Answer, error) {
+func daemonCapabilities(client func() *daemon.Client, cwd string) func(context.Context) (capability.Answer, error) {
 	return func(ctx context.Context) (capability.Answer, error) {
-		snap, err := c.Capabilities(ctx, cwd)
+		snap, err := client().Capabilities(ctx, cwd)
 		return classifyCapabilities(snap, err)
 	}
 }
@@ -59,7 +64,8 @@ func localCapabilities(sup *supervisor.Supervisor, cwd string) func(context.Cont
 }
 
 // attachCommandEnv is `gofer attach`'s [tui.CommandEnv]: the shared local
-// builder plus the daemon capability closure bound to THIS connection.
+// builder plus the daemon capability closure bound to the bridge's CURRENT
+// connection (client is a supplier — see [daemonCapabilities]).
 //
 // It exists because the shared builder deliberately leaves Capabilities nil
 // (see the file doc), and `gofer attach` is always daemon-backed — so calling
@@ -72,9 +78,9 @@ func localCapabilities(sup *supervisor.Supervisor, cwd string) func(context.Cont
 // Wrapping it in a named function rather than repeating two lines at the call
 // site is the point: there is now one place per backend that binds this, and
 // TestAttachWiresDaemonCapabilities pins that attach uses it.
-func attachCommandEnv(c *daemon.Client, root, cwd string) tui.CommandEnv {
+func attachCommandEnv(client func() *daemon.Client, root, cwd string) tui.CommandEnv {
 	env := buildCommandEnv(root, cwd)
-	env.Capabilities = daemonCapabilities(c, cwd)
+	env.Capabilities = daemonCapabilities(client, cwd)
 	return env
 }
 
