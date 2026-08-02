@@ -82,11 +82,11 @@ func (a *App) applyCompactionEvent(ev event.Event) (armTick bool) {
 		// Prefer the event's own publish time so a client attaching MID
 		// compaction — the case this event exists for — counts from when the
 		// work actually started rather than from when it happened to connect.
-		// It is zero on the daemon path: internal/wirestream rebuilds events
-		// through the SDK's exported New* constructors, which cannot set the
-		// unexported seq/ts meta, so a reconstructed event carries no timestamp.
-		// Falling back to receipt time there understates elapsed by the transport
-		// hop and nothing more. Same guard as internal/router/rostercache.go.
+		// On the daemon path that time is the reconstructor's republish, not the
+		// origin's — see internal/wirestream/reconstruct.go's note on seq/time —
+		// so it understates elapsed by the transport hop and nothing more. The
+		// IsZero fallback below stays as defence. Same guard as
+		// internal/router/rostercache.go.
 		since := e.Time()
 		if since.IsZero() {
 			since = time.Now()

@@ -22,7 +22,7 @@ Rows are the SDK's full `event` union (`agent-sdk-go/event/`, 23 types, verified
 | 2 | **gofer in-turn broadcast** | `internal/daemon/handlers.go` `handleSessionPrompt` |
 | 3 | **gofer out-of-turn relay** | `cmd/gofer/daemon.go` `OnRegister` (in-process) · `internal/daemon/observer.go` (worker) |
 | 4 | **`wirestream` reconstruction** | `internal/wirestream/reconstruct.go` — `--workers` mode only |
-| 5 | **gofer TUI** | `internal/tui/model.go` `Model.Ingest` |
+| 5 | **gofer TUI** | `internal/tui/model.go` `Model.Ingest`, plus `internal/tui/compact.go` `App.applyCompactionEvent` for the two `Y o` rows |
 
 **Column 1 is first because omitting it is how you get a false negative.** The first hop out of
 the event stream is not in gofer at all — it is in the SDK. An investigation that greps only
@@ -95,33 +95,41 @@ journal state: `session/entry.go:117,123` persist `parent_id`/`depth` in the roo
 entry, `runner/runner.go:275-276` writes them via `session.WithMetaParent`, and
 `runner/runner.go:420,443-444` recovers them on resume.
 
-What makes the cell correctly empty is narrower and more durable: **gofer opts out of the SDK's
-parentage on both sides.**
+What makes the cell correctly empty is narrower and more durable: **gofer never calls the SDK's
+`Spawn`, and never reads the SDK's parentage back.**
 
-- *Write side* — no `runner.Options` literal in gofer sets `ParentID` or `Depth`: not
-  `supervisor.go:682-686` (Create), not `:831-835` (Resume), not
-  `cmd/gofer/{exec.go:99, run.go:308, resume.go:118, session_worker.go:150}`. So the
-  `opts.ParentID != ""` guard at `runner/runner.go:275` never fires and the journal's parentage
-  fields stay omitted (both `omitempty`) on every gofer session.
+- *Write side* — `Create` DOES forward `ParentID`/`Depth` into `runner.Options`
+  (`supervisor.go:804-809`), deliberately: those three assignments put the child runner in
+  exactly the state `runner.Spawn` would construct, without calling it (the reasoning is at
+  `supervisor.go:785-803`). So for a subagent session the `opts.ParentID != ""` guard at
+  `runner/runner.go:275` *does* fire and the journal's root meta entry *does* record
+  `parent_id`/`depth`. That copy is a write-only PROJECTION. `Resume` (`:960-965`) passes only
+  `MaxDepth` — `runner.Resume` recovers lineage from the journal itself — and
+  `cmd/gofer/{exec.go:99, run.go:308, resume.go:118}` pass neither, so a root session still
+  omits both fields (`omitempty`).
 - *Read side* — `session.MetaOf`, `Runner.ParentID()` and `Runner.Depth()` have **zero** call
-  sites in gofer.
+  sites in gofer. Nothing reads that projection back, which is what keeps the sidecar the single
+  authority.
 
-Parentage lives solely in `internal/supervisor/sidecar.go`'s `sessionMeta{ParentID, Agent,
-Depth}` → `<id>.meta.json` (writer `sidecar.go:163`, call site `supervisor.go:706`), per
+Parentage's authority is `internal/supervisor/sidecar.go`'s `sessionMeta{ParentID, Agent,
+Depth}` → `<id>.meta.json` (writer `sidecar.go:204`, call site `supervisor.go:829`), per
 CLAUDE.md's "visible artifacts over hidden state", with gofer's own depth cap in `resolveParent`
-(`supervisor.go:760-781`) rather than the SDK's. The event's sole emitter is `runner.Runner.Spawn`
+(`supervisor.go:883-904`) rather than the SDK's. The event's sole emitter is `runner.Runner.Spawn`
 (`runner/runner.go:546`, the only publish site in the SDK), which gofer never calls — zero
-`.Spawn(` hits across `internal/` and `cmd/`. So it is structurally never emitted here.
+`runner.Runner.Spawn` call sites across `internal/` and `cmd/`. (`internal/subagent/tool.go:209`
+calls `Spawn` on gofer's *own* `Spawner` seam, which is a different method.) So it is
+structurally never emitted here.
 
 **Adding a handler would create a second source of truth for parentage.** The roster tree and
-drill-in already work from the sidecar (`overview.go:287,310,555`; `app.go:851`). This is not a
-"gap": a gap is information gofer wants and is not getting, and gofer has complete parentage from
-an artifact it owns.
+drill-in already work from the sidecar (`overview.go:287,310,555`; `app.go:878,1642,1814`). This
+is not a "gap": a gap is information gofer wants and is not getting, and gofer has complete
+parentage from an artifact it owns.
 
-**Forward note.** This is a live fork in the road, not settled forever. If agent-initiated spawn
-is ever built on `Runner.Spawn`, the SDK would start both emitting `session.spawned` *and* writing
-`WithMetaParent` on paths gofer controls — producing exactly the dual source of truth this
-annotation exists to prevent. Whoever does that work has to pick one owner for parentage first.
+**Forward note.** This is a live fork in the road, not settled forever. The `WithMetaParent`
+write already happens (see the write side above); what a spawn built on `Runner.Spawn` would add
+is the SDK *emitting* `session.spawned` on a path gofer controls, and a second reader for
+parentage — producing exactly the dual source of truth this annotation exists to prevent.
+Whoever does that work has to pick one owner for parentage first.
 Related: `runner.New` does **not** enforce `Depth > MaxDepth` — `ErrMaxDepth`
 (`runner/runner.go:48`) is returned only from `Spawn` (`:530-531`) — so gofer's `resolveParent`
 cap is currently the *only* depth enforcement on every path it uses. Do not assume the SDK caps
@@ -148,8 +156,8 @@ tool call carries the output.
 Reading only that switch makes these look like gaps; they are not.
 
 **h — Carried on dedicated wire methods, not `gofer/event`.** Both the in-turn broadcast
-(`handlers.go:1010`, `:1035`) and wirestream (`reconstruct.go:578-603`) special-case permissions
-onto `gofer/permission_requested` / `_resolved`. `reconstruct.go:367-369` documents it:
+(`handlers.go:1037`, `:1070`) and wirestream (`reconstruct.go:581-606`) special-case permissions
+onto `gofer/permission_requested` / `_resolved`. `reconstruct.go:413-414` documents it:
 "permission.* deliberately never arrives via gofer/event".
 
 **i — Emitted out of turn in one case, and dropped downstream. Harmless, but not unreachable.**
@@ -157,17 +165,17 @@ The obvious reading is that permissions only fire inside an active turn, so `pro
 (`event_relay.go:97-99`) always suppresses the out-of-turn relay for them. That is *almost* right
 and the exception matters: a turn can run on a worker with **no** prompt handler in the worker
 daemon — an adopted session finishing a turn its original router started
-(`internal/router/router.go:1063`), where the original `session/prompt` died with its connection
+(`internal/router/router.go:1287-1288`), where the original `session/prompt` died with its connection
 and `endPromptHandler` already ran while the turn continued on the supervisor pump. In that
 window a `permission.requested` *is* marshalled and shipped as a `gofer/event` frame.
 
-Nothing breaks, because `handleGoferEvent`'s switch has no permission case, so the frame hits
-`default` and is discarded — the same outcome the deliberate design intends
-(`reconstruct.go:367-369`). The real permission path is the dedicated `gofer/permission_*`
-methods either way. Recorded rather than smoothed over because "unreachable" and "reachable but
-dropped" are different invariants, and a future filter added to `handleGoferEvent` would turn the
-second into a live duplicate-delivery bug. This predates the worker-side observer: the in-process
-watcher relays `liveSub.C` equally unfiltered.
+Nothing breaks, because `handleGoferEvent` drops both permission kinds with an EXPLICIT kind
+check (`reconstruct.go:534-536`) rather than by falling off a decode — `event.Unmarshal` decodes
+them perfectly well, so the contract is enforced there or nowhere. The real permission path is
+the dedicated `gofer/permission_*` methods either way. Recorded rather than smoothed over
+because "unreachable" and "reachable but dropped" are different invariants, and REMOVING that
+check would deliver such a frame twice: once here and once on its own method. This predates the
+worker-side observer: the in-process watcher relays `liveSub.C` equally unfiltered.
 
 **j — ACP has no error stop reason.** `StopReasonFor` returns `ok=false` for `"error"`
 (`acp/project_out.go:209-226`), documenting that "a session.error event carries that signal
@@ -255,8 +263,9 @@ note i draws for permissions.
 (`loop/loop.go:386`, from the `update_plan` builtin), so a prompt handler is necessarily active in
 the worker daemon and the out-of-turn relay never sees it.
 
-**m — a stale-roster sibling, still open.** The router's own `advertiseModelChange` would
-re-advertise `session.config` locally, which would have masked the transport gap above. It does
+**m — a stale-roster sibling, still open.** The daemon's `advertiseModelChange`
+(`internal/daemon/handlers.go:1600`) would re-advertise `session.config` locally, which would
+have masked the transport gap above. It does
 not fire, because `applyRosterEvent` (`internal/router/rostercache.go:119-160`) folds
 Status/Title/Usage/Cost but **not** `Model`, and the cache is seeded once
 (`rostercache.go:85-104`) with no re-seed. So under `--workers` the router serves a stale `Model`

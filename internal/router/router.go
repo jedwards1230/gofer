@@ -128,12 +128,14 @@ type Config struct {
 	// sessions.
 	//
 	// Empty RouterAddr leaves agent-initiated spawning unavailable INSIDE
-	// workers: the worker is started without a link and its supervisor keeps the
-	// in-process default, which a single-session daemon cannot use to spawn a
-	// sibling. That is the correct degradation for an embedder that drives the
-	// router directly (every test in this package), and for a gofer whose
-	// operator never enabled subagents — cmd/gofer leaves BOTH fields empty in
-	// that case, so nothing about a worker changes.
+	// workers: the worker is started without a link, so it supplies a nil
+	// [supervisor.Config.Subagents] factory and its supervisor installs no
+	// spawner at all — the spawn tool is never registered (that field's doc
+	// has the polarity and why it fails closed). That is the correct
+	// degradation for an embedder that drives the router directly (every
+	// test in this package), and for a gofer whose operator never enabled
+	// subagents — cmd/gofer leaves BOTH fields empty in that case, so
+	// nothing about a worker changes.
 	//
 	// # RouterToken reaches a worker through a 0600 file, and nothing else
 	//

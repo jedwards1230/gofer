@@ -292,10 +292,11 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 			// restart — the same shape as adding an MCP server (see
 			// supervisor.Config.MCP).
 			//
-			// The gate is not merely tidiness. Handing a worker the daemon's
-			// bearer token at all is a credential exposure an operator who
-			// never asked for subagents must not pay: nothing else about a
-			// worker changes when this feature is off.
+			// The gate is not merely tidiness. Minting a dial-back credential
+			// and handing it to a worker is an exposure an operator who never
+			// asked for subagents must not pay (see dialBackToken's
+			// declaration above): nothing else about a worker changes when
+			// this feature is off.
 			RouterAddr:  routerDialBackAddr(cfg.Subagents, *listen),
 			RouterToken: dialBackToken,
 			Logger:      logger,
