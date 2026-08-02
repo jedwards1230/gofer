@@ -187,6 +187,13 @@ type Config struct {
 	// owns its lifecycle via [daemon.Reap]. It receives the router-pinned session
 	// uuid so the faux worker can key its socket/endpoint/lock and pin its
 	// session id to the same value the router expects (design Option A).
+	//
+	// A builder supplied here REPLACES [Supervisor.buildWorkerCmd] entirely, so
+	// the credential strip that function applies (see workerEnv) does not run —
+	// whoever supplies one owns the environment their worker gets. Stated
+	// because it is exactly the kind of residual that should be written down
+	// rather than assumed away: nil in production, so gofer's own workers are
+	// always stripped, but an embedder's are their own responsibility.
 	NewWorkerCmd func(ctx context.Context, sessionID, model, cwd string) *exec.Cmd
 
 	// MaxWorkers, when > 0, caps how many LIVE workers this router hosts: once
@@ -705,10 +712,12 @@ func removeWorkerRouterToken(sessionID string) {
 // operator did not enable subagents, cmd/gofer leaves RouterAddr empty and none
 // of this is passed at all.
 //
-// cmd.Env is deliberately left NIL, so the worker inherits the router's
-// environment unchanged and gains nothing from this feature. See
-// [Config.RouterToken] for why a bearer token must reach a worker through
-// neither argv nor the environment.
+// cmd.Env is set EXPLICITLY, to the router's environment minus every known
+// credential variable and minus any value equal to the dial-back token (see
+// workerEnv). It is never left nil, because nil means INHERIT — and a worker
+// runs a model with a shell, so an inherited $GOFER_TOKEN is one `env` away
+// from the agent. See [Config.RouterToken] for the full reasoning, and
+// CONTRIBUTING.md's "The environment is not a safe channel for a secret".
 func (s *Supervisor) buildWorkerCmd(ctx context.Context, sessionID, model, cwd string) *exec.Cmd {
 	if s.newWorkerCmd != nil {
 		return s.newWorkerCmd(ctx, sessionID, model, cwd)

@@ -895,7 +895,15 @@ func pingLoop(ctx context.Context, conn *websocket.Conn, cancel context.CancelFu
 //
 // Every candidate is compared, with no early return on a match, so the work done
 // depends on how many tokens are configured and not on which one matched (or
-// whether any did). Each comparison is constant-time.
+// whether any did).
+//
+// Each comparison is constant-time in the CONTENTS, which is the property that
+// matters here — stated that precisely because subtle.ConstantTimeCompare's own
+// doc says the time taken "is a function of the length of the slices" and that a
+// length mismatch "returns 0 immediately". So a presented token's LENGTH is not
+// hidden, only its bytes. That is fine for this use (a token's length is not the
+// secret) and would not be fine if it were, which is why the limit is written
+// down rather than rounded up to "constant-time".
 func (d *Daemon) authorized(r *http.Request) bool {
 	if d.cfg.BearerToken == "" {
 		return true
