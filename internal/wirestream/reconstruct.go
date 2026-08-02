@@ -310,7 +310,9 @@ func (r *Reconstructor) handleTurnEnd(te turnEnd) {
 // and hands rec off to the demuxer via loadCh once the Call resolves, success
 // or failure alike (a failed load — e.g. an id the daemon doesn't recognize —
 // just leaves the session starting from whatever live events arrive next,
-// the pre-existing M1 behavior, rather than failing attach outright). The
+// the pre-existing M1 behavior, rather than failing attach outright; the one
+// exception is the recorded-cwd-is-gone signal, which is ALSO routed to an
+// installed [CwdMissingSink] because a consumer can act on it — see its doc). The
 // demuxer's loadCh case (see demux) drains every notification still
 // buffered before calling [Reconstructor.finishLoad] — by the identical
 // wire-order argument demux's doc makes for turnEndCh/handleTurnEnd, that
@@ -340,8 +342,30 @@ func (r *Reconstructor) handleTurnEnd(te turnEnd) {
 // so the transcript stays coherent regardless.
 func (r *Reconstructor) loadHistory(rec *sessionState) {
 	ctx := context.Background()
-	cwd := r.sessionCwd(ctx, rec.id)
-	_, _ = r.client.Call(ctx, acp.MethodSessionLoad, acp.LoadSessionRequest{SessionID: rec.id, Cwd: cwd})
+	// A BLANK cwd, deliberately: it is the wire's way of saying "reopen this
+	// session where it was recorded" (see internal/daemon's resolveLoadCwd).
+	// This core used to look the session's cwd up first — two RPCs, gofer/roster
+	// then gofer/overview — and send it back, which was an ECHO of the journal
+	// the daemon could not tell apart from a directory the USER chose. That
+	// collapsed the distinction: a session whose recorded directory had been
+	// deleted came back as a bare invalid-params rejection instead of the typed
+	// signal below, and the lookup cost every cold attach a whole-store roster
+	// read (jedwards1230/gofer#317, jedwards1230/gofer#326).
+	_, err := r.client.Call(ctx, acp.MethodSessionLoad, acp.LoadSessionRequest{SessionID: rec.id})
+	// The one error routed onward rather than dropped. Everything else stays
+	// discarded exactly as before — see [CwdMissingSink] and the paragraph above
+	// on a failed load being non-fatal (jedwards1230/gofer#325 is untouched).
+	if cwd, ok := daemon.SessionCwdMissing(err); ok {
+		// Arm the retry BEFORE the sink runs, never after: the consumer may
+		// re-reference this session the moment it is told (a user answering the
+		// prompt, or an immediate re-attach), and arming afterwards would race
+		// that reference into finding an un-armed entry and silently doing
+		// nothing. See [Reconstructor.session]'s cwd-missing retry.
+		r.armReload(rec)
+		if r.cwdMissing != nil {
+			r.cwdMissing(rec.id, cwd)
+		}
+	}
 	select {
 	case r.loadCh <- rec:
 	case <-r.closed:
@@ -357,8 +381,21 @@ func (r *Reconstructor) loadHistory(rec *sessionState) {
 // complete MessageStarted/MessageFinished pair — see historyEvents in
 // internal/daemon), so this simply unblocks any [Reconstructor.Send] waiting on
 // rec.loadDone.
+// It settles through [sessionState.settleLoad] rather than closing loadDone
+// directly, because a session whose load raised the cwd-missing signal can be
+// loaded again (see [Reconstructor.session]) and therefore reach here twice.
 func (r *Reconstructor) finishLoad(rec *sessionState) {
-	close(rec.loadDone)
+	rec.settleLoad()
+}
+
+// armReload marks rec for one further history load on its next reference — the
+// cwd-missing branch's answer to loadHistory being memoized per session id (see
+// [Reconstructor.session]). Under mu, like every other write to a session's
+// entry.
+func (r *Reconstructor) armReload(rec *sessionState) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rec.reload = true
 }
 
 // handleNotification decodes one inbound notification and applies it to its

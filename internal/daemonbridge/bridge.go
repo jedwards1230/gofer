@@ -85,6 +85,14 @@ type Supervisor struct {
 	// transport-only bridge deliberately does not carry — cmd/gofer owns that.
 	// nil ⇒ [Supervisor.RestartDaemon] reports the capability is unavailable.
 	reconnect func(ctx context.Context) (*daemon.Client, error)
+	// cwdMissing holds the callback registered by [Supervisor.OnSessionCwdMissing],
+	// nil until a consumer registers one. It lives on the SUPERVISOR rather than
+	// on a conn so it survives [RestartDaemon]'s connection swap: every
+	// Reconstructor this bridge builds is handed the same stable
+	// [Supervisor.emitCwdMissing] method value at construction (which is where a
+	// wirestream sink must be installed — see [wirestream.Option]), and the
+	// mutable half is this pointer, swapped atomically instead.
+	cwdMissing atomic.Pointer[func(sessionID, cwd string)]
 }
 
 // conn is one live connection: the reconstruction core and the client it
@@ -126,11 +134,58 @@ func WithReconnect(fn func(ctx context.Context) (*daemon.Client, error)) Option 
 // [Supervisor.Close] to tear both down.
 func New(client *daemon.Client, opts ...Option) *Supervisor {
 	s := &Supervisor{}
-	s.conn.Store(&conn{core: wirestream.New(client), client: client})
+	s.conn.Store(&conn{core: s.newCore(client), client: client})
 	for _, opt := range opts {
 		opt(s)
 	}
 	return s
+}
+
+// newCore builds the reconstruction core for one connection, with this
+// Supervisor's stable cwd-missing relay installed. Every Reconstructor this
+// bridge owns goes through here so the relay is never accidentally dropped on
+// the [RestartDaemon] path — the failure that seam would produce (a prompt that
+// stops appearing only after a daemon restart) is invisible until someone hits
+// it in the field.
+func (s *Supervisor) newCore(client *daemon.Client) *wirestream.Reconstructor {
+	return wirestream.New(client, wirestream.WithCwdMissingSink(s.emitCwdMissing))
+}
+
+// OnSessionCwdMissing registers fn as this bridge's handler for "the session's
+// recorded working directory is gone" — the one session/load failure a client
+// can offer a REMEDY for rather than a message (see [daemon.SessionCwdMissing]).
+// fn is called with the session id and the recorded directory that no longer
+// exists. Passing nil clears the registration.
+//
+// It covers BOTH attach paths, so a consumer needs exactly one handler:
+//
+//   - the roster-Enter path, where the load is issued by the reconstruction core
+//     itself on first reference (see [wirestream.CwdMissingSink]); and
+//   - the /resume path, where [Supervisor.Resume] issues the load — which ALSO
+//     returns the wrapped error, so a caller that prefers to branch on the
+//     return value can pass it to [daemon.SessionCwdMissing] instead.
+//
+// fn runs on a background goroutine — the core's per-session load goroutine, or
+// whichever goroutine called Resume — never on the caller's UI loop. It must
+// return promptly and must not block: post a message and return. A bubbletea
+// consumer sends into its own buffered channel here and reads that channel from
+// a tea.Cmd.
+func (s *Supervisor) OnSessionCwdMissing(fn func(sessionID, cwd string)) {
+	if fn == nil {
+		s.cwdMissing.Store(nil)
+		return
+	}
+	s.cwdMissing.Store(&fn)
+}
+
+// emitCwdMissing delivers one cwd-missing signal to the registered handler, if
+// any. It is the stable method value every [wirestream.Reconstructor] this
+// bridge builds is constructed with, so registration can happen after New
+// without racing the demuxer the core starts (see [Supervisor.cwdMissing]).
+func (s *Supervisor) emitCwdMissing(sessionID, cwd string) {
+	if fn := s.cwdMissing.Load(); fn != nil {
+		(*fn)(sessionID, cwd)
+	}
 }
 
 // cur returns the current live connection snapshot. Never nil after [New].
@@ -164,7 +219,7 @@ func (s *Supervisor) RestartDaemon(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("daemonbridge: restart daemon: %w", err)
 	}
-	old := s.conn.Swap(&conn{core: wirestream.New(client), client: client, version: helloBinaryVersion(ctx, client)})
+	old := s.conn.Swap(&conn{core: s.newCore(client), client: client, version: helloBinaryVersion(ctx, client)})
 	if old != nil {
 		_ = old.core.Close()
 	}
@@ -409,8 +464,25 @@ func (s *Supervisor) ListSessions(ctx context.Context) ([]tui.SessionRef, error)
 // Resume reopens sessionID as a live session via ACP's session/load — the same
 // method `gofer resume` sends against a reachable daemon (cmd/gofer's
 // openDaemonSession), which the daemon answers by calling its supervisor's own
-// Resume. cwd is the client's, per ACP v1: LoadSessionRequest.cwd is required
-// and authoritative for what directory the session reloads into.
+// Resume.
+//
+// cwd is passed through verbatim, and its BLANKNESS is meaningful (see
+// internal/daemon's resolveLoadCwd):
+//
+//   - non-blank ⇒ explicit user intent — `gofer resume`'s own os.Getwd, or a
+//     directory the user picked — authoritative per ACP v1, and hard-rejected by
+//     the daemon if it does not exist;
+//   - blank ⇒ "reopen this session where it was recorded", which the daemon
+//     resolves from the session's journal meta.
+//
+// A caller must therefore NOT pre-read a session's cwd off a roster row and pass
+// it here as a convenience: that echo is indistinguishable, server-side, from a
+// user's choice, and it is what made a deleted project directory surface as a
+// bare invalid-params rejection (jedwards1230/gofer#326). Pass blank and let the
+// daemon answer. When the recorded directory is gone the daemon says so with a
+// typed error: this relays it to [Supervisor.OnSessionCwdMissing] AND returns it
+// wrapped, so a caller may branch either way ([daemon.SessionCwdMissing] reads it
+// back through errors.As — never by matching the message).
 //
 // The reconstruction state is pre-registered BEFORE the call, not after. A
 // session/load replays the session's whole history back to this peer as
@@ -425,6 +497,9 @@ func (s *Supervisor) Resume(ctx context.Context, sessionID, cwd string) error {
 	c := s.cur()
 	c.core.RegisterFresh(sessionID)
 	if _, err := c.client.Call(ctx, acp.MethodSessionLoad, acp.LoadSessionRequest{SessionID: sessionID, Cwd: cwd}); err != nil {
+		if missing, ok := daemon.SessionCwdMissing(err); ok {
+			s.emitCwdMissing(sessionID, missing)
+		}
 		return fmt.Errorf("daemonbridge: resume %s: %w", sessionID, err)
 	}
 	return nil

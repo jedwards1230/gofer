@@ -63,7 +63,7 @@ type step struct {
 // vocabulary is spelled out, so the two never drift apart. Slugs follow
 // `<area>-<view>[-<state>]`, kebab-case: transcript-* (the attach scenes),
 // roster-* (the overview scene), panel-* (the command-panel scenes).
-const scenarioHelp = "transcript-tool-call | transcript-approval | transcript-compacting | transcript-overflow-recovery | roster-overview | roster-cwd-home | panel-status-overview | panel-status | panel-status-cwd-home | panel-config | panel-model | panel-model-empty | panel-model-daemon-refresh | panel-thinking | panel-usage | panel-stats | panel-help | panel-resume | panel-capabilities | panel-capabilities-unknown"
+const scenarioHelp = "transcript-tool-call | transcript-approval | transcript-compacting | transcript-overflow-recovery | roster-overview | roster-cwd-home | roster-cwd-missing | panel-status-overview | panel-status | panel-status-cwd-home | panel-config | panel-model | panel-model-empty | panel-model-daemon-refresh | panel-thinking | panel-usage | panel-stats | panel-help | panel-resume | panel-capabilities | panel-capabilities-unknown"
 
 func main() {
 	scenario := flag.String("scenario", "transcript-tool-call", "scripted scene to play: "+scenarioHelp)
@@ -106,6 +106,13 @@ func main() {
 		// A settled sequence, not an in-flight state: the tape only attaches
 		// and photographs the seeded backlog (see overflowRecoveryHistory).
 		model = overflowRecoveryApp()
+	case "roster-cwd-missing":
+		// The same canned roster and env every panel-* scene renders — only the
+		// Supervisor's behavior differs, exactly as transcript-compacting swaps
+		// in a blocking Compact. Keeping the SESSION SET identical is what makes
+		// this scene's frames comparable with the rest of the baseline, and what
+		// keeps a new scenario from churning six other tapes' snapshots.
+		model = cwdMissingApp()
 	case "panel-model-empty":
 		model = commandViewApp(emptyCommandEnv())
 	case "panel-model-daemon-refresh":
@@ -429,6 +436,34 @@ func cannedSessions() []tui.SessionInfo {
 	}
 }
 
+// cwdMissingSession / cwdMissingPath are which canned session the
+// roster-cwd-missing scene reports as unattachable, and the recorded directory
+// it reports as gone.
+//
+// sess-1 deliberately: it is the roster's FIRST row, so a bare Enter attaches
+// it and the tape needs no navigation keys before the state it is capturing.
+// The path is a plausible retired project — absolute, since a recorded cwd
+// always is, and fixed, since these frames are committed and diffed.
+const (
+	cwdMissingSession = "sess-1"
+	cwdMissingPath    = "/Users/justin/orchestration/repos/retired-service"
+)
+
+// cwdMissingApp is the roster-cwd-missing scene: the canned App, over a
+// Supervisor that answers an attach of [cwdMissingSession] the way a real
+// daemon does when that session's recorded directory has been deleted — with
+// the typed cwd-missing signal (jedwards1230/gofer#326), which the TUI turns
+// into its three-way prompt.
+//
+// The roster and CommandEnv are the shared canned ones, unchanged, so every
+// other panel-*/roster-* frame in the baseline stays byte-identical.
+func cwdMissingApp() tea.Model {
+	sup := newVHSSupervisor(cannedSessions())
+	sup.cwdMissingID = cwdMissingSession
+	sup.cwdMissingDir = cwdMissingPath
+	return commandViewAppOver(cannedCommandEnv(), sup)
+}
+
 // commandViewAppOver builds the canned App over a caller-supplied Supervisor,
 // which is what lets the compaction scene swap in a blocking Compact without
 // duplicating the roster or the meta.
@@ -605,6 +640,55 @@ type vhsSupervisor struct {
 	// with nothing left to photograph. Holding the call is what makes the state
 	// under capture actually exist.
 	compactHold time.Duration
+
+	// cwdMissingID / cwdMissingDir drive the roster-cwd-missing scene: when
+	// [vhsSupervisor.Subscribe] is asked for cwdMissingID, it raises the typed
+	// "recorded directory is gone" signal for cwdMissingDir instead of the
+	// attach settling normally. Empty (every other scene) raises nothing.
+	//
+	// Implementing OnSessionCwdMissing at all is what makes this Supervisor
+	// satisfy the notifier seam tui.App type-asserts against. The assertion, not
+	// the interface, is the contract: tui.Supervisor does not require the method,
+	// so a Supervisor that drops it still compiles and just never raises the
+	// prompt (both backends gofer ships implement it — internal/daemonbridge and
+	// internal/tuibridge).
+	cwdMissingID  string
+	cwdMissingDir string
+	// cwdMissing is the handler tui.App registers at construction. It is read
+	// from the Subscribe goroutine and written from the App's, so it is guarded
+	// by mu like sessions.
+	cwdMissing func(sessionID, cwd string)
+}
+
+// OnSessionCwdMissing satisfies the seam tui.App type-asserts its Supervisor
+// against (see internal/tui/cwdprompt.go's cwdMissingNotifier). The real
+// implementation is daemonbridge.Supervisor's; this is the canned one.
+func (s *vhsSupervisor) OnSessionCwdMissing(fn func(sessionID, cwd string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cwdMissing = fn
+}
+
+// raiseCwdMissingFor reports the signal for id, if that is the session this
+// scene is configured to fail, on a BACKGROUND goroutine after a short delay.
+//
+// Both details mirror production. The signal really does arrive on a background
+// goroutine (the reconstruction core's per-session load), and it really does
+// arrive AFTER the attach screen has opened — the load is asynchronous — so a
+// tape that fired it synchronously would capture a state sequence real users
+// never see. The delay is comfortably shorter than any tape's frame spacing, so
+// it stays deterministic rather than racing the screenshot.
+func (s *vhsSupervisor) raiseCwdMissingFor(id string) {
+	s.mu.Lock()
+	fn, want, dir := s.cwdMissing, s.cwdMissingID, s.cwdMissingDir
+	s.mu.Unlock()
+	if fn == nil || want == "" || id != want {
+		return
+	}
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		fn(id, dir)
+	}()
 }
 
 func newVHSSupervisor(sessions []tui.SessionInfo) *vhsSupervisor {
@@ -650,7 +734,15 @@ func (s *vhsSupervisor) Roster(context.Context) ([]tui.SessionInfo, error) {
 // whatever [vhsSupervisor.seed] mocked. The buffer is sized to the replay cap:
 // a subscription too small to hold the backlog would stall the replay, so the
 // two bounds are tied together rather than picked independently.
-func (s *vhsSupervisor) Subscribe(context.Context, string) (*event.Subscription, error) {
+//
+// It is also where the roster-cwd-missing scene's failure originates, because
+// that is where it originates in production: attaching a session is what makes
+// the daemon load it, and loading is what discovers the recorded directory is
+// gone. Every other scene passes [vhsSupervisor.raiseCwdMissingFor] straight
+// through (its cwdMissingID is empty), so the subscribe path is unchanged for
+// them.
+func (s *vhsSupervisor) Subscribe(_ context.Context, id string) (*event.Subscription, error) {
+	s.raiseCwdMissingFor(id)
 	return s.broker.Subscribe(event.FilterAll, replayCap), nil
 }
 

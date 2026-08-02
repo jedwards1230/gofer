@@ -469,15 +469,15 @@ func (a App) handleResumeSelect() (tea.Model, tea.Cmd) {
 	if !ok {
 		return a, nil
 	}
-	// The session's OWN directory wins over this client's when the listing
-	// carried one: per ACP the client picks what directory a load reloads into,
-	// and for a session from another project that is where it lives, not where
-	// this TUI happens to be sitting.
-	cwd := ref.Cwd
-	if cwd == "" {
-		cwd = a.cwd
-	}
-	app, cmd := a.resumeSession(ref.ID, cwd)
+	// A BLANK cwd, deliberately (jedwards1230/gofer#326). This used to send
+	// [SessionRef.Cwd] — the directory the picker had just READ off the daemon's
+	// own listing — falling back to this client's. That is an ECHO of the
+	// journal, and the daemon cannot tell it apart from a directory the user
+	// chose, so a session whose project directory had been deleted came back as
+	// a bare invalid-params rejection instead of the typed signal the three-way
+	// prompt is built on (cwdprompt.go). Blank says "reopen where it was
+	// recorded" and lets the daemon answer — including with that signal.
+	app, cmd := a.resumeSession(ref.ID)
 	return app, cmd
 }
 
@@ -486,12 +486,21 @@ func (a App) handleResumeSelect() (tea.Model, tea.Cmd) {
 // path — the panel closes, and the session is brought back and attached
 // through the same [App.doResume]/[resumedMsg] round trip.
 //
-// A session the roster ALREADY holds is live, so it skips the Resume op
-// entirely and just attaches. That is not merely an optimization: on the daemon
-// path a redundant session/load replays the session's whole history back onto
-// the reconstruction broker a second time, which the attach transcript would
-// then render twice.
-func (a App) resumeSession(id, cwd string) (App, tea.Cmd) {
+// It takes NO cwd, which is the structural half of gofer#326's fix: both of its
+// callers used to pass one they had merely read (the picker off the daemon's
+// listing, `/resume <id>` off this client's own working directory), and neither
+// was a directory the user had named for that session. Sending blank is now the
+// only thing this function CAN do, so the echo cannot come back by someone
+// re-adding an argument at one call site. [App.doResume] still takes a cwd,
+// because exactly one caller has a real one — [App.commitCwdReinit], where the
+// user picked it.
+//
+// A session the roster ALREADY holds skips the Resume op entirely and just
+// attaches. That is not merely an optimization: on the daemon path the attach's
+// OWN session/load is what brings an offline row back, so a preceding Resume is
+// a second load that replays the session's whole history onto the
+// reconstruction broker again — which the attach transcript then renders twice.
+func (a App) resumeSession(id string) (App, tea.Cmd) {
 	a.panel = nil
 	for _, s := range a.over.Roster() {
 		if s.ID != id {
@@ -500,7 +509,7 @@ func (a App) resumeSession(id, cwd string) (App, tea.Cmd) {
 		a.scr = screenAttach
 		return a, a.enter(id)
 	}
-	return a, a.doResume(id, cwd)
+	return a, a.doResume(id, "")
 }
 
 // modelsLoadedMsg carries the result of the Model tab's background catalog

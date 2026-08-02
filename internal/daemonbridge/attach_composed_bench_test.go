@@ -18,7 +18,6 @@ package daemonbridge_test
 //
 //	daemon.Dial + daemonbridge.New          — the client half of `gofer attach`
 //	  -> Reconstructor.Subscribe            — first reference triggers the load
-//	    -> gofer/roster + gofer/overview    — sessionCwd's two RPCs
 //	    -> session/load                     — supervisor.Resume, AwaitSettled,
 //	                                          History fold, ReplayNotifications,
 //	                                          historyEvents, N wire frames
@@ -160,9 +159,10 @@ func newComposedStack(b *testing.B, root string) composedStack {
 // internal/supervisor's roster_bench_test.go, so resume and fold read exactly
 // the on-disk format production writes — a hand-rolled format could parse
 // faster or slower and quietly measure the wrong thing. The cwd is a REAL
-// directory because it round-trips: the client reads it off gofer/overview
-// (wirestream's sessionCwd) and sends it back as session/load's required cwd,
-// which the daemon resumes the session into.
+// directory because the daemon resolves it: the client sends session/load with a
+// BLANK cwd ("reopen where recorded"), and the daemon reads this value back out
+// of the journal meta and resumes the session into it — a directory that did not
+// exist would fail the load outright (jedwards1230/gofer#326).
 func composedSeedRoot(b *testing.B, sessions, turns int) (root string, ids []string, cwd string) {
 	b.Helper()
 	root, cwd = b.TempDir(), b.TempDir()
@@ -370,12 +370,17 @@ func BenchmarkComposedAttach(b *testing.B) {
 //
 // Swept separately, per CONTRIBUTING's rule, because the two axes are paid for
 // by different code and a fix that flattens one leaves the other untouched. A
-// cold attach reads the whole store before it reads the session: wirestream's
-// sessionCwd calls gofer/roster AND gofer/overview to resolve session/load's
-// required cwd, and gofer/overview is the roster read that opens and parses
-// every non-archived journal (the gofer#298 path). So attaching to a one-turn
-// session gets more expensive as the OPERATOR'S OTHER SESSIONS accumulate —
-// a cost no benchmark of the session being attached to can express.
+// cold attach still reads the whole store before it reads the session, on the
+// daemon side: resolving a blank cwd goes through the supervisor's List, the
+// roster read that opens and parses every non-archived journal (the gofer#298
+// path). So attaching to a one-turn session gets more expensive as the
+// OPERATOR'S OTHER SESSIONS accumulate — a cost no benchmark of the session
+// being attached to can express.
+//
+// The CLIENT-side half of that read is gone: the core used to make two roster
+// RPCs of its own (gofer/roster + gofer/overview) to look the cwd up before
+// sending it back, which this sweep is also the record of
+// (jedwards1230/gofer#317, jedwards1230/gofer#326).
 func BenchmarkComposedAttachStoreSize(b *testing.B) {
 	// 8 turns: long enough to be a real transcript, short enough that the
 	// per-transcript work does not mask the store-wide read this isolates.

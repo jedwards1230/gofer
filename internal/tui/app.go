@@ -113,6 +113,22 @@ type App struct {
 	// decision > menu > active screen > global (see Update).
 	panel *commandPanel
 
+	// cwdPrompt is the open "this session's recorded directory is gone"
+	// three-way prompt (cwdprompt.go); nil = none. Like panel it composes over
+	// whatever screen scr shows rather than being a fourth [screen], but it
+	// outranks every other overlay in Update's dispatch — it opens in response
+	// to a daemon signal rather than to something the user typed, so whatever
+	// they type next must answer IT. Opening one closes the panel and the menu
+	// for the same reason (see [App.applyCwdMissing]).
+	cwdPrompt *cwdMissingPrompt
+
+	// cwdMissing is the buffered hand-off channel [App.registerCwdMissing]
+	// installs on a Supervisor that can report a missing recorded cwd. The
+	// callback writes it from a DAEMON goroutine; [App.waitCwdMissing] reads it
+	// from a tea.Cmd, which is the only thing that may touch App state. nil
+	// when the backend raises no such signal (the in-process supervisor).
+	cwdMissing chan cwdMissingSignal
+
 	// registry resolves a submitted "/name arg…" buffer's command token to
 	// the [Command] that runs it.
 	registry Registry
@@ -305,6 +321,11 @@ func NewApp(th theme.Theme, sup Supervisor, meta OverviewMeta, env CommandEnv) A
 		registry:   newBuiltinRegistry(),
 		commandEnv: env,
 	}
+	// Register the cwd-missing handler ONCE, here, where the concrete
+	// Supervisor is in hand — a type assertion, not a requirement, so a backend
+	// with no session/load to fail (tuibridge.Adapter) is unaffected. See
+	// [App.registerCwdMissing]; [App.Init] arms the reader.
+	a.registerCwdMissing(sup)
 	// Seed the sticky shell reply-now/queue mode from config so a user who
 	// always wants queue mode launches in it instead of re-pressing ctrl+r every
 	// session (config.TUI.ShellReplyMode, default reply-now). A one-shot read at
@@ -458,14 +479,20 @@ type opDoneMsg struct {
 	refreshRoster bool
 }
 
-// Init satisfies tea.Model: it kicks off the first roster fetch, plus — when
-// the app opened straight into an attach (via OverviewMeta.AttachSessionID) —
-// the subscription to that session so its transcript streams in immediately.
+// Init satisfies tea.Model: it kicks off the first roster fetch, arms the
+// cwd-missing listener, and — when the app opened straight into an attach (via
+// OverviewMeta.AttachSessionID) — subscribes to that session so its transcript
+// streams in immediately.
+//
+// [App.waitCwdMissing] is nil on a backend that raises no cwd-missing signal,
+// and tea.Batch drops nil commands and collapses a single survivor back to
+// itself, so on those backends this returns EXACTLY what it returned before the
+// listener existed.
 func (a App) Init() tea.Cmd {
 	if a.sessID != "" {
-		return tea.Batch(a.fetchRoster, a.subscribe(a.sessID))
+		return tea.Batch(a.fetchRoster, a.subscribe(a.sessID), a.waitCwdMissing())
 	}
-	return a.fetchRoster
+	return tea.Batch(a.fetchRoster, a.waitCwdMissing())
 }
 
 // fetchRoster fetches a fresh roster snapshot from the Supervisor. This is the
@@ -1040,12 +1067,39 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case resumedMsg:
 		if msg.err != nil {
+			// A cwd-missing failure on the /resume path is reported TWICE — once
+			// as this error, once as the signal that opens the prompt — and the
+			// two are posted from different goroutines, so which lands first is
+			// scheduler-dependent. With the prompt for this session already on
+			// screen the error has been superseded: painting it would put the
+			// bare "session cwd … is no longer available" rejection in the footer
+			// underneath the very prompt that exists to replace it. (The other
+			// order needs no guard: applyCwdMissing clears the status line.)
+			if a.cwdPrompt != nil && a.cwdPrompt.sessionID == msg.id {
+				return a, nil
+			}
 			a.setStatus(sevDanger, msg.err.Error())
 			return a, nil
 		}
 		// Same landing as createdMsg: the session is live now, so show it.
 		a.scr = screenAttach
 		return a, a.switchSession(msg.id)
+
+	case cwdMissingMsg:
+		// A session could not be attached because its RECORDED directory is
+		// gone (jedwards1230/gofer#326) — the one attach failure with a remedy
+		// to offer, so it opens the three-way prompt instead of a status line.
+		// The listener is re-armed immediately: it is a single long-lived read
+		// chain, one goroutine at a time, and dropping the re-arm here would
+		// silently retire the signal for the rest of the process.
+		return a.applyCwdMissing(msg), a.waitCwdMissing()
+
+	case cwdDirsLoadedMsg:
+		// The re-init picker's background directory enumeration landing
+		// (cwdprompt.go). Never a status line: an empty result is a legitimate
+		// answer the picker renders honestly, and the free-text entry works
+		// regardless.
+		return a.applyCwdDirsLoaded(msg), nil
 
 	case sessionsListedMsg:
 		return a.applySessionsListed(msg), nil
@@ -1235,6 +1289,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// fresh click already clears it via handleMouseClick installing a new
 		// selectionState outright, so this is the key-press half).
 		a.sel = nil
+		// The cwd-missing prompt outranks every other overlay (dispatch
+		// precedence: cwd-prompt > panel > approval > decision > menu > active
+		// screen > global). It is the one overlay the USER did not open — it
+		// appears because an attach failed — so the next key must answer it
+		// rather than land on whatever happened to be underneath. Opening it
+		// already closed the panel and the menu (applyCwdMissing), so this
+		// steals nothing that was mid-edit. See handleCwdPromptKey.
+		if a.cwdPrompt != nil {
+			return a.handleCwdPromptKey(msg)
+		}
 		// The command panel takes every key ahead of the approval overlay and
 		// the per-screen handlers (dispatch precedence: panel > approval >
 		// decision > menu > active screen > global) — see handlePanelKey.
@@ -1809,6 +1873,7 @@ type frameLayout struct {
 	h         int      // content budget handed to the active screen's own render
 	footer    string   // trailing status line, "" when a.status is unset
 	panelH    int      // command-panel row count, 0 when a.panel is nil
+	cwdH      int      // cwd-missing prompt row count, 0 when a.cwdPrompt is nil
 	menuLines []string // pre-rendered command-menu rows, nil when closed/not applicable
 }
 
@@ -1832,6 +1897,20 @@ func (a App) frameLayout() frameLayout {
 			panelH = h
 		}
 		h -= panelH
+	}
+
+	// The cwd-missing prompt takes its slice out of the same budget, exactly
+	// as the panel above does, and the two are mutually exclusive by
+	// construction (applyCwdMissing clears a.panel) so they can never both
+	// carve. Sized to what it actually renders rather than to its cap, so the
+	// roster underneath keeps every row the prompt does not need.
+	cwdH := 0
+	if a.cwdPrompt != nil {
+		cwdH = a.cwdPrompt.height(a.theme, a.width)
+		if cwdH > h {
+			cwdH = h
+		}
+		h -= cwdH
 	}
 
 	// The command-autocomplete menu (command_menu.go) is part of the
@@ -1859,7 +1938,7 @@ func (a App) frameLayout() frameLayout {
 		// shrink the bottom-anchored frame short of a.height.
 	}
 
-	return frameLayout{h: h, footer: footer, panelH: panelH, menuLines: menuLines}
+	return frameLayout{h: h, footer: footer, panelH: panelH, cwdH: cwdH, menuLines: menuLines}
 }
 
 // This is the pure core [App.View] wraps into a tea.View, kept separate so
@@ -1899,6 +1978,13 @@ func (a App) render() string {
 
 	if a.panel != nil {
 		body += "\n" + a.panel.View(a.width, fl.panelH)
+	}
+
+	// The cwd-missing prompt draws in the panel's slot, for the same reason and
+	// with the same arithmetic — see [App.frameLayout]. It can never double up
+	// with a panel (opening it closes one).
+	if a.cwdPrompt != nil {
+		body += "\n" + a.cwdPrompt.render(a.theme, a.width, fl.cwdH)
 	}
 
 	if fl.footer != "" {

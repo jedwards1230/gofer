@@ -218,11 +218,24 @@ type Supervisor interface {
 	// It is idempotent: resuming a session that is already live is a no-op that
 	// succeeds, so the caller may always follow it with a Subscribe.
 	//
-	// cwd is the working directory to reload the session INTO, and per ACP v1 it
-	// is the client's call, not the daemon's (LoadSessionRequest.cwd is
-	// required). Callers pass the session's own persisted directory when they
-	// know it (the picker reads it off [SessionRef.Cwd]) and their own working
-	// directory otherwise — the same value `gofer resume` sends from os.Getwd.
+	// cwd is the working directory to reload the session INTO, and its
+	// BLANKNESS is meaningful (jedwards1230/gofer#326):
+	//
+	//   - blank ⇒ "reopen this session where it was RECORDED". The backend
+	//     resolves it from the session's own journal — the daemon server-side,
+	//     the in-process adapter in internal/tuibridge — and reports the
+	//     recorded-directory-is-gone case as a signal ([cwdMissingNotifier])
+	//     rather than substituting a directory.
+	//   - non-blank ⇒ EXPLICIT user intent: a directory the user named. It is
+	//     authoritative per ACP v1, and hard-rejected if it does not exist.
+	//
+	// A caller must therefore NOT pre-read a roster row's cwd and pass it here
+	// as a convenience. Server-side that echo is indistinguishable from a
+	// directory the user chose, which is exactly what turned a deleted project
+	// directory into a bare invalid-params rejection with no remedy on offer.
+	// Every plain resume/attach in this package passes blank; the ONE caller
+	// that passes a directory is the cwd-missing prompt's re-init branch
+	// ([App.commitCwdReinit]), where the user picked it.
 	Resume(ctx context.Context, sessionID, cwd string) error
 
 	// Send submits prompt as the next turn on an existing session — the
