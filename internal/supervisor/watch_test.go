@@ -267,9 +267,15 @@ func TestWatchRoster_SeedNeverOverwritesANewerSnapshot(t *testing.T) {
 	}
 
 	parked, release := make(chan struct{}), make(chan struct{})
-	var once sync.Once
+	var parkOnce, releaseOnce sync.Once
+	releaseSeed := func() { releaseOnce.Do(func() { close(release) }) }
+	// Every assertion below exits via runtime.Goexit, which skips the rest of the
+	// body — so the parked seed is released from a defer, not inline. Without it
+	// a FAILING run leaks the goroutine and hangs the whole package on its
+	// timeout instead of reporting the assertion that fired.
+	defer releaseSeed()
 	defer supervisor.SetWatchSeedTestHook(func() {
-		once.Do(func() {
+		parkOnce.Do(func() {
 			close(parked)
 			<-release
 		})
@@ -314,7 +320,7 @@ racing:
 		}
 	}
 
-	close(release)
+	releaseSeed()
 
 	sub := <-subCh
 	if sub.err != nil {
