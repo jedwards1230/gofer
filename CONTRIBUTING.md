@@ -145,6 +145,20 @@ about the workaround.
   a long pure computation, a `time.Sleep` — is a different case and the report
   may be right.)
 
+- **"`case` path patterns only match one directory level."** Reports that
+  `case "$f" in internal/tui/*)` won't match `internal/tui/theme/foo.go` are
+  wrong. `case` uses **pattern matching**, not pathname expansion: the rule
+  that `*` stops at `/` belongs to globbing a filesystem, and POSIX applies it
+  only there (`XCU 2.13.3`). In `case`, `*` matches any string including
+  slashes, so `internal/tui/*` matches arbitrarily deep paths. The
+  `.github/workflows/vhs-capture.yml` path matcher relies on this. Verify by
+  running the matcher over nested paths in both `sh` and `bash` before
+  changing it — adding `**` or a second `internal/tui/*/*` arm is noise, and
+  `**` is not even special in `case` (it is just two `*`s). Reply with the run
+  and resolve. (A pattern that genuinely needs to *stop* at a directory
+  boundary is a different case — but then the fix is an explicit character
+  class, not `**`.)
+
 If you refute one of these, add it here rather than only in the PR thread — the
 bot has no memory across pull requests, but this file does.
 
