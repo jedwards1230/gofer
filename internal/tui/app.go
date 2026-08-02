@@ -1050,6 +1050,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case sessionsListedMsg:
 		return a.applySessionsListed(msg), nil
 
+	case capabilitiesLoadedMsg:
+		// The /mcp + /skills tabs' background capability fetch landing
+		// (capabilities.go). Like modelsLoadedMsg it never touches a.status: an
+		// unknown answer is a state the panel body says out loud, not a note to
+		// talk over whatever the user is reading.
+		return a.applyCapabilitiesLoaded(msg), nil
+
 	case compactTickMsg:
 		// Re-arm only while a compaction is actually in flight, so the tick dies
 		// with the operation instead of running for the process's life. The frame

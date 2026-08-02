@@ -16,6 +16,7 @@ import (
 
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
+	"github.com/jedwards1230/gofer/internal/capability"
 	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/modelcatalog"
 )
@@ -68,6 +69,34 @@ type CommandEnv struct {
 	// unknown answer rather than an error, and every other failure collapses to
 	// unknown at the call site. The ctx carries the caller's timeout.
 	DaemonDefaultModel func(ctx context.Context) (string, error)
+
+	// Capabilities reads the BACKEND's runtime MCP/skills report — which MCP
+	// servers it has configured and connected, and which skills a session
+	// created in Cwd would load — for the /mcp and /skills panels
+	// (mcp_view.go, skills_view.go).
+	//
+	// It is the one closure here that is bound to a SPECIFIC backend rather
+	// than to this machine. Auth and Config are always local files; an MCP
+	// connection belongs to whichever process owns the supervisor, so the
+	// daemon wiring points this at the wire and ONLY at the wire, and the
+	// local wiring at the in-process supervisor. Neither may fall back to the
+	// other: rendering this process's local snapshot in a daemon-attached
+	// panel would describe a completely different machine's configuration
+	// while looking entirely plausible. [buildCommandEnv] (cmd/gofer), the
+	// builder both paths share, therefore leaves it nil.
+	//
+	// The two-level unavailability mirrors [CommandEnv.DaemonDefaultModel]'s:
+	// a nil closure means there is no capability source at all, and a non-nil
+	// closure returning [capability.Answer] with Known=false means the backend
+	// was asked and cannot tell you (an older daemon, or a `--workers` router
+	// that owns no MCP manager). Both render as an explicit textual UNKNOWN —
+	// never as an empty list, which reads as "nothing configured".
+	//
+	// It performs network IO on the daemon path, so it takes a ctx and is
+	// called from a tea.Cmd off the Update loop ([App.loadCapabilitiesCmd]),
+	// never on the render path. Non-fatal like the rest: the caller collapses
+	// every error to unknown.
+	Capabilities func(ctx context.Context) (capability.Answer, error)
 
 	// Auth lists every authenticated provider, wrapping auth.Store.Status().
 	Auth func() ([]ProviderAuth, error)

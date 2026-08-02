@@ -11,6 +11,7 @@ package tui
 // Model, so only this package's internal tests can do anything with one.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
+	"github.com/jedwards1230/gofer/internal/capability"
 	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
@@ -153,6 +155,58 @@ func GoldenCommandEnv() CommandEnv {
 		Auth:       func() ([]ProviderAuth, error) { return nil, nil },
 		Config:     func() (config.Config, error) { return config.Config{}, nil },
 		SaveConfig: func(config.Config) error { return nil },
+		Capabilities: func(context.Context) (capability.Answer, error) {
+			return capability.Answer{Known: true, Snapshot: GoldenCapabilities()}, nil
+		},
+	}
+}
+
+// GoldenCapabilities returns the shared [capability.Snapshot] the /mcp and
+// /skills golden tests render. It is deliberately the AWKWARD case rather than
+// the happy one, because the happy one proves almost nothing: every distinct
+// server state the MCP tab has a different word for is present exactly once
+// (connected, down, an unrecognized transport, disabled), the tool surface is
+// in index mode so the resident/index-only split renders at all, and the
+// skills half carries a shadowed duplicate, a size-skipped candidate, a
+// disabled skill, and a truncated description.
+//
+// Every path here is a literal "~/..." string, never a real one: the goldens
+// must render identically on every machine, and these values are shown
+// verbatim.
+func GoldenCapabilities() capability.Snapshot {
+	return capability.Snapshot{
+		MCP: capability.MCP{
+			Servers: []capability.Server{
+				{Name: "github", ConfiguredTransport: "stdio", Enabled: true, Connected: true},
+				{Name: "linear", ConfiguredTransport: "http", Enabled: true},
+				{Name: "legacy-ws", Enabled: true},
+				{Name: "scratch", ConfiguredTransport: "stdio"},
+			},
+			ConnectedTools: 7,
+			SchemaMode:     "index",
+			ResidentTools:  1,
+			IndexOnlyTools: 6,
+		},
+		Skills: capability.Skills{
+			Directories: []string{"~/orchestration/.gofer/skills", "~/.gofer/skills"},
+			Loaded: []capability.Skill{
+				{Name: "commit-msg", Description: "Write a conventional-commit message from a staged diff"},
+				{Name: "deep-dive", Description: "Trace a symbol across packages before changing it", Truncated: true},
+				{Name: "release", Description: "Cut a release and draft its notes", Disabled: true},
+			},
+			Diagnostics: []capability.Diagnostic{
+				{
+					Path:     "~/.gofer/skills/commit-msg/SKILL.md",
+					Detail:   `skill: duplicate name "commit-msg"; the earlier directory's definition wins`,
+					Shadowed: true,
+				},
+				{
+					Path:   "~/.gofer/skills/whole-repo/SKILL.md",
+					Detail: "skill: body exceeds 262144 bytes",
+				},
+			},
+			Summary: `skills: skipped ~/.gofer/skills/commit-msg/SKILL.md: skill: duplicate name "commit-msg"; the earlier directory's definition wins (+1 more)`,
+		},
 	}
 }
 

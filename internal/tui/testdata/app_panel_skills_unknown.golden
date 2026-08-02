@@ -13,12 +13,12 @@ claude-sonnet-5 · ~/orchestration
 
 
 ────────────────────────────────────────────────────────────────────────────────
-[Status] Config Model Thinking Usage Stats Context MCP Skills Resume Help
+Status Config Model Thinking Usage Stats Context MCP [Skills] Resume Help
 ────────────────────────────────────────────────────────────────────────────────
-Version: 0.3.0
-Session: —
-Session ID: —
-Cwd: ~/orchestration
-Providers: not signed in
-Model: claude-sonnet-5
+Skills: UNKNOWN — this backend cannot report it.
+This is NOT "none configured": nothing here has been read.
+An attached `gofer daemon --workers` router owns no supervisor, so
+no MCP manager and no skill set exist in that process to report;
+each session's worker owns its own. A daemon older than
+gofer/capabilities answers the same way.
 ←/→ to switch tabs · esc to close

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
@@ -37,6 +38,8 @@ const (
 	panelUsage
 	panelStats
 	panelContext
+	panelMCP
+	panelSkills
 	panelResume
 	panelHelp
 )
@@ -52,8 +55,11 @@ type panelTab struct {
 // once open, all of them are reachable with ←/→. Thinking sits beside Model
 // because the two answer adjacent questions about the same turn (which model,
 // and how hard it thinks), and because the Thinking tab's row list is gated on
-// whichever model the Model tab reports as active. Resume sits last: it is the
-// only tab that acts on a DIFFERENT session than the one the panel describes.
+// whichever model the Model tab reports as active. MCP and Skills sit together
+// after Context: both describe the SESSION'S CAPABILITY SURFACE rather than its
+// consumption, and both render the one [capability.Answer] the panel fetches
+// once (capabilities.go). Resume sits last: it is the only tab that acts on a
+// DIFFERENT session than the one the panel describes.
 var panelTabs = []panelTab{
 	{panelStatus, "Status"},
 	{panelConfig, "Config"},
@@ -62,6 +68,8 @@ var panelTabs = []panelTab{
 	{panelUsage, "Usage"},
 	{panelStats, "Stats"},
 	{panelContext, "Context"},
+	{panelMCP, "MCP"},
+	{panelSkills, "Skills"},
 	{panelResume, "Resume"},
 	{panelHelp, "Help"},
 }
@@ -140,6 +148,15 @@ type commandPanel struct {
 	// help is the Help tab's state (help.go), holding the live command
 	// registry App handed the panel at open time plus its own scroll offset.
 	help helpView
+
+	// caps is the MCP and Skills tabs' SHARED state (capabilities.go). Like
+	// resume it opens EMPTY — the answer belongs to the backend, and on the
+	// daemon path reading it is a round trip — so [App.loadCapabilitiesCmd]
+	// fills it in off the Update loop. Its pending flag is set here, at open
+	// time, from whether the env carries a capability source at all, so a
+	// panel that will never receive an answer renders UNKNOWN immediately
+	// instead of a "Loading…" line that never resolves.
+	caps capabilitiesState
 }
 
 // newCommandPanel returns a panel open on tab, rendering through th, with env
@@ -161,6 +178,7 @@ func newCommandPanel(th theme.Theme, tab commandPanelTab, env CommandEnv, sess *
 		resume:       newResumePickerView(th, now, roster),
 		effort:       newEffortPickerView(th, env, sess, defaultModel),
 		help:         newHelpView(th, reg),
+		caps:         capabilitiesState{pending: env.Capabilities != nil},
 	}
 }
 
@@ -264,7 +282,7 @@ func (p commandPanel) View(width, height int) string {
 	}
 
 	rule := strings.Repeat("─", width)
-	tabBar := truncate(p.tabBar(), width)
+	tabBar := truncate(p.tabBar(width), width)
 	footer := truncate(p.theme.MutedStyle().Render(p.footerText()), width)
 
 	bodyRows := h - panelFixedRows
@@ -335,8 +353,22 @@ func (p commandPanel) footerText() string {
 	return "←/→ to switch tabs · esc to close"
 }
 
-// tabBar renders the tab labels, bracketing the active one.
-func (p commandPanel) tabBar() string {
+// tabBar renders the tab labels, bracketing the active one, joined to fit
+// width.
+//
+// The separator is width-adaptive — two spaces normally, one when that would
+// not fit — because the fallback is not "slightly tighter", it is a TAB THAT
+// DISAPPEARS: [commandPanel.View] truncates this line, and the tabs it drops
+// are the rightmost ones, which is exactly where a newly added tab lands. The
+// eleven tabs as of gofer#303 come to 81 cells at two spaces with the active
+// one bracketed, one past the 80-column floor the goldens pin, so Help would
+// have silently become "[H…" — reachable only by someone who already knew it
+// was there.
+//
+// Truncation still guards the line (a genuinely narrow terminal has no answer
+// but to clip), and whoever adds the twelfth tab should expect to revisit
+// this: one space between labels is the last cheap trick available.
+func (p commandPanel) tabBar(width int) string {
 	parts := make([]string, len(panelTabs))
 	for i, t := range panelTabs {
 		label := t.label
@@ -345,7 +377,10 @@ func (p commandPanel) tabBar() string {
 		}
 		parts[i] = label
 	}
-	return strings.Join(parts, "  ")
+	if bar := strings.Join(parts, "  "); ansi.StringWidth(bar) <= width {
+		return bar
+	}
+	return strings.Join(parts, " ")
 }
 
 // body renders the active tab's content at the given width/bodyRows budget —
@@ -363,6 +398,12 @@ func (p commandPanel) body(width, bodyRows int) string {
 		return v.View(width, bodyRows)
 	case panelContext:
 		v := contextView{theme: p.theme, sess: p.sess, env: p.env}
+		return v.View(width, bodyRows)
+	case panelMCP:
+		v := mcpView{theme: p.theme, caps: p.caps}
+		return v.View(width, bodyRows)
+	case panelSkills:
+		v := skillsView{theme: p.theme, caps: p.caps}
 		return v.View(width, bodyRows)
 	case panelConfig:
 		return p.cfg.View(width, bodyRows)
@@ -593,6 +634,12 @@ func (a App) handlePanelKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// its own "already answered" flag so a tab bounce costs no second listing.
 	if p.active == panelResume && was != panelResume && !p.resume.loaded {
 		return a, a.listSessionsCmd()
+	}
+	// The MCP and Skills tabs share ONE fetch, so the guard is on the shared
+	// state rather than per tab: tabbing MCP → Skills after the answer landed
+	// costs nothing, and arriving at either from a third tab fetches once.
+	if capabilityTab(p.active) && !capabilityTab(was) && !p.caps.loaded {
+		return a, a.loadCapabilitiesCmd()
 	}
 	return a, nil
 }

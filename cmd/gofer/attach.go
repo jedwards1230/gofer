@@ -119,7 +119,7 @@ func runAttach(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 		// stale daemon — the stderr warning below is swallowed by the alt-screen.
 		DaemonVersion:   daemonBinaryVersion(ctx, c),
 		AttachSessionID: attachID,
-	}, buildCommandEnv(rootDir, cwd))
+	}, attachCommandEnv(c, rootDir, cwd))
 
 	ctx, stop := interruptCtx(ctx)
 	defer stop()

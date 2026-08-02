@@ -285,6 +285,21 @@ symlinked) is never swallowed: `sessionGuard` emits it as a non-fatal
 `session.error` on the session's own event stream once, at creation — the
 same "visible artifact, never silent" treatment a failed turn gets.
 
+**Reading the state back: `/skills` (gofer#303).** The per-session
+`session.error` above is a one-shot at creation; the `/skills` command panel is
+the standing view, off the same `gofer/capabilities` report `/mcp` uses. It
+lists every discovered skill (with `skills.disabled` and description-truncation
+marked as WORDS, since the Ascii goldens are colour-blind), the loader's full
+diagnostic list verbatim, and `skillset.Summarize`'s one-line rollup — which
+until this panel had **no caller anywhere**: every skill misconfiguration was
+diagnosed and then discarded.
+
+Precedence is reported to exactly the depth it is knowable. A shadowed
+duplicate's LOSING file is named (the loader's diagnostic carries its path); the
+WINNING file's path is **not shown at all**, because `skill.Meta` records none
+and re-walking the discovery directories to guess it goes wrong precisely when a
+first-directory candidate failed to load for an unrelated reason.
+
 ## Context compaction (M7)
 
 The SDK ships the seam (`runner.Runner.Compact`, `event.SessionCompacted`)
@@ -461,6 +476,39 @@ tool globs (the same grammar as a permission rule's specifier) filter a
 chatty server's tools before they ever reach the registry. Server
 definitions are file-only config (objects, not scalars) — no `/config`
 settings-registry row.
+
+**Reading the state back: `/mcp` (gofer#303).** Server definitions being
+file-only left the TUI with a write surface and no read surface — nothing could
+answer "is my server actually up". The `/mcp` command panel is that read
+surface, fed by a `gofer/capabilities` report (`internal/capability`, produced
+by `supervisor.Capabilities`). It shows each configured server's name, its
+CONFIGURED transport, whether it is enabled, and whether it held a live
+connection at snapshot time, plus the total federated tool count and — under
+index mode — the configured resident/index-only split.
+
+Every server field comes from the config the manager was **built** with, not a
+live re-read: the manager's server set is fixed at construction, so a server
+added to `config.json` afterwards is absent from `Snapshot().Down` simply
+because the manager has never heard of it — and treating that absence as health
+rendered a confident "connected" for a server that had never been dialed. The
+live file is compared only to report that it has **drifted**, so a correct
+omission does not become a silent one.
+
+It deliberately shows **no per-server tool count, no down-reason, and no
+never-connected-vs-dropped distinction**, because `Manager.Snapshot` cannot
+answer any of the three: its tool list is flat (attributing a tool by parsing
+its `mcp__<server>__<tool>` name would be a reconstruction that looks right and
+goes wrong), `Down` merges "never connected" with "connected then dropped" by
+its own documentation, and connect failures are logged and dropped rather than
+stored. Enriching the snapshot is
+[gofer#302](https://github.com/jedwards1230/gofer/issues/302); until it lands
+the panel names the gap on screen rather than filling it in.
+
+Under `gofer daemon --workers` the router process owns no supervisor and
+therefore no Manager — each session's worker owns its own — so it does not
+implement the optional `daemon.CapabilityReporter` and the panel renders an
+explicit UNKNOWN, textually distinct from "none configured". See
+[`TUI.md`](TUI.md).
 
 ## On-disk layout & config precedence
 

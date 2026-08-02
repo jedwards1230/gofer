@@ -290,6 +290,16 @@ func newBuiltinRegistry() Registry {
 		Run:     openPanel(panelContext),
 	})
 	r.register(Command{
+		Name:    "mcp",
+		Summary: "Show configured MCP servers and their connection state",
+		Run:     openPanel(panelMCP),
+	})
+	r.register(Command{
+		Name:    "skills",
+		Summary: "Show discovered SKILL.md skills and loader diagnostics",
+		Run:     openPanel(panelSkills),
+	})
+	r.register(Command{
 		Name:    "yolo",
 		ArgHint: "[on|off]",
 		Summary: "Toggle guardrails for new sessions",
@@ -407,6 +417,11 @@ func openPanel(tab commandPanelTab) func(App, []string) (App, tea.Cmd) {
 		case panelResume:
 			// Same rule, same reason: only /resume pays for the store walk.
 			return a, a.listSessionsCmd()
+		case panelMCP, panelSkills:
+			// Same rule again: only the two capability tabs pay for the
+			// backend round trip, and they share the one answer between them
+			// (capabilities.go).
+			return a, a.loadCapabilitiesCmd()
 		}
 		return a, nil
 	}

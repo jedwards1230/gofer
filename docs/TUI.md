@@ -1524,6 +1524,13 @@ human-eye check of real rendered frames, `vhs/` holds on-demand
   roster rollup, the registry-driven Help reference, and the Resume picker
   with a fetched listing. Each reproduces the state its
   `app_panel_<tab>.golden` pins.
+- `panel-capabilities` / `panel-capabilities-unknown` — the two scenes behind
+  `panel-mcp.tape` and `panel-skills.tape`, each captured as a **before/after
+  pair**: a backend that answered, and one that cannot. The pair is load
+  bearing rather than decorative — the failure mode these tabs exist to
+  prevent is an unanswered panel that reads as "nothing configured", and only
+  the two frames together show they are unmistakable. Both scenes drive
+  in-process closures: no network IO, nothing time-varying.
 
 Run `scripts/tui-vhs.sh [slug...]` (no arg = all tapes). It prebuilds
 `vhs/.bin/harness`, then renders each tape to `vhs/out/` (GIF of the whole turn
@@ -2252,11 +2259,100 @@ automatic trigger uses, not a tokenizer-derived category breakdown (gofer#177's
 full grid stays blocked on the tokenizer primitive it names as a prerequisite)
 — plus the configured auto-compaction threshold. `ContextWindow == 0`
 (unregistered model) renders counts only, never a fabricated percentage.
+
+**Built (gofer#303): `/mcp` and `/skills`, the runtime capability tabs.** M7
+shipped MCP servers, skills, and the tool index with config-WRITE surfaces
+(`/config` rows) and no runtime READ surface: nothing in the TUI could answer
+"is my MCP server actually up" or "which skills did the loader take". These two
+tabs are that surface. `/mcp` (`mcp_view.go`, `panelMCP`) and `/skills`
+(`skills_view.go`, `panelSkills`) sit together after Context — both describe the
+session's CAPABILITY surface rather than its consumption — and are read-only
+tabs cut from the same cloth as `/status`: pure values, no `handleKey`, Esc just
+closes.
+
+They share ONE fetch. Both render a single `capability.Answer`
+(`internal/capability`, a stdlib-only leaf shared by the producer, the wire, and
+the renderer), so opening either — or tabbing into either — costs at most one
+round trip per panel (`capabilities.go`). The fetch runs off the Update loop
+like `/model`'s catalog load and `/resume`'s listing, because on the daemon path
+it is a request to another process.
+
+**Where the answer comes from, and why it may not come at all.** MCP
+connections and skill directories belong to whichever process owns the
+supervisor. The local backend reads its own `supervisor.Capabilities`; both
+daemon-backed entrypoints — bare `gofer` attached to a daemon, and
+`gofer attach` — call `gofer/capabilities` over the wire and **only** the wire
+(`cmd/gofer/capabilities_wire.go`). Neither may fall back to the other, and the
+shared `buildCommandEnv` leaves the closure nil, because a daemon-attached panel
+rendering this process's `config.json` would describe a different machine while
+looking entirely correct. Each backend binds it in exactly one named place
+(`attachCommandEnv`, and `selectTUIBackend`'s two branches); an entrypoint that
+forgets renders UNKNOWN forever against a perfectly healthy daemon, which is
+safe but indistinguishable from an unreachable one, so both are pinned by test.
+
+**The MCP tab describes the connection MANAGER, not `config.json`.** The manager
+is built once at supervisor construction and its snapshot only knows the servers
+it was built with, while `mcp.servers` is re-read live. Reading the live file to
+build the list produced a real fabrication: a server added after startup was
+enabled and — because the manager had never heard of it — absent from the
+snapshot's `Down` list, so it rendered a green **connected** for a server that
+had never been dialed. Every server field therefore comes from the
+construction-time config. A newly added server is correctly absent, and the
+panel says so rather than omitting it silently: when the live file no longer
+matches, it shows **`config.json changed since startup — restart gofer to
+apply`**. That is a comparison of two values in hand, not a guess. Timeout-only
+edits do not raise it — they change how the manager behaves, not which servers
+it holds, and a notice that fires on every open gets trained away.
+
+Under `gofer daemon --workers` there is **no answer to give**: the router
+process owns no supervisor and therefore no MCP manager (each session's worker
+owns its own), and with N sessions there is no single fleet-wide MCP state
+anyway. The router deliberately does not implement the optional
+`daemon.CapabilityReporter` — the same shape `DecisionAnswerer` and
+`FleetUsager` use — so it answers `{supported:false}`, which the client
+classifies to **UNKNOWN**. A daemon older than the method answers
+method-not-found and collapses to the identical unknown. The tabs render that as
+an explicit textual UNKNOWN block that says out loud it is *not* "none
+configured".
+
+**What these tabs deliberately do not show.** Each omission is a field the
+current data cannot answer honestly, and each is ABSENT rather than blank-filled
+— the rule `/status` already follows:
+
+| Omitted | Why |
+|---|---|
+| Per-server tool list / count | `mcpconn.Manager.Snapshot`'s tool list is flat and the proxy tool's owning server is unexported. Attributing a tool by parsing its `mcp__<server>__<tool>` name would be a reconstruction that looks right and goes wrong. The tab reports a TOTAL across connected servers and says so. |
+| Never-connected vs connected-then-dropped | `Snapshot.Down` carries both, undifferentiated, by its own documentation. The tab says "not connected" and stops there. |
+| Why a server is down | Connect and `tools/list` failures are logged and dropped; nothing stores them. |
+| A loaded skill's source path | `skill.Meta` records none. Re-walking the discovery directories to guess the winner goes wrong precisely when a first-directory candidate failed to load for an unrelated reason. The LOSING file of a shadowing IS knowable (it arrives as a diagnostic) and is shown. |
+| A project skills directory, when the caller names no cwd | `Skills.Directories` joins cwd unconditionally, so an empty one yields the *relative* `.gofer/skills` — resolved against the daemon's own working directory and reported as though it were the caller's project. The report covers the store root alone instead. |
+
+The first three are `internal/mcpconn`'s to fix — jedwards1230/gofer#302 —
+which is why the tab names that issue on screen: the line retires itself when
+the data exists. The fourth is not waiting on anything; a wrong path would be
+worse than none.
+
+What IS shown, and honestly labelled: each server's **configured** transport
+(from `config`, not observed on a live connection), the total federated tool
+count, and — under index mode only — how many of those tools are index-only vs
+resident, computed from `tools.schema_mode` + `tools.resident` as **configured
+intent** rather than a reading of any live tool index (the live
+`*toolindex.Index` belongs to one session's registry). The Skills tab renders
+the loader's full diagnostic list verbatim plus `skillset.Summarize`'s
+one-liner, which until now had no caller anywhere: every skill misconfiguration
+was diagnosed and then discarded.
+
+Both tabs' state distinctions are carried by WORDS, never by colour alone —
+"disabled", "unsupported transport", "not connected", "(truncated)",
+"shadowed" — because the Ascii goldens that pin them cannot see colour at all.
+
 - **P1**: `/init` (first-run project context) · `/fork` · `/tree` ·
   `/export html|jsonl` · `/login` · runtime `registerCommand` from plugins ·
   `/skill:name` · `/name` · `/session` (id, path, per-model tokens/cost).
-- **P2**: model-cycling key · `/mcp` management · `/debug` (hidden commands
-  share the dispatcher, skip autocomplete).
+- **P2**: model-cycling key · `/mcp` server MANAGEMENT (these tabs are
+  read-only; enabling, disabling, and reconnecting a server is still a
+  `config.json` edit) · `/debug` (hidden commands share the dispatcher, skip
+  autocomplete).
 
 ## Plugin-contributed UI
 

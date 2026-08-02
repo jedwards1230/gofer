@@ -34,6 +34,7 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
+	"github.com/jedwards1230/gofer/internal/capability"
 	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/decision"
 	"github.com/jedwards1230/gofer/internal/tui"
@@ -62,7 +63,7 @@ type step struct {
 // vocabulary is spelled out, so the two never drift apart. Slugs follow
 // `<area>-<view>[-<state>]`, kebab-case: transcript-* (the attach scenes),
 // roster-* (the overview scene), panel-* (the command-panel scenes).
-const scenarioHelp = "transcript-tool-call | transcript-approval | transcript-compacting | transcript-overflow-recovery | roster-overview | roster-cwd-home | panel-status-overview | panel-status | panel-status-cwd-home | panel-config | panel-model | panel-model-empty | panel-model-daemon-refresh | panel-thinking | panel-usage | panel-stats | panel-help | panel-resume"
+const scenarioHelp = "transcript-tool-call | transcript-approval | transcript-compacting | transcript-overflow-recovery | roster-overview | roster-cwd-home | panel-status-overview | panel-status | panel-status-cwd-home | panel-config | panel-model | panel-model-empty | panel-model-daemon-refresh | panel-thinking | panel-usage | panel-stats | panel-help | panel-resume | panel-capabilities | panel-capabilities-unknown"
 
 func main() {
 	scenario := flag.String("scenario", "transcript-tool-call", "scripted scene to play: "+scenarioHelp)
@@ -109,6 +110,15 @@ func main() {
 		model = commandViewApp(emptyCommandEnv())
 	case "panel-model-daemon-refresh":
 		model = commandViewApp(daemonRefreshCommandEnv())
+	case "panel-capabilities":
+		// The /mcp + /skills scenes' POPULATED half: a backend that answered.
+		model = commandViewApp(capabilitiesCommandEnv())
+	case "panel-capabilities-unknown":
+		// Their UNKNOWN half — a daemon-attached TUI whose backend cannot
+		// report. panel-mcp.tape and panel-skills.tape each photograph BOTH
+		// scenes, because one frame of a populated panel cannot show that the
+		// unanswered one is different (CONTRIBUTING.md's before/after pair).
+		model = commandViewApp(unknownCapabilitiesCommandEnv())
 	default:
 		fmt.Fprintf(os.Stderr, "harness: unknown scenario %q (want %s)\n", *scenario, scenarioHelp)
 		os.Exit(2)
@@ -502,6 +512,71 @@ func daemonRefreshCommandEnv() tui.CommandEnv {
 			return *m, nil
 		}
 		return "claude-fable-5", nil // the daemon's pre-change default
+	}
+	return env
+}
+
+// capabilitiesCommandEnv is the [tui.CommandEnv] the panel-capabilities scene
+// reads: cannedCommandEnv plus a capability report chosen to put every state
+// the /mcp and /skills tabs have a distinct WORD for on screen at once —
+// connected, down, an unrecognized transport, disabled, a shadowed duplicate,
+// a size-skipped candidate, a disabled skill, a truncated description.
+//
+// That breadth is the point of the tape. The Ascii goldens already pin the
+// text; what only a real colour render can show is whether those states are
+// also visually distinguishable (green/yellow/muted/red) at a glance — and
+// whether any of the styling scatters or mis-measures at width.
+//
+// The closure is in-process, so this scene performs ZERO network IO and the
+// frame is fully deterministic.
+func capabilitiesCommandEnv() tui.CommandEnv {
+	env := cannedCommandEnv()
+	env.Capabilities = func(context.Context) (capability.Answer, error) {
+		return capability.Answer{Known: true, Snapshot: capability.Snapshot{
+			MCP: capability.MCP{
+				Servers: []capability.Server{
+					{Name: "github", ConfiguredTransport: "stdio", Enabled: true, Connected: true},
+					{Name: "linear", ConfiguredTransport: "http", Enabled: true},
+					{Name: "legacy-ws", Enabled: true},
+					{Name: "scratch", ConfiguredTransport: "stdio"},
+				},
+				ConnectedTools: 7,
+				SchemaMode:     "index",
+				ResidentTools:  1,
+				IndexOnlyTools: 6,
+			},
+			Skills: capability.Skills{
+				Directories: []string{"~/orchestration/.gofer/skills", "~/.gofer/skills"},
+				Loaded: []capability.Skill{
+					{Name: "commit-msg", Description: "Write a conventional-commit message from a staged diff"},
+					{Name: "deep-dive", Description: "Trace a symbol across packages before changing it", Truncated: true},
+					{Name: "release", Description: "Cut a release and draft its notes", Disabled: true},
+				},
+				Diagnostics: []capability.Diagnostic{
+					{Path: "~/.gofer/skills/commit-msg/SKILL.md", Detail: `skill: duplicate name "commit-msg"; the earlier directory's definition wins`, Shadowed: true},
+					{Path: "~/.gofer/skills/whole-repo/SKILL.md", Detail: "skill: body exceeds 262144 bytes"},
+				},
+				Summary: `skills: skipped ~/.gofer/skills/commit-msg/SKILL.md: skill: duplicate name "commit-msg"; the earlier directory's definition wins (+1 more)`,
+			},
+		}}, nil
+	}
+	return env
+}
+
+// unknownCapabilitiesCommandEnv is the [tui.CommandEnv] the
+// panel-capabilities-unknown scene reads: a DAEMON-BACKED env whose capability
+// closure answers UNKNOWN, exactly as an attached `gofer daemon --workers`
+// router (or a daemon predating gofer/capabilities) does.
+//
+// It is the "after" half of each tape's pair, and the frame that de-risks the
+// whole feature: side by side with the populated one it shows that an
+// unanswered panel looks nothing like an empty one, which is precisely the
+// confusion a colourless golden cannot rule out on its own.
+func unknownCapabilitiesCommandEnv() tui.CommandEnv {
+	env := cannedCommandEnv()
+	env.DaemonBacked = true
+	env.Capabilities = func(context.Context) (capability.Answer, error) {
+		return capability.Answer{}, nil
 	}
 	return env
 }
