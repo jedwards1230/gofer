@@ -2351,11 +2351,12 @@ Two consequences worth knowing:
 - **The elapsed counter is not authoritative over the daemon transport.** It
   prefers the start event's own publish time, so a client attaching *mid*
   compaction counts from when the work began rather than from when it connected.
-  That timestamp is **zero on the daemon path**: `internal/wirestream` rebuilds
-  events through the SDK's exported `New*` constructors, which cannot set the
-  unexported `seq`/`ts` meta, and the SDK exposes no way to restore it. There the
-  counter falls back to receipt time and so *understates* elapsed by the
-  transport hop. Read it as "at least this long", not as the true duration.
+  On the daemon path that timestamp is the **reconstructor's** publish time, not
+  the origin's: `internal/wirestream` decodes via `event.Unmarshal` and
+  republishes onto its own broker, which re-stamps `seq`/`ts` (see
+  `internal/wirestream/reconstruct.go`'s note on seq/time). So the counter still
+  *understates* elapsed by the transport hop. Read it as "at least this long",
+  not as the true duration.
 
 Captured as a before/after pair in `vhs/transcript-auto-compacting.tape` — the
 claim being that the indicator appears with nothing typed, which one frame
