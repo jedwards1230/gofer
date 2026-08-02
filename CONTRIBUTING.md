@@ -236,6 +236,21 @@ about the workaround.
   `internal/router`, and `internal/worker` — not a one-file stub, and not the job
   of a PR that merely moves a call site. Reply with the two commands and resolve.
 
+- **"`go/parser.ParseDir` is not deprecated."** It is. The stdlib carries the
+  marker itself, so this is settled by one command rather than by argument:
+
+  ```bash
+  go doc go/parser.ParseDir | head    # "Deprecated: ParseDir does not consider build tags…"
+  ```
+
+  The report usually arrives *half* right, which is what makes it worth a note:
+  it correctly identifies the mechanism (`ParseDir` groups files into packages
+  without applying build constraints) and then draws the wrong conclusion from
+  it. That mechanism **is** the deprecation reason, quoted almost verbatim from
+  the stdlib comment — so a doc comment naming it is not a mistake to correct.
+  `internal/tui/uicopylint_test.go`'s `parseNonTestFiles` exists precisely
+  because of it. Reply with the `go doc` output and resolve.
+
 If you refute one of these, add it here rather than only in the PR thread — the
 bot has no memory across pull requests, but this file does.
 
