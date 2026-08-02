@@ -632,6 +632,75 @@ rendered even though it now reaches the client — the daemon fans it out to eve
 peer, but the TUI subscribes per attached session. Surfacing "needs a decision"
 on the roster the way a pending approval is surfaced is the remaining UI work.
 
+## Missing session directory prompt
+
+Attaching a session whose **recorded working directory no longer exists** shows
+a three-way prompt, not an error (jedwards1230/gofer#326). It is the one attach
+failure a client can offer a remedy for, so it gets one.
+
+The daemon distinguishes the two things a `cwd` on `session/load` can mean —
+**blank** is "reopen this session where it was recorded", **non-blank** is a
+directory the user named — and answers the blank-plus-recorded-directory-gone
+case with a typed signal carrying the missing path, never a substitute
+directory. `internal/tui` receives it through a builtin-only
+`cwdMissingNotifier` seam it type-**asserts** its `Supervisor` against
+(`cwdprompt.go`). **Both backends implement it**: the daemon-backed bridge
+relays the wire signal, and the in-process `tuibridge.Adapter` resolves the same
+blank cwd against the same recorded directory itself (`internal/tuibridge/cwd.go`)
+— `supervisor.Resume` performs no cwd resolution of its own, so without that a
+blank cwd would root the session's tools, project config and skills in the gofer
+process's own directory, silently. The signal arrives on a background goroutine
+and crosses onto the Update loop through a buffered channel read from a
+`tea.Cmd`; nothing off-loop ever touches `App` state.
+
+A session that is **already live** never reaches this prompt on either backend:
+`supervisor.Resume` returns the running session's snapshot and ignores the cwd,
+so nothing needs resolving and attaching to a session whose directory was
+deleted underneath it simply works.
+
+The prompt draws in the command panel's slot, over the **roster** (the failed
+attach's half-opened screen is left, since an empty transcript under the prompt
+would assert an attach that did not happen), and outranks every other overlay in
+`App.Update`'s dispatch — it opens in response to something the user did not
+type, so the next key must answer it. It states the session and the recorded
+directory that went missing, and offers:
+
+| Choice | Key | What it does |
+| --- | --- | --- |
+| Re-init in a new directory | `1` / Enter | Opens a free-text path entry + bounded candidate list (the same enumeration `@` mentions use). The pick is sent as an **explicit, non-blank** cwd, so a bad one still hard-errors `-32602` the ordinary way. |
+| Cancel | `2` / Esc | Back to the overview. Asks the Supervisor for **nothing** — the session is untouched and still unattachable. Pressing Enter on the same roster row again **retries** and re-raises the prompt: opening it tears down the aborted attach's subscription, and the reconstruction core re-issues the load it would otherwise have memoized. |
+| Archive / delete | `3` | The same lifecycle op `ctrl+x` dispatches from the roster: archive at rest, kill if live. The journal is kept either way (repo invariant #4). |
+
+Two rules the implementation is held to by test rather than by review:
+
+- **Never silently substitute a directory.** Nothing — client or daemon — picks
+  one on the user's behalf, and where a session is being reopened is stated on
+  the status line before the round trip resolves. The client resolves every
+  relative frame of reference itself (a leading `~`, a relative path) so what
+  goes on the wire is always absolute: the daemon's `~` and the daemon's "here"
+  are a different machine's.
+- **Cancel is the default on every dismissal path**: Esc, and simply never
+  answering (the terminal closes, the client quits, the connection drops). That
+  holds by construction rather than by a cleanup path — the prompt is TUI-local
+  and opening it issues no op, so there is no pending server-side state a
+  teardown would have to unwind.
+
+The re-init copy carries an explicit warning that a session reloads
+**different local context** in a new directory — project config
+(`.gofer/config.json`), user commands (`<cwd>/.gofer/commands`), skills and file
+resolution are all cwd-scoped, so the user is rebasing the session's
+environment, not merely pointing it somewhere that exists. That warning is
+rendered unconditionally (not only while its row is focused) and pinned by
+`TestCwdMissingPromptWarnsAboutCwdScopedContext`.
+
+Because the fix depends on blank meaning "where it was recorded", **no caller in
+this package echoes a cwd it merely read**: `App.resumeSession` (the Resume tab
+and `/resume <id>`) takes no cwd parameter at all, and the only non-blank cwd
+the TUI sends is the one the user picks here.
+
+Goldens: `app_cwd_missing_prompt.golden`, `app_cwd_missing_dir_picker.golden`.
+Tapes: `vhs/roster-cwd-missing.tape`, `vhs/roster-cwd-missing-cancel.tape`.
+
 ## Roster & navigation (M2)
 
 The `Overview` screen is the concrete M2 roster. Like `Model`, it is a pure

@@ -22,7 +22,7 @@ import (
 // contract, not an internal implementation detail).
 const (
 	// methodGoferRoster is the gofer/roster Call this core makes to enumerate
-	// live sessions (see [Reconstructor.Roster] and [Reconstructor.sessionCwd]).
+	// live sessions (see [Reconstructor.Roster]).
 	methodGoferRoster = "gofer/roster"
 
 	// methodGoferOverview is the gofer/overview Call this core makes to enumerate
@@ -159,6 +159,35 @@ func WithEventSink(sink EventSink) Option {
 	return func(r *Reconstructor) { r.sink = sink }
 }
 
+// CwdMissingSink observes the ONE session/load failure this core routes onward
+// rather than dropping: the daemon rejecting a load because the session's
+// RECORDED working directory no longer exists (the daemon's session-cwd-missing
+// code, read back with [daemon.SessionCwdMissing]). cwd is that recorded
+// directory — what the consumer names when it asks the user where to reopen the
+// session instead.
+//
+// It is deliberately NARROW. [Reconstructor.loadHistory] still discards every
+// OTHER load error exactly as before (jedwards1230/gofer#325 — a failed load
+// leaves the session starting from whatever live events arrive next), because
+// this one failure is the only one a consumer can act on: it has a remedy the
+// user chooses, not a message the user reads.
+//
+// Unlike [EventSink] it does NOT run on the demuxer goroutine — it runs on the
+// per-session loadHistory goroutine, so it cannot stall the connection's control
+// plane. It must still return promptly: it runs before that goroutine hands the
+// session to the demuxer to settle, and a [Reconstructor.Send] waiting on the
+// load waits behind it. Post a message and return; never block on a UI.
+type CwdMissingSink func(sessionID, cwd string)
+
+// WithCwdMissingSink installs sink, invoked when a session/load this core issued
+// was rejected because the session's recorded cwd is gone (see
+// [CwdMissingSink]). A nil sink is ignored. Construction-time for the same
+// reason as [WithEventSink]: [New] starts the demuxer — and with it the loads it
+// triggers — before it returns, so a post-hoc setter would race them.
+func WithCwdMissingSink(sink CwdMissingSink) Option {
+	return func(r *Reconstructor) { r.cwdMissing = sink }
+}
+
 // Reconstructor drains a [*daemon.Client]'s inbound notification stream and
 // reconstructs each session's typed [event.Event] stream from it into a
 // per-session [*event.Broker] — the tui-free core behind
@@ -172,6 +201,12 @@ type Reconstructor struct {
 	// [EventSink]). Written once by [New] before the demuxer starts and never
 	// mutated afterwards, so the demuxer's reads need no synchronization.
 	sink EventSink
+
+	// cwdMissing, when non-nil, observes a session/load rejected because the
+	// session's recorded cwd is gone (see [CwdMissingSink]). Written once by
+	// [New] before any load can be triggered and never mutated afterwards, so
+	// the loadHistory goroutines' reads need no synchronization.
+	cwdMissing CwdMissingSink
 
 	mu       sync.Mutex
 	sessions map[string]*sessionState
@@ -261,6 +296,25 @@ type sessionState struct {
 	// never race a still-settling history replay onto the broker ahead of it
 	// — see loadHistory's doc in reconstruct.go for the full argument.
 	loadDone chan struct{}
+
+	// loadOnce guards loadDone's close, because a session can now be loaded
+	// more than once (see reload): a second load settling would otherwise
+	// close an already-closed channel and panic. The gate is one-way by
+	// design — once history has settled it stays settled — so the retry
+	// re-issues the RPC without reopening it.
+	loadOnce sync.Once
+
+	// reload arms ONE further history load on the next CONSUMER-facing
+	// reference to this session — [Reconstructor.reference], never the plain
+	// [Reconstructor.session] lookup the demuxer makes per frame. It is set only
+	// by the cwd-missing branch of loadHistory: that load did not merely fail,
+	// it raised a signal whose whole point is that the user answers it, and
+	// memoizing it would make the second attempt — pressing Enter on the same
+	// roster row again — a silent empty attach instead of the prompt
+	// (jedwards1230/gofer#326). Cleared without loading by
+	// [Reconstructor.RegisterFresh], whose caller is issuing its own load.
+	// Guarded by [Reconstructor.mu], like the sessions map it lives in.
+	reload bool
 }
 
 // newSessionState returns id's zero-value reconstruction record: an empty
@@ -277,6 +331,14 @@ func newSessionState(id string) *sessionState {
 	}
 }
 
+// settleLoad closes loadDone, at most once. Both settling paths go through it —
+// RegisterFresh's immediate close and finishLoad's post-drain one — so the
+// retried load a cwd-missing signal arms (see sessionState.reload) settles onto
+// an already-closed gate instead of panicking on a double close.
+func (rec *sessionState) settleLoad() {
+	rec.loadOnce.Do(func() { close(rec.loadDone) })
+}
+
 // session returns id's reconstruction state, creating it on first reference
 // from any of Subscribe, SubscribeLive, Send, or the demuxer. Guarded by mu
 // since it is called from arbitrary caller goroutines (consumer ops) as well
@@ -291,6 +353,12 @@ func newSessionState(id string) *sessionState {
 // under mu before that goroutine is started, and every other caller of
 // session for the same id will find the map entry already present and return
 // early, loadHistory is started at most once per session id.
+//
+// This is the REFERENCE-NEUTRAL entry: it never re-loads an already-mapped
+// session, whoever asks. That is what makes it safe on the demuxer's own hot
+// path — handleGoferEvent calls it for every inbound event frame — and the
+// cwd-missing retry deliberately does NOT live here for exactly that reason
+// (see [Reconstructor.reference]).
 func (r *Reconstructor) session(id string) *sessionState {
 	r.mu.Lock()
 	if rec, ok := r.sessions[id]; ok {
@@ -302,11 +370,9 @@ func (r *Reconstructor) session(id string) *sessionState {
 	// it, so a subscription on it would hang forever and the broker would leak.
 	// A nil return signals "closed" to callers. mu serializes this with
 	// closeAllBrokers, so a broker created just before Close is still reaped.
-	select {
-	case <-r.closed:
+	if r.isClosed() {
 		r.mu.Unlock()
 		return nil
-	default:
 	}
 	rec := newSessionState(id)
 	r.sessions[id] = rec
@@ -316,29 +382,112 @@ func (r *Reconstructor) session(id string) *sessionState {
 	return rec
 }
 
+// reference returns id's reconstruction state for a CONSUMER-facing reference —
+// [Reconstructor.Subscribe], [Reconstructor.SubscribeLive] and
+// [Reconstructor.Load], the three calls that mean "a consumer is attaching to
+// this session". It is [Reconstructor.session] plus the cwd-missing retry.
+//
+// # The cwd-missing retry
+//
+// A load rejected because the session's RECORDED directory is gone arms
+// rec.reload (loadHistory), and this method consumes that arming to issue the
+// load again. Without it the memo would make the remedy one-shot: the user
+// answers the prompt that failure raised with "cancel", presses Enter on the
+// same roster row again, and the second attach finds the map entry, issues no
+// session/load, raises no signal and shows an empty attach screen saying
+// nothing — the pre-fix silence, back again on the second try
+// (jedwards1230/gofer#326).
+//
+// # Why the retry lives HERE and not in session()
+//
+// Because "a consumer is attaching" is the only reference kind a retry may
+// answer. session() is also called for every inbound event frame
+// (handleGoferEvent), for every turn end, and by Send — and the demuxer's
+// per-frame call is the dangerous one: an explicit re-init (the prompt's own
+// remedy, [daemonbridge.Supervisor.Resume] with the user's directory) replays
+// the whole history back as gofer/event frames BEFORE its response, so the
+// first of those frames would consume the arming and fire a second, blank-cwd
+// session/load — which now succeeds, because the session is live by then, and
+// replays the entire history onto the same broker AGAIN. That is precisely the
+// double-render internal/tui's resumeSession is written to avoid, and it would
+// have fired on every successful re-init.
+//
+// The supersede rule in [Reconstructor.RegisterFresh] closes the other half:
+// after an explicit resume, the consumer's follow-up Subscribe must not consume
+// a now-stale arming either.
+//
+// The retry re-issues the RPC and nothing else: the session's broker, decision
+// stream and loadDone gate are the SAME ones, still in the map, so
+// [Reconstructor.Close] still reaps that broker (a broker dropped from the map
+// would leave any subscription on it hanging forever) and loadDone — closed by
+// the first, failed load — stays closed rather than reopening a gate a
+// [Reconstructor.Send] might already have passed. Only the cwd-missing branch
+// arms it, so every other load failure stays memoized exactly as before
+// (jedwards1230/gofer#325 untouched), and each retry must be armed afresh by a
+// further failure, so this can never spin.
+func (r *Reconstructor) reference(id string) *sessionState {
+	rec := r.session(id)
+	if rec == nil {
+		return nil
+	}
+	if r.takeReload(rec) {
+		go r.loadHistory(rec)
+	}
+	return rec
+}
+
+// takeReload consumes rec's pending cwd-missing retry, reporting whether one was
+// armed. Always clears the flag, so a retry is issued at most once per arming
+// however many consumers reference the session.
+func (r *Reconstructor) takeReload(rec *sessionState) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	armed := rec.reload && !r.isClosed()
+	rec.reload = false
+	return armed
+}
+
 // RegisterFresh pre-registers id's reconstruction state with loadDone already
 // closed, for a session the CALLER just created via session/new: that response
 // carries no history by construction, so there is nothing to load. Calling it
 // before the caller's own follow-up Subscribe (and, when the create carried a
 // first prompt, [Reconstructor.Send]) guarantees they find the entry already
 // mapped and never trigger a history load — see session's doc. It is a no-op
-// if the session is already registered, or if the Reconstructor is closed
-// (nothing would ever publish to or close a fresh broker), matching session's
-// own nil-on-closed contract.
+// if the Reconstructor is closed (nothing would ever publish to or close a
+// fresh broker), matching session's own nil-on-closed contract.
+//
+// For an ALREADY-registered id it is not quite a no-op: it clears any pending
+// cwd-missing retry ([sessionState.reload]). The caller is declaring that IT is
+// issuing this session's load — [daemonbridge.Supervisor.Resume] calls this
+// immediately before its own session/load — which supersedes the retry the
+// core would otherwise issue. Without the clear, the consumer's follow-up
+// Subscribe after a successful re-init would consume the stale arming and load
+// the session a second time, replaying its whole history onto the broker twice.
 func (r *Reconstructor) RegisterFresh(id string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, ok := r.sessions[id]; ok {
+	if rec, ok := r.sessions[id]; ok {
+		rec.reload = false
 		return
 	}
-	select {
-	case <-r.closed:
+	if r.isClosed() {
 		return
-	default:
 	}
 	rec := newSessionState(id)
-	close(rec.loadDone)
+	rec.settleLoad()
 	r.sessions[id] = rec
+}
+
+// isClosed reports whether [Reconstructor.Close] has been called. It takes no
+// lock of its own (the channel is closed exactly once and never reopened);
+// callers holding mu use it to serialize their decision with closeAllBrokers.
+func (r *Reconstructor) isClosed() bool {
+	select {
+	case <-r.closed:
+		return true
+	default:
+		return false
+	}
 }
 
 // SessionInfo is the client-side mirror of internal/daemon/wire.go's
@@ -361,9 +510,12 @@ type SessionInfo struct {
 	Project string         `json:"project"`
 	Live    bool           `json:"live"`
 	// Cwd, like the rest of this DTO, mirrors internal/daemon/wire.go's field
-	// of the same name — used internally by [Reconstructor.sessionCwd] to drive
-	// session/load's required cwd (see loadHistory), and surfaced by consumers
-	// (internal/daemonbridge's toTUISessionInfo) as their row's cwd group key.
+	// of the same name — the directory the session runs in, surfaced by
+	// consumers (internal/daemonbridge's toTUISessionInfo) as their row's cwd
+	// group key. This core deliberately does NOT feed it back to the daemon as
+	// session/load's cwd (see loadHistory): echoing a value read out of the
+	// journal would be indistinguishable, server-side, from a directory the user
+	// explicitly chose.
 	Cwd string `json:"cwd"`
 	// Pending is the session's live outstanding-permission-request count —
 	// contract #2 of the M3 approvals-relay work: the daemon side
@@ -410,8 +562,7 @@ type SessionInfo struct {
 
 // Roster calls gofer/roster and decodes the raw wire rows. Consumers map the
 // result to their own domain row type (internal/daemonbridge's Roster maps to
-// tui.SessionInfo); [Reconstructor.sessionCwd] reuses it for the Cwd field a
-// mapped row may not carry.
+// tui.SessionInfo).
 func (r *Reconstructor) Roster(ctx context.Context) ([]SessionInfo, error) {
 	raw, err := r.client.Call(ctx, methodGoferRoster, nil)
 	if err != nil {
@@ -442,34 +593,6 @@ func (r *Reconstructor) OverviewRoster(ctx context.Context) ([]SessionInfo, erro
 	return dtos, nil
 }
 
-// sessionCwd looks up sessionID's persisted working directory for
-// [Reconstructor.loadHistory] to pass as session/load's required cwd. It
-// consults the live roster first (the gofer/roster wire call
-// [Reconstructor.Roster] makes, a running session's authoritative cwd) and then
-// the persistent overview roster ([Reconstructor.OverviewRoster], gofer/overview)
-// — because an OFFLINE (reloaded, not-yet-live) session isn't in gofer/roster at
-// all, yet the overview carries its cwd read back from its journal meta. Without
-// the overview fallback an offline session/load would send "", and the daemon's
-// resolveSessionCwd would then reopen it in the daemon's OWN working directory
-// (typically "/" under launchd/systemd) rather than the directory it was created
-// in. It returns "" only when neither roster resolves a non-empty cwd (the
-// daemon still accepts that — its own empty-cwd fallback applies — but now also
-// substitutes the persisted cwd itself; see internal/daemon/handlers.go).
-func (r *Reconstructor) sessionCwd(ctx context.Context, sessionID string) string {
-	for _, rosterFn := range []func(context.Context) ([]SessionInfo, error){r.Roster, r.OverviewRoster} {
-		dtos, err := rosterFn(ctx)
-		if err != nil {
-			continue
-		}
-		for _, d := range dtos {
-			if d.ID == sessionID && d.Cwd != "" {
-				return d.Cwd
-			}
-		}
-	}
-	return ""
-}
-
 // Subscribe returns the reconstructed event stream for sessionID WITH backlog
 // replay: the session broker's retained must-deliver events (see
 // [event.WithReplay]) are replayed to this late subscriber first, so peek/attach
@@ -478,7 +601,7 @@ func (r *Reconstructor) sessionCwd(ctx context.Context, sessionID string) string
 // (and broker) on first reference if this is the first
 // Subscribe/SubscribeLive/Send/notification the core has seen for it.
 func (r *Reconstructor) Subscribe(_ context.Context, sessionID string) (*event.Subscription, error) {
-	rec := r.session(sessionID)
+	rec := r.reference(sessionID)
 	if rec == nil {
 		return nil, ErrClosed
 	}
@@ -507,7 +630,7 @@ func (r *Reconstructor) Subscribe(_ context.Context, sessionID string) (*event.S
 // settle first for an adopted/attached one. TestSubscribeLiveFirstReferenceReplaysHistory
 // (external) pins this actual behavior.
 func (r *Reconstructor) SubscribeLive(_ context.Context, sessionID string) (*event.Subscription, error) {
-	rec := r.session(sessionID)
+	rec := r.reference(sessionID)
 	if rec == nil {
 		return nil, ErrClosed
 	}
@@ -535,6 +658,14 @@ func (r *Reconstructor) SubscribeLive(_ context.Context, sessionID string) (*eve
 // to poll for the connection ending: [Reconstructor.Close] closes every
 // session's stream, so the channel closing is how a consumer learns the stream
 // is over — exactly as with an event subscription.
+//
+// It references through [Reconstructor.session], NOT [Reconstructor.reference]:
+// it does not consume a pending cwd-missing retry. That is deliberate and not an
+// oversight — a consumer arms both streams for ONE attach (the TUI subscribes,
+// then subscribes decisions off that subscription's readiness), so consuming
+// here as well would issue a second load per attach, since the retry's own
+// failure re-arms the flag before this call runs. One attach, one retry. When
+// Decisions genuinely IS the first reference, session() starts the load anyway.
 func (r *Reconstructor) Decisions(_ context.Context, sessionID string) (*decision.Subscription, error) {
 	rec := r.session(sessionID)
 	if rec == nil {
@@ -566,7 +697,7 @@ func (r *Reconstructor) Decisions(_ context.Context, sessionID string) (*decisio
 // it. It returns ctx.Err() if ctx is cancelled before the load settles, or
 // [ErrClosed] if the Reconstructor is (or becomes) closed.
 func (r *Reconstructor) Load(ctx context.Context, sessionID string) error {
-	rec := r.session(sessionID)
+	rec := r.reference(sessionID)
 	if rec == nil {
 		return ErrClosed
 	}

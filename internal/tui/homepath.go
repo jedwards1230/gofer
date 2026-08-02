@@ -1,17 +1,23 @@
 package tui
 
-// homepath.go is the DISPLAY-direction counterpart to
-// internal/daemon/handlers.go's normalizeCwd and internal/prompt/resolve.go's
-// expandHome, which both expand a leading "~" against the process's home for
-// storage/resolution. This file only ever CONTRACTS an absolute path back to
-// "~" for rendering — never the reverse, and never anywhere the result is
-// persisted, journaled, sent over the wire, or shown to the model. Its two
-// callers are [Overview.cwdLabel] (the roster's cwd group headers) and
-// [statusView.lines] (the /status panel's "Cwd: " row); the value each reads
-// from ([SessionInfo.Cwd]/[OverviewMeta.Cwd] and [CommandEnv.Cwd]) stays
-// untouched everywhere else it's used — including CommandEnv.Cwd itself,
-// which filepath.Join builds real filesystem paths from elsewhere in this
-// package (settingSourcesLine, filemention.go, shell.go, usercmds.go).
+// homepath.go holds this package's two "~" conversions, which run in opposite
+// directions and must not be confused for each other.
+//
+// [displayHome] CONTRACTS an absolute path back to "~" for RENDERING only —
+// never anywhere the result is persisted, journaled, sent over the wire, or
+// shown to the model. Its callers are [Overview.cwdLabel] (the roster's cwd
+// group headers), [statusView.lines] (the /status panel's "Cwd: " row) and the
+// cwd-missing prompt's directory list; the value each reads from
+// ([SessionInfo.Cwd]/[OverviewMeta.Cwd] and [CommandEnv.Cwd]) stays untouched
+// everywhere else it's used — including CommandEnv.Cwd itself, which
+// filepath.Join builds real filesystem paths from elsewhere in this package
+// (settingSourcesLine, filemention.go, shell.go, usercmds.go).
+//
+// [expandHome] runs the other way, matching internal/daemon/handlers.go's
+// normalizeCwd and internal/prompt/resolve.go's expandHome: a leading "~"
+// resolved against THIS process's home, for a path that is about to become a
+// real filesystem path or go on the wire. It has exactly one caller
+// ([resolveChosenDir]) and gaining a second should be argued for, not assumed.
 
 import (
 	"os"
@@ -29,6 +35,26 @@ func displayHome(path string) string {
 		return path
 	}
 	return contractHome(path, home)
+}
+
+// expandHome resolves a leading "~"/"~/" against this client's own home — the
+// input direction, for a path that is about to be used as a real directory
+// rather than displayed. If os.UserHomeDir errors (or answers ""), path is
+// returned unexpanded rather than failing, the same fallback normalizeCwd and
+// internal/prompt's expandHome take; the caller's own absolute-path check then
+// rejects it as the real problem it is.
+func expandHome(path string) string {
+	if path != "~" && !strings.HasPrefix(path, "~"+string(filepath.Separator)) && !strings.HasPrefix(path, "~/") {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return path
+	}
+	if path == "~" {
+		return home
+	}
+	return filepath.Join(home, path[2:])
 }
 
 // contractHome is displayHome's pure core, taking home explicitly so tests

@@ -386,7 +386,13 @@ func runResume(a App, args []string) (App, tea.Cmd) {
 		a.setStatus(sevDanger, "can't resume "+strconv.Quote(id)+": not a valid session id")
 		return a, nil
 	}
-	return a.resumeSession(id, a.cwd)
+	// A BLANK cwd, for the same reason [App.handleResumeSelect] sends one: this
+	// TUI's own working directory is not a directory the user named for THIS
+	// session, and sending it would silently reopen a session from another
+	// project here (jedwards1230/gofer#326). Blank means "where it was
+	// recorded"; the only non-blank cwd this package sends is one the user
+	// picked in the cwd-missing prompt.
+	return a.resumeSession(id)
 }
 
 // validSessionID reports whether id can name a session at all. A session id is

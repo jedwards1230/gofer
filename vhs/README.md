@@ -95,6 +95,35 @@ Tape/scenario names follow one slug schema, `<area>-<view>[-<state>]`
   journal. Needs `vhsSupervisor.Kill` to really mutate the canned roster —
   against a frozen one both frames would be identical. Reuses the
   `panel-status-overview` scenario.
+- `roster-cwd-missing.tape` — the three-way prompt that replaces the bare
+  error when a session's RECORDED working directory has been deleted
+  (jedwards1230/gofer#326), as a **before/after pair**
+  (`roster-cwd-missing-before` / `roster-cwd-missing`): the ordinary roster,
+  then Enter, then the daemon's typed cwd-missing signal landing ~200ms later
+  and the prompt taking the bottom of the frame. Before this change that second
+  frame was a red `session cwd "…" does not exist` status line — an error with
+  no remedy on it. What only colour can show, and
+  `app_cwd_missing_prompt.golden` therefore cannot: the Danger-red heading, so
+  the frame reads as a failure rather than as an ordinary panel, and the
+  Warn-yellow cwd-scoped-context warning under the re-init row, which is the
+  load-bearing caveat of the whole prompt and must not read as body text. Both
+  also change TEXT, so the goldens keep their half. Uses the
+  `roster-cwd-missing` scenario: the SAME canned roster and CommandEnv every
+  `panel-*` scene renders, differing only in a Supervisor that raises the signal
+  when `sess-1` is subscribed — the same way `transcript-compacting` differs
+  only by a blocking `Compact`. Keeping the session set identical is what stops
+  a new scene from churning six other tapes' snapshots.
+- `roster-cwd-missing-cancel.tape` — cancelling that prompt, as a
+  **before/after pair** (`roster-cwd-missing-cancel-before` /
+  `roster-cwd-missing-cancel`), and here the pair IS the claim: "nothing
+  changed" is exactly what a single frame cannot demonstrate. The after-frame
+  shows the overview back with `sess-1` still on the roster, still Working,
+  still selected, and no error on the footer. The Supervisor-side half — cancel
+  records no op at all — is asserted by `TestCwdMissingCancelMutatesNothing`;
+  this is the user-visible half no unit test can look at. Cancel is also what
+  every other dismissal path (esc, never answering) lands on. Drives the `2`
+  quick key, so nothing intermediate is caught mid-flight. Reuses the
+  `roster-cwd-missing` scenario.
 - `roster-quit-confirm.tape` — the armed `ctrl+c` double-tap quit confirm
   (gofer#314), captured as a **before/after pair**
   (`roster-quit-confirm-before` / `roster-quit-confirm`). Unlike

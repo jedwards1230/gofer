@@ -118,6 +118,10 @@ type rpcFrame struct {
 type frameError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
+	// Data is the JSON-RPC error object's optional structured payload, kept raw
+	// so a test decodes the operand a coded error carries (the missing directory
+	// behind codeSessionCwdMissing) instead of reading it out of Message.
+	Data json.RawMessage `json:"data,omitempty"`
 }
 
 // wsNotificationBuffer sizes every [wsClient]'s notification buffer.
