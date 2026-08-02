@@ -103,7 +103,7 @@ func TestRunDaemonStopStopsRunningDaemon(t *testing.T) {
 		t.Fatalf("runDaemonStop: %v (stderr=%q)", err, errBuf.String())
 	}
 
-	if pidAlive(pid) {
+	if daemon.ProcessAlive(pid) {
 		t.Errorf("daemon pid %d is still alive after `daemon stop`", pid)
 	}
 	if !strings.Contains(out.String(), "Stopped gofer daemon") {
@@ -205,7 +205,7 @@ func TestRunDaemonStopDrivesServiceManager(t *testing.T) {
 	if !strings.Contains(out.String(), "will not respawn") {
 		t.Errorf("stdout = %q, want it to tell the operator the service was stopped too", out.String())
 	}
-	if pidAlive(pid) {
+	if daemon.ProcessAlive(pid) {
 		t.Errorf("pid %d still alive: the service manager did not reap it, so stop must still signal it", pid)
 	}
 }
@@ -287,10 +287,10 @@ func TestRunDaemonRestartLeavesOneDaemonAtNewPID(t *testing.T) {
 	if !endpointGone {
 		t.Error("the endpoint file still existed when the replacement was started — restart must leave no window where it names a dead pid")
 	}
-	if pidAlive(oldPID) {
+	if daemon.ProcessAlive(oldPID) {
 		t.Errorf("restart left the old daemon (pid %d) running", oldPID)
 	}
-	if !pidAlive(newPID) {
+	if !daemon.ProcessAlive(newPID) {
 		t.Errorf("the replacement daemon (pid %d) is not running", newPID)
 	}
 	ep, err := daemon.ReadEndpoint(root)
@@ -729,5 +729,74 @@ func TestRemoveStaleEndpointSparesALiveDaemon(t *testing.T) {
 	}
 	if _, err := daemon.ReadEndpoint(root); err != nil {
 		t.Errorf("live endpoint file was removed: %v", err)
+	}
+}
+
+// TestDaemonRestartHandsTheTokenOverByFile is the regression test for the
+// pre-promotion sweep's root finding: `gofer daemon restart` used to inject
+// GOFER_TOKEN into the replacement daemon's environment, unconditionally and
+// regardless of how the operator originally supplied it.
+//
+// That mattered because a `--workers` daemon spawns worker processes that run a
+// model with a shell, and a child inherits its parent's environment by default —
+// so the operator's bearer token, which is equivalent to code execution as their
+// user, was one `env` away from every agent gofer ran. internal/sandbox does not
+// help: it contains the filesystem and the network, not the environment.
+func TestDaemonRestartHandsTheTokenOverByFile(t *testing.T) {
+	const token = "operator-bearer-token"
+	root := t.TempDir()
+
+	// Present in the CLI's own environment, which is the realistic case: the
+	// operator exported it, which is how `gofer daemon` picks it up by
+	// documented default. It must not survive into the child.
+	t.Setenv("GOFER_TOKEN", token)
+
+	cmd, logPath, err := buildDaemonRestartCmd("/usr/local/bin/gofer", daemonStartSpec{
+		root:   root,
+		listen: "127.0.0.1:7777",
+		token:  token,
+	})
+	if err != nil {
+		t.Fatalf("buildDaemonRestartCmd: %v", err)
+	}
+	if logPath == "" {
+		t.Error("no log path returned; the child's stdio would go nowhere")
+	}
+
+	for _, arg := range cmd.Args {
+		if strings.Contains(arg, token) {
+			t.Fatalf("the bearer token leaked into argv (%v) — `ps` exposes it to every local account", cmd.Args)
+		}
+	}
+	// Explicit, not nil. A nil Env means INHERIT, which is how the token got
+	// into workers in the first place — it was never assigned in, it was
+	// already there. Checked before the scan because a nil slice ranges zero
+	// times and would make the scan vacuous.
+	if cmd.Env == nil {
+		t.Fatal("buildDaemonRestartCmd left cmd.Env nil, which means INHERIT — the operator's exported GOFER_TOKEN would reach the child")
+	}
+	for _, kv := range cmd.Env {
+		if strings.Contains(kv, token) {
+			t.Fatalf("the bearer token survived into the replacement daemon's environment (%q) — "+
+				"under --workers that reaches every worker, and the model can print it with `env`", kv)
+		}
+	}
+
+	// The hand-off itself: a 0600 file runDaemon already reads as its final
+	// token fallback, so the child still comes up authenticated.
+	envPath := filepath.Join(root, daemonEnvFileName)
+	info, err := os.Stat(envPath)
+	if err != nil {
+		t.Fatalf("stat %s: %v — the token was removed from the environment but never handed over, so the replacement daemon would come up unauthenticated", envPath, err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("daemon.env mode = %04o, want 0600", got)
+	}
+	got, err := readDaemonEnvToken(root)
+	if err != nil {
+		t.Fatalf("readDaemonEnvToken: %v", err)
+	}
+	if got != token {
+		t.Errorf("token read back = %q, want %q", got, token)
 	}
 }

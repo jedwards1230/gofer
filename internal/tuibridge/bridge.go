@@ -46,6 +46,12 @@ type Adapter struct {
 	// nil, or a resolver returning "", is valid: Create then fails with
 	// supervisor.ErrNoModel, whose message names the remedy.
 	defaultModel func(context.Context) string
+
+	// cwdMissing holds the "this session's recorded directory is gone" handler
+	// a consumer registers through [Adapter.OnSessionCwdMissing]. A pointer,
+	// because this Adapter is a value type that is copied on every hand-off —
+	// see cwd.go, which owns the whole mechanism.
+	cwdMissing *cwdMissingHandler
 }
 
 // New returns an Adapter wrapping sup, resolving the create-time fallback
@@ -53,7 +59,7 @@ type Adapter struct {
 // defaultModel is called on each such Create — see [Adapter.defaultModel] for
 // why it must not be a value captured once.
 func New(sup *supervisor.Supervisor, defaultModel func(context.Context) string) Adapter {
-	return Adapter{sup: sup, defaultModel: defaultModel}
+	return Adapter{sup: sup, defaultModel: defaultModel, cwdMissing: &cwdMissingHandler{}}
 }
 
 // Adapter satisfies the TUI's consumer interface. Failing this assertion means
@@ -126,17 +132,31 @@ func (a Adapter) ListSessions(ctx context.Context) ([]tui.SessionRef, error) {
 	return out, nil
 }
 
-// Resume reopens sessionID as a live session in cwd. The model is resolved the
+// Resume reopens sessionID as a live session. The model is resolved the
 // same per-call way [Adapter.Create] resolves it — the supervisor requires one
 // on every Resume (the journal does not persist it, see
 // [supervisor.ResumeOptions]) and reading it now rather than at construction
 // keeps a `/model` write made since made effective here too.
+//
+// cwd's BLANKNESS is meaningful, exactly as it is on the daemon path (see
+// internal/daemon's resolveLoadCwd and [daemonbridge.Supervisor.Resume]):
+// non-blank is explicit user intent, blank means "reopen this session where it
+// was recorded". [supervisor.Supervisor.Resume] itself resolves NOTHING — a
+// blank cwd would reach runner.Options unchanged and root the session's tools
+// and project config in the gofer process's own directory — so the resolution
+// happens here, in cwd.go, against the same List the daemon reads. A recorded
+// directory that no longer exists raises the registered cwd-missing signal
+// ([Adapter.OnSessionCwdMissing]) and fails; it never resolves to a substitute.
 func (a Adapter) Resume(ctx context.Context, sessionID, cwd string) error {
+	resolved, err := a.resolveResumeCwd(ctx, sessionID, cwd)
+	if err != nil {
+		return err
+	}
 	var model string
 	if a.defaultModel != nil {
 		model = a.defaultModel(ctx)
 	}
-	_, err := a.sup.Resume(ctx, sessionID, supervisor.ResumeOptions{Cwd: cwd, Model: model})
+	_, err = a.sup.Resume(ctx, sessionID, supervisor.ResumeOptions{Cwd: resolved, Model: model})
 	return err
 }
 

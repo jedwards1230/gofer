@@ -6,19 +6,19 @@ claude-sonnet-5 · ~/orchestration
 
 
 ────────────────────────────────────────────────────────────────────────────────
-Status  Config  Model  Thinking  Usage  Stats  Context  Resume  [Help]
+Status Config Model Thinking Usage Stats Context MCP Skills Resume [Help]
 ────────────────────────────────────────────────────────────────────────────────
 Commands
   /compact                         Summarize this session's history and replace…
   /config                          View and edit settings (/cfg)
   /context                         Show how full this session's context window …
   /help                            List commands and keys
+  /mcp                             Show configured MCP servers and their connec…
   /model [id]                      Pick the active/default model
   /new                             Start a new session and attach to it
   /quit                            Quit gofer (/exit)
   /resume [session-id]             Reopen a session from disk
+  /skills                          Show discovered SKILL.md skills and loader d…
   /stats                           Show session lifecycle and roster-wide totals
-  /status                          Show session, cwd, and provider status
-  /thinking [low|medium|high|off]  Set the reasoning effort for this session (/…
-↓ 74 more
+↓ 76 more
 ↑/↓ to scroll · ←/→ to switch tabs · esc to close

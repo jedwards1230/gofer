@@ -1,0 +1,24 @@
+
+gofer v0.3.0
+claude-sonnet-5 · ~/orchestration
+1 awaiting input · 1 working · 0 completed
+
+~/orchestration
+▸ wire the app root             Working · overview <-> peek <-> attach nav    2m
+  review the supervisor contr…  Needs input · turn finished — awaiting the…   5m
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+Status Config Model Thinking Usage Stats Context [MCP] Skills Resume Help
+────────────────────────────────────────────────────────────────────────────────
+MCP: UNKNOWN — this backend cannot report it.
+This is NOT "none configured": nothing here has been read.
+An attached `gofer daemon --workers` router owns no supervisor, so
+no MCP manager and no skill set exist in that process to report;
+each session's worker owns its own. A daemon older than
+gofer/capabilities answers the same way.
+←/→ to switch tabs · esc to close

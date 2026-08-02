@@ -22,6 +22,7 @@ import (
 	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/permrationale"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
+	"github.com/jedwards1230/gofer/internal/uicopy"
 )
 
 // pendingApproval is the state of one unresolved permission request. A zero
@@ -172,7 +173,7 @@ func renderApprovalPrompt(th theme.Theme, p pendingApproval, width, bodyLimit in
 	// "Do you want to proceed?" sits directly above its Yes/No choices as their
 	// label — no blank between — which also keeps the whole block within a
 	// standard 80x24 frame's floor-0 (never-collapse) budget.
-	lines = append(lines, "", "Do you want to proceed?")
+	lines = append(lines, "", uicopy.ApprovalQuestion)
 	lines = append(lines, choiceListLines(th, approvalChoiceRows(), p.cursor, width)...)
 	lines = append(lines, "")
 	for _, l := range wrap(approvalHint(p), width) {
@@ -187,8 +188,8 @@ func renderApprovalPrompt(th theme.Theme, p pendingApproval, width, bodyLimit in
 // affirmative row is the one Enter opens on.
 func approvalChoiceRows() []choiceRow {
 	return []choiceRow{
-		{leader: "[a] ", label: "Yes"},
-		{leader: "[d] ", label: "No"},
+		{leader: "[a] ", label: uicopy.ApprovalChoiceYes},
+		{leader: "[d] ", label: uicopy.ApprovalChoiceNo},
 	}
 }
 
@@ -197,29 +198,14 @@ func approvalChoiceRows() []choiceRow {
 const approvalChoiceCount = 2
 
 // approvalHint is the muted footer beneath the choice list: how to navigate it,
-// the remember toggle's live state, and the amend/explain/cancel keys. It fits
-// one line at the standard 80-cell width so the whole block stays within a
-// non-collapsing 80x24 frame — which is also why the session id is NOT repeated
-// here (the attach identity header already carries it); a second wrapped line
-// would push the full prompt past the frame and force the rationale to collapse.
+// the remember toggle's live state, and the amend/explain/cancel keys. Its
+// one-line width budget is [uicopy.ApprovalHint]'s — which is also why the
+// session id is NOT repeated here (the attach identity header already carries
+// it); a second wrapped line would push the full prompt past the frame and
+// force the rationale to collapse.
 func approvalHint(p pendingApproval) string {
-	return fmt.Sprintf("enter/↑↓ select · [r] remember: %s · [tab] amend · ctrl+e explain · esc cancel",
-		rememberLabel(p.remember))
+	return uicopy.ApprovalHint(rememberLabel(p.remember))
 }
-
-// The amend editor's two warning sentences. They are the UI half of a real
-// SDK property and must never be softened into a claim of safety:
-// loop.awaitApproval substitutes event.PermissionReply.Input into the call
-// AFTER the guard already evaluated the model's original arguments, and it
-// substitutes it BEFORE calling Grant — so an amended allow is a human
-// override the rules never saw, and a REMEMBERED amended allow pins the
-// edited call as the standing grant. Nothing here may suggest the edit is
-// validated, re-run through the rules, or in any way vetted.
-const (
-	warnAmendOverride = "Warning: an amended command does not go back through the permission rules. " +
-		"Approving it is a manual override — the call runs exactly what you leave here."
-	warnAmendRemember = "Remember is on, so the standing grant will pin the edited command, not the model's original."
-)
 
 // amendCursorGlyph is the block the editor draws at the cursor — the same
 // marker the attach input uses (see [Model.inputLine]), so a cursor reads
@@ -240,10 +226,10 @@ const amendCursorGlyph = "▏"
 func amendLines(th theme.Theme, p pendingApproval, width, limit int) []string {
 	ed := *p.amend
 
-	lines := []string{"", "Amending `" + ed.key + "`:"}
+	lines := []string{"", uicopy.ApprovalAmendingPrefix + ed.key + "`:"}
 	start, end := ed.visibleLines(limit)
 	if start > 0 {
-		lines = append(lines, th.MutedStyle().Render(fmt.Sprintf("  … +%d lines above", start)))
+		lines = append(lines, th.MutedStyle().Render(uicopy.ApprovalAmendLinesAbove(start)))
 	}
 	for i := start; i < end; i++ {
 		glyph := ""
@@ -253,12 +239,12 @@ func amendLines(th theme.Theme, p pendingApproval, width, limit int) []string {
 		lines = append(lines, "  "+ed.lines[i].Render(glyph))
 	}
 	if hidden := len(ed.lines) - end; hidden > 0 {
-		lines = append(lines, th.MutedStyle().Render(fmt.Sprintf("  … +%d lines below", hidden)))
+		lines = append(lines, th.MutedStyle().Render(uicopy.ApprovalAmendLinesBelow(hidden)))
 	}
 
-	warns := []string{warnAmendOverride}
+	warns := []string{uicopy.ApprovalAmendOverrideWarning}
 	if p.remember {
-		warns = append(warns, warnAmendRemember)
+		warns = append(warns, uicopy.ApprovalAmendRememberWarning)
 	}
 	lines = append(lines, "")
 	for _, w := range warns {
@@ -268,7 +254,7 @@ func amendLines(th theme.Theme, p pendingApproval, width, limit int) []string {
 	}
 	return append(lines,
 		"",
-		th.MutedStyle().Render("ctrl+s approve edited · esc cancel · enter newline · remember: "+rememberLabel(p.remember)),
+		th.MutedStyle().Render(uicopy.ApprovalAmendHintPrefix+rememberLabel(p.remember)),
 	)
 }
 
@@ -279,9 +265,9 @@ func amendLines(th theme.Theme, p pendingApproval, width, limit int) []string {
 // (p.agent == "") gets NO suffix and no placeholder: the honest rendering of
 // "we don't know" is to say nothing, not to invent a name.
 func approvalTitle(p pendingApproval) string {
-	title := p.tool + " command"
+	title := p.tool + uicopy.ApprovalTitleCommandSuffix
 	if p.agent != "" {
-		title += " · from the `" + p.agent + "` agent"
+		title += uicopy.ApprovalTitleAgentPrefix + p.agent + uicopy.ApprovalTitleAgentSuffix
 	}
 	return title
 }
@@ -311,12 +297,12 @@ func approvalBodyLines(th theme.Theme, p pendingApproval, width, limit int) []st
 		rows = append(rows, indentWrap(fmt.Sprintf("%s=%v", k, p.spec[k]), width)...)
 	}
 	if len(rows) == 0 {
-		return []string{"  (no args)"}
+		return []string{uicopy.ApprovalNoArgs}
 	}
 
 	if limit > 0 && len(rows) > limit {
 		keep := limit - 1
-		rows = append(rows[:keep:keep], th.MutedStyle().Render(fmt.Sprintf("  … +%d more lines", len(rows)-keep)))
+		rows = append(rows[:keep:keep], th.MutedStyle().Render(uicopy.ApprovalMoreLines(len(rows)-keep)))
 	}
 	return rows
 }
@@ -363,12 +349,12 @@ func residualKeys(spec map[string]any, bodyKey string) []string {
 // derivation ("· derived locally", say) would put a caveat on every approval
 // prompt ever shown, which is noise until a user asks for the other one.
 func rationaleHeaderLine(th theme.Theme, p pendingApproval) string {
-	const header = "Why you're being asked"
+	const header = uicopy.ApprovalRationaleHeader
 	switch {
 	case p.explaining:
-		return header + th.MutedStyle().Render(" · explaining…")
+		return header + th.MutedStyle().Render(uicopy.ApprovalRationaleExplaining)
 	case p.rationale != nil:
-		return header + th.MutedStyle().Render(" · the agent's answer")
+		return header + th.MutedStyle().Render(uicopy.ApprovalRationaleAgentAnswer)
 	default:
 		return header
 	}
@@ -406,9 +392,9 @@ func rationaleLines(th theme.Theme, p pendingApproval, width int, collapsed bool
 		lines = append(lines, indentWrap(para, width)...)
 	}
 	if collapsed {
-		hint := "  … ctrl+e to explain"
+		hint := uicopy.ApprovalRationaleExplainHint
 		if p.amend != nil {
-			hint = "  … esc, then ctrl+e to explain"
+			hint = uicopy.ApprovalRationaleExplainFromAmendHint
 		}
 		lines = append(lines, th.MutedStyle().Render(hint))
 	}
@@ -464,12 +450,12 @@ func policyParagraph(r acp.PermissionRationale) string {
 	// only speaks up for a rationale whose source adds something the label
 	// doesn't already say — an agent-side policy whose origin differs from it.
 	if r.Source != "" && r.Source != label {
-		parts = append(parts, "source: "+r.Source)
+		parts = append(parts, uicopy.ApprovalPolicySourcePrefix+r.Source)
 	}
 	if len(parts) == 0 {
 		return ""
 	}
-	return "Policy: " + strings.Join(parts, " · ")
+	return uicopy.ApprovalPolicyPrefix + strings.Join(parts, " · ")
 }
 
 // approvalEscapeHatch renders the two concrete ways out, both of which exist
@@ -479,15 +465,14 @@ func policyParagraph(r acp.PermissionRationale) string {
 // written; with no command body there is no honest example to give, so the
 // "e.g." is omitted rather than guessed at.
 func approvalEscapeHatch(p pendingApproval) string {
-	hatch := "Press `r` before allowing to remember this exact call for the rest of the session. " +
-		"Add a rule to the `permissions` array in `" + config.ConfigFileName + "`"
+	hatch := uicopy.ApprovalRememberHint +
+		uicopy.ApprovalAddRulePrefix + config.ConfigFileName + "`"
 
 	body, _ := commandBody(p.spec)
 	if fields := strings.Fields(body); len(fields) > 0 {
-		hatch += fmt.Sprintf(" — e.g. `{\"verdict\": %q, \"tool\": %q, \"specifier\": %q}` —",
-			string(event.VerdictAllow), p.tool, fields[0]+" *")
+		hatch += uicopy.ApprovalRuleExample(string(event.VerdictAllow), p.tool, fields[0]+" *")
 	}
-	return hatch + " to stop being asked."
+	return hatch + uicopy.ApprovalStopBeingAskedSuffix
 }
 
 // indentWrap word-wraps s to the prompt's two-space-indented body column and
@@ -513,7 +498,7 @@ func indentWrap(s string, width int) []string {
 // row.
 func rememberLabel(on bool) string {
 	if on {
-		return "on"
+		return uicopy.ApprovalRememberOn
 	}
-	return "off"
+	return uicopy.ApprovalRememberOff
 }

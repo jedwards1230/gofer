@@ -17,6 +17,7 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/event"
 
 	"github.com/jedwards1230/gofer/internal/tui/testkit"
+	"github.com/jedwards1230/gofer/internal/uicopy"
 )
 
 // requestApprovalSpec is [requestApproval] with a caller-chosen spec — the
@@ -332,17 +333,30 @@ func TestAppApprovalExplainLandingMidEditKeepsTheEditor(t *testing.T) {
 	if !strings.Contains(frame, "sandbox profile denies deletes") {
 		t.Errorf("the agent's rationale never reached the frame:\n%s", frame)
 	}
-	if !strings.Contains(flattenPrompt(frame), warnAmendOverride) {
+	if !strings.Contains(flattenPrompt(frame), uicopy.ApprovalAmendOverrideWarning) {
 		t.Errorf("the explain repaint dropped the amend warning:\n%s", frame)
 	}
 }
 
-// TestAppApprovalAmendCtrlCStillQuits pins the one key the editor does NOT
-// swallow: ctrl+c quits from here exactly as it does everywhere else.
-func TestAppApprovalAmendCtrlCStillQuits(t *testing.T) {
+// TestAppApprovalAmendCtrlCArmsThenQuits pins the one key the editor does NOT
+// swallow: ctrl+c reaches the double-tap quit confirm from here exactly as it
+// does everywhere else (gofer#314) — the first press arms without a Cmd (and
+// without touching the editor's buffer), the second, immediately following,
+// quits.
+func TestAppApprovalAmendCtrlCArmsThenQuits(t *testing.T) {
 	a := amendingApp(t, newInternalFakeSup(GoldenRoster()), map[string]any{"cmd": "ls"})
-	if _, cmd := a.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}); cmd == nil {
-		t.Fatal("ctrl+c while amending issued no Cmd; want tea.Quit")
+
+	mdl, cmd := a.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	a = mdl.(App)
+	if cmd != nil {
+		t.Fatal("first ctrl+c while amending issued a Cmd; want it to only arm")
+	}
+	if !a.sess.AmendingApproval() {
+		t.Fatal("first ctrl+c closed the amend editor; it must only arm the quit confirm")
+	}
+
+	if _, cmd := a.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}); !isQuitCmd(cmd) {
+		t.Fatal("second ctrl+c while amending did not return tea.Quit")
 	}
 }
 

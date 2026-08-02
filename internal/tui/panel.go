@@ -17,6 +17,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
@@ -24,6 +25,7 @@ import (
 	"github.com/jedwards1230/gofer/internal/modelcatalog"
 	"github.com/jedwards1230/gofer/internal/modelmeta"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
+	"github.com/jedwards1230/gofer/internal/uicopy"
 )
 
 // commandPanelTab identifies one tab in the command panel's tab bar.
@@ -37,6 +39,8 @@ const (
 	panelUsage
 	panelStats
 	panelContext
+	panelMCP
+	panelSkills
 	panelResume
 	panelHelp
 )
@@ -52,18 +56,23 @@ type panelTab struct {
 // once open, all of them are reachable with ←/→. Thinking sits beside Model
 // because the two answer adjacent questions about the same turn (which model,
 // and how hard it thinks), and because the Thinking tab's row list is gated on
-// whichever model the Model tab reports as active. Resume sits last: it is the
-// only tab that acts on a DIFFERENT session than the one the panel describes.
+// whichever model the Model tab reports as active. MCP and Skills sit together
+// after Context: both describe the SESSION'S CAPABILITY SURFACE rather than its
+// consumption, and both render the one [capability.Answer] the panel fetches
+// once (capabilities.go). Resume sits last: it is the only tab that acts on a
+// DIFFERENT session than the one the panel describes.
 var panelTabs = []panelTab{
-	{panelStatus, "Status"},
-	{panelConfig, "Config"},
-	{panelModel, "Model"},
-	{panelEffort, "Thinking"},
-	{panelUsage, "Usage"},
-	{panelStats, "Stats"},
-	{panelContext, "Context"},
-	{panelResume, "Resume"},
-	{panelHelp, "Help"},
+	{panelStatus, uicopy.PanelTabStatus},
+	{panelConfig, uicopy.PanelTabConfig},
+	{panelModel, uicopy.PanelTabModel},
+	{panelEffort, uicopy.PanelTabThinking},
+	{panelUsage, uicopy.PanelTabUsage},
+	{panelStats, uicopy.PanelTabStats},
+	{panelContext, uicopy.PanelTabContext},
+	{panelMCP, uicopy.PanelTabMCP},
+	{panelSkills, uicopy.PanelTabSkills},
+	{panelResume, uicopy.PanelTabResume},
+	{panelHelp, uicopy.PanelTabHelp},
 }
 
 // panelHeight is the fixed number of rows the command panel occupies in the
@@ -140,6 +149,15 @@ type commandPanel struct {
 	// help is the Help tab's state (help.go), holding the live command
 	// registry App handed the panel at open time plus its own scroll offset.
 	help helpView
+
+	// caps is the MCP and Skills tabs' SHARED state (capabilities.go). Like
+	// resume it opens EMPTY — the answer belongs to the backend, and on the
+	// daemon path reading it is a round trip — so [App.loadCapabilitiesCmd]
+	// fills it in off the Update loop. Its pending flag is set here, at open
+	// time, from whether the env carries a capability source at all, so a
+	// panel that will never receive an answer renders UNKNOWN immediately
+	// instead of a "Loading…" line that never resolves.
+	caps capabilitiesState
 }
 
 // newCommandPanel returns a panel open on tab, rendering through th, with env
@@ -161,6 +179,7 @@ func newCommandPanel(th theme.Theme, tab commandPanelTab, env CommandEnv, sess *
 		resume:       newResumePickerView(th, now, roster),
 		effort:       newEffortPickerView(th, env, sess, defaultModel),
 		help:         newHelpView(th, reg),
+		caps:         capabilitiesState{pending: env.Capabilities != nil},
 	}
 }
 
@@ -264,7 +283,7 @@ func (p commandPanel) View(width, height int) string {
 	}
 
 	rule := strings.Repeat("─", width)
-	tabBar := truncate(p.tabBar(), width)
+	tabBar := truncate(p.tabBar(width), width)
 	footer := truncate(p.theme.MutedStyle().Render(p.footerText()), width)
 
 	bodyRows := h - panelFixedRows
@@ -322,21 +341,35 @@ func (p commandPanel) Height(width int) int {
 func (p commandPanel) footerText() string {
 	switch p.active {
 	case panelConfig:
-		return "Type to filter · Enter/↓ to select · ↑ to tabs · Esc to clear"
+		return uicopy.PanelFooterConfig
 	case panelModel:
-		return "Type a model id · ↑/↓ to browse · Enter to select · Esc to clear"
+		return uicopy.PanelFooterModel
 	case panelResume:
-		return "Type to filter · ↑/↓ to browse · Enter to resume · Esc to clear"
+		return uicopy.PanelFooterResume
 	case panelEffort:
-		return "↑/↓ to choose · Enter to select · Esc to close"
+		return uicopy.PanelFooterEffort
 	case panelHelp:
-		return "↑/↓ to scroll · ←/→ to switch tabs · esc to close"
+		return uicopy.PanelFooterHelp
 	}
-	return "←/→ to switch tabs · esc to close"
+	return uicopy.PanelFooterDefault
 }
 
-// tabBar renders the tab labels, bracketing the active one.
-func (p commandPanel) tabBar() string {
+// tabBar renders the tab labels, bracketing the active one, joined to fit
+// width.
+//
+// The separator is width-adaptive — two spaces normally, one when that would
+// not fit — because the fallback is not "slightly tighter", it is a TAB THAT
+// DISAPPEARS: [commandPanel.View] truncates this line, and the tabs it drops
+// are the rightmost ones, which is exactly where a newly added tab lands. The
+// eleven tabs as of gofer#303 come to 81 cells at two spaces with the active
+// one bracketed, one past the 80-column floor the goldens pin, so Help would
+// have silently become "[H…" — reachable only by someone who already knew it
+// was there.
+//
+// Truncation still guards the line (a genuinely narrow terminal has no answer
+// but to clip), and whoever adds the twelfth tab should expect to revisit
+// this: one space between labels is the last cheap trick available.
+func (p commandPanel) tabBar(width int) string {
 	parts := make([]string, len(panelTabs))
 	for i, t := range panelTabs {
 		label := t.label
@@ -345,7 +378,10 @@ func (p commandPanel) tabBar() string {
 		}
 		parts[i] = label
 	}
-	return strings.Join(parts, "  ")
+	if bar := strings.Join(parts, "  "); ansi.StringWidth(bar) <= width {
+		return bar
+	}
+	return strings.Join(parts, " ")
 }
 
 // body renders the active tab's content at the given width/bodyRows budget —
@@ -363,6 +399,12 @@ func (p commandPanel) body(width, bodyRows int) string {
 		return v.View(width, bodyRows)
 	case panelContext:
 		v := contextView{theme: p.theme, sess: p.sess, env: p.env}
+		return v.View(width, bodyRows)
+	case panelMCP:
+		v := mcpView{theme: p.theme, caps: p.caps}
+		return v.View(width, bodyRows)
+	case panelSkills:
+		v := skillsView{theme: p.theme, caps: p.caps}
 		return v.View(width, bodyRows)
 	case panelConfig:
 		return p.cfg.View(width, bodyRows)
@@ -428,15 +470,15 @@ func (a App) handleResumeSelect() (tea.Model, tea.Cmd) {
 	if !ok {
 		return a, nil
 	}
-	// The session's OWN directory wins over this client's when the listing
-	// carried one: per ACP the client picks what directory a load reloads into,
-	// and for a session from another project that is where it lives, not where
-	// this TUI happens to be sitting.
-	cwd := ref.Cwd
-	if cwd == "" {
-		cwd = a.cwd
-	}
-	app, cmd := a.resumeSession(ref.ID, cwd)
+	// A BLANK cwd, deliberately (jedwards1230/gofer#326). This used to send
+	// [SessionRef.Cwd] — the directory the picker had just READ off the daemon's
+	// own listing — falling back to this client's. That is an ECHO of the
+	// journal, and the daemon cannot tell it apart from a directory the user
+	// chose, so a session whose project directory had been deleted came back as
+	// a bare invalid-params rejection instead of the typed signal the three-way
+	// prompt is built on (cwdprompt.go). Blank says "reopen where it was
+	// recorded" and lets the daemon answer — including with that signal.
+	app, cmd := a.resumeSession(ref.ID)
 	return app, cmd
 }
 
@@ -445,12 +487,21 @@ func (a App) handleResumeSelect() (tea.Model, tea.Cmd) {
 // path — the panel closes, and the session is brought back and attached
 // through the same [App.doResume]/[resumedMsg] round trip.
 //
-// A session the roster ALREADY holds is live, so it skips the Resume op
-// entirely and just attaches. That is not merely an optimization: on the daemon
-// path a redundant session/load replays the session's whole history back onto
-// the reconstruction broker a second time, which the attach transcript would
-// then render twice.
-func (a App) resumeSession(id, cwd string) (App, tea.Cmd) {
+// It takes NO cwd, which is the structural half of gofer#326's fix: both of its
+// callers used to pass one they had merely read (the picker off the daemon's
+// listing, `/resume <id>` off this client's own working directory), and neither
+// was a directory the user had named for that session. Sending blank is now the
+// only thing this function CAN do, so the echo cannot come back by someone
+// re-adding an argument at one call site. [App.doResume] still takes a cwd,
+// because exactly one caller has a real one — [App.commitCwdReinit], where the
+// user picked it.
+//
+// A session the roster ALREADY holds skips the Resume op entirely and just
+// attaches. That is not merely an optimization: on the daemon path the attach's
+// OWN session/load is what brings an offline row back, so a preceding Resume is
+// a second load that replays the session's whole history onto the
+// reconstruction broker again — which the attach transcript then renders twice.
+func (a App) resumeSession(id string) (App, tea.Cmd) {
 	a.panel = nil
 	for _, s := range a.over.Roster() {
 		if s.ID != id {
@@ -459,7 +510,7 @@ func (a App) resumeSession(id, cwd string) (App, tea.Cmd) {
 		a.scr = screenAttach
 		return a, a.enter(id)
 	}
-	return a, a.doResume(id, cwd)
+	return a, a.doResume(id, "")
 }
 
 // modelsLoadedMsg carries the result of the Model tab's background catalog
@@ -549,7 +600,10 @@ func (a App) handlePanelKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.Key()
 	switch {
 	case key.Mod.Contains(tea.ModCtrl) && key.Code == 'c':
-		return a, tea.Quit
+		// Double-tap confirm (gofer#314): see [App.confirmQuit]. Esc (below)
+		// stays the panel's own, un-confirmed way out, so requiring a second
+		// ctrl+c to quit cannot strand a user who only meant to close the panel.
+		return a.confirmQuit()
 	case key.Code == tea.KeyEscape:
 		p, closePanel := a.panel.handleEscape()
 		if closePanel {
@@ -590,6 +644,12 @@ func (a App) handlePanelKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// its own "already answered" flag so a tab bounce costs no second listing.
 	if p.active == panelResume && was != panelResume && !p.resume.loaded {
 		return a, a.listSessionsCmd()
+	}
+	// The MCP and Skills tabs share ONE fetch, so the guard is on the shared
+	// state rather than per tab: tabbing MCP → Skills after the answer landed
+	// costs nothing, and arriving at either from a third tab fetches once.
+	if capabilityTab(p.active) && !capabilityTab(was) && !p.caps.loaded {
+		return a, a.loadCapabilitiesCmd()
 	}
 	return a, nil
 }
@@ -647,7 +707,7 @@ func (a App) applyModelSelection(selected string, sess *SessionInfo) (App, tea.C
 			// zero-value config — that would overwrite config.json and drop
 			// the user's permissions/telemetry settings. Surface it and abort,
 			// preserving the on-disk state (mirrors the SaveConfig-error path).
-			a.setStatus(sevDanger, "couldn't load config: "+err.Error())
+			a.setStatus(sevDanger, uicopy.PanelConfigLoadFailed(err.Error()))
 			a.panel = nil
 			return a, nil
 		}
@@ -656,7 +716,7 @@ func (a App) applyModelSelection(selected string, sess *SessionInfo) (App, tea.C
 	cfg.Session.Model = selected
 	if a.commandEnv.SaveConfig != nil {
 		if err := a.commandEnv.SaveConfig(cfg); err != nil {
-			a.setStatus(sevDanger, "couldn't save default model: "+err.Error())
+			a.setStatus(sevDanger, uicopy.PanelSaveDefaultModelFailed(err.Error()))
 			a.panel = nil
 			return a, nil
 		}
@@ -678,8 +738,8 @@ func (a App) applyModelSelection(selected string, sess *SessionInfo) (App, tea.C
 	if sess == nil {
 		// The overview: no running session to swap, only the default.
 		a.setStatus(a.defaultReachSeverity(sevOK), a.withDefaultReach(
-			"Default model set to "+modelmeta.DisplayName(selected)+".",
-			"Default saved; attached daemon adopts it unless pinned."))
+			uicopy.PanelDefaultModelSet(modelmeta.DisplayName(selected)),
+			uicopy.PanelDefaultSavedDaemonHedged))
 		return a, a.probeDaemonDefaultCmd(outcomeDefaultOnly, selected)
 	}
 
@@ -694,10 +754,10 @@ func (a App) applyModelSelection(selected string, sess *SessionInfo) (App, tea.C
 		// most likely looking at — the running session — did not move.
 		if a.commandEnv.DaemonBacked {
 			a.setStatus(sevWarn, a.withDefaultReach(
-				"Live model swap needs the same provider — this session keeps its model.",
-				"Provider differs — session keeps its model; default saved."))
+				uicopy.PanelLiveSwapNeedsSameProvider,
+				uicopy.PanelProviderDiffersDefaultSaved))
 		} else {
-			a.setStatus(sevWarn, "Live model swap needs the same provider — default set for new sessions; this session keeps its model.")
+			a.setStatus(sevWarn, uicopy.PanelLiveSwapNeedsSameProviderNew)
 		}
 		return a, a.probeDaemonDefaultCmd(outcomeProviderMismatch, selected)
 	}
@@ -706,8 +766,8 @@ func (a App) applyModelSelection(selected string, sess *SessionInfo) (App, tea.C
 	// on the daemon path, in-process on the local one — so this half of the
 	// message is unconditional. Only the DEFAULT's reach differs.
 	a.setStatus(a.defaultReachSeverity(sevOK), a.withDefaultReach(
-		"Model set to "+modelmeta.DisplayName(selected)+".",
-		"Model set for this session; daemon adopts the default unless pinned."))
+		uicopy.PanelModelSet(modelmeta.DisplayName(selected)),
+		uicopy.PanelModelSetDaemonHedged))
 	sessionID, sup := sess.ID, a.sup
 	probe := a.probeDaemonDefaultCmd(outcomeLiveSwap, selected)
 	return a, func() tea.Msg {
@@ -783,7 +843,7 @@ func (a App) applyEffortSelection(effort string, sess *SessionInfo) (App, tea.Cm
 			// Same width discipline as every other status note (see
 			// withDefaultReach): short enough that the remedy survives
 			// truncation at the 80-column floor.
-			a.setStatus(sevDanger, modelmeta.DisplayName(model)+" doesn't support reasoning effort — switch with /model.")
+			a.setStatus(sevDanger, uicopy.PanelEffortUnsupported(modelmeta.DisplayName(model)))
 			a.panel = nil
 			return a, nil
 		}
@@ -796,7 +856,7 @@ func (a App) applyEffortSelection(effort string, sess *SessionInfo) (App, tea.Cm
 			// Same data-loss guard as applyModelSelection: never fall through to
 			// SaveConfig with a zero-value config, which would overwrite
 			// config.json and drop the user's permissions/telemetry settings.
-			a.setStatus(sevDanger, "couldn't load config: "+err.Error())
+			a.setStatus(sevDanger, uicopy.PanelConfigLoadFailed(err.Error()))
 			a.panel = nil
 			return a, nil
 		}
@@ -805,7 +865,7 @@ func (a App) applyEffortSelection(effort string, sess *SessionInfo) (App, tea.Cm
 	cfg.Session.Effort = effort
 	if a.commandEnv.SaveConfig != nil {
 		if err := a.commandEnv.SaveConfig(cfg); err != nil {
-			a.setStatus(sevDanger, "couldn't save default reasoning effort: "+err.Error())
+			a.setStatus(sevDanger, uicopy.PanelSaveDefaultEffortFailed(err.Error()))
 			a.panel = nil
 			return a, nil
 		}
@@ -820,11 +880,11 @@ func (a App) applyEffortSelection(effort string, sess *SessionInfo) (App, tea.Cm
 		// (see config.Session.Effort), so "new sessions will use it" would be
 		// an overclaim on either backend, which is also why this path needs
 		// none of /model's daemon-reach hedging.
-		a.setStatus(sevOK, "Default reasoning effort saved: "+effortLabel(effort)+".")
+		a.setStatus(sevOK, uicopy.PanelDefaultEffortSaved(effortLabel(effort)))
 		return a, nil
 	}
 
-	a.setStatus(sevOK, "Reasoning effort set to "+effortLabel(effort)+" for this session.")
+	a.setStatus(sevOK, uicopy.PanelEffortSet(effortLabel(effort)))
 	sessionID, sup := sess.ID, a.sup
 	return a, func() tea.Msg {
 		// Off the Update loop: on the daemon path this is a network call. Any
@@ -937,21 +997,21 @@ func (a App) applyDaemonDefault(msg daemonDefaultProbedMsg) App {
 	case outcomeProviderMismatch:
 		// Warn regardless: the running session did not move either way.
 		if adopted {
-			a.setStatus(sevWarn, "Provider differs — session keeps its model; daemon took the default.")
+			a.setStatus(sevWarn, uicopy.PanelProviderDiffersDaemonAdopted)
 		} else {
-			a.setStatus(sevWarn, "Provider differs — session keeps its model; daemon is pinned.")
+			a.setStatus(sevWarn, uicopy.PanelProviderDiffersDaemonPinned)
 		}
 	case outcomeLiveSwap:
 		if adopted {
-			a.setStatus(sevOK, "Model set for this session; the daemon took the new default.")
+			a.setStatus(sevOK, uicopy.PanelModelSetDaemonAdopted)
 		} else {
-			a.setStatus(sevWarn, "Model set for this session; the daemon is pinned to another default.")
+			a.setStatus(sevWarn, uicopy.PanelModelSetDaemonPinned)
 		}
 	default: // outcomeDefaultOnly
 		if adopted {
-			a.setStatus(sevOK, "Default model saved; the attached daemon adopted it.")
+			a.setStatus(sevOK, uicopy.PanelDefaultSavedDaemonAdopted)
 		} else {
-			a.setStatus(sevWarn, "Default saved; the attached daemon is pinned to another model.")
+			a.setStatus(sevWarn, uicopy.PanelDefaultSavedDaemonPinned)
 		}
 	}
 	return a

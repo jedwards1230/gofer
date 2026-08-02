@@ -35,6 +35,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/jedwards1230/gofer/internal/tui/theme"
+	"github.com/jedwards1230/gofer/internal/uicopy"
 )
 
 // resumePickerView renders and drives the Resume tab.
@@ -190,13 +191,13 @@ func (v resumePickerView) window(n, size int) (int, int) {
 func (v resumePickerView) stateLine() (string, bool) {
 	switch {
 	case v.loadErr != "":
-		return v.theme.DangerStyle().Render("Couldn't list sessions: " + v.loadErr), true
+		return v.theme.DangerStyle().Render(uicopy.ResumePickerListFailed(v.loadErr)), true
 	case !v.loaded:
-		return v.theme.MutedStyle().Render("Loading sessions…"), true
+		return v.theme.MutedStyle().Render(uicopy.ResumePickerLoading), true
 	case len(v.sessions) == 0:
-		return v.theme.MutedStyle().Render("No sessions on disk yet."), true
+		return v.theme.MutedStyle().Render(uicopy.ResumePickerNoSessions), true
 	case len(v.filtered()) == 0:
-		return v.theme.MutedStyle().Render("No sessions match."), true
+		return v.theme.MutedStyle().Render(uicopy.ResumePickerNoMatches), true
 	}
 	return "", false
 }
@@ -204,9 +205,9 @@ func (v resumePickerView) stateLine() (string, bool) {
 // filterLine renders the search box, mirroring [configView.filterLine].
 func (v resumePickerView) filterLine() string {
 	if v.filter == "" {
-		return v.theme.MutedStyle().Render("Search sessions…")
+		return v.theme.MutedStyle().Render(uicopy.ResumePickerSearchPrompt)
 	}
-	return "Search: " + v.filter
+	return uicopy.ResumePickerSearchPrefix + v.filter
 }
 
 // rowLine renders one session's row: marker, a "live" mark for a session
@@ -225,7 +226,7 @@ func (v resumePickerView) rowLine(i int, ref SessionRef) string {
 	}
 	title := ref.Title
 	if title == "" {
-		title = "(untitled)"
+		title = uicopy.ResumePickerUntitled
 	}
 	line := marker + mark + title + " · " + shortSessionID(ref.ID) + " · " + v.ageOf(ref)
 	if base := filepath.Base(ref.Cwd); ref.Cwd != "" && base != "." {
@@ -242,7 +243,7 @@ func (v resumePickerView) rowLine(i int, ref SessionRef) string {
 // Updated would otherwise produce for every legacy journal.
 func (v resumePickerView) ageOf(ref SessionRef) string {
 	if ref.Updated.IsZero() {
-		return "age unknown"
+		return uicopy.ResumePickerAgeUnknown
 	}
 	return humanAge(v.now.Sub(ref.Updated))
 }

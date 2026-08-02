@@ -36,7 +36,20 @@ import (
 // still loaded (so re-enabling it needs no directory rescan) and is only
 // excluded at the [NewTool] projection.
 func Load(cfg config.Skills, root, cwd string) (*sdkskill.Set, []sdkskill.Diagnostic) {
-	dirs := cfg.Directories(root, cwd)
+	return LoadDirs(cfg, cfg.Directories(root, cwd))
+}
+
+// LoadDirs is [Load] with the directory list already resolved, for the one
+// caller that must adjust it before loading: [supervisor.Supervisor.Capabilities]
+// drops the project entry when it has no cwd to resolve it against, because
+// [config.Skills.Directories] joins cwd unconditionally and an empty one yields
+// the RELATIVE ".gofer/skills" — which would otherwise be scanned against this
+// process's own working directory and reported as if it were the caller's
+// project.
+//
+// Everything else about the load is identical, size caps included; only the
+// directory list is the caller's to choose. Load remains the normal entry point.
+func LoadDirs(cfg config.Skills, dirs []string) (*sdkskill.Set, []sdkskill.Diagnostic) {
 	return sdkskill.Load(dirs, sdkskill.Options{
 		MaxBodyBytes:      cfg.FileLimitBytes(),
 		DescriptionBudget: cfg.DescriptionLimitBytes(),

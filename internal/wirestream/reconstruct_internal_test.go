@@ -155,6 +155,17 @@ func TestHandleNotificationReplaysGoferEventKinds(t *testing.T) {
 		event.NewSessionCompacted(sid, "entry-12", 7, "claude-sonnet-5",
 			provider.Usage{InputTokens: 900, OutputTokens: 120, CacheReadTokens: 40, CacheWriteTokens: 11},
 			"a summary of the compacted turns"),
+		// The compaction start and its failure terminal. Both matter more than
+		// an ordinary kind here: an unregistered kind hits handleGoferEvent's
+		// default, which returns WITHOUT invoking the EventSink, so under
+		// `--workers` it would be dropped at the router and reach no client at
+		// all. Dropping the START loses the indicator gofer#300 adds; dropping
+		// the FAILURE terminal is worse — the indicator latches and never
+		// clears. Messages is deliberately a DIFFERENT number from the
+		// SessionCompacted case's 7 above, so a decode that wrongly read
+		// `messages_compacted` for these kinds could not coincidentally pass.
+		event.NewSessionCompactionStarted(sid, "entry-12", 9),
+		event.NewSessionCompactionFailed(sid, "entry-12", 9, "summarizer: context deadline exceeded"),
 		event.NewSessionKilled(sid),
 		event.NewSessionArchived(sid),
 		event.NewSessionError(sid, "boom", true),

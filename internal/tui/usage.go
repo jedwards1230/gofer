@@ -19,12 +19,12 @@ package tui
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
 	"github.com/jedwards1230/gofer/internal/tui/theme"
+	"github.com/jedwards1230/gofer/internal/uicopy"
 )
 
 // usageView renders the Usage tab: the current session's accumulated token
@@ -56,24 +56,24 @@ func (v usageView) View(width, height int) string {
 // wall of zeros.
 func (v usageView) lines() []string {
 	if v.sess == nil {
-		return []string{v.theme.MutedStyle().Render("No active session — attach to see its usage.")}
+		return []string{v.theme.MutedStyle().Render(uicopy.UsageNoSession)}
 	}
 	u := v.sess.Usage
 	if usageIsZero(u) {
-		return []string{v.theme.MutedStyle().Render("No usage recorded yet.")}
+		return []string{v.theme.MutedStyle().Render(uicopy.UsageNone)}
 	}
 
 	out := []string{
-		"Input tokens: " + strconv.Itoa(u.InputTokens),
-		"Output tokens: " + strconv.Itoa(u.OutputTokens),
+		uicopy.UsageInputTokens(u.InputTokens),
+		uicopy.UsageOutputTokens(u.OutputTokens),
 	}
 	// Cache rows are omitted rather than shown as zero: a provider that does no
 	// caching (or a turn that read/wrote none) has nothing to report here.
 	if u.CacheReadTokens > 0 {
-		out = append(out, "Cache read tokens: "+strconv.Itoa(u.CacheReadTokens))
+		out = append(out, uicopy.UsageCacheReadTokens(u.CacheReadTokens))
 	}
 	if u.CacheWriteTokens > 0 {
-		out = append(out, "Cache write tokens: "+strconv.Itoa(u.CacheWriteTokens))
+		out = append(out, uicopy.UsageCacheWriteTokens(u.CacheWriteTokens))
 	}
 	out = append(out, v.costLines(v.sess.Cost)...)
 	return out
@@ -86,20 +86,20 @@ func (v usageView) lines() []string {
 // zero, matching the token rows' omit-don't-blank-fill discipline.
 func (v usageView) costLines(c provider.Cost) []string {
 	if c.USD == 0 {
-		return []string{"Cost: —"}
+		return []string{uicopy.UsageCostUnknown}
 	}
-	out := []string{"Cost: " + fmtUSD(c.USD)}
+	out := []string{uicopy.UsageCost(fmtUSD(c.USD))}
 	if c.InputUSD > 0 {
-		out = append(out, "  Input: "+fmtUSD(c.InputUSD))
+		out = append(out, uicopy.UsageCostInput(fmtUSD(c.InputUSD)))
 	}
 	if c.OutputUSD > 0 {
-		out = append(out, "  Output: "+fmtUSD(c.OutputUSD))
+		out = append(out, uicopy.UsageCostOutput(fmtUSD(c.OutputUSD)))
 	}
 	if c.CacheReadUSD > 0 {
-		out = append(out, "  Cache read: "+fmtUSD(c.CacheReadUSD))
+		out = append(out, uicopy.UsageCostCacheRead(fmtUSD(c.CacheReadUSD)))
 	}
 	if c.CacheWriteUSD > 0 {
-		out = append(out, "  Cache write: "+fmtUSD(c.CacheWriteUSD))
+		out = append(out, uicopy.UsageCostCacheWrite(fmtUSD(c.CacheWriteUSD)))
 	}
 	return out
 }

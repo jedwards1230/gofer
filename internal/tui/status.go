@@ -21,6 +21,7 @@ import (
 
 	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
+	"github.com/jedwards1230/gofer/internal/uicopy"
 )
 
 // statusView renders the Status tab: version/cwd, session identity, one row
@@ -58,13 +59,13 @@ func (v statusView) View(width, height int) string {
 // data can't answer rather than rendering it blank.
 func (v statusView) lines() []string {
 	out := []string{
-		"Version: " + orDash(v.env.Version),
-		"Session: " + v.sessionName(),
-		"Session ID: " + v.sessionID(),
-		"Cwd: " + orDash(v.env.Cwd),
+		uicopy.StatusVersion(orDash(v.env.Version)),
+		uicopy.StatusSession(v.sessionName()),
+		uicopy.StatusSessionID(v.sessionID()),
+		uicopy.StatusCwd(orDash(displayHome(v.env.Cwd))),
 	}
 	out = append(out, v.providerLines()...)
-	out = append(out, "Model: "+v.modelLine())
+	out = append(out, uicopy.StatusModel(v.modelLine()))
 	if src := v.settingSourcesLine(); src != "" {
 		out = append(out, src)
 	}
@@ -95,11 +96,11 @@ func (v statusView) sessionID() string {
 func (v statusView) providerLines() []string {
 	auths := v.authList()
 	if len(auths) == 0 {
-		return []string{v.theme.WarnStyle().Render("Providers: not signed in")}
+		return []string{v.theme.WarnStyle().Render(uicopy.StatusNoProviders)}
 	}
 	sort.Slice(auths, func(i, j int) bool { return auths[i].Provider < auths[j].Provider })
 	lines := make([]string, 0, len(auths)+1)
-	lines = append(lines, "Providers:")
+	lines = append(lines, uicopy.StatusProvidersHeader)
 	for _, p := range auths {
 		lines = append(lines, "  "+v.providerLine(p))
 	}
@@ -135,15 +136,15 @@ func (v statusView) providerLine(p ProviderAuth) string {
 // authKindLabel renders a provider's kind plus, for OAuth, its expiry.
 func authKindLabel(p ProviderAuth) string {
 	if p.Kind != KindOAuth {
-		return "API key"
+		return uicopy.StatusAuthAPIKey
 	}
 	if p.Expired {
-		return "OAuth (expired)"
+		return uicopy.StatusAuthOAuthExpired
 	}
 	if p.Expires.IsZero() {
-		return "OAuth"
+		return uicopy.StatusAuthOAuth
 	}
-	return "OAuth (valid until " + p.Expires.Format(time.RFC3339) + ")"
+	return uicopy.StatusAuthOAuthValidUntil(p.Expires.Format(time.RFC3339))
 }
 
 // modelLine resolves the active model: the attached/peeked session's model
@@ -176,10 +177,10 @@ func (v statusView) settingSourcesLine() string {
 	if len(layers) == 0 {
 		return ""
 	}
-	line := "Config: " + strings.Join(layers, ", ")
+	line := uicopy.StatusConfig(strings.Join(layers, ", "))
 	if v.env.Config != nil {
 		if _, err := v.env.Config(); err != nil {
-			line += " (unreadable)"
+			line += uicopy.StatusConfigUnreadable
 		}
 	}
 	return line

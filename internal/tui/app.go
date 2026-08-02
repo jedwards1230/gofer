@@ -2,7 +2,6 @@ package tui
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"time"
 
@@ -15,6 +14,7 @@ import (
 	"github.com/jedwards1230/gofer/internal/decision"
 	"github.com/jedwards1230/gofer/internal/tui/layout"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
+	"github.com/jedwards1230/gofer/internal/uicopy"
 	"github.com/jedwards1230/gofer/internal/usercmd"
 )
 
@@ -113,6 +113,22 @@ type App struct {
 	// decision > menu > active screen > global (see Update).
 	panel *commandPanel
 
+	// cwdPrompt is the open "this session's recorded directory is gone"
+	// three-way prompt (cwdprompt.go); nil = none. Like panel it composes over
+	// whatever screen scr shows rather than being a fourth [screen], but it
+	// outranks every other overlay in Update's dispatch — it opens in response
+	// to a daemon signal rather than to something the user typed, so whatever
+	// they type next must answer IT. Opening one closes the panel and the menu
+	// for the same reason (see [App.applyCwdMissing]).
+	cwdPrompt *cwdMissingPrompt
+
+	// cwdMissing is the buffered hand-off channel [App.registerCwdMissing]
+	// installs on a Supervisor that can report a missing recorded cwd. The
+	// callback writes it from a DAEMON goroutine; [App.waitCwdMissing] reads it
+	// from a tea.Cmd, which is the only thing that may touch App state. nil
+	// when the backend raises no such signal (the in-process supervisor).
+	cwdMissing chan cwdMissingSignal
+
 	// registry resolves a submitted "/name arg…" buffer's command token to
 	// the [Command] that runs it.
 	registry Registry
@@ -129,19 +145,26 @@ type App struct {
 	shellRuns []shellRun
 	shellSeq  int
 
-	// compactingSince is when an explicit `/compact` was dispatched, or the
-	// zero time when none is in flight. It drives the transient "compacting
-	// context…" indicator at the transcript tail ([Model.WithCompacting]) and
-	// the elapsed seconds it counts, and it is what [compactTickMsg] reschedules
-	// itself on — so the once-per-second tick exists only while a compaction
-	// does, and stops on its own.
+	// compactingSince is when the compaction currently in flight began, or the
+	// zero time when none is. It drives the transient "compacting context…"
+	// indicator at the transcript tail ([Model.WithCompacting]) and the elapsed
+	// seconds it counts, and it is what [compactTickMsg] reschedules itself on —
+	// so the once-per-second tick exists only while a compaction does, and stops
+	// on its own.
 	//
-	// This covers the EXPLICIT path only. Automatic compaction (the pump's
-	// maybeAutoCompact) is triggered daemon-side, and the Event contract carries
-	// only session.compacted — the COMPLETION. There is no session.compacting
-	// event to hang an indicator on, so an automatic compaction still shows
-	// nothing until it lands; closing that gap is an agent-sdk-go contract
-	// change, not a TUI one (see gofer #300).
+	// It is set from TWO sources, which is what makes it cover automatic
+	// compaction as well as explicit (gofer#300):
+	//
+	//  1. `/compact` dispatch ([runCompact]), which latches optimistically at
+	//     the moment the user asked rather than waiting for the round trip.
+	//  2. event.SessionCompactionStarted, which is the ONLY signal an automatic
+	//     compaction gives — the pump's maybeAutoCompact is triggered
+	//     supervisor-side with no client RPC in flight to hang an indicator on.
+	//
+	// It is cleared by [App.applyCompactionEvent] on either of the start's two
+	// terminals, by compactDoneMsg, by [App.switchSession], and — load-bearing,
+	// not defensive — on sessClosedMsg. See applyCompactionEvent for why a
+	// closed subscription MUST clear it.
 	compactingSince time.Time
 
 	// shellQueue is the sticky reply-now/queue mode ctrl+r toggles (keymap.go).
@@ -221,6 +244,21 @@ type App struct {
 	// a held selection leaves the arm pointing at the session it was armed on.
 	ctrlXArmed string
 
+	// quitArmed is the ctrl+c double-tap confirm's arm state (gofer#314):
+	// false = nothing armed, true = a first ctrl+c has armed the quit. Unlike
+	// ctrlXArmed above, Update's key handler disarms it CONDITIONALLY — only on
+	// a key that is NOT itself ctrl+c — rather than unconditionally on every
+	// press. That is what lets every ctrl+c site ([App.confirmQuit], shared by
+	// the global keymap row and the panel/approval/decision overlays that each
+	// intercept ctrl+c ahead of it) read the arm a PRIOR press left behind
+	// without a prevArmed parameter: by the time any handler sees a ctrl+c key,
+	// this field still holds whatever the last press set it to, and by the time
+	// any handler sees any OTHER key, Update has already forced it back to
+	// false. See [App.confirmQuit]'s doc for the read side and
+	// [Program.quitArmed] (adapter.go) for the single-session TUI's mirrored,
+	// independent copy of the same shape.
+	quitArmed bool
+
 	// pendingSelect is the session id [App.confirmDestroy] wants selected once
 	// the roster refresh that reflects its kill/archive lands — the row that
 	// occupied the deleted session's position AS RENDERED at confirm time (see
@@ -290,6 +328,11 @@ func NewApp(th theme.Theme, sup Supervisor, meta OverviewMeta, env CommandEnv) A
 		registry:   newBuiltinRegistry(),
 		commandEnv: env,
 	}
+	// Register the cwd-missing handler ONCE, here, where the concrete
+	// Supervisor is in hand — a type assertion, not a requirement, so a backend
+	// with no session/load to fail (tuibridge.Adapter) is unaffected. See
+	// [App.registerCwdMissing]; [App.Init] arms the reader.
+	a.registerCwdMissing(sup)
 	// Seed the sticky shell reply-now/queue mode from config so a user who
 	// always wants queue mode launches in it instead of re-pressing ctrl+r every
 	// session (config.TUI.ShellReplyMode, default reply-now). A one-shot read at
@@ -443,14 +486,20 @@ type opDoneMsg struct {
 	refreshRoster bool
 }
 
-// Init satisfies tea.Model: it kicks off the first roster fetch, plus — when
-// the app opened straight into an attach (via OverviewMeta.AttachSessionID) —
-// the subscription to that session so its transcript streams in immediately.
+// Init satisfies tea.Model: it kicks off the first roster fetch, arms the
+// cwd-missing listener, and — when the app opened straight into an attach (via
+// OverviewMeta.AttachSessionID) — subscribes to that session so its transcript
+// streams in immediately.
+//
+// [App.waitCwdMissing] is nil on a backend that raises no cwd-missing signal,
+// and tea.Batch drops nil commands and collapses a single survivor back to
+// itself, so on those backends this returns EXACTLY what it returned before the
+// listener existed.
 func (a App) Init() tea.Cmd {
 	if a.sessID != "" {
-		return tea.Batch(a.fetchRoster, a.subscribe(a.sessID))
+		return tea.Batch(a.fetchRoster, a.subscribe(a.sessID), a.waitCwdMissing())
 	}
-	return a.fetchRoster
+	return tea.Batch(a.fetchRoster, a.waitCwdMissing())
 }
 
 // fetchRoster fetches a fresh roster snapshot from the Supervisor. This is the
@@ -660,6 +709,12 @@ func (a *App) switchSession(id string) tea.Cmd {
 	a.sub = nil
 	a.decSub = nil
 	a.scroll = 0 // a different session's transcript starts back at the tail
+	// The indicator describes the session being LEFT, and its terminal event
+	// will arrive on a subscription that is already closed — carrying the latch
+	// across would paint another session's transcript with a compaction that is
+	// not its own. (The old subscription's sessClosedMsg cannot clear it here:
+	// sessID has already moved, so that message is dropped as stale.)
+	a.compactingSince = time.Time{}
 	return a.subscribe(id)
 }
 
@@ -1007,11 +1062,23 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// PermissionRequested, cleared on a matching PermissionResolved) —
 		// see Model.Ingest and approval.go.
 		a.ingestAttach(msg.ev)
+		// The compaction indicator is App state, not Model state — like the
+		// turn-in-flight indicator it is composed per render (attachModel's
+		// WithCompacting) and must never enter the durable item list. Driving it
+		// here rather than in Model.Ingest keeps that split intact.
+		if a.applyCompactionEvent(msg.ev) {
+			return a, tea.Batch(waitForEvent(msg.id, msg.sub), compactTick())
+		}
 		return a, waitForEvent(msg.id, msg.sub)
 
 	case sessClosedMsg:
 		if msg.id == a.sessID {
 			a.sub = nil
+			// A severed subscription is the one way a latched compaction
+			// indicator never sees its terminal event, so it is cleared here
+			// rather than left to a terminal that is no longer coming. See
+			// [App.applyCompactionEvent].
+			a.compactingSince = time.Time{}
 		}
 		return a, nil
 
@@ -1025,6 +1092,17 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case resumedMsg:
 		if msg.err != nil {
+			// A cwd-missing failure on the /resume path is reported TWICE — once
+			// as this error, once as the signal that opens the prompt — and the
+			// two are posted from different goroutines, so which lands first is
+			// scheduler-dependent. With the prompt for this session already on
+			// screen the error has been superseded: painting it would put the
+			// bare "session cwd … is no longer available" rejection in the footer
+			// underneath the very prompt that exists to replace it. (The other
+			// order needs no guard: applyCwdMissing clears the status line.)
+			if a.cwdPrompt != nil && a.cwdPrompt.sessionID == msg.id {
+				return a, nil
+			}
 			a.setStatus(sevDanger, msg.err.Error())
 			return a, nil
 		}
@@ -1032,8 +1110,31 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.scr = screenAttach
 		return a, a.switchSession(msg.id)
 
+	case cwdMissingMsg:
+		// A session could not be attached because its RECORDED directory is
+		// gone (jedwards1230/gofer#326) — the one attach failure with a remedy
+		// to offer, so it opens the three-way prompt instead of a status line.
+		// The listener is re-armed immediately: it is a single long-lived read
+		// chain, one goroutine at a time, and dropping the re-arm here would
+		// silently retire the signal for the rest of the process.
+		return a.applyCwdMissing(msg), a.waitCwdMissing()
+
+	case cwdDirsLoadedMsg:
+		// The re-init picker's background directory enumeration landing
+		// (cwdprompt.go). Never a status line: an empty result is a legitimate
+		// answer the picker renders honestly, and the free-text entry works
+		// regardless.
+		return a.applyCwdDirsLoaded(msg), nil
+
 	case sessionsListedMsg:
 		return a.applySessionsListed(msg), nil
+
+	case capabilitiesLoadedMsg:
+		// The /mcp + /skills tabs' background capability fetch landing
+		// (capabilities.go). Like modelsLoadedMsg it never touches a.status: an
+		// unknown answer is a state the panel body says out loud, not a note to
+		// talk over whatever the user is reading.
+		return a.applyCapabilitiesLoaded(msg), nil
 
 	case compactTickMsg:
 		// Re-arm only while a compaction is actually in flight, so the tick dies
@@ -1059,7 +1160,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// session.compacted event appends to the transcript — the durable record.
 		// A status note on top of it would be a second, redundant voice, so the
 		// off-screen note set at dispatch is simply retired here.
-		if a.status == compactingNote {
+		if a.status == uicopy.CompactingNote {
 			a.clearStatus()
 		}
 		return a, nil
@@ -1084,7 +1185,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case daemonRestartMsg:
 		if msg.err != nil {
-			a.setStatus(sevDanger, fmt.Sprintf("Daemon restart failed: %s", msg.err.Error()))
+			a.setStatus(sevDanger, uicopy.DaemonRestartFailed(msg.err.Error()))
 			return a, nil
 		}
 		// The replacement is up and this client is reconnected (the bridge swapped
@@ -1093,7 +1194,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// immediately — the visible proof the restart worked. Also fold in the
 		// replacement's build version so the header stops warning about the
 		// daemon this restart just replaced (see [App.doRestartDaemon]).
-		a.setStatus(sevOK, "Daemon restarted; roster restored.")
+		a.setStatus(sevOK, uicopy.DaemonRestarted)
 		a.over = a.over.WithDaemonVersion(msg.version)
 		return a, a.fetchRosterNow
 
@@ -1186,6 +1287,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyPressMsg:
 		a.clearStatus()
+		key := msg.Key()
 		// Capture and disarm the ctrl+x two-press confirm. Snapshotting it here —
 		// before any overlay or per-screen handler — and clearing a.ctrlXArmed
 		// (and the hint's mirror of it) is what makes the confirm momentary: ANY
@@ -1196,11 +1298,32 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		prevArmed := a.ctrlXArmed
 		a.ctrlXArmed = ""
 		a.over = a.over.WithCtrlXArmed(false)
+		// Disarm the ctrl+c double-tap quit confirm (gofer#314) — but only on a
+		// key that is NOT itself ctrl+c. Unlike ctrlXArmed above, this clear is
+		// CONDITIONAL: a ctrl+c key press leaves a.quitArmed untouched here so
+		// [App.confirmQuit] — called from wherever this key actually ends up
+		// dispatched (the global keymap, or the panel/approval/decision overlay
+		// that claims it first) — can read whatever the PREVIOUS press left
+		// behind. Every other key forces it back to false before any handler
+		// runs, exactly as ctrlXArmed's unconditional clear does for ctrl+x.
+		if !key.Mod.Contains(tea.ModCtrl) || key.Code != 'c' {
+			a.quitArmed = false
+		}
 		// Any key press clears an active/frozen mouse selection — docs/TUI.md's
 		// "clear the selection on the next click / a key press" contract (a
 		// fresh click already clears it via handleMouseClick installing a new
 		// selectionState outright, so this is the key-press half).
 		a.sel = nil
+		// The cwd-missing prompt outranks every other overlay (dispatch
+		// precedence: cwd-prompt > panel > approval > decision > menu > active
+		// screen > global). It is the one overlay the USER did not open — it
+		// appears because an attach failed — so the next key must answer it
+		// rather than land on whatever happened to be underneath. Opening it
+		// already closed the panel and the menu (applyCwdMissing), so this
+		// steals nothing that was mid-edit. See handleCwdPromptKey.
+		if a.cwdPrompt != nil {
+			return a.handleCwdPromptKey(msg)
+		}
 		// The command panel takes every key ahead of the approval overlay and
 		// the per-screen handlers (dispatch precedence: panel > approval >
 		// decision > menu > active screen > global) — see handlePanelKey.
@@ -1299,6 +1422,54 @@ func (a App) handleKey(msg tea.KeyPressMsg, prevArmed string) (tea.Model, tea.Cm
 	default:
 		return a.handleOverviewKey(msg)
 	}
+}
+
+// quitArmedNote is the status-line text a first ctrl+c shows while armed,
+// shared by [App.confirmQuit] and [Program]'s mirrored copy (adapter.go) so
+// the two independent implementations read identically. It changes TEXT, not
+// just color (a.status renders in [sevWarn]'s style, but the Ascii golden
+// profile cannot see that) — the same reason the roster's ctrl+x confirm
+// swaps its hint text rather than relying on the row highlight alone. The
+// wording itself lives in internal/uicopy; this is the local name the two
+// call sites share.
+const quitArmedNote = uicopy.QuitArmedNote
+
+// confirmQuit is the ctrl+c double-tap quit confirm (gofer#314), shared by
+// every site that intercepts ctrl+c on [App]: the live global-keymap row
+// (keymap.go, reached from the overview/peek/attach screens and the open
+// autocomplete menu, all of which fall through to [dispatchGlobalKey]) and
+// the three overlays that claim ctrl+c themselves ahead of it — the command
+// panel ([App.handlePanelKey]), the pending-approval prompt including its
+// nested amend editor ([App.handleApprovalKey]), and the pending-decision
+// prompt ([App.handleDecisionKey]). Every one of those sites is a one-line
+// `return a.confirmQuit()` in place of the old unconditional `return a,
+// tea.Quit` — see gofer#314's issue body for the full enumeration this PR's
+// description repeats.
+//
+// The FIRST press arms: it sets a.quitArmed and shows [quitArmedNote] on the
+// status line, but does NOT quit — mirroring [App.confirmDestroy]'s
+// arm-instead-of-act shape for ctrl+x. The SECOND press, while still armed,
+// quits outright. Any OTHER key disarms: Update's tea.KeyPressMsg case clears
+// a.quitArmed on every press that is not itself ctrl+c BEFORE any handler
+// runs (see the isCtrlC guard there), so confirmQuit reads a.quitArmed
+// directly rather than taking a prevArmed parameter the way confirmDestroy
+// does — every non-ctrl+c key has already forced it to false by the time any
+// handler sees the key, so a live true here can only mean "the previous key
+// was also ctrl+c".
+//
+// Quitting mid-modal is deliberately safe: every overlay this is reachable
+// from also has an Esc that leaves it WITHOUT quitting (the panel's
+// handleEscape, the approval's escapeApproval, the amend editor's own Esc
+// cancel, the decision's escapeDecision) — ctrl+c was never the only way out
+// of any of them, so requiring a second press to quit cannot strand a user
+// who only wanted to back out.
+func (a App) confirmQuit() (tea.Model, tea.Cmd) {
+	if a.quitArmed {
+		return a, tea.Quit
+	}
+	a.quitArmed = true
+	a.setStatus(sevWarn, quitArmedNote)
+	return a, nil
 }
 
 // confirmDestroy runs the roster/peek ctrl+x two-press confirm against the
@@ -1470,10 +1641,10 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// poll; this note still covers the window while the sweep is in flight.
 		ids := a.over.Descendants(a.over.SelectedID())
 		if len(ids) == 0 {
-			a.setStatus(sevWarn, "No subagents under this session.")
+			a.setStatus(sevWarn, uicopy.NoSubagentsToStop)
 			return a, nil
 		}
-		a.setStatus(sevOK, fmt.Sprintf("Stopping %s.", plural(len(ids), "subagent")))
+		a.setStatus(sevOK, uicopy.StoppingSubagents(len(ids)))
 		return a, a.doKillTree(ids)
 
 	case key.Text == "R" && a.over.InputEmpty() && a.over.daemonStale():
@@ -1486,7 +1657,7 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// and — since the local backend never shows that banner — only ever on a
 		// daemon-backed overview. The restart runs as a background Cmd; its
 		// daemonRestartMsg refreshes the roster from the replacement (Update).
-		a.setStatus(sevOK, "Restarting daemon…")
+		a.setStatus(sevOK, uicopy.DaemonRestarting)
 		return a, a.doRestartDaemon()
 
 	case key.Text == "?" && a.over.InputEmpty():
@@ -1729,6 +1900,7 @@ type frameLayout struct {
 	h         int      // content budget handed to the active screen's own render
 	footer    string   // trailing status line, "" when a.status is unset
 	panelH    int      // command-panel row count, 0 when a.panel is nil
+	cwdH      int      // cwd-missing prompt row count, 0 when a.cwdPrompt is nil
 	menuLines []string // pre-rendered command-menu rows, nil when closed/not applicable
 }
 
@@ -1752,6 +1924,20 @@ func (a App) frameLayout() frameLayout {
 			panelH = h
 		}
 		h -= panelH
+	}
+
+	// The cwd-missing prompt takes its slice out of the same budget, exactly
+	// as the panel above does, and the two are mutually exclusive by
+	// construction (applyCwdMissing clears a.panel) so they can never both
+	// carve. Sized to what it actually renders rather than to its cap, so the
+	// roster underneath keeps every row the prompt does not need.
+	cwdH := 0
+	if a.cwdPrompt != nil {
+		cwdH = a.cwdPrompt.height(a.theme, a.width)
+		if cwdH > h {
+			cwdH = h
+		}
+		h -= cwdH
 	}
 
 	// The command-autocomplete menu (command_menu.go) is part of the
@@ -1779,7 +1965,7 @@ func (a App) frameLayout() frameLayout {
 		// shrink the bottom-anchored frame short of a.height.
 	}
 
-	return frameLayout{h: h, footer: footer, panelH: panelH, menuLines: menuLines}
+	return frameLayout{h: h, footer: footer, panelH: panelH, cwdH: cwdH, menuLines: menuLines}
 }
 
 // This is the pure core [App.View] wraps into a tea.View, kept separate so
@@ -1819,6 +2005,13 @@ func (a App) render() string {
 
 	if a.panel != nil {
 		body += "\n" + a.panel.View(a.width, fl.panelH)
+	}
+
+	// The cwd-missing prompt draws in the panel's slot, for the same reason and
+	// with the same arithmetic — see [App.frameLayout]. It can never double up
+	// with a panel (opening it closes one).
+	if a.cwdPrompt != nil {
+		body += "\n" + a.cwdPrompt.render(a.theme, a.width, fl.cwdH)
 	}
 
 	if fl.footer != "" {

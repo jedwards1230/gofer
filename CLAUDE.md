@@ -71,9 +71,18 @@ make install                                       # local install, truthfully v
   (`gofer daemon`); see its package doc.
 - `internal/tui/` (bubbletea) — the attach/peek/overview frontend, plus the
   slash-command dispatcher and command panel (`/status`, `/config`, `/model`,
-  `/thinking`, `/usage`, `/stats`, `/resume`, `/help`), plus the
-  session-lifecycle commands `/new` and `/quit`, the `/yolo` guardrail toggle,
-  and the declarative keymap `/help` renders from.
+  `/thinking`, `/usage`, `/stats`, `/context`, `/mcp`, `/skills`, `/resume`,
+  `/help`), plus the session-lifecycle commands `/new` and `/quit`, the
+  `/yolo` guardrail toggle, and the declarative keymap `/help` renders from.
+- `internal/uicopy/` — the single home for operator-facing TUI copy: every
+  phrase a human reads on screen, as typed constants and formatting functions
+  rather than a keyed map, so a mistyped entry is a compile error instead of a
+  blank line. **Model-facing text is not copy and must not live here** — a tool
+  description or prompt fragment changes what the agent *does*, so translating
+  one would silently change behaviour. The exceptions still inline in
+  `internal/tui` (all in `shell.go`, all read by the model) are enumerated in
+  `allowedInlineCopy` and enforced by `TestNoInlineOperatorCopy`. A stdlib-only
+  leaf; nothing imports it but `internal/tui`.
 - `internal/tuibridge/` — adapts the daemon supervisor to the TUI's narrow
   `Supervisor` interface (the single seam importing both).
 - `internal/render/` — turns a session's typed event stream into terminal
@@ -82,12 +91,14 @@ make install                                       # local install, truthfully v
   `<root>/config.json`, written via `config.Save` — indented, mode 0600,
   atomic); sections are the permissions ruleset (M3), `Session`/`TUI` (M4),
   `Telemetry`, `Daemon` (incl. `drain_timeout_ms`), and M7's `Prompt`/
-  `Tools`/`MCP`/`Search`/`Skills`/`LSP` sections, plus the shared `SecretRef`
-  (`env:`/`file:`, resolved at use time, never inlined). `Prompt` is read by
-  `internal/prompt`; `LSP`/`MCP`/`Tools`/`Search`/`Skills` by
-  `internal/supervisor`'s session wiring (`internal/websearch` and the SDK's
-  `toolindex` consume `Search`/`Tools` respectively; `internal/skillset`
-  consumes `Skills`; `internal/mcpconn` consumes `MCP`). See its package doc.
+  `Tools`/`MCP`/`Search`/`Skills`/`LSP`/`Subagents` sections, plus the shared
+  `SecretRef` (`env:`/`file:`, resolved at use time, never inlined). `Prompt`
+  is read by `internal/prompt`; `LSP`/`MCP`/`Tools`/`Search`/`Skills`/
+  `Subagents` by `internal/supervisor`'s session wiring (`internal/websearch`
+  and the SDK's `toolindex` consume `Search`/`Tools` respectively;
+  `internal/skillset` consumes `Skills`; `internal/mcpconn` consumes `MCP`;
+  `internal/subagent` consumes `Subagents`, whose zero value is DISABLED — the
+  only section that fails safe to "off"). See its package doc.
 - `internal/prompt/` — composes a session's system prompt from
   `config.Prompt.Files` (the replacement for cmd/gofer's old
   `defaultSystemPrompt` string constant): `builtin:`/absolute/`~/`/cwd-then-
@@ -117,6 +128,13 @@ make install                                       # local install, truthfully v
   the next session, a dead one keeps its tools registered (degrading to
   `IsError`, working again after reconnect with no re-registration). See its
   package doc.
+- `internal/capability/` — the read-only runtime capability report `/mcp` and
+  `/skills` render: a stdlib-only leaf shared by the producer
+  (`supervisor.Capabilities`), the wire (`daemon`'s `gofer/capabilities`), and
+  the renderer (`internal/tui`). Its package doc is the authoritative list of
+  what the current data CANNOT answer — per-server tool attribution,
+  never-connected vs dropped, and a down-reason are absent by design, not
+  pending. See its doc before adding a field.
 - `internal/skillset/` — wires the SDK's `agent-sdk-go/skill` package
   (`SKILL.md` discovery with progressive disclosure) into a session:
   resolves `config.Skills` into a `skill.Load` call, applies
@@ -126,6 +144,20 @@ make install                                       # local install, truthfully v
   disabling. Also the seam that fixes the project-vs-global skill precedence
   bug (`config.Skills.Directories` lists the project directory first, since
   the SDK's `skill.Load` is first-directory-wins).
+- `internal/subagent/` — the `spawn_subagent` tool: the model-facing surface
+  of agent-initiated subagent spawning, registered by
+  `internal/supervisor`'s `sessionGuard` ONLY when `config.Subagents` enables
+  it AND the supervisor has a spawner seam (the same `(tool, ok)` +
+  guarded-append shape `web_search`/`skill` use), so an unconfigured session's
+  tool surface is byte-identical to one built before subagents existed. A leaf
+  over the SDK and `internal/config`; it drives a narrow `Spawner` seam and
+  owns no policy — the depth cap, the parent lookup, and the child's inherited
+  model/cwd all live behind it. The seam's two implementations are
+  `supervisor.LocalSubagents` (in-process `Create`/`Send`) and
+  `internal/worker.RouterSubagents` (dials the router, because a worker is a
+  single-session daemon and cannot host a sibling); a worker with no
+  `--router` supplies NEITHER, and `supervisor.Config.Subagents` fails closed
+  on nil so config alone can never install a local spawner in a worker.
 - `internal/decision/` — gofer's structured-decision round trip: the
   `ask_user` tool (gofer's first tool of its own) plus the per-session `Gate`
   it blocks on, carrying `acp` decision types over a gofer-native transport

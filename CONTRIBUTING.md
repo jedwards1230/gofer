@@ -91,6 +91,23 @@ rather than red).
 
 `docs/TESTING.md` has the longer list.
 
+## In a comment, point at the rule — don't restate it
+
+When a comment needs a rule that is written down elsewhere, **link to it**:
+`[Config.Field]`, a named function, a section of this file. Restate it only if
+you are willing to maintain a second copy.
+
+A restated rule rots **silently**. The canonical statement changes, the copy
+keeps asserting the old one, and a stale comment is indistinguishable from a true
+one — nothing mechanical tells them apart, because the test suite verifies
+behaviour and says nothing about whether the prose agrees. A pointer rots
+**visibly**: rewrite the target and every reference now reads the new text, so
+the ones that no longer fit show up. Making decay visible is the cheapest defence
+available, and for a comment it is close to the only one.
+
+`internal/router`'s `buildWorkerCmd` is the worked example — it points at
+`Config.RouterToken` and at the section above rather than re-explaining either.
+
 ## Local install
 
 Use `make install` (not a bare `go install ./cmd/gofer`) to install gofer
@@ -106,6 +123,71 @@ stale-daemon version-skew banner. `make build` does the same into `bin/gofer`.
   contract in `agent-sdk-go` first.
 - **SDK promotion test**: code moves down into the SDK only when a second
   application would need it unchanged. Supervision, roster, and TUI stay here.
+
+## The environment is not a safe channel for a secret
+
+**In gofer the model has a shell, so treat any process environment an agent's
+tools can reach as readable by the model.** argv and the environment are *both*
+unsafe channels for a secret. The safe hand-off is a `0600` file the recipient
+reads once and deletes.
+
+The tempting reasoning is "argv is world-readable via `ps`, so pass it in the
+environment instead". That is correct about argv and wrong about the conclusion:
+it defends against other local *users* while leaving the secret open to the
+*agent*, which is the principal this codebase exists to run. Two mechanisms make
+that concrete, and both are worth re-checking rather than taking on faith:
+
+- The SDK's bash tool execs with `cmd.Env` left nil
+  (`agent-sdk-go`'s `tool/bash.go` — the SDK module, not a path in this repo),
+  and Go gives a child process with a nil `Env` its parent's environment.
+  Anything in a gofer process's environment is therefore one `env` away from the
+  model.
+- `internal/sandbox` does not change that. The bwrap profile
+  (`internal/sandbox/profile_bwrap.go`) binds the filesystem and unshares the
+  network (`--ro-bind`, `--bind`, `--unshare-net`); neither backend passes
+  `--clearenv`/`--unsetenv` or filters the environment at all. Containment
+  covers the filesystem and the network, not the environment.
+
+So when a gofer process must hand a credential to another process it spawns:
+
+1. Write the secret to a `0600` file.
+2. Pass the **path**, never the value — not in argv, not in the environment.
+3. Have the recipient read it once and **delete** it.
+4. Set `cmd.Env` **explicitly**, stripped of every credential variable — never
+   leave it nil. See below: nil does not mean "empty", it means "inherit".
+5. Gate the whole hand-off on the feature that needs it, so a deployment that
+   never opted in carries no credential at all.
+6. Sweep a leftover file with the recipient's other runtime artifacts, for the
+   case where it dies before reading.
+
+**Not passing a secret is not the same as not leaking one.** Step 4 originally
+read "leave `cmd.Env` nil so the child inherits the parent's environment
+unchanged", which is exactly backwards, and the way it was wrong is the point: a
+nil `cmd.Env` means **inherit**, so a spawned worker received the whole
+environment of the process that spawned it — including `$GOFER_TOKEN`, which is
+where a daemon's bearer token comes from by documented default. Nothing ever
+*assigned* the token into the child's environment; it was already there. A
+component can hand over no secret and still leak one.
+
+The test guarding that had the matching shape of error: it iterated `cmd.Env`
+looking for the token while a neighbouring assertion required `cmd.Env` to be
+nil, so it ran zero times and could not fail. **When you assert that a secret is
+absent from a child's environment, assert against the environment the child will
+actually run with** — for a nil `Env` that is the parent's, not an empty set.
+
+The same property bounds `config.SecretRef`: its `env:VAR` form resolves against
+gofer's **own** environment at use time (`os.LookupEnv`), so any credential
+supplied that way is readable by the model through the bash tool. That is not
+one key — it holds for every `SecretRef` consumer, including each MCP server's
+`env` and `headers` (`internal/mcpconn`'s `resolveEnv`/`resolveHeaders`), so an
+`Authorization` bearer for an HTTP MCP server configured as `env:` is
+model-readable on the same terms.
+
+That is a reasonable trade for an operator-scoped, per-service credential and
+the wrong one as the blast radius grows. `SecretRef` already supports
+`file:/path` — prefer it whenever disclosure would cost more than the session.
+Whether gofer should narrow the `env:` form further is open, and tracked in
+gofer#354.
 
 ## Before you open a PR
 
@@ -153,6 +235,62 @@ about the workaround.
   a cancellation test, and resolve. (Genuinely unbounded work *between* calls —
   a long pure computation, a `time.Sleep` — is a different case and the report
   may be right.)
+
+- **"`case` path patterns only match one directory level."** Reports that
+  `case "$f" in internal/tui/*)` won't match `internal/tui/theme/foo.go` are
+  wrong. `case` uses **pattern matching**, not pathname expansion: the rule
+  that `*` stops at `/` belongs to globbing a filesystem, and POSIX applies it
+  only there (`XCU 2.13.3`). In `case`, `*` matches any string including
+  slashes, so `internal/tui/*` matches arbitrarily deep paths. The
+  `.github/workflows/vhs-capture.yml` path matcher relies on this. Verify by
+  running the matcher over nested paths in both `sh` and `bash` before
+  changing it — adding `**` or a second `internal/tui/*/*` arm is noise, and
+  `**` is not even special in `case` (it is just two `*`s). Reply with the run
+  and resolve. (A pattern that genuinely needs to *stop* at a directory
+  boundary is a different case — but then the fix is an explicit character
+  class, not `**`.)
+
+- **"Add a non-unix stub so `cmd/gofer` cross-compiles."** Reports that a new
+  reference to a `//go:build unix` helper in `internal/daemon` (`ProcessAlive`,
+  `LockWorker`, `SpawnDetached`, `Reap`) breaks the Windows/plan9 build, usually
+  citing `cmd/gofer/service_other.go` as the pattern to follow, are **wrong about
+  what that pattern is for**. `service_other.go` is `//go:build !darwin && !linux`
+  — it keeps the **BSDs** green, and those are `unix`, so the `internal/daemon`
+  unix files apply there normally. It has never been about non-unix.
+
+  `cmd/gofer` does not build on Windows today and did not before any such PR: it
+  depends transitively on `internal/router` and `internal/worker`, which already
+  call four unix-only `internal/daemon` helpers. Adding `process_other.go` alone
+  removes two of the five errors and leaves three. plan9 additionally fails
+  inside `bubbletea/v2` and `grpc`, which no change here can fix. The release
+  matrix (`.github/workflows/release.yml`) targets only linux and darwin.
+
+  Verify before believing either side — the "before" must actually fail
+  differently from the "after":
+
+  ```bash
+  GOOS=windows GOARCH=amd64 go build ./cmd/gofer/   # fails, on base and on HEAD alike
+  GOOS=freebsd GOARCH=amd64 go build ./cmd/gofer/   # passes — this is what the stubs protect
+  ```
+
+  Making non-unix build is a real (unfiled) project spanning `internal/daemon`,
+  `internal/router`, and `internal/worker` — not a one-file stub, and not the job
+  of a PR that merely moves a call site. Reply with the two commands and resolve.
+
+- **"`go/parser.ParseDir` is not deprecated."** It is. The stdlib carries the
+  marker itself, so this is settled by one command rather than by argument:
+
+  ```bash
+  go doc go/parser.ParseDir | head    # "Deprecated: ParseDir does not consider build tags…"
+  ```
+
+  The report usually arrives *half* right, which is what makes it worth a note:
+  it correctly identifies the mechanism (`ParseDir` groups files into packages
+  without applying build constraints) and then draws the wrong conclusion from
+  it. That mechanism **is** the deprecation reason, quoted almost verbatim from
+  the stdlib comment — so a doc comment naming it is not a mistake to correct.
+  `internal/tui/uicopylint_test.go`'s `parseNonTestFiles` exists precisely
+  because of it. Reply with the `go doc` output and resolve.
 
 If you refute one of these, add it here rather than only in the PR thread — the
 bot has no memory across pull requests, but this file does.

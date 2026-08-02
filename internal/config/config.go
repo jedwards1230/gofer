@@ -75,6 +75,9 @@ type Config struct {
 	// Compaction configures gofer's automatic context-compaction trigger. See
 	// [Compaction].
 	Compaction Compaction `json:"compaction,omitempty"`
+	// Subagents configures agent-initiated subagent spawning. The zero value
+	// is DISABLED — see [Subagents] for why that polarity is load-bearing.
+	Subagents Subagents `json:"subagents,omitempty"`
 }
 
 // Daemon holds daemon-process lifecycle preferences, distinct from Session's

@@ -33,6 +33,7 @@ import (
 	"github.com/jedwards1230/gofer/internal/decision"
 	"github.com/jedwards1230/gofer/internal/tui/testkit"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
+	"github.com/jedwards1230/gofer/internal/uicopy"
 )
 
 // multiDecisionQuestions is the two-question batch every test here asks: both
@@ -178,7 +179,7 @@ func TestDecisionMultiPanelCollapsesNarrow(t *testing.T) {
 	if strings.Contains(got, decisionPanelDivider) {
 		t.Errorf("expected no two-column divider at width 40:\n%s", got)
 	}
-	for _, want := range []string{decisionPanelContext, "M4 is the TUI polish milestone", "leaning renderer-first"} {
+	for _, want := range []string{uicopy.DecisionPanelContext, "M4 is the TUI polish milestone", "leaning renderer-first"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("collapsed panel dropped %q:\n%s", want, got)
 		}
@@ -403,7 +404,7 @@ func TestDecisionMultiTabCheckboxFlipsOnAnswer(t *testing.T) {
 	if !strings.Contains(after, "□ Views v1 scope") {
 		t.Errorf("expected the unanswered tab to stay □:\n%s", after)
 	}
-	if !strings.Contains(after, "□ "+decisionSubmitLabel) {
+	if !strings.Contains(after, "□ "+uicopy.DecisionSubmitLabel) {
 		t.Errorf("expected the Submit tab to stay □ while a question is outstanding:\n%s", after)
 	}
 }
@@ -504,7 +505,7 @@ func TestDecisionMultiPartialSubmitCancelsTheRest(t *testing.T) {
 	a = pressDecision(t, a, tea.KeyPressMsg{Text: "1"})        // answer q1 only
 	a = pressDecision(t, a, tea.KeyPressMsg{Code: tea.KeyTab}) // → q2
 	a = pressDecision(t, a, tea.KeyPressMsg{Code: tea.KeyTab}) // → Submit
-	if got := a.render(); !strings.Contains(got, decisionUnansweredNote) {
+	if got := a.render(); !strings.Contains(got, uicopy.DecisionUnansweredNote) {
 		t.Errorf("expected the Submit tab to say what happens to an unanswered question:\n%s", got)
 	}
 	a = pressDecision(t, a, tea.KeyPressMsg{Code: tea.KeyEnter})

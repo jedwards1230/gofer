@@ -16,11 +16,11 @@ package tui
 // does not consume.
 
 import (
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jedwards1230/gofer/internal/tui/theme"
+	"github.com/jedwards1230/gofer/internal/uicopy"
 )
 
 // statsView renders the Stats tab. sess is nil on the overview (the session
@@ -65,15 +65,15 @@ func (v statsView) sessionLines() []string {
 	if v.sess == nil {
 		return nil
 	}
-	out := []string{"Session: " + orDash(v.sess.Title)}
+	out := []string{uicopy.StatsSession(orDash(v.sess.Title))}
 	if !v.sess.Created.IsZero() {
-		out = append(out, "Age: "+humanAge(v.now.Sub(v.sess.Created)))
+		out = append(out, uicopy.StatsAge(humanAge(v.now.Sub(v.sess.Created))))
 	}
 	if !v.sess.Updated.IsZero() {
-		out = append(out, "Last active: "+humanDuration(v.now.Sub(v.sess.Updated)))
+		out = append(out, uicopy.StatsLastActive(humanDuration(v.now.Sub(v.sess.Updated))))
 	}
-	out = append(out, "Status: "+v.sess.Status.String())
-	out = append(out, "Model: "+orDash(v.sess.Model))
+	out = append(out, uicopy.StatsStatus(v.sess.Status.String()))
+	out = append(out, uicopy.StatsModel(orDash(v.sess.Model)))
 	return out
 }
 
@@ -88,12 +88,12 @@ func (v statsView) rosterLines() []string {
 		tokens += u.InputTokens + u.OutputTokens + u.CacheReadTokens + u.CacheWriteTokens
 		cost += s.Cost.USD
 	}
-	out := []string{"Sessions: " + strconv.Itoa(len(v.roster))}
-	out = append(out, "Total tokens: "+strconv.Itoa(tokens))
+	out := []string{uicopy.StatsSessions(len(v.roster))}
+	out = append(out, uicopy.StatsTotalTokens(tokens))
 	if cost == 0 {
-		out = append(out, "Total cost: —")
+		out = append(out, uicopy.StatsTotalCostUnknown)
 	} else {
-		out = append(out, "Total cost: "+fmtUSD(cost))
+		out = append(out, uicopy.StatsTotalCost(fmtUSD(cost)))
 	}
 	return out
 }

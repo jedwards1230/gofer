@@ -2,15 +2,17 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/jedwards1230/gofer/internal/config"
@@ -238,12 +240,35 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 	// whatever it holds at the time an event actually arrives, never before
 	// daemon.New has returned (see the out-of-turn watcher's doc, below).
 	var d *daemon.Daemon
+	// dialBackToken is the credential a `--workers` router's workers present when
+	// they dial back to create a subagent session. Empty on every other path.
+	//
+	// It is MINTED here, freshly per daemon process, rather than being the
+	// operator's own bearer token. Handing a component the operator's credential
+	// makes any leak of it a disclosure of $GOFER_TOKEN — which an operator may
+	// reuse elsewhere and which outlives this process — so the two are kept
+	// separate. The daemon accepts it via daemon.Config.ExtraTokens; see that
+	// field for what this does and does not buy (separation, not privilege
+	// reduction — the wire authority is the same).
+	var dialBackToken string
 	if *workers {
 		// Each worker is spawned from THIS gofer binary (`gofer session-worker`),
 		// so the router needs its own executable path.
 		selfExe, exeErr := os.Executable()
 		if exeErr != nil {
 			return fmt.Errorf("build router: resolve gofer executable: %w", exeErr)
+		}
+		// Gated on the same opt-in as the address: an operator who never asked
+		// for subagents mints nothing and hands their workers nothing.
+		if cfg.Subagents.IsEnabled() && bearerToken != "" {
+			// Only meaningful when the daemon actually authenticates. With no
+			// bearer token the daemon accepts every connection, so a dial-back
+			// credential would be theatre.
+			t, terr := mintDialBackToken()
+			if terr != nil {
+				return fmt.Errorf("build router: mint subagent dial-back token: %w", terr)
+			}
+			dialBackToken = t
 		}
 		rsup, rerr := router.New(router.Config{
 			Root:  rootDir,
@@ -252,10 +277,29 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 			// gofer/hello binaryVersion to classify skew. effectiveVersion() is
 			// the SAME derivation every worker stamps itself with (see
 			// runSessionWorker), so identical local builds compare equal.
-			Version:    effectiveVersion(),
-			SelfExe:    selfExe,
-			Logger:     logger,
-			MaxWorkers: *maxWorkers,
+			Version: effectiveVersion(),
+			SelfExe: selfExe,
+			// The dial-back coordinates every spawned worker uses to create
+			// subagent sessions and deliver a finished child's report — BOTH
+			// EMPTY unless the operator enabled subagents.
+			//
+			// Gated at STARTUP, not per session, and that asymmetry with the
+			// tool registration is real: the tool is re-resolved per session
+			// (config.Subagents reaches the next session with no restart), but
+			// a worker's dial-back is fixed when the worker process forks, and
+			// the router's own address is fixed when it binds. Enabling
+			// subagents on a running `--workers` daemon therefore takes a
+			// restart — the same shape as adding an MCP server (see
+			// supervisor.Config.MCP).
+			//
+			// The gate is not merely tidiness. Handing a worker the daemon's
+			// bearer token at all is a credential exposure an operator who
+			// never asked for subagents must not pay: nothing else about a
+			// worker changes when this feature is off.
+			RouterAddr:  routerDialBackAddr(cfg.Subagents, *listen),
+			RouterToken: dialBackToken,
+			Logger:      logger,
+			MaxWorkers:  *maxWorkers,
 		})
 		if rerr != nil {
 			return fmt.Errorf("build router: %w", rerr)
@@ -295,6 +339,14 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 			Search: searchConfigResolver(rootDir),
 			// Same reasoning, for skills.* — see skillsConfigResolver.
 			Skills: skillsConfigResolver(rootDir),
+			// Same re-read-per-session shape, for subagents.* — see
+			// subagentsConfigResolver. This is the NON-workers branch, so the
+			// answer to "where does a spawn go" is this same supervisor: it hosts
+			// every session in this process and is under no MaxSessions cap, so
+			// it asks for the in-process seam by name. The `--workers` branch
+			// above never reaches here; its workers each answer for themselves.
+			SubagentsConfig: subagentsConfigResolver(rootDir),
+			Subagents:       supervisor.LocalSubagents,
 			// Attach a per-session telemetry observer at registration, before the
 			// session's first turn — subscribing here (rather than after a turn
 			// has already started) means Events' replay backlog is still empty,
@@ -364,8 +416,12 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 	}
 
 	d = daemon.New(sup, daemon.Config{
-		ListenAddr:   *listen,
-		BearerToken:  bearerToken,
+		ListenAddr:  *listen,
+		BearerToken: bearerToken,
+		// The worker dial-back credential, when this is a `--workers` daemon
+		// with subagents enabled. Nil otherwise, so a daemon that mints nothing
+		// accepts exactly what it always did.
+		ExtraTokens:  dialBackTokens(dialBackToken),
 		DefaultModel: modelID,
 		// Let a running daemon observe a later `session.model` config write
 		// instead of freezing its startup answer forever (issue #156). nil when
@@ -487,7 +543,7 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 	// Guarded: only remove the file if it still names OUR pid when we get
 	// here. A clean shutdown (the common case) always finds its own pid and
 	// removes it. A crash leaves the file in place — clients self-heal past
-	// a stale one (see the pidAlive/Probe check in guardLiveEndpoint, and
+	// a stale one (see the daemon.ProcessAlive/Probe check in guardLiveEndpoint, and
 	// dialDaemon's own dead-address handling); a LATER daemon that started
 	// after we crashed and overwrote the file with its own pid must NOT have
 	// its endpoint clobbered by this deferred cleanup running (it never does,
@@ -733,6 +789,97 @@ func skillsConfigResolver(root string) func() config.Skills {
 	}
 }
 
+// subagentsConfigResolver is [supervisor.Config.SubagentsConfig] for a process
+// rooted at root — searchConfigResolver's subagent-axis twin, same shape and
+// reason: a `subagents.*` write governs the next session this process starts
+// rather than only the next process.
+//
+// A config that won't load resolves to the zero [config.Subagents] — DISABLED,
+// the fail-safe [config.Subagents.IsEnabled] itself falls back to: no spawn tool
+// registered at all, and no child→parent report path. That polarity matters more
+// here than for the other sections: subagents are opt-in, so a transiently
+// unreadable config must never be the reason a session gains a tool.
+func subagentsConfigResolver(root string) func() config.Subagents {
+	return func() config.Subagents {
+		cfg, err := config.Load(config.DefaultPath(root))
+		if err != nil {
+			return config.Subagents{}
+		}
+		return cfg.Subagents
+	}
+}
+
+// routerDialBackAddr resolves the address a `--workers` router hands its
+// workers to dial back on, or "" when the operator did not enable subagents —
+// in which case a worker is spawned exactly as it was before this feature
+// existed.
+//
+// A WILDCARD bind is normalized to loopback. `--listen 0.0.0.0:7333` names
+// every interface, which is a valid thing to BIND and a meaningless thing to
+// DIAL: connecting to 0.0.0.0 happens to reach loopback on Linux and macOS, so
+// forwarding it verbatim works by accident rather than by design (and not at
+// all on some stacks). A worker is always on the same host as its router, so
+// loopback is both correct and the tightest thing to hand it. An empty host
+// ("":7333, Go's own bind-all spelling) is normalized the same way.
+func routerDialBackAddr(cfg config.Subagents, listen string) string {
+	if !cfg.IsEnabled() {
+		return ""
+	}
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		// No host:port shape at all (a bare host, or malformed): hand it over
+		// unchanged rather than inventing an address. ValidateListen already
+		// ran against this exact string, and a worker that cannot dial it fails
+		// its spawn loudly.
+		return listen
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, port)
+}
+
+// dialBackTokenBytes is the entropy of a minted dial-back credential. 32 bytes
+// of crypto/rand is well past any brute-force concern for a loopback listener
+// and matches what a bearer token is expected to look like.
+const dialBackTokenBytes = 32
+
+// mintDialBackToken generates a fresh worker dial-back credential for THIS
+// daemon process.
+//
+// Freshly minted rather than derived from the operator's bearer token, and
+// never persisted: it lives in this process's memory, reaches a worker only
+// through the 0600 read-once-and-deleted file internal/router writes, and dies
+// with the process. A restart therefore rotates it with no operator action,
+// which is the property a long-lived shared credential cannot have.
+//
+// An error is fatal to router startup rather than silently degrading to an
+// unauthenticated dial-back: a router with an address but no token dials
+// unauthenticated, which against a token-required daemon is a confusing 401
+// several minutes later inside a tool call.
+func mintDialBackToken() (string, error) {
+	b := make([]byte, dialBackTokenBytes)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// dialBackTokens shapes the minted credential for [daemon.Config.ExtraTokens]:
+// a one-element slice, or nil when nothing was minted.
+//
+// Nil rather than a slice holding "" matters — an empty entry in an accepted-
+// token list is the shape that turns "present but empty" into "authorized", and
+// daemon.authorized skips empties precisely because this kind of caller exists.
+// Returning nil means a daemon that mints nothing is configured exactly as it
+// was before this feature.
+func dialBackTokens(token string) []string {
+	if token == "" {
+		return nil
+	}
+	return []string{token}
+}
+
 // guardLiveEndpoint reports whether a still-running `gofer daemon` already
 // owns the endpoint file at root and is bound to the SAME address this
 // process is about to bind — in which case starting would be a silent
@@ -756,7 +903,7 @@ func guardLiveEndpoint(ctx context.Context, root, listenAddr string) error {
 		// as missing — WriteEndpoint replaces it below): either way, proceed.
 		return nil
 	}
-	if !pidAlive(existing.PID) {
+	if !daemon.ProcessAlive(existing.PID) {
 		return nil
 	}
 	dctx, cancel := context.WithTimeout(ctx, daemonDialTimeout)
@@ -786,26 +933,6 @@ func removeOwnEndpoint(root string, pid int) error {
 		return nil
 	}
 	return daemon.RemoveEndpoint(root)
-}
-
-// pidAlive reports whether a process with the given pid is currently
-// running — the liveness half of guardLiveEndpoint's stale-file detection.
-// Unix-only (this repo ships no Windows build): os.FindProcess always
-// succeeds on Unix regardless of whether pid is alive, so signal 0 is the
-// portable "is it there" probe — it performs error checking without
-// actually delivering a signal. A nil error, or EPERM (exists, just not
-// ours to signal), both mean alive; anything else (typically ESRCH /
-// [os.ErrProcessDone]) means gone.
-func pidAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	err = proc.Signal(syscall.Signal(0))
-	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 // parseLogLevel maps a --log-level flag value to a [slog.Level]. Only the

@@ -313,48 +313,93 @@ func resolveSessionCwd(raw string) (string, *rpcError) {
 }
 
 // resolveLoadCwd resolves the working directory to reload sessionID into for
-// session/load. A non-blank client-supplied cwd is authoritative (ACP v1
-// requires it) and validated exactly like session/new. When the client omits it
-// — gofer's daemonbridge sends "" for an offline session its live roster can't
-// resolve — the session's PERSISTED cwd (from its journal meta, discovered via
-// persistedCwd) is used instead of the daemon's own working directory, so the
-// reloaded session reopens in, and groups under, the directory it was created in
-// rather than the daemon's launch dir (typically "/" under launchd/systemd). If
-// the persisted directory has since been deleted, resolveSessionCwd would reject
-// it; rather than hard-fail a resume that used to succeed, this falls through to
-// the daemon's working directory (resolveSessionCwd's original empty-cwd path).
+// session/load, on the distinction the two possible ORIGINS of a cwd carry:
+//
+//   - A non-blank client-supplied cwd is EXPLICIT USER INTENT — `gofer resume`'s
+//     own os.Getwd at invocation, or a directory the user picked in a client's
+//     prompt. It is authoritative (ACP v1 requires it) and validated exactly like
+//     session/new, so a bad path still hard-errors with invalid-params rather
+//     than being quietly replaced.
+//   - A BLANK cwd means "reopen this session where it was recorded". The
+//     session's PERSISTED cwd (from its journal meta, discovered via
+//     persistedCwd) is used, so the reloaded session reopens in — and groups
+//     under — the directory it was created in rather than the daemon's launch dir
+//     (typically "/" under launchd/systemd).
+//
+// A session that is ALREADY LIVE resolves NOTHING, whatever its recorded
+// directory looks like now: [supervisor.Supervisor.Resume] returns the existing
+// snapshot for a live id without building a second runner, so the cwd handed to
+// it is ignored outright. Deciding where to START a session that is already
+// running is a question with no answer, and answering it anyway is a bug with
+// two faces — a running session whose directory was deleted underneath it
+// (rm -rf on a worktree) became unattachable, and a client that then offered to
+// re-init it somewhere else had its chosen directory silently discarded by that
+// same early return while its UI said the session had been reopened there. The
+// row's own cwd is passed straight back, unvalidated: it is where the session IS
+// running, so nothing is being substituted for anything.
+//
+// The liveness read and the Resume are not atomic, so a session that exits in
+// between takes that unvalidated directory into a real runner start. That window
+// is ACCEPTED, not overlooked. Validating instead would re-create the very
+// failure this branch removes — a RUNNING session in a deleted directory going
+// unattachable — to guard a race whose loser is a session that just exited; the
+// supervisor validates no cwd on any path, so the outcome there is the one every
+// non-blank cwd already has; and a stat here would narrow the window, never
+// close it, since any directory can vanish the instant after a successful stat.
+//
+// When that recorded directory no longer resolves (deleted, replaced by a file,
+// no longer absolute) this returns the typed [codeSessionCwdMissing] error naming
+// it, and NEVER a substitute. It used to fall through to the daemon's own
+// working directory, which looked like a successful resume while silently
+// reopening the session against a stranger's project: every cwd-scoped input —
+// .gofer/config.json, <cwd>/.gofer/commands, skills, file resolution — would come
+// from a directory the user never chose. A client answers the typed error by
+// asking the user where to reopen the session and sending that choice back as an
+// explicit cwd, which then validates on the first branch (jedwards1230/gofer#326).
+//
+// A session with NO recorded cwd at all still falls through to
+// resolveSessionCwd("") — the daemon's own working directory. That is
+// pre-existing behavior and deliberately unchanged: there is no recorded
+// directory being substituted away from, and in practice it only happens for a
+// session id the supervisor does not know, whose Resume fails immediately after.
 func resolveLoadCwd(d *Daemon, ctx context.Context, sessionID, reqCwd string) (string, *rpcError) {
 	if strings.TrimSpace(reqCwd) != "" {
 		return resolveSessionCwd(reqCwd)
 	}
-	if pc := persistedCwd(d, ctx, sessionID); pc != "" {
-		if cwd, rerr := resolveSessionCwd(pc); rerr == nil {
-			return cwd, nil
+	pc, live := persistedCwd(d, ctx, sessionID)
+	if live {
+		return pc, nil
+	}
+	if pc != "" {
+		cwd, rerr := resolveSessionCwd(pc)
+		if rerr != nil {
+			return "", sessionCwdMissing(pc, rerr.Message)
 		}
-		// Persisted directory gone — fall through to the daemon-getwd default
-		// rather than failing the whole resume.
+		return cwd, nil
 	}
 	return resolveSessionCwd("")
 }
 
 // persistedCwd returns sessionID's working directory as persisted in its journal
-// meta, or "" if unknown/unreadable. It reuses the supervisor's List (which
+// meta — plus whether the session is LIVE right now, which decides whether that
+// directory needs resolving at all (see [resolveLoadCwd]) — or "", false if the
+// session is unknown/unreadable. It reuses the supervisor's List (which
 // enriches every session — live with its live cwd, offline/archived with its
 // journal cwd — see supervisor/router diskSessionInfo) so it covers BOTH the
 // in-process supervisor and the router deployment through the one seam the
 // daemon already holds, without a second disk-scan path. Read-only. Called only
 // on the cold blank-cwd resume path, so the List scan's cost is inconsequential.
-func persistedCwd(d *Daemon, ctx context.Context, sessionID string) string {
+func persistedCwd(d *Daemon, ctx context.Context, sessionID string) (cwd string, live bool) {
 	rows, err := d.sup.List(ctx)
 	if err != nil {
-		return ""
+		return "", false
 	}
 	for _, r := range rows {
 		if r.ID == sessionID {
-			return r.Cwd
+			return r.Cwd, r.Live
 		}
 	}
-	return ""
+	return "", false
 }
 
 // handleSessionNew creates an idle session (no first turn — the prompt
@@ -423,6 +468,11 @@ func handleSessionNew(d *Daemon, ctx context.Context, _ *peer, params json.RawMe
 		}
 		return nil, appError(err)
 	}
+	// Start this session's standing out-of-turn event observer. A no-op unless
+	// [Config.RelayOutOfTurnEvents] is set (the M6 worker) — see
+	// [Daemon.startSessionObserver], including why it subscribes live here even
+	// though Create publishes its MCP-down/skill notices before returning.
+	d.startSessionObserver(info.ID)
 	// Only log the subagent keys when there IS a link: every ordinary root create
 	// would otherwise carry two empty attributes on every line.
 	logArgs := []any{"session", info.ID}
@@ -484,16 +534,19 @@ func handleSessionNew(d *Daemon, ctx context.Context, _ *peer, params json.RawMe
 //
 // Cwd precedence: ACP v1's LoadSessionRequest.cwd is REQUIRED and is the
 // working directory to reload the session into (src/v1/agent.rs), so a
-// client-supplied cwd is authoritative here — via resolveSessionCwd, same as
-// session/new. But when the client sends NONE, this reopens the session in the
-// directory it was CREATED in — the cwd persisted in its journal meta (read via
-// resolveLoadCwd) — rather than the daemon's own working directory. gofer's own
-// daemonbridge legitimately sends "" for an offline (journal-reloaded) session
-// its live roster can't resolve, and a launchd/systemd daemon's working
-// directory is typically "/", so the old empty-cwd fallback regrouped a resumed
-// session under a bogus "/" root and ran its agent there. The persisted cwd is
-// preferred only as the empty-cwd substitute; a client that DOES send a cwd
-// still overrides it. See [resolveLoadCwd].
+// non-blank client-supplied cwd is authoritative here — validated by
+// resolveSessionCwd, same as session/new, so a bad path hard-errors -32602. A
+// BLANK cwd is not a missing value but a distinct request: "reopen this session
+// where it was RECORDED", answered from the session's journal meta. gofer's own
+// clients send blank for exactly that, deliberately (they used to echo back a
+// cwd they had merely read off a roster row, which the daemon could not tell
+// apart from a directory the user chose — jedwards1230/gofer#326), and a
+// launchd/systemd daemon's own working directory is typically "/", so resolving
+// blank to it would regroup a resumed session under a bogus "/" root and run its
+// agent there. When the recorded directory no longer exists this answers the
+// typed [codeSessionCwdMissing] error naming it rather than substituting
+// anything, and for an ALREADY-LIVE session it resolves nothing at all. The full
+// branch table, and why each branch is what it is, lives on [resolveLoadCwd].
 func handleSessionLoad(d *Daemon, ctx context.Context, p *peer, params json.RawMessage) (any, *rpcError) {
 	op, rerr := decodeOp[event.SessionResume](acp.MethodSessionLoad, params)
 	if rerr != nil {
@@ -522,6 +575,18 @@ func handleSessionLoad(d *Daemon, ctx context.Context, p *peer, params json.RawM
 	// failed above never reaches here — means the registry only ever holds
 	// peers attached to a session the daemon actually resumed.
 	d.attachPeer(op.SessionID, p)
+
+	// Start this session's standing out-of-turn event observer (a no-op unless
+	// [Config.RelayOutOfTurnEvents] is set, and idempotent per session — see
+	// [Daemon.startSessionObserver]). It goes HERE, not after the replays below,
+	// so the settle wait + fold is not a window in which a live out-of-turn event
+	// is silently dropped. The cost is that such an event may interleave with the
+	// replay frames rather than following them: harmless, because both paths reach
+	// this peer through the same writeMu-serialized [peer.writeJSON] (so frames
+	// never corrupt each other), and because a session/load NEVER guaranteed an
+	// ordering against concurrent live traffic in the first place — see the
+	// concurrency note on this handler.
+	d.startSessionObserver(op.SessionID)
 
 	// Wait — bounded, best-effort — for the session's in-flight turn to finish
 	// journaling before folding, so a load landing in the async-journaling window
@@ -1525,6 +1590,13 @@ func (d *Daemon) broadcastGoferEvent(sessionID string, e event.Event) {
 // direct fan-out both deliver the snapshot; a config_option_update is an
 // authoritative, idempotent full snapshot (not a delta), so a duplicate is a
 // harmless re-render.
+//
+// That duplicate becomes the ORDINARY case, not a race, on a daemon running with
+// [Config.RelayOutOfTurnEvents] (the M6 worker): the standing observer drains the
+// EmitConfigOptions publish above and rebroadcasts it, alongside this direct
+// fan-out. It is left as-is for exactly the reason the race is — the snapshot is
+// idempotent — and removing the direct fan-out instead would silently regress
+// every deployment that does NOT run the observer, which is all of them but one.
 func (d *Daemon) advertiseModelChange(sessionID, prev, current string) {
 	if current == "" || current == prev {
 		return

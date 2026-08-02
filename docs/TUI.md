@@ -56,6 +56,26 @@ bar is empty; every other key types into it — so `space` on non-empty text is 
 ordinary space, and `R` on non-empty text is an ordinary character — and `enter`
 on non-empty text starts a new session, or dispatches a `/` command.
 
+**`ctrl-c` quits gofer — a two-press confirm** (issue #314), the same shape as
+`ctrl-x`'s delete confirm above: the first `ctrl-c` arms and shows "ctrl-c
+again to quit" on the status line, but touches nothing; the second, pressed
+immediately after with no other key in between, quits (`tea.Quit`); any other
+key disarms. It is **global**, not just the overview's: the same
+`App.confirmQuit` runs from the live global-keymap row (`keymap.go`, reached
+from the overview, peek, attach, and the open autocomplete popup) and from
+every overlay that claims `ctrl-c` ahead of it — the command panel, the
+pending-approval prompt (including its nested amend editor), and the
+pending-decision prompt — so there is one arm/confirm implementation, not one
+per site that could drift. Quitting mid-overlay never strands anyone: each of
+those overlays keeps its own single-press `Esc` out (closing the panel,
+dismissing the approval, cancelling the decision) untouched by the arm, so a
+`ctrl-c` confirm can never become the only way out of a modal state. The
+single-session `gofer run`/`gofer resume` view (`tui.Program`, driven by
+`cmd/gofer`'s `driveTUI`) mirrors the same two-press shape independently,
+since it shares no code with the roster `App` — but its `Esc` stays a
+**single**-press quit/cancel, deliberately: it is that view's only way to
+interrupt an in-flight turn, with no other screen to back out to first.
+
 In the flat view the rows are grouped by working directory (a cwd header per
 group, most-recently-active dir first); `↑`/`↓` and the default selection follow
 that exact on-screen order rather than the raw recency order, and the focused
@@ -405,7 +425,9 @@ option answers with it, `Type something.` opens its editor and a **second**
 `Enter` submits, `Chat about this` answers with the chat hatch); `Esc` leaves
 typing mode, or — when not typing — resolves the prompt per
 [`session.prompt_esc_scope`](#esc-on-a-prompt) (by default stopping the whole
-turn; opt-in, cancelling just this decision); `ctrl+c` quits. While typing, the
+turn; opt-in, cancelling just this decision); `ctrl+c` is the double-tap quit
+confirm (below) — a first press arms without touching the prompt, a second
+quits. While typing, the
 hint reads `Enter to submit · Esc to cancel` and every unclaimed key goes to the
 shared input keymap, so digits type digits. `j`/`k` are deliberately unbound —
 every list here is arrow-only, and vi keys would fight the free-text row.
@@ -610,6 +632,75 @@ rendered even though it now reaches the client — the daemon fans it out to eve
 peer, but the TUI subscribes per attached session. Surfacing "needs a decision"
 on the roster the way a pending approval is surfaced is the remaining UI work.
 
+## Missing session directory prompt
+
+Attaching a session whose **recorded working directory no longer exists** shows
+a three-way prompt, not an error (jedwards1230/gofer#326). It is the one attach
+failure a client can offer a remedy for, so it gets one.
+
+The daemon distinguishes the two things a `cwd` on `session/load` can mean —
+**blank** is "reopen this session where it was recorded", **non-blank** is a
+directory the user named — and answers the blank-plus-recorded-directory-gone
+case with a typed signal carrying the missing path, never a substitute
+directory. `internal/tui` receives it through a builtin-only
+`cwdMissingNotifier` seam it type-**asserts** its `Supervisor` against
+(`cwdprompt.go`). **Both backends implement it**: the daemon-backed bridge
+relays the wire signal, and the in-process `tuibridge.Adapter` resolves the same
+blank cwd against the same recorded directory itself (`internal/tuibridge/cwd.go`)
+— `supervisor.Resume` performs no cwd resolution of its own, so without that a
+blank cwd would root the session's tools, project config and skills in the gofer
+process's own directory, silently. The signal arrives on a background goroutine
+and crosses onto the Update loop through a buffered channel read from a
+`tea.Cmd`; nothing off-loop ever touches `App` state.
+
+A session that is **already live** never reaches this prompt on either backend:
+`supervisor.Resume` returns the running session's snapshot and ignores the cwd,
+so nothing needs resolving and attaching to a session whose directory was
+deleted underneath it simply works.
+
+The prompt draws in the command panel's slot, over the **roster** (the failed
+attach's half-opened screen is left, since an empty transcript under the prompt
+would assert an attach that did not happen), and outranks every other overlay in
+`App.Update`'s dispatch — it opens in response to something the user did not
+type, so the next key must answer it. It states the session and the recorded
+directory that went missing, and offers:
+
+| Choice | Key | What it does |
+| --- | --- | --- |
+| Re-init in a new directory | `1` / Enter | Opens a free-text path entry + bounded candidate list (the same enumeration `@` mentions use). The pick is sent as an **explicit, non-blank** cwd, so a bad one still hard-errors `-32602` the ordinary way. |
+| Cancel | `2` / Esc | Back to the overview. Asks the Supervisor for **nothing** — the session is untouched and still unattachable. Pressing Enter on the same roster row again **retries** and re-raises the prompt: opening it tears down the aborted attach's subscription, and the reconstruction core re-issues the load it would otherwise have memoized. |
+| Archive / delete | `3` | The same lifecycle op `ctrl+x` dispatches from the roster: archive at rest, kill if live. The journal is kept either way (repo invariant #4). |
+
+Two rules the implementation is held to by test rather than by review:
+
+- **Never silently substitute a directory.** Nothing — client or daemon — picks
+  one on the user's behalf, and where a session is being reopened is stated on
+  the status line before the round trip resolves. The client resolves every
+  relative frame of reference itself (a leading `~`, a relative path) so what
+  goes on the wire is always absolute: the daemon's `~` and the daemon's "here"
+  are a different machine's.
+- **Cancel is the default on every dismissal path**: Esc, and simply never
+  answering (the terminal closes, the client quits, the connection drops). That
+  holds by construction rather than by a cleanup path — the prompt is TUI-local
+  and opening it issues no op, so there is no pending server-side state a
+  teardown would have to unwind.
+
+The re-init copy carries an explicit warning that a session reloads
+**different local context** in a new directory — project config
+(`.gofer/config.json`), user commands (`<cwd>/.gofer/commands`), skills and file
+resolution are all cwd-scoped, so the user is rebasing the session's
+environment, not merely pointing it somewhere that exists. That warning is
+rendered unconditionally (not only while its row is focused) and pinned by
+`TestCwdMissingPromptWarnsAboutCwdScopedContext`.
+
+Because the fix depends on blank meaning "where it was recorded", **no caller in
+this package echoes a cwd it merely read**: `App.resumeSession` (the Resume tab
+and `/resume <id>`) takes no cwd parameter at all, and the only non-blank cwd
+the TUI sends is the one the user picks here.
+
+Goldens: `app_cwd_missing_prompt.golden`, `app_cwd_missing_dir_picker.golden`.
+Tapes: `vhs/roster-cwd-missing.tape`, `vhs/roster-cwd-missing-cancel.tape`.
+
 ## Roster & navigation (M2)
 
 The `Overview` screen is the concrete M2 roster. Like `Model`, it is a pure
@@ -683,7 +774,8 @@ nothing when it has no children (with text, the key belongs to the input keymap,
 not to navigation); `ctrl-x` deletes the selected
 session (a two-press confirm — press twice);
 `ctrl-t` stops the selected row's subagents;
-`ctrl-c` quits. In peek, `up`/`down` move
+`ctrl-c` is the double-tap quit confirm — press twice
+(below). In peek, `up`/`down` move
 the selection, `enter` opens the session (or sends the reply when the `❯` input
 has text), `esc` closes to the overview (and `space` does too with an empty
 reply), and `ctrl+x` deletes (press twice to confirm).
@@ -1174,9 +1266,19 @@ nothing changes for a root session. `ParentID`/`Agent`/`Depth` ride the roster
 wire (`parentId`/`agent`/`depth`, all omitempty) through to `tui.SessionInfo`;
 `session/new` carries the request half in ACP's `_meta` (`gofer/parent`,
 `gofer/agent`) and reports what it assigned back (plus `gofer/depth`).
-`gofer run --parent <id> --agent <name>` is the CLI spawner. WHO spawns children
-from inside a turn is still open — there is deliberately no agent-facing spawn
-tool.
+`gofer run --parent <id> --agent <name>` is the CLI spawner.
+
+**Built (agent-initiated, opt-in).** A running session can now spawn children of
+its own via the `spawn_subagent` tool (`internal/subagent`), registered ONLY when
+`subagents.enabled` is set — with the section unset a session's tool surface is
+byte-identical to one built before it existed, so a user who wants nothing to do
+with session trees sees none of this. The tool returns as soon as the child
+exists; when the child's first turn settles, its final assistant text arrives at
+the parent as a queued PROMPT (exactly one per child), which is why a report
+never interrupts a turn and shows up in the parent's transcript as an ordinary
+user message rather than a new widget. Under `--workers` the router creates every
+child — a worker is a single-session daemon. See docs/PRD.md's "Agent-initiated
+subagents".
 
 **Built (the render).** The overview renders the parent at the root with its
 children indented beneath it — a depth-first tree, siblings by the usual recency
@@ -1371,6 +1473,25 @@ tui/
   help composed from the focused component's `ShortHelp()`.
 - **Dispatch precedence as a rule**: dialog stack > active pane/screen >
   global keys.
+- **Operator copy lives in `internal/uicopy`, not at the call site.** Every
+  phrase a human reads is a constant or a formatting function there, so a
+  phrase changes in one place and a second locale becomes possible later.
+  Constants rather than a keyed map on purpose: a mistyped key in a map returns
+  `""` and renders a blank line, which nothing catches; a mistyped constant
+  does not compile. Parameterised copy is a function with named arguments
+  rather than an exported format string, so two interpolated values cannot be
+  transposed silently.
+
+  The split that matters is **audience, not location**: model-facing text —
+  tool descriptions, prompt fragments, anything the agent reads — is behaviour,
+  not copy, and stays out of the catalog. `shell.go`'s fold header and
+  no-output marker are the live example, and the shell run *note* is
+  genuinely both (written into the model's context and rendered to the
+  operator), so it stays put too. `TestNoInlineOperatorCopy` enforces the rule
+  and `allowedInlineCopy` records every exception with its reason. It is a
+  floor, not a ceiling: it only sees multi-word prose, because a bare word is
+  indistinguishable from a map key by syntax alone — single-word labels still
+  belong in the catalog, they just are not mechanically enforced.
 
 ## Load-bearing patterns (design in from day one)
 
@@ -1501,6 +1622,13 @@ human-eye check of real rendered frames, `vhs/` holds on-demand
   roster rollup, the registry-driven Help reference, and the Resume picker
   with a fetched listing. Each reproduces the state its
   `app_panel_<tab>.golden` pins.
+- `panel-capabilities` / `panel-capabilities-unknown` — the two scenes behind
+  `panel-mcp.tape` and `panel-skills.tape`, each captured as a **before/after
+  pair**: a backend that answered, and one that cannot. The pair is load
+  bearing rather than decorative — the failure mode these tabs exist to
+  prevent is an unanswered panel that reads as "nothing configured", and only
+  the two frames together show they are unmistakable. Both scenes drive
+  in-process closures: no network IO, nothing time-varying.
 
 Run `scripts/tui-vhs.sh [slug...]` (no arg = all tapes). It prebuilds
 `vhs/.bin/harness`, then renders each tape to `vhs/out/` (GIF of the whole turn
@@ -1960,8 +2088,11 @@ column rather than the name column, since the name column is padded to its
 widest entry and one long `ArgHint` would otherwise truncate every other row's
 summary. Its **Keys** section renders from `keymap.go`, a new declarative table.
 That table is honestly two-tier: its **global** rows (`ctrl+c`, `ctrl+y`) are
-LIVE — `App.handleKey` dispatches through `dispatchGlobalKey`, replacing the
-per-screen `ctrl+c` copies — while the per-screen rows are **descriptive only
+LIVE — `App.handleKey` dispatches through `dispatchGlobalKey` for the
+overview/peek/attach/menu paths, and the command-panel/approval/decision
+overlays that claim `ctrl+c` ahead of it (see above) call the SAME
+`App.confirmQuit` the row's action does, rather than each carrying its own
+copy of the quit behavior (issue #314) — while the per-screen rows are **descriptive only
 and can drift**, because several of those bindings are conditional on state a
 table can't express (a bare → attaches only from an *empty* dispatch bar) and
 routing them all through the table is a whole-TUI key refactor, not this
@@ -1985,11 +2116,14 @@ doesn't consume).
 **Built (session-lifecycle commands)**: `/quit` (alias `/exit`), `/new`, and
 `/resume` — the three of the P0 session-lifecycle set the SDK can back today.
 
-`/quit` returns exactly `tea.Quit`, the same one line ctrl-c is bound to on
-every screen and over the panel; the daemon connection, the subscription, and
-the reconstruction core are owned and closed by `cmd/gofer` once the program
-returns, so there is no teardown for the command to duplicate (and no
-confirmation, which would make it more ceremonious than the key it mirrors).
+`/quit` returns exactly `tea.Quit`, the same Cmd a **confirmed** (second)
+ctrl-c produces everywhere it's bound (see the two-press confirm above); the
+daemon connection, the subscription, and the reconstruction core are owned and
+closed by `cmd/gofer` once the program returns, so there is no teardown for
+the command to duplicate. `/quit` itself carries no arm/confirm of its own —
+typing it out and pressing Enter is already the deliberate gesture the
+double-tap approximates — so adding one would make the command more
+ceremonious than the key it mirrors.
 
 `/new` starts a fresh session — new id, new journal — through the same
 `Supervisor.Create` seam a prompt typed into the dispatch bar takes, and lands
@@ -2189,11 +2323,43 @@ nothing for as long as it runs:
   background-agents summary, never silent: message count, a `~before → after`
   token line explicitly labeled an *estimate*, the model, and the summary text).
 
-Note the progress half covers the EXPLICIT path only. Automatic compaction is
-triggered daemon-side and the Event contract carries only `session.compacted`,
-the completion — there is no `session.compacting` to hang an indicator on, so an
-automatic compaction still shows nothing until it lands. Closing that is an
-agent-sdk-go contract change (gofer#300), not a TUI one.
+The progress half covers AUTOMATIC compaction too (gofer#300, agent-sdk-go
+v0.24.0). It used to cover the explicit path only: automatic compaction is
+triggered supervisor-side with no client call in flight, and the Event contract
+carried only `session.compacted` — the completion — so the transcript simply
+froze for the length of a summarizer call with nothing to explain it. The SDK
+now brackets that call with `session.compaction_started` and, on the failure
+side, `session.compaction_failed`, and `App.applyCompactionEvent` latches the
+same `⋯ compacting context… (Ns)` indicator off the start event. The state is
+read from the contract, never inferred — no stall detection, no token-count
+watching.
+
+Two consequences worth knowing:
+
+- **A failed compaction says so.** `session.compaction_failed` clears the
+  indicator *and* raises a danger note carrying the reason. An indicator that
+  merely blinked out would be indistinguishable from one that succeeded, leaving
+  the user believing their context was summarized when it was not (it is not —
+  nothing the runner acknowledges as journaled happened).
+- **A severed subscription clears it.** The start/terminal pair is total over
+  what the SDK *publishes*, not over what a client *receives*: a
+  force-unsubscribe or a broker close (an ordinary ctrl+c) can cut the stream
+  between the two, and the only signal is the channel closing. `sessClosedMsg`
+  therefore clears the latch, or one severed subscription would leave
+  "compacting context…" on screen counting up forever.
+
+- **The elapsed counter is not authoritative over the daemon transport.** It
+  prefers the start event's own publish time, so a client attaching *mid*
+  compaction counts from when the work began rather than from when it connected.
+  That timestamp is **zero on the daemon path**: `internal/wirestream` rebuilds
+  events through the SDK's exported `New*` constructors, which cannot set the
+  unexported `seq`/`ts` meta, and the SDK exposes no way to restore it. There the
+  counter falls back to receipt time and so *understates* elapsed by the
+  transport hop. Read it as "at least this long", not as the true duration.
+
+Captured as a before/after pair in `vhs/transcript-auto-compacting.tape` — the
+claim being that the indicator appears with nothing typed, which one frame
+cannot show.
 
 The failure-triggered recovery (jedwards1230/gofer#279) is the one automatic
 case that *does* announce itself first, and it reuses the blocks above rather
@@ -2223,11 +2389,100 @@ automatic trigger uses, not a tokenizer-derived category breakdown (gofer#177's
 full grid stays blocked on the tokenizer primitive it names as a prerequisite)
 — plus the configured auto-compaction threshold. `ContextWindow == 0`
 (unregistered model) renders counts only, never a fabricated percentage.
+
+**Built (gofer#303): `/mcp` and `/skills`, the runtime capability tabs.** M7
+shipped MCP servers, skills, and the tool index with config-WRITE surfaces
+(`/config` rows) and no runtime READ surface: nothing in the TUI could answer
+"is my MCP server actually up" or "which skills did the loader take". These two
+tabs are that surface. `/mcp` (`mcp_view.go`, `panelMCP`) and `/skills`
+(`skills_view.go`, `panelSkills`) sit together after Context — both describe the
+session's CAPABILITY surface rather than its consumption — and are read-only
+tabs cut from the same cloth as `/status`: pure values, no `handleKey`, Esc just
+closes.
+
+They share ONE fetch. Both render a single `capability.Answer`
+(`internal/capability`, a stdlib-only leaf shared by the producer, the wire, and
+the renderer), so opening either — or tabbing into either — costs at most one
+round trip per panel (`capabilities.go`). The fetch runs off the Update loop
+like `/model`'s catalog load and `/resume`'s listing, because on the daemon path
+it is a request to another process.
+
+**Where the answer comes from, and why it may not come at all.** MCP
+connections and skill directories belong to whichever process owns the
+supervisor. The local backend reads its own `supervisor.Capabilities`; both
+daemon-backed entrypoints — bare `gofer` attached to a daemon, and
+`gofer attach` — call `gofer/capabilities` over the wire and **only** the wire
+(`cmd/gofer/capabilities_wire.go`). Neither may fall back to the other, and the
+shared `buildCommandEnv` leaves the closure nil, because a daemon-attached panel
+rendering this process's `config.json` would describe a different machine while
+looking entirely correct. Each backend binds it in exactly one named place
+(`attachCommandEnv`, and `selectTUIBackend`'s two branches); an entrypoint that
+forgets renders UNKNOWN forever against a perfectly healthy daemon, which is
+safe but indistinguishable from an unreachable one, so both are pinned by test.
+
+**The MCP tab describes the connection MANAGER, not `config.json`.** The manager
+is built once at supervisor construction and its snapshot only knows the servers
+it was built with, while `mcp.servers` is re-read live. Reading the live file to
+build the list produced a real fabrication: a server added after startup was
+enabled and — because the manager had never heard of it — absent from the
+snapshot's `Down` list, so it rendered a green **connected** for a server that
+had never been dialed. Every server field therefore comes from the
+construction-time config. A newly added server is correctly absent, and the
+panel says so rather than omitting it silently: when the live file no longer
+matches, it shows **`config.json changed since startup — restart gofer to
+apply`**. That is a comparison of two values in hand, not a guess. Timeout-only
+edits do not raise it — they change how the manager behaves, not which servers
+it holds, and a notice that fires on every open gets trained away.
+
+Under `gofer daemon --workers` there is **no answer to give**: the router
+process owns no supervisor and therefore no MCP manager (each session's worker
+owns its own), and with N sessions there is no single fleet-wide MCP state
+anyway. The router deliberately does not implement the optional
+`daemon.CapabilityReporter` — the same shape `DecisionAnswerer` and
+`FleetUsager` use — so it answers `{supported:false}`, which the client
+classifies to **UNKNOWN**. A daemon older than the method answers
+method-not-found and collapses to the identical unknown. The tabs render that as
+an explicit textual UNKNOWN block that says out loud it is *not* "none
+configured".
+
+**What these tabs deliberately do not show.** Each omission is a field the
+current data cannot answer honestly, and each is ABSENT rather than blank-filled
+— the rule `/status` already follows:
+
+| Omitted | Why |
+|---|---|
+| Per-server tool list / count | `mcpconn.Manager.Snapshot`'s tool list is flat and the proxy tool's owning server is unexported. Attributing a tool by parsing its `mcp__<server>__<tool>` name would be a reconstruction that looks right and goes wrong. The tab reports a TOTAL across connected servers and says so. |
+| Never-connected vs connected-then-dropped | `Snapshot.Down` carries both, undifferentiated, by its own documentation. The tab says "not connected" and stops there. |
+| Why a server is down | Connect and `tools/list` failures are logged and dropped; nothing stores them. |
+| A loaded skill's source path | `skill.Meta` records none. Re-walking the discovery directories to guess the winner goes wrong precisely when a first-directory candidate failed to load for an unrelated reason. The LOSING file of a shadowing IS knowable (it arrives as a diagnostic) and is shown. |
+| A project skills directory, when the caller names no cwd | `Skills.Directories` joins cwd unconditionally, so an empty one yields the *relative* `.gofer/skills` — resolved against the daemon's own working directory and reported as though it were the caller's project. The report covers the store root alone instead. |
+
+The first three are `internal/mcpconn`'s to fix — jedwards1230/gofer#302 —
+which is why the tab names that issue on screen: the line retires itself when
+the data exists. The fourth is not waiting on anything; a wrong path would be
+worse than none.
+
+What IS shown, and honestly labelled: each server's **configured** transport
+(from `config`, not observed on a live connection), the total federated tool
+count, and — under index mode only — how many of those tools are index-only vs
+resident, computed from `tools.schema_mode` + `tools.resident` as **configured
+intent** rather than a reading of any live tool index (the live
+`*toolindex.Index` belongs to one session's registry). The Skills tab renders
+the loader's full diagnostic list verbatim plus `skillset.Summarize`'s
+one-liner, which until now had no caller anywhere: every skill misconfiguration
+was diagnosed and then discarded.
+
+Both tabs' state distinctions are carried by WORDS, never by colour alone —
+"disabled", "unsupported transport", "not connected", "(truncated)",
+"shadowed" — because the Ascii goldens that pin them cannot see colour at all.
+
 - **P1**: `/init` (first-run project context) · `/fork` · `/tree` ·
   `/export html|jsonl` · `/login` · runtime `registerCommand` from plugins ·
   `/skill:name` · `/name` · `/session` (id, path, per-model tokens/cost).
-- **P2**: model-cycling key · `/mcp` management · `/debug` (hidden commands
-  share the dispatcher, skip autocomplete).
+- **P2**: model-cycling key · `/mcp` server MANAGEMENT (these tabs are
+  read-only; enabling, disabling, and reconnecting a server is still a
+  `config.json` edit) · `/debug` (hidden commands share the dispatcher, skip
+  autocomplete).
 
 ## Plugin-contributed UI
 

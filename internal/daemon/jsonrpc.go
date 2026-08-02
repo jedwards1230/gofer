@@ -1,13 +1,17 @@
 package daemon
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // jsonrpcVersion is the "jsonrpc" field every envelope carries.
 const jsonrpcVersion = "2.0"
 
-// Standard JSON-RPC 2.0 error codes, plus one gofer-owned application-error
-// code for daemon/supervisor failures that have no closer standard fit (e.g.
-// "session not live").
+// Standard JSON-RPC 2.0 error codes, plus the gofer-owned implementation-defined
+// codes (JSON-RPC reserves -32000..-32099 for those): an application-error code
+// for daemon/supervisor failures that have no closer standard fit (e.g. "session
+// not live"), and the session-cwd-missing code session/load answers with.
 const (
 	codeParseError     = -32700
 	codeInvalidRequest = -32600
@@ -15,6 +19,17 @@ const (
 	codeInvalidParams  = -32602
 	codeInternalError  = -32603
 	codeAppError       = -32000
+
+	// codeSessionCwdMissing is what session/load answers when the client asked
+	// to resume a session WHERE IT WAS RECORDED — a blank
+	// acp.LoadSessionRequest.Cwd, meaning "reopen this session in its own
+	// directory" — and that recorded directory no longer resolves to an
+	// existing one. It is deliberately NOT codeInvalidParams: the params are
+	// fine, the world changed, and only that distinction lets a client offer
+	// "pick a new directory" instead of reporting a malformed request. See
+	// [sessionCwdMissing] for the payload and [SessionCwdMissing] for the
+	// client-side predicate.
+	codeSessionCwdMissing = -32001
 )
 
 // inboundEnvelope is the shape of any client->daemon frame: a request (method +
@@ -123,6 +138,35 @@ func invalidParamsMsg(msg string) *rpcError {
 // wire instead of panicking the connection.
 func internalErr(err error) *rpcError {
 	return &rpcError{Code: codeInternalError, Message: err.Error()}
+}
+
+// sessionCwdMissingData is the structured payload [sessionCwdMissing] carries in
+// rpcError.Data. The directory travels as a FIELD, never only inside the human
+// message: a client reads it back by decoding this struct
+// ([SessionCwdMissing]), so nothing on the path ever parses prose to learn which
+// directory went missing.
+type sessionCwdMissingData struct {
+	Cwd string `json:"cwd"`
+}
+
+// sessionCwdMissing builds the [codeSessionCwdMissing] error for a session whose
+// RECORDED working directory can no longer be resolved. cwd is that recorded
+// directory — the one thing a client needs to tell the user what is gone — and
+// detail is the underlying resolution failure from [resolveSessionCwd] (deleted,
+// not a directory, no longer absolute). See [resolveLoadCwd] for why this is an
+// error rather than a fallback.
+func sessionCwdMissing(cwd, detail string) *rpcError {
+	data, err := json.Marshal(sessionCwdMissingData{Cwd: cwd})
+	if err != nil {
+		// Unreachable: the payload is a single string field. Reported rather
+		// than dropped so a future field that CAN fail to marshal fails loudly.
+		return internalErr(fmt.Errorf("session cwd missing: encode error data: %w", err))
+	}
+	return &rpcError{
+		Code:    codeSessionCwdMissing,
+		Message: fmt.Sprintf("session cwd %q, recorded when the session was created, is no longer available: %s", cwd, detail),
+		Data:    data,
+	}
 }
 
 // appError builds the -32000 application error from a supervisor/session

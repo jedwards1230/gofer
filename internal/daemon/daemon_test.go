@@ -9,6 +9,8 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/acp"
 	"github.com/jedwards1230/agent-sdk-go/provider"
 	"github.com/jedwards1230/agent-sdk-go/provider/faux"
+
+	"github.com/jedwards1230/gofer/internal/daemon"
 )
 
 // fauxProvider returns a provider.Provider constructor for newTestSupervisor
@@ -159,4 +161,53 @@ func TestBearerAuth_Disabled(t *testing.T) {
 	if resp.Error != nil {
 		t.Fatalf("initialize error: %+v", resp.Error)
 	}
+}
+
+// TestExtraTokensAccepted covers [daemon.Config.ExtraTokens]: a credential the
+// EMBEDDER mints (today the router's worker dial-back) is accepted alongside the
+// operator's bearer token, and a wrong one still is not.
+//
+// It exists so the router can stop handing workers the operator's own token.
+// Both directions are asserted — an accepted-token list that accepted
+// everything would satisfy the positive case alone, and one that accepted
+// nothing would leave every dial-back failing with an opaque 401.
+func TestExtraTokensAccepted(t *testing.T) {
+	sup := newTestSupervisor(t, fauxProvider)
+	_, url := newTestDaemonWithConfig(t, sup, daemon.Config{
+		BearerToken:  "the-operators-token",
+		ExtraTokens:  []string{"the-minted-dial-back-token"},
+		DefaultModel: "faux",
+	})
+
+	t.Run("the operator's own token still works", func(t *testing.T) {
+		c := dial(t, context.Background(), url, map[string][]string{"Authorization": {"Bearer the-operators-token"}})
+		if resp := c.request(acp.MethodInitialize, acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersion}); resp.Error != nil {
+			t.Fatalf("initialize error: %+v", resp.Error)
+		}
+	})
+
+	t.Run("a minted extra token is accepted", func(t *testing.T) {
+		c := dial(t, context.Background(), url, map[string][]string{"Authorization": {"Bearer the-minted-dial-back-token"}})
+		if resp := c.request(acp.MethodInitialize, acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersion}); resp.Error != nil {
+			t.Fatalf("initialize error: %+v", resp.Error)
+		}
+	})
+
+	t.Run("an unknown token is still refused", func(t *testing.T) {
+		httpURL := "http" + url[len("ws"):]
+		req, err := http.NewRequest(http.MethodGet, httpURL, nil)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer neither-of-them")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("Do: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("status = %d, want %d — adding an accepted-token list must not widen auth to everything",
+				resp.StatusCode, http.StatusUnauthorized)
+		}
+	})
 }

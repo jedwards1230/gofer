@@ -34,6 +34,7 @@ import (
 	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/decision"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
+	"github.com/jedwards1230/gofer/internal/uicopy"
 )
 
 // itemKind distinguishes transcript item shapes.
@@ -1246,7 +1247,7 @@ func summarizeAskUser(compact string) string {
 		return ""
 	}
 	if len(in.Questions) > 1 {
-		return plural(len(in.Questions), "question")
+		return uicopy.TranscriptAskUserQuestions(len(in.Questions))
 	}
 	if q := in.Questions[0]; q.Title != "" {
 		return q.Title
@@ -1684,7 +1685,7 @@ func (m Model) renderItemLines(it item, width int) []string {
 		// like itemThinking — a muted `⏹ stopped`, clearly reading as "you
 		// stopped this", not a failure.
 		muted := m.theme.MutedStyle()
-		return []string{markerLine(muted, "⏹", muted.Render("stopped"))}
+		return []string{markerLine(muted, "⏹", muted.Render(uicopy.TranscriptInterrupted))}
 
 	case itemApproval:
 		return []string{markerLine(m.theme.WarnStyle(), m.theme.GlyphAgent, it.text)}
@@ -1694,7 +1695,7 @@ func (m Model) renderItemLines(it item, width int) []string {
 		if it.approvalVerdict == string(event.VerdictDeny) {
 			style = m.theme.DangerStyle()
 		}
-		return []string{markerLine(style, m.theme.GlyphAgent, "permission "+it.approvalVerdict)}
+		return []string{markerLine(style, m.theme.GlyphAgent, uicopy.TranscriptPermissionVerdict(it.approvalVerdict))}
 
 	case itemBackgroundAgents:
 		return m.renderBackgroundAgentLines(it)
@@ -1712,7 +1713,7 @@ func (m Model) renderItemLines(it item, width int) []string {
 		// because the turn may be running a tool, not only reasoning — a
 		// one-token swap if that preference changes.
 		muted := m.theme.MutedStyle()
-		return []string{markerLine(muted, "⋯", muted.Render("working…"))}
+		return []string{markerLine(muted, "⋯", muted.Render(uicopy.TranscriptWorking))}
 
 	case itemCompacting:
 		// Transient compaction-in-flight indicator, deliberately the SAME muted
@@ -1733,7 +1734,7 @@ func (m Model) renderItemLines(it item, width int) []string {
 		muted := m.theme.MutedStyle()
 		elapsed := time.Since(it.compactingSince).Truncate(time.Second)
 		return []string{markerLine(muted, "⋯",
-			muted.Render(fmt.Sprintf("compacting context… (%s)", elapsed)))}
+			muted.Render(uicopy.TranscriptCompacting(elapsed)))}
 
 	default: // itemAssistantText
 		// Same empty-guard as itemAssistantReasoning above: an assistant-text
@@ -1783,7 +1784,7 @@ func attributeHeader(header, agent string) string {
 	if agent == "" {
 		return header
 	}
-	clause := " · from the " + agent + " agent"
+	clause := uicopy.TranscriptToolAttribution(agent)
 	first, rest, multiline := strings.Cut(header, "\n")
 	if !multiline {
 		return header + clause
@@ -1859,7 +1860,7 @@ func (m Model) renderBlock(b contentBlock) []string {
 			ren = plainRender
 		}
 		extra := len(b.rows) - b.maxBody
-		lines = append(lines, ren(blockGutterCont+fmt.Sprintf("… +%d lines", extra)))
+		lines = append(lines, ren(blockGutterCont+uicopy.TranscriptMoreLines(extra)))
 	}
 	return lines
 }
@@ -1988,7 +1989,7 @@ func (m Model) renderBackgroundAgentLines(it item) []string {
 	if len(it.spawned) == 0 {
 		return nil
 	}
-	header := fmt.Sprintf("%s launched (↓ to manage)", plural(len(it.spawned), "background agent"))
+	header := uicopy.TranscriptBackgroundAgents(len(it.spawned))
 	rows := make([]blockRow, len(it.spawned))
 	for i, s := range it.spawned {
 		label := s.name
@@ -2029,16 +2030,14 @@ func (m Model) renderBackgroundAgentLines(it item) []string {
 // project has been bitten by before; the "~" and "estimate" qualifier are
 // load-bearing, not decoration.
 func (m Model) renderSessionCompactedLines(it item) []string {
-	header := fmt.Sprintf("Context compacted — %s replaced with a summary",
-		plural(it.compactMessagesCompacted, "message"))
+	header := uicopy.TranscriptContextCompacted(it.compactMessagesCompacted)
 
 	var rows []blockRow
 	if it.compactModel != "" {
 		footprint := it.compactUsage.InputTokens + it.compactUsage.CacheReadTokens
 		muted := func(s string) string { return m.theme.MutedStyle().Render(s) }
 		rows = append(rows, blockRow{
-			text: fmt.Sprintf("~%d in (est., incl. overhead) → %d out · %s",
-				footprint, it.compactUsage.OutputTokens, it.compactModel),
+			text:   uicopy.TranscriptCompactionUsage(footprint, it.compactUsage.OutputTokens, it.compactModel),
 			render: muted,
 		})
 	}
@@ -2078,8 +2077,10 @@ func (m Model) shellMarker(r shellRun) (glyph string, style lipgloss.Style) {
 // ([attributeHeader]). It states, in words, that the command was run by YOU: the
 // sigil glyph already sets a shell run apart from an agent's `●` tool call, but
 // the attribution makes "you ran this locally, it is not an agent tool call"
-// explicit rather than leaving it to the reader to infer from the glyph.
-const shellRunAttribution = " · you ran this"
+// explicit rather than leaving it to the reader to infer from the glyph. The
+// wording itself lives in internal/uicopy; this is the local name the header
+// and its tests share.
+const shellRunAttribution = uicopy.TranscriptShellRunAttribution
 
 // shellRunHeader is a run's command with [shellRunAttribution] appended to its
 // FIRST physical line, muted so it de-emphasizes below the command itself while
@@ -2119,7 +2120,7 @@ func (m Model) renderShellRunLines(r shellRun) []string {
 	danger := func(s string) string { return m.theme.DangerStyle().Render(s) }
 
 	if !r.done {
-		block.rows = []blockRow{{text: "running…", render: muted}}
+		block.rows = []blockRow{{text: uicopy.TranscriptShellRunning, render: muted}}
 		return m.renderBlock(block)
 	}
 
@@ -2136,10 +2137,10 @@ func (m Model) renderShellRunLines(r shellRun) []string {
 	case r.note != "":
 		rows = append(rows, blockRow{text: r.note, render: danger})
 	case r.exitCode != 0:
-		rows = append(rows, blockRow{text: fmt.Sprintf("exit %d", r.exitCode), render: danger})
+		rows = append(rows, blockRow{text: uicopy.TranscriptShellExit(r.exitCode), render: danger})
 	}
 	if r.truncated {
-		rows = append(rows, blockRow{text: "… output truncated", render: muted})
+		rows = append(rows, blockRow{text: uicopy.TranscriptShellTruncated, render: muted})
 	}
 	block.rows = rows
 	// maxBody stays 0: shell output is byte-bounded already, and the user

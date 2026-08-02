@@ -20,12 +20,12 @@ package tui
 // worse than no help screen.
 
 import (
-	"fmt"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/jedwards1230/gofer/internal/tui/theme"
+	"github.com/jedwards1230/gofer/internal/uicopy"
 )
 
 // helpView renders the Help tab. Like every other panel body it is a pure
@@ -128,10 +128,10 @@ func (v helpView) View(width, height int) string {
 func scrollHint(above, below int) string {
 	var parts []string
 	if above > 0 {
-		parts = append(parts, fmt.Sprintf("↑ %d more", above))
+		parts = append(parts, uicopy.HelpMoreAbove(above))
 	}
 	if below > 0 {
-		parts = append(parts, fmt.Sprintf("↓ %d more", below))
+		parts = append(parts, uicopy.HelpMoreBelow(below))
 	}
 	return strings.Join(parts, " · ")
 }
@@ -142,7 +142,7 @@ func scrollHint(above, below int) string {
 func (v helpView) lines() []string {
 	var out []string
 	if cmds := v.commandRows(); len(cmds) > 0 {
-		out = append(out, "Commands")
+		out = append(out, uicopy.HelpCommandsHeading)
 		out = append(out, cmds...)
 	}
 	for _, scope := range keyScopeOrder {

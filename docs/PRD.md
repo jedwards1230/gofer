@@ -85,7 +85,11 @@ gofer daemon install|uninstall|status   # launchd/systemd unit for the daemon (M
 gofer daemon stop|restart [--root dir]  # stop a running daemon (driving its service manager
                             #   when one owns it, so the stop sticks), or stop-then-start it
 gofer session-worker        # single-session daemon on a unix socket; spawned by the router
-                            #   (M6), not meant to be run directly
+                            #   (M6), not meant to be run directly. --router <addr> is the
+                            #   dial-back the router hands it so its session can spawn
+                            #   subagents; --router-token-file names a 0600 file the worker
+                            #   reads once and deletes (never argv, never the environment —
+                            #   the agent's own bash tool inherits that)
 gofer acp serve             # ACP over stdio (editors, stdio→ws bridges) — NOT IMPLEMENTED
 gofer ps [--all]            # roster (--all includes archived; later: fleet)
 gofer kill|archive <id>     # stop running / clear finished (journal kept)
@@ -285,6 +289,21 @@ symlinked) is never swallowed: `sessionGuard` emits it as a non-fatal
 `session.error` on the session's own event stream once, at creation — the
 same "visible artifact, never silent" treatment a failed turn gets.
 
+**Reading the state back: `/skills` (gofer#303).** The per-session
+`session.error` above is a one-shot at creation; the `/skills` command panel is
+the standing view, off the same `gofer/capabilities` report `/mcp` uses. It
+lists every discovered skill (with `skills.disabled` and description-truncation
+marked as WORDS, since the Ascii goldens are colour-blind), the loader's full
+diagnostic list verbatim, and `skillset.Summarize`'s one-line rollup — which
+until this panel had **no caller anywhere**: every skill misconfiguration was
+diagnosed and then discarded.
+
+Precedence is reported to exactly the depth it is knowable. A shadowed
+duplicate's LOSING file is named (the loader's diagnostic carries its path); the
+WINNING file's path is **not shown at all**, because `skill.Meta` records none
+and re-walking the discovery directories to guess it goes wrong precisely when a
+first-directory candidate failed to load for an unrelated reason.
+
 ## Context compaction (M7)
 
 The SDK ships the seam (`runner.Runner.Compact`, `event.SessionCompacted`)
@@ -334,8 +353,13 @@ opinion. gofer supplies all three:
   requires the session to be idle) — the one gap this closes: a per-session
   out-of-turn watcher (`cmd/gofer/daemon.go`'s `OnRegister` hook) relays such
   events through the same guarded broadcast the M6 router relay already used,
-  so a remote peer sees them too. The M6 `--workers` path does not yet wire
-  this watcher — a known follow-up, not silently left.
+  so a remote peer sees them too. The M6 `--workers` path wires the same
+  property from the worker side instead: a session-worker's daemon runs a
+  standing per-session observer (`daemon.Config.RelayOutOfTurnEvents`, set only
+  in `internal/worker`) that puts an out-of-turn event on the wire, where the
+  router's existing event relay fans it out. Exactly one of the two is ever
+  enabled for a given session, so a compaction is delivered once, in both
+  deployments.
 - **`/compact [instructions]`** — explicit, idle-only (mirrors `/kill`/
   `/archive`'s precondition), forwards free-text instructions verbatim ("" is
   the SDK's own default). No `ArgHint`: like `/new`'s prompt, every string is
@@ -462,6 +486,146 @@ chatty server's tools before they ever reach the registry. Server
 definitions are file-only config (objects, not scalars) — no `/config`
 settings-registry row.
 
+**Reading the state back: `/mcp` (gofer#303).** Server definitions being
+file-only left the TUI with a write surface and no read surface — nothing could
+answer "is my server actually up". The `/mcp` command panel is that read
+surface, fed by a `gofer/capabilities` report (`internal/capability`, produced
+by `supervisor.Capabilities`). It shows each configured server's name, its
+CONFIGURED transport, whether it is enabled, and whether it held a live
+connection at snapshot time, plus the total federated tool count and — under
+index mode — the configured resident/index-only split.
+
+Every server field comes from the config the manager was **built** with, not a
+live re-read: the manager's server set is fixed at construction, so a server
+added to `config.json` afterwards is absent from `Snapshot().Down` simply
+because the manager has never heard of it — and treating that absence as health
+rendered a confident "connected" for a server that had never been dialed. The
+live file is compared only to report that it has **drifted**, so a correct
+omission does not become a silent one.
+
+It deliberately shows **no per-server tool count, no down-reason, and no
+never-connected-vs-dropped distinction**, because `Manager.Snapshot` cannot
+answer any of the three: its tool list is flat (attributing a tool by parsing
+its `mcp__<server>__<tool>` name would be a reconstruction that looks right and
+goes wrong), `Down` merges "never connected" with "connected then dropped" by
+its own documentation, and connect failures are logged and dropped rather than
+stored. Enriching the snapshot is
+[gofer#302](https://github.com/jedwards1230/gofer/issues/302); until it lands
+the panel names the gap on screen rather than filling it in.
+
+Under `gofer daemon --workers` the router process owns no supervisor and
+therefore no Manager — each session's worker owns its own — so it does not
+implement the optional `daemon.CapabilityReporter` and the panel renders an
+explicit UNKNOWN, textually distinct from "none configured". See
+[`TUI.md`](TUI.md).
+
+## Agent-initiated subagents (M7)
+
+The parent/child session primitive shipped first as an OPERATOR feature
+(`gofer run --parent <id> --agent <name>`). This round closes the loop in both
+directions: a running agent can spawn a child of its own, and a finished child
+reports its result back to the session that spawned it.
+
+**It is opt-in, and that is the design.** The `spawn_subagent` tool
+(`internal/subagent`) is registered only when `subagents.enabled` is set, on
+exactly the mechanism `web_search` and `skill` already use in `sessionGuard`: a
+constructor returning `(tool, ok)` and one `if`-guarded append into the `extra`
+slice. With the section unset — the zero value — a session's tool surface is
+byte-identical to one built before this existed and no child ever prompts its
+parent, so nobody who does not want session trees pays for them in context,
+concepts, or behavior. `subagents.agents` optionally names the agent identities
+the tool advertises, which constrains its `agent` argument to an enum;
+unconfigured leaves it free-form, matching `--agent`. Independent of
+`session.max_subagent_depth`, which caps how DEEP a tree nests (and governs the
+operator path too) rather than whether the model may ask at all.
+
+**Spawning is asynchronous; reporting is a prompt.** The tool returns as soon as
+the child session exists — it never blocks the parent's turn on a child's work.
+When the child's first turn settles cleanly, its final assistant text is
+delivered to the parent as that parent's next PROMPT, queued through the same
+FIFO steering queue a human's message uses. A parent mid-turn or mid-compaction
+therefore runs the report the instant it is free, rather than being interrupted:
+`enqueue` takes the session's mutex, `maybeAutoCompact` runs on the pump without
+holding it (`internal/supervisor`'s `TestSubagentReportLandsAfterParentCompaction`
+pins the ordering).
+
+**Exactly ONE report per child, durably.** The report is the answer to the
+brief; a parent that reacted by steering the child would otherwise get another,
+which is an unbounded two-agent loop with no human in it. The bound is a
+`reported` flag in the child's own `.meta.json` sidecar, claimed *before*
+delivery — so the failure direction is at-most-once (a parent that waits, which
+a human notices) rather than at-least-once (the loop). It cannot be in-memory
+only: a `sync.Once` belongs to a live session object, and `gofer resume
+<child-id>` builds a new one, so an in-memory bound re-armed the report on every
+resume. The `sync.Once` is kept only as the in-process fast path. The report
+also runs under `context.WithoutCancel` of the session's base context plus its
+own deadline, because the LAST report of a session's life is exactly the one
+racing a `Kill` that cancels it.
+
+**One seam, three answers — and the third is "no".** `supervisor.Subagents`
+(`Spawn`/`Report`) is the only abstraction. The in-process daemon answers it with
+its own `Create`/`Send` (`supervisor.LocalSubagents`). Under `--workers`, **the
+ROUTER creates every child and a worker never creates a session**: a worker's
+embedded daemon is built with `MaxSessions: 1` — a worker IS a single-session
+daemon — so it structurally cannot host a sibling. The worker dials the router
+back (`--router <addr>`) and uses the existing `session/new` `_meta` and
+`session/prompt` wire, adding no protocol. That keeps exactly one place in gofer
+that mints sessions and forks processes — the same place that enforces
+`--max-workers`.
+
+The third answer is what holds that invariant up structurally. A worker with no
+`--router` supplies **no seam at all**, and `supervisor.Config.Subagents` fails
+CLOSED: nil means this supervisor cannot create a child, so `spawn_subagent` is
+not registered and no report path is wired, whatever `subagents.enabled` says.
+The session-creating implementation is reachable only by naming
+`supervisor.LocalSubagents`, which a worker never does. Before that polarity was
+fixed, nil meant "install the in-process default", so a worker started without
+`--router` but with subagents enabled in config silently received it — spawning
+children inside a single-session worker, past both the router and the
+`MaxSessions` cap. Such a worker now warns at startup rather than going quiet.
+
+**The dial-back credential reaches a worker through neither argv nor the
+environment.** It is written as a 0600 `<workers-dir>/<uuid>.token` file the
+worker reads once and deletes at startup — the same out-of-band shape a
+service-managed daemon's own token already uses. Both obvious channels leak, in
+different directions: `/proc/<pid>/cmdline` is world-readable, so argv publishes
+a token equivalent to arbitrary code execution as the daemon's user to every
+local account; and the *environment* is readable by the **agent itself**, since
+the SDK's bash tool execs with `cmd.Env` unset and gofer's sandbox scrubs
+nothing, so a model could simply run `env`. The whole hand-off is additionally
+gated on `subagents.enabled` — a gofer whose operator never opted in hands its
+workers nothing and spawns them exactly as before. Because a worker's dial-back
+is fixed when the worker forks, enabling subagents under `--workers` takes a
+daemon restart (the same shape as adding an MCP server).
+
+**The sidecar stays the single authority for parentage.** `Supervisor.Create`
+now also forwards `ParentID`/`Depth`/`MaxDepth` into `runner.Options`, which
+puts the child runner in exactly the state `runner.Spawn` constructs without
+calling it (`Spawn` needs the parent's live `*runner.Runner` in-process, which
+gofer does not have behind its session factory seam, and cannot have across a
+worker process boundary). The SDK's journal records `parent_id`/`depth` in its
+root `session_meta` entry as a result — a write-only **projection** with no
+reader in gofer. `resolveParent` still derives depth and enforces the cap from
+the on-disk `<id>.meta.json`, and `event.SessionSpawned` is deliberately still
+unhandled: a handler would create a second, divergent record of the same fact. A
+root session forwards zero values, which the SDK omits, so an unchanged root
+session's journal stays byte-identical.
+
+**`Supervisor.resolveParent` is the SOLE depth-cap enforcement.** `runner.New`
+does not check `Depth > MaxDepth` — only `Runner.Spawn` does, and gofer never
+calls it (see above). Forwarding `MaxDepth` therefore records policy for the
+SDK's own use; it is not a backstop, and nothing behind gofer will catch a cap
+gofer fails to enforce.
+
+The forwarding itself is **not** gated on the subagents opt-in, which is
+deliberate and worth stating: a child created by the operator path
+(`gofer run --parent`) on a subagents-*disabled* gofer now records
+`parent_id`/`depth` in its journal's root meta entry where it previously
+recorded nothing. That is strictly additive, has no reader in gofer, and makes
+the journal agree with the sidecar it always had — but "byte-identical" is a
+claim about a ROOT session's journal and about a session's tool surface, and it
+does not cover this.
+
 ## On-disk layout & config precedence
 
 ```
@@ -522,7 +686,7 @@ phone-home.
 | **M4 · command views** ✅ shipped 2026-07-15 | slash dispatcher + command panel (`/status`, `/config`, `/model`) + autocomplete + settings registry (`config.Save`) + a TUI redesign wave (global header, bottom-anchored layout, mouse-wheel scroll, cursor-aware input, click-drag selection + OSC 52 copy) | an operator opens `/status`/`/config`/`/model` from the dispatcher and swaps a session's model without leaving the TUI |
 | **M5 · ACP v1 featureset expansion** ✅ shipped 2026-07-25 (on `main`; the `milestone/m5-acp-featureset` integration branch has merged and been deleted). Every committed slice is live end-to-end across SDK → gofer → Agmente; the two carve-outs are image/audio/resource content blocks (modeled, no producer in any repo) and the `available_commands_update`/`current_mode_update` registries, both descoped rather than pending — see the slice list below | cross-repo ACP conformance push (SDK models the blocks, gofer emits them, Agmente decodes) driven by an internal conformance matrix: `usage_update` on `session/update` (SDK v0.6.0 pass-through, [#97](https://github.com/jedwards1230/gofer/pull/97), merged) → rich content/tool-call blocks (`diff` live; image/audio/resource modeled, no producer) → session methods (`session/list`, resume, `set_config_option`, `cwd`) → model discovery + `set_model` → capability stretch (`session_info_update`, `plan`, `available_commands_update`/`current_mode_update`/`config_option_update`). Detail: [ACP v1 featureset expansion](#acp-v1-featureset-expansion-m5) | an ACP client renders live token cost, tool-call blocks, and a model picker — all off the daemon's spec-general `session/update` surface, no client-specific path |
 | **M6 · process isolation** ✅ Phases 0-3 shipped 2026-07-19 and Phase 4 (lifecycle polish) since — [#139](https://github.com/jedwards1230/gofer/issues/139) (offline resume spawns a fresh worker) and [#140](https://github.com/jedwards1230/gofer/issues/140) (cost/usage aggregation + graceful drain) are both closed; only roster reconciliation edge cases remain unverified. Behind the opt-in, off-by-default `gofer daemon --workers` | thin router daemon + detached per-session `gofer session-worker` processes (worker owns runner + pump + gate + journal + broker; router owns roster/fan-out/discovery/ACP surface); `setsid` detachment + endpoint-file adoption on restart; versioned router↔worker wire (the existing client wire + `gofer/hello`) with in-flight-only skew tolerance; `-local` stays in-process. Design: [docs/milestones/M6-process-isolation.md](milestones/M6-process-isolation.md) | upgrade the daemon binary mid-turn — the running session finishes uninterrupted on the old worker binary, the next session runs the new one; `session/list` shows mixed binary versions |
-| **M7 · ecosystem** 🚧 in flight — the current milestone | MCP on by default (schemas preload by default; tool-search index mode is opt-in) + subagents first-class (roster tree, peek/attach into children, linked journals) + skills + plugin UX. **Subagents are partly shipped**: the parent/child primitive, roster tree, drill-in, and per-tool-call agent attribution landed 2026-07-21 ([#204](https://github.com/jedwards1230/gofer/pull/204)/[#207](https://github.com/jedwards1230/gofer/pull/207)/[#208](https://github.com/jedwards1230/gofer/pull/208)), operator-driven only via `gofer run --parent/--agent`. Agent-initiated spawn ([#260](https://github.com/jedwards1230/gofer/issues/260)) is **unblocked and not started**: the SDK spawn seam it waits on (`agent-sdk-go#90` — `session.spawned` + `parent_id` + `depth`) closed 2026-07-26, so #260 is consumable now. **Skills shipped**: config-driven `SKILL.md` discovery, progressive disclosure, and project-beats-global precedence (`internal/skillset`) — see [Skills](#skills-m7). **MCP servers are wired** (`internal/mcpconn` — see [MCP servers (M7)](#mcp-servers-m7)); plugin UX is not started | a third-party plugin adds a tool with one config line |
+| **M7 · ecosystem** 🚧 in flight — the current milestone | MCP on by default (schemas preload by default; tool-search index mode is opt-in) + subagents first-class (roster tree, peek/attach into children, linked journals) + skills + plugin UX. **Subagents are partly shipped**: the parent/child primitive, roster tree, drill-in, and per-tool-call agent attribution landed 2026-07-21 ([#204](https://github.com/jedwards1230/gofer/pull/204)/[#207](https://github.com/jedwards1230/gofer/pull/207)/[#208](https://github.com/jedwards1230/gofer/pull/208)), operator-driven only. **Agent-initiated spawn + the child→parent report path shipped** ([#260](https://github.com/jedwards1230/gofer/issues/260)) — opt-in behind `subagents.enabled`; see [Agent-initiated subagents](#agent-initiated-subagents-m7). **Skills shipped**: config-driven `SKILL.md` discovery, progressive disclosure, and project-beats-global precedence (`internal/skillset`) — see [Skills](#skills-m7). **MCP servers are wired** (`internal/mcpconn` — see [MCP servers (M7)](#mcp-servers-m7)); plugin UX is not started | a third-party plugin adds a tool with one config line |
 | M8 · auto + polish | auto mode (reviewer pipeline), CC-asset import, mDNS pairing | auto mode survives a week of real ops without a bad allow |
 
 ## ACP v1 featureset expansion (M5)

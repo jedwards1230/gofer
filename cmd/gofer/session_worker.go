@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/jedwards1230/agent-sdk-go/runner"
 
@@ -16,6 +17,51 @@ import (
 	"github.com/jedwards1230/gofer/internal/telemetry"
 	"github.com/jedwards1230/gofer/internal/worker"
 )
+
+// newSupervisor is the seam a test swaps to observe the [supervisor.Config] a
+// worker actually builds — the same shape as this package's startDaemonProcess
+// and serveForeground seams.
+//
+// It exists for one assertion that nothing else in the process can make: that a
+// worker started WITHOUT --router hands supervisor.New a nil Subagents factory.
+// That property is the "a worker never creates a session" invariant, and a
+// worker's tool surface is not observable from outside it — gofer/capabilities
+// carries MCP servers and skills, not builtins, and driving the spawn tool would
+// need a real model turn. Asserting on the startup warning instead was tried and
+// is too weak: the warning is computed from the local variable BEFORE
+// supervisor.New is reached, so re-adding the fail-open default immediately
+// above the call left the warning intact and the whole suite green.
+var newSupervisor = supervisor.New
+
+// readRouterTokenFile reads the router dial-back bearer token from path and
+// DELETES the file, so the credential exists on disk only for the moment
+// between the router writing it and this worker starting.
+//
+// An empty path is not an error: a router on a loopback bind with no bearer
+// token configures none, and a worker with no token dials an unauthenticated
+// router exactly as it did before this existed.
+//
+// A path that was given but cannot be read IS an error, and deliberately fails
+// worker startup. The alternative — carrying on with an empty token — produces a
+// worker whose every spawn dies with an opaque 401 several minutes later, inside
+// a tool call, with nothing pointing back at the real cause.
+//
+// The delete is best-effort and never fails startup: the router sweeps a
+// leftover token file with the rest of the worker's runtime artifacts (see
+// internal/router's removeWorkerArtifacts).
+func readRouterTokenFile(path string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+	b, err := os.ReadFile(path) // #nosec G304 -- the path comes from our own parent router's argv, not from a session.
+	if err != nil {
+		return "", fmt.Errorf("session-worker: read --router-token-file: %w", err)
+	}
+	if rmErr := os.Remove(path); rmErr != nil && !os.IsNotExist(rmErr) {
+		_ = rmErr
+	}
+	return strings.TrimSpace(string(b)), nil
+}
 
 // runSessionWorker implements `gofer session-worker`: a single-session daemon
 // that binds a unix-domain socket ([daemon.WorkerSocketPath]), prints a
@@ -39,6 +85,19 @@ func runSessionWorker(ctx context.Context, args []string, stdout, stderr io.Writ
 	session := fs.String("session", "", "REQUIRED: the pinned session uuid the router pre-generated")
 	model := fs.String("model", "", "default model for the session (default: the sole logged-in provider's model)")
 	root := fs.String("root", "", "session store root (default ~/.gofer)")
+	// The router's own listen address, so this worker can dial BACK to create
+	// subagent sessions and deliver a finished child's report (see
+	// internal/worker.RouterSubagents). Empty — a worker started by hand, or by
+	// a router with no RouterAddr — leaves agent-initiated spawning unavailable
+	// in this worker, which is the correct degradation: a single-session daemon
+	// cannot host a sibling session, so there is nowhere local for a spawn to go.
+	routerAddr := fs.String("router", "", "the router's listen address for subagent spawn/report dial-back (default: none)")
+	// A PATH, never the token itself, and deliberately not an env var either:
+	// the token is read once from this 0600 file and the file is deleted
+	// immediately (see readRouterTokenFile). See router.Config.RouterToken for
+	// why both of the obvious channels leak — argv to every local user, the
+	// environment to the agent's own bash tool.
+	routerTokenFile := fs.String("router-token-file", "", "path to a 0600 file holding the --router bearer token; read once and deleted")
 	// Same explicit env-fallback convention as `gofer daemon` (see runDaemon):
 	// the flag default is "", and $GOFER_LOG_LEVEL is applied below.
 	logLevel := fs.String("log-level", "", "log level: debug, info, warn, or error (default: $GOFER_LOG_LEVEL, or \"info\")")
@@ -110,7 +169,64 @@ func runSessionWorker(ctx context.Context, args []string, stdout, stderr io.Writ
 	}()
 	logger = wrappedLogger
 
-	sup, err := supervisor.New(supervisor.Config{
+	// The subagent seam reads the supervisor back (for the parent's model/cwd)
+	// while the supervisor is being constructed with the seam. supervisor.Config
+	// takes a FACTORY for exactly that reason, so the seam is built with the
+	// live *Supervisor in hand rather than closed over a variable assigned
+	// later.
+	//
+	// It dials nothing until a session actually spawns, so a worker whose
+	// session never delegates pays nothing even if the router is unreachable.
+	//
+	// NIL WHEN NO --router WAS GIVEN, and nil is the whole point: a worker never
+	// creates a session (see internal/worker's package doc — its embedded daemon
+	// is MaxSessions: 1), so with no dial-back there is no legal answer to a
+	// spawn and this process must not have one. supervisor.New leaves its seam
+	// nil in turn, which suppresses the spawn tool and the child→parent report
+	// regardless of what subagents.enabled says — the ONLY way to obtain the
+	// session-creating implementation is to name supervisor.LocalSubagents, and
+	// a worker never does. Passing supervisor.LocalSubagents here would let a
+	// worker mint children locally, bypassing the router and the daemon's
+	// MaxSessions cap; that is what the nil expresses and what
+	// TestSessionWorkerNeverInstallsLocalSubagents pins.
+	var subagents func(*supervisor.Supervisor) supervisor.Subagents
+	if addr := *routerAddr; addr != "" {
+		// Consumed and deleted HERE, at startup, before the supervisor exists
+		// and long before any tool call can run — so the credential is in this
+		// process's memory only, never on disk for the session's lifetime and
+		// never in an environment the agent's shell inherits.
+		token, terr := readRouterTokenFile(*routerTokenFile)
+		if terr != nil {
+			return terr
+		}
+		// The factory runs synchronously inside supervisor.New below, on this
+		// goroutine, so seam is assigned before anything reads it — including
+		// the deferred close, which runs at THIS function's exit and tolerates
+		// a supervisor.New that failed before ever calling the factory.
+		var seam *worker.RouterSubagents
+		defer func() {
+			if seam != nil {
+				_ = seam.Close()
+			}
+		}()
+		subagents = func(s *supervisor.Supervisor) supervisor.Subagents {
+			seam = worker.NewRouterSubagents(addr, token, func() *supervisor.Supervisor { return s }, logger)
+			return seam
+		}
+	}
+	if subagents == nil && cfg.Subagents.IsEnabled() {
+		// An operator opted into subagents on a worker that has no way to
+		// deliver one. Suppressing the tool is correct (see above) but silence
+		// about it is not: the symptom is a model that never delegates and a
+		// parent that never hears back, neither of which points at the cause.
+		// Read off the startup snapshot rather than the per-session resolver
+		// because the dial-back this warns about is fixed for the process's
+		// life — a later config edit cannot make this worker able to spawn.
+		logger.Warn("subagents.enabled is set but this worker has no --router dial-back: spawn_subagent is not registered and no report will reach a parent",
+			"session", *session)
+	}
+
+	sup, err := newSupervisor(supervisor.Config{
 		Root:        rootDir,
 		Permissions: cfg.Engine,
 		// Same config-driven subagent depth cap as `gofer daemon`: the worker
@@ -139,6 +255,14 @@ func runSessionWorker(ctx context.Context, args []string, stdout, stderr io.Writ
 		Search: searchConfigResolver(rootDir),
 		// Same reasoning for skills.* — see skillsConfigResolver.
 		Skills: skillsConfigResolver(rootDir),
+		// Same re-read-per-session shape, for subagents.* — see
+		// subagentsConfigResolver. Unlike the in-process daemon this worker never
+		// names supervisor.LocalSubagents: its own daemon is capped at one
+		// session, so a spawn either leaves the process (see
+		// internal/worker.RouterSubagents) or does not happen. See the seam's
+		// construction above for why a nil factory is the fail-closed answer.
+		SubagentsConfig: subagentsConfigResolver(rootDir),
+		Subagents:       subagents,
 		// Pin the sole session's id to --session (design Option A) through the
 		// SDK's pre-assigned-session-id seam: runner.New creates the session with
 		// this exact id, leaving entry-id generation on the store default.

@@ -34,6 +34,20 @@ Tape/scenario names follow one slug schema, `<area>-<view>[-<state>]`
   history is load-bearing: compaction replaces a long context, so an indicator
   over an empty transcript would show the widget while misrepresenting what
   produces it.
+- `transcript-auto-compacting.tape` — the SAME indicator reached the other way:
+  AUTOMATIC compaction (gofer#300), with no slash command and no keystroke.
+  Captured as a before/after PAIR (`transcript-auto-compacting-before`,
+  `-after`) because the reviewable claim is that the indicator APPEARED ON ITS
+  OWN, which a single frame cannot show — compare the two and the untouched
+  input line between them. The scene publishes `session.compaction_started` on a
+  TIMER (`autoCompactingApp`, `autoCompactDelay`) rather than seeding it into
+  the replay backlog: seeding would put the indicator on screen the instant the
+  tape attaches and destroy the "before" frame. No terminal event is ever
+  published, so the indicator persists to the end. Same mid-bucket timing
+  discipline as `transcript-compacting` above, with ~500ms of slack either side
+  for process-startup jitter. The clearing paths (both terminals, a closed
+  subscription, a session switch) are unit-tested instead — a tape cannot assert
+  that something is absent for the right reason.
 - `transcript-overflow-recovery.tape` — the failure-triggered compaction
   sequence (jedwards1230/gofer#279): a user prompt, then the non-fatal
   `context window exceeded — compacting…` notice, then the `session.compacted`
@@ -50,6 +64,26 @@ Tape/scenario names follow one slug schema, `<area>-<view>[-<state>]`
 - `roster-overview.tape` — the roster screen with mixed session states,
   capturing the ● status markers in color (yellow working / awaiting input
   incl. the ●2 pending count vs green finished).
+- `roster-cwd-home.tape` — the flat view's cwd group headers contracting
+  `$HOME` to `~` (gofer#337), captured as a **before/after pair**
+  (`roster-cwd-home-before` / `roster-cwd-home`). Every other scene's fixture
+  Cwd is the literal string `"~/orchestration"`, which never starts with a
+  real absolute `$HOME` and so never touches the contraction code at all;
+  `overviewCwdHomeScene` instead seeds absolute working directories, and the
+  tape runs the harness twice with a different `HOME` env var each time so
+  `HOME` — not a code difference — is the only variable between the two
+  frames. The before frame (`HOME=/Users/nobody`, matching nothing) shows
+  every header as its full absolute path; the after frame
+  (`HOME=/Users/justin`) contracts three of the four to `~`-relative
+  spellings while the fourth, `/Users/justinother/notes` — a SIBLING
+  directory that only shares `/Users/justin` as a text prefix — stays
+  unchanged in the same frame, which is the path-boundary trap the issue
+  exists to guard against (a naive `strings.HasPrefix` would have contracted
+  it into `~other/notes`).
+- `panel-status-cwd-home.tape` — the companion to the tape above for the
+  Status tab's `Cwd: ` row (`internal/tui/status.go`), same technique and
+  same before/after pair (`panel-status-cwd-home-before` /
+  `panel-status-cwd-home`) over `cwdHomeCommandEnv`'s absolute Cwd.
 - `roster-delete-confirm.tape` — the armed `ctrl+x` delete confirm, captured as
   a **before/after pair** (`roster-delete-confirm-before` /
   `roster-delete-confirm`). The thing under review is a colour change — the
@@ -75,6 +109,51 @@ Tape/scenario names follow one slug schema, `<area>-<view>[-<state>]`
   journal. Needs `vhsSupervisor.Kill` to really mutate the canned roster —
   against a frozen one both frames would be identical. Reuses the
   `panel-status-overview` scenario.
+- `roster-cwd-missing.tape` — the three-way prompt that replaces the bare
+  error when a session's RECORDED working directory has been deleted
+  (jedwards1230/gofer#326), as a **before/after pair**
+  (`roster-cwd-missing-before` / `roster-cwd-missing`): the ordinary roster,
+  then Enter, then the daemon's typed cwd-missing signal landing ~200ms later
+  and the prompt taking the bottom of the frame. Before this change that second
+  frame was a red `session cwd "…" does not exist` status line — an error with
+  no remedy on it. What only colour can show, and
+  `app_cwd_missing_prompt.golden` therefore cannot: the Danger-red heading, so
+  the frame reads as a failure rather than as an ordinary panel, and the
+  Warn-yellow cwd-scoped-context warning under the re-init row, which is the
+  load-bearing caveat of the whole prompt and must not read as body text. Both
+  also change TEXT, so the goldens keep their half. Uses the
+  `roster-cwd-missing` scenario: the SAME canned roster and CommandEnv every
+  `panel-*` scene renders, differing only in a Supervisor that raises the signal
+  when `sess-1` is subscribed — the same way `transcript-compacting` differs
+  only by a blocking `Compact`. Keeping the session set identical is what stops
+  a new scene from churning six other tapes' snapshots.
+- `roster-cwd-missing-cancel.tape` — cancelling that prompt, as a
+  **before/after pair** (`roster-cwd-missing-cancel-before` /
+  `roster-cwd-missing-cancel`), and here the pair IS the claim: "nothing
+  changed" is exactly what a single frame cannot demonstrate. The after-frame
+  shows the overview back with `sess-1` still on the roster, still Working,
+  still selected, and no error on the footer. The Supervisor-side half — cancel
+  records no op at all — is asserted by `TestCwdMissingCancelMutatesNothing`;
+  this is the user-visible half no unit test can look at. Cancel is also what
+  every other dismissal path (esc, never answering) lands on. Drives the `2`
+  quick key, so nothing intermediate is caught mid-flight. Reuses the
+  `roster-cwd-missing` scenario.
+- `roster-quit-confirm.tape` — the armed `ctrl+c` double-tap quit confirm
+  (gofer#314), captured as a **before/after pair**
+  (`roster-quit-confirm-before` / `roster-quit-confirm`). Unlike
+  `roster-delete-confirm` above, the signal here is TEXT — a.status switches
+  from empty to "ctrl-c again to quit", rendered in the theme's warn style —
+  so an Ascii golden can already see the words; the tape's job is showing that
+  it renders in the same warn-yellow every other caution note uses (issue
+  #161's severity styling), which the Ascii profile cannot, and documenting
+  that the note is momentary rather than permanent chrome. This is the
+  GLOBAL confirm, not roster-specific — the same `App.confirmQuit` also runs
+  from the command panel and the pending-approval/decision overlays (see
+  `docs/TUI.md`'s "ctrl-c quits gofer" section) — captured once here since the
+  note renders identically on every screen. One press only: the first
+  `ctrl+c` is pure client state and never reaches `tea.Quit`. A second,
+  confirming `ctrl+c` follows the last screenshot only to end the recording
+  promptly. Reuses the `panel-status-overview` scenario.
 - `roster-select-all.tape` — `ctrl+a` select-all, captured as a **before/after
   pair** (`roster-select-all-before` / `roster-select-all`). The claim under
   review is that the reverse video reaches the rows OUTSIDE the roster body —
@@ -130,10 +209,32 @@ Tape/scenario names follow one slug schema, `<area>-<view>[-<state>]`
 - `panel-resume.tape` — the Resume tab: the session picker with a fetched
   listing applied (an offline session plus a live one). Listing only, no
   resume.
+- `panel-mcp.tape` — the MCP tab (jedwards1230/gofer#303), a **before/after
+  pair**: `panel-mcp` is a backend that answered (four servers, one per state
+  the tab has a distinct word for — connected / not connected / unsupported
+  transport / disabled — plus the federated tool total and the configured
+  index/resident split), and `panel-mcp-unknown` is the same tab against a
+  backend that CANNOT answer (a `gofer daemon --workers` router owns no MCP
+  manager; each session's worker owns its own). The pair is the whole point:
+  the regression this feature exists to prevent is an unanswered panel reading
+  as "no MCP servers configured", and only the two frames side by side show
+  that they are unmistakable.
+- `panel-skills.tape` — the Skills tab, the same before/after pair
+  (`panel-skills` / `panel-skills-unknown`). The answered frame carries the
+  four registers that have to read as one list rather than a scatter: ordinary
+  loaded rows, a muted disabled row, a yellow shadowed duplicate naming the
+  LOSING file, and a red skipped candidate — plus `skillset.Summarize`'s
+  operator line. Loaded rows deliberately carry no source path; the skill index
+  records none (see docs/TUI.md).
+
+Both capability scenes drive in-process closures, so neither performs network
+IO and neither frame varies with time.
 
 Each of the five panel-thinking/usage/stats/help/resume tapes reproduces the
 exact state its `internal/tui/testdata/app_panel_<tab>.golden` pins, so the
-color frame and the Ascii golden agree.
+color frame and the Ascii golden agree; `panel-mcp` / `panel-skills` do the
+same against `app_panel_mcp.golden` / `app_panel_skills.golden` and their
+`_unknown` twins.
 
 Run: `scripts/tui-vhs.sh [slug...]` (no arg = all tapes, e.g.
 `scripts/tui-vhs.sh panel-status panel-config`). It prebuilds

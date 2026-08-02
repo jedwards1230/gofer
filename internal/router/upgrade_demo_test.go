@@ -21,27 +21,28 @@ package router
 // it is verified by mutation: dropping the SetEventRelay call makes the tail
 // never arrive.
 //
-// # A related property, deferred: live streaming of the PRE-upgrade turn's tail
+// # A related property, since shipped: live streaming of an OUT-OF-TURN event
 //
 // The criterion above never asked for the pre-upgrade turn's events to stream
-// live to an attached client, and they do not. A worker has NO continuous broker
-// drain outside a session/prompt handler — internal/daemon/handlers.go's
-// advertiseModelChange states this explicitly — and the connection that drove
-// the pre-upgrade turn is severed BY the upgrade, so that turn's tail is
-// published to the worker's broker and never put on the wire at all. No amount
-// of router-side bridging can forward a frame that was never sent.
+// live to an attached client, and when this test was written they did not: a
+// worker had NO continuous broker drain outside a session/prompt handler
+// (internal/daemon/handlers.go's advertiseModelChange states this explicitly),
+// and the connection that drove the pre-upgrade turn is severed BY the upgrade,
+// so that turn's tail was published to the worker's broker and never put on the
+// wire at all. No amount of router-side bridging can forward a frame that was
+// never sent.
 //
-// It is NOT durably lost, though, and the test asserts as much: the worker
-// journals the tail, and it returns as folded history on the session's next
-// session/load. The gap is "not streamed live", not "gone" — a re-attaching
-// client sees the complete transcript.
+// The standing worker-side observer this file's earlier revision described as
+// deferred now exists — daemon.Config.RelayOutOfTurnEvents, set in
+// internal/worker (jedwards1230/gofer#280) — so an out-of-turn frame does reach
+// an attached client once one is attached. The assertion below is unchanged and
+// still meaningful: it pins the DURABILITY half, which no live path replaces —
+// the worker journals the tail, and it returns as folded history on the
+// session's next session/load, which is the only way a client that was absent
+// when the tail was published can ever see it.
 //
-// Closing the live half would need a standing observer on the WORKER side (in
-// internal/daemon, which the worker runs via daemon.New/Serve), gated behind a
-// Config flag beside ReplayPendingPermissionsOnAttach, and relying on exactly
-// the promptHandlerActive guard this slice shipped to keep it from double-
-// delivering against a real prompt handler. Deferred deliberately, recorded here
-// and in internal/router/doc.go rather than papered over.
+// TestOutOfTurnCompactionReachesAttachedClient (outofturn_compact_test.go) is
+// the test that pins the live half.
 //
 // What the bridge DOES fix is the hop it owns. The router receives a worker's
 // events for a turn the ROUTER drives (rtr.Send, over the router's own

@@ -59,8 +59,9 @@ func isQuit(cmd tea.Cmd) bool {
 }
 
 // TestQuitCommandQuits pins /quit (and its /exit alias) returning exactly
-// tea.Quit — the same one line ctrl-c is bound to on every screen, with no
-// teardown of its own (app.go/panel.go/dialog.go all just return tea.Quit).
+// tea.Quit — the same Cmd a CONFIRMED (second) ctrl-c produces on every
+// screen (see [tui.App]'s confirmQuit, gofer#314), with no teardown of its
+// own (app.go/panel.go/dialog.go all funnel through it).
 func TestQuitCommandQuits(t *testing.T) {
 	for _, name := range []string{"/quit", "/exit"} {
 		t.Run(name, func(t *testing.T) {
@@ -77,19 +78,24 @@ func TestQuitCommandQuits(t *testing.T) {
 }
 
 // TestQuitMatchesCtrlC is the equivalence check behind /quit staying trivial:
-// the command and the key must produce the same Cmd, so a teardown added to
-// one is visibly missing from the other.
+// the command and a CONFIRMED ctrl-c (its first press only arms, see
+// gofer#314's double-tap confirm) must produce the same Cmd, so a teardown
+// added to one is visibly missing from the other.
 func TestQuitMatchesCtrlC(t *testing.T) {
 	m := newTestApp(t, newFakeSup(tui.GoldenRoster()))
+	m, armCmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if armCmd != nil {
+		t.Fatal("first ctrl-c returned a Cmd; it should only arm the quit confirm")
+	}
 	_, keyCmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	m2 := newTestApp(t, newFakeSup(tui.GoldenRoster()))
 	_, cmdCmd := dispatchSlashCmd(t, m2, "/quit")
 
 	if !isQuit(keyCmd) {
-		t.Fatal("ctrl-c no longer returns tea.Quit; this test's premise is stale")
+		t.Fatal("the second ctrl-c no longer returns tea.Quit; this test's premise is stale")
 	}
 	if reflect.ValueOf(keyCmd).Pointer() != reflect.ValueOf(cmdCmd).Pointer() {
-		t.Error("/quit and ctrl-c returned different Cmds — one of the two grew a teardown the other skips")
+		t.Error("/quit and a confirmed ctrl-c returned different Cmds — one of the two grew a teardown the other skips")
 	}
 }
 
@@ -183,7 +189,15 @@ func TestGoldenPanelResume(t *testing.T) {
 }
 
 // TestResumeWithIDResumesDirectly is the direct path: `/resume <id>` must
-// reach Supervisor.Resume with that id and NOT open the picker.
+// reach Supervisor.Resume with that id, a BLANK cwd, and NOT open the picker.
+//
+// Blank is the assertion that changed with jedwards1230/gofer#326. This used to
+// forward the client's own working directory, which the daemon cannot tell
+// apart from a directory the user named — so a session recorded in another
+// project silently reopened HERE, and one whose directory had been deleted came
+// back as a bare invalid-params rejection with no remedy on offer. Blank means
+// "reopen where it was recorded" and lets the daemon answer, including with the
+// typed cwd-missing signal the three-way prompt is built on (cwdprompt.go).
 func TestResumeWithIDResumesDirectly(t *testing.T) {
 	const id = "0192a0c4-off0-7000-8000-000000000009"
 	sup := newFakeSup(tui.GoldenRoster())
@@ -195,11 +209,9 @@ func TestResumeWithIDResumesDirectly(t *testing.T) {
 	m = runCmd(t, m, cmd)
 
 	ops := sup.recordedOps()
-	if len(ops) != 1 || !strings.HasPrefix(ops[0], "resume:"+id+":") {
-		t.Fatalf("ops = %q, want exactly one resume of %s", ops, id)
-	}
-	if !strings.HasSuffix(ops[0], ":"+tui.GoldenMeta().Cwd) {
-		t.Errorf("ops = %q, want the client's cwd (%s) forwarded to Resume", ops, tui.GoldenMeta().Cwd)
+	want := "resume:" + id + ":"
+	if len(ops) != 1 || ops[0] != want {
+		t.Fatalf("ops = %q, want exactly [%s] — a BLANK cwd, never this client's %q", ops, want, tui.GoldenMeta().Cwd)
 	}
 	if got := content(m); !onAttachScreen(got) {
 		t.Errorf("expected a successful /resume to attach into the session, got:\n%s", got)
@@ -277,9 +289,16 @@ func TestResumeAlreadyLiveSessionSkipsTheOp(t *testing.T) {
 }
 
 // TestResumePickerEnterResumes drives the picker's Enter: ↓ onto the offline
-// row, Enter, and the op must carry that row's id and its OWN cwd — not this
-// client's, which is what makes resuming a session from another project land
-// in the right directory.
+// row, Enter, and the op must carry that row's id and a BLANK cwd.
+//
+// Blank even though the picker HAS the row's cwd on screen — that is the point
+// of jedwards1230/gofer#326. The picker read that directory off the daemon's own
+// listing, so sending it back is an echo the daemon cannot distinguish from a
+// directory the user chose; the distinction is the whole mechanism, and it is
+// what lets a session whose recorded directory has been deleted surface as the
+// three-way prompt (cwdprompt.go) instead of an invalid-params error. The
+// session still reopens in its own directory — the daemon resolves it from the
+// journal, which is where the picker got it from in the first place.
 func TestResumePickerEnterResumes(t *testing.T) {
 	sup := newFakeSup(tui.GoldenRoster())
 	sup.listed = resumableRefs()
@@ -293,9 +312,9 @@ func TestResumePickerEnterResumes(t *testing.T) {
 	m = runCmd(t, m, cmd)
 
 	ops := sup.recordedOps()
-	want := "resume:0192a0c4-off0-7000-8000-000000000009:/home/j/elsewhere"
+	want := "resume:0192a0c4-off0-7000-8000-000000000009:"
 	if len(ops) != 1 || ops[0] != want {
-		t.Fatalf("ops = %q, want [%s]", ops, want)
+		t.Fatalf("ops = %q, want [%s] — the row's own cwd (/home/j/elsewhere) must NOT be echoed back", ops, want)
 	}
 	if strings.Contains(content(m), "[Resume]") {
 		t.Errorf("the panel stayed open after Enter; resuming is a committing action:\n%s", content(m))

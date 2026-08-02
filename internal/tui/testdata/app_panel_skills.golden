@@ -1,0 +1,24 @@
+
+gofer v0.3.0
+claude-sonnet-5 · ~/orchestration
+1 awaiting input · 1 working · 0 completed
+
+~/orchestration
+▸ wire the app root             Working · overview <-> peek <-> attach nav    2m
+  review the supervisor contr…  Needs input · turn finished — awaiting the…   5m
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+Status Config Model Thinking Usage Stats Context MCP [Skills] Resume Help
+────────────────────────────────────────────────────────────────────────────────
+Skills: 3 loaded, 1 disabled, 2 skipped
+  commit-msg        Write a conventional-commit message from a staged diff
+  deep-dive         Trace a symbol across packages before changing it (truncate…
+  release           Cut a release and draft its notes (disabled)
+  shadowed  ~/.gofer/skills/commit-msg/SKILL.md
+  skipped   ~/.gofer/skills/whole-repo/SKILL.md: skill: body exceeds 262144 byt…
+skills: skipped ~/.gofer/skills/commit-msg/SKILL.md: skill: duplicate name "com…
+Source paths shown for shadowed/skipped files only — the index carries none
+←/→ to switch tabs · esc to close

@@ -117,6 +117,13 @@ type inboundFrame struct {
 type CallError struct {
 	Code    int
 	Message string
+	// Data is the JSON-RPC error object's optional structured payload, verbatim
+	// — nil when the daemon sent none. It exists so an error code that carries
+	// operands (the missing directory behind [codeSessionCwdMissing]) hands them
+	// over as FIELDS a caller decodes, rather than as prose inside Message that a
+	// caller would have to parse. Decode it through a typed predicate
+	// ([SessionCwdMissing]), never inline at a call site.
+	Data json.RawMessage
 }
 
 func (e *CallError) Error() string { return e.Message }
@@ -130,6 +137,32 @@ func (e *CallError) Error() string { return e.Message }
 func IsMethodNotFound(err error) bool {
 	var ce *CallError
 	return errors.As(err, &ce) && ce.Code == codeMethodNotFound
+}
+
+// SessionCwdMissing reports whether err is a [Client.Call] failure the daemon
+// answered with gofer's session-cwd-missing code ([codeSessionCwdMissing]) —
+// i.e. a session/load that asked to reopen a session WHERE IT WAS RECORDED (a
+// blank cwd) against a recorded directory that no longer exists. It returns that
+// directory, so a client can name it while offering the user somewhere else to
+// reopen the session in (see [resolveLoadCwd]).
+//
+// It is the [IsMethodNotFound] pattern with an operand: errors.As on the typed
+// [CallError] plus a code comparison, then a decode of the structured
+// [CallError.Data] payload. Nothing here — and nothing downstream of it — matches
+// on the error's message text. ok is true whenever the CODE matches, even if the
+// payload is absent or undecodable (a daemon that sent the signal without the
+// operand): the caller still knows WHICH failure this is, and gets "" for the
+// path rather than a false negative.
+func SessionCwdMissing(err error) (string, bool) {
+	var ce *CallError
+	if !errors.As(err, &ce) || ce.Code != codeSessionCwdMissing {
+		return "", false
+	}
+	var data sessionCwdMissingData
+	if decErr := json.Unmarshal(ce.Data, &data); decErr != nil {
+		return "", true
+	}
+	return data.Cwd, true
 }
 
 // ErrHelloUnsupported is returned by [Client.Hello] when the daemon does not
@@ -380,7 +413,7 @@ func (c *Client) Call(ctx context.Context, method string, params any) (json.RawM
 			return nil, fmt.Errorf("daemon client: %s: connection closed before a response arrived", method)
 		}
 		if f.Error != nil {
-			return nil, &CallError{Code: f.Error.Code, Message: f.Error.Message}
+			return nil, &CallError{Code: f.Error.Code, Message: f.Error.Message, Data: f.Error.Data}
 		}
 		return f.Result, nil
 	case <-ctx.Done():

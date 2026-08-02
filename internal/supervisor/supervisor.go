@@ -31,6 +31,7 @@ import (
 	sysprompt "github.com/jedwards1230/gofer/internal/prompt"
 	"github.com/jedwards1230/gofer/internal/sandbox"
 	"github.com/jedwards1230/gofer/internal/skillset"
+	"github.com/jedwards1230/gofer/internal/subagent"
 	"github.com/jedwards1230/gofer/internal/websearch"
 )
 
@@ -142,6 +143,49 @@ type Config struct {
 	// directories at the package defaults.
 	Skills func() config.Skills
 
+	// SubagentsConfig resolves whether AGENT-INITIATED subagent spawning exists
+	// for each NEW session (see [config.Subagents]). Same factory shape as
+	// Search/Skills and for the same reason: called once per Create/Resume from
+	// sessionGuard, so a `subagents.*` write reaches the next session a RUNNING
+	// gofer starts, with no restart. Nil defaults to the zero
+	// [config.Subagents], which resolves to DISABLED — no spawn tool is
+	// registered at all and no child reports to its parent, so a supervisor
+	// built without one behaves exactly as it did before this feature existed.
+	//
+	// It is deliberately separate from MaxSubagentDepth above: that caps how
+	// deep a tree may nest (and governs the operator-driven `gofer run --parent`
+	// path too), this decides whether a MODEL may ask for a child at all.
+	SubagentsConfig func() config.Subagents
+
+	// Subagents BUILDS the seam a session's spawn tool and a finished child's
+	// report travel through (see [Subagents]). Nil — the default — means this
+	// supervisor has NO way to create a child session: no spawn tool is
+	// registered whatever SubagentsConfig says, and no child reports to its
+	// parent.
+	//
+	// # Why nil fails CLOSED, and why it is a factory
+	//
+	// A deployment that can host sibling sessions passes [LocalSubagents], which
+	// answers spawn with a plain in-process Create/Send on this same supervisor.
+	// A `--workers` session passes its own router dial-back
+	// ([internal/worker.NewRouterSubagents]) instead, because its embedded daemon
+	// is built with MaxSessions: 1 and structurally cannot host a sibling.
+	//
+	// A worker with no dial-back configured passes NOTHING — and that is exactly
+	// why nil cannot mean "install the in-process default". It did once, and the
+	// result was that a worker started without `--router` but with
+	// `subagents.enabled` set silently got [localSubagents] and could mint child
+	// sessions inside a single-session worker, bypassing both the router and the
+	// daemon's MaxSessions cap (gofer#345 review). The invariant "the router
+	// creates every child; a worker never creates a session" now holds because
+	// the session-creating implementation is unreachable without asking for it by
+	// name, not because a comment says so.
+	//
+	// It is a factory rather than a value because [localSubagents] needs the
+	// *Supervisor that construction is still building; a caller cannot express
+	// that from outside. Every other caller ignores the argument.
+	Subagents func(*Supervisor) Subagents
+
 	// Store, when set, is used instead of building a store from Root, and is
 	// NOT closed by [Supervisor.Close] — the caller owns its lifecycle. Test
 	// seam.
@@ -219,6 +263,19 @@ type Supervisor struct {
 	// config.Skills.Directories etc. resolve to the package defaults).
 	skillsConfig func() config.Skills
 
+	// subagentsConfig mirrors Config.SubagentsConfig; never nil after New (a nil
+	// resolver becomes a constant zero-value factory, i.e. DISABLED).
+	subagentsConfig func() config.Subagents
+
+	// subagents is what Config.Subagents built, and is NIL whenever that factory
+	// was nil — this supervisor then has no way to create a child session at
+	// all, which is the state a worker with no router dial-back is in. Both
+	// consumers treat nil as "the feature does not exist here": subagent.NewTool
+	// refuses to build a tool without a spawner (so sessionGuard registers
+	// none), and register's report wiring is gated on that same tool. Enabling
+	// subagentsConfig cannot conjure one.
+	subagents Subagents
+
 	// resumeMu serializes Resume end-to-end (roster check through
 	// registration) so two concurrent Resumes of the same id can never both
 	// observe "not live" and both build a second runner over the same
@@ -246,6 +303,15 @@ type Supervisor struct {
 	// for [config.MCP.ReadyTimeout] only — see Config.MCP's doc for why the
 	// server list itself is NOT re-read here.
 	mcpConfig func() config.MCP
+
+	// mcpAtStart is the config.MCP mcpManager was actually BUILT from, captured
+	// at New. It exists because mcpConfig is typically a live re-read of
+	// config.json (cmd/gofer's mcpConfigResolver), so the two drift the moment
+	// an operator edits the file — and the manager's own view never moves.
+	// [Supervisor.Capabilities] must describe the manager, not the file: see
+	// capabilities.go for the fabricated "connected" that reading the live
+	// config produced.
+	mcpAtStart config.MCP
 
 	mu     sync.Mutex
 	roster map[string]*managed
@@ -362,7 +428,8 @@ func New(cfg Config) (*Supervisor, error) {
 	// list is a construction-time snapshot rather than re-read per session.
 	// Start connects every enabled server ASYNCHRONOUSLY and returns
 	// immediately, so this never delays New.
-	mcpManager := mcpconn.NewManager(mcpconn.Config{MCP: mcpConfig()})
+	mcpAtStart := mcpConfig()
+	mcpManager := mcpconn.NewManager(mcpconn.Config{MCP: mcpAtStart})
 	mcpManager.Start(context.Background())
 
 	toolsConfig := cfg.Tools
@@ -388,7 +455,15 @@ func New(cfg Config) (*Supervisor, error) {
 		skillsConfig = func() config.Skills { return config.Skills{} }
 	}
 
-	return &Supervisor{
+	subagentsConfig := cfg.SubagentsConfig
+	if subagentsConfig == nil {
+		// No explicit resolver: the zero config.Subagents, which IsEnabled()
+		// resolves to DISABLED — the fail-safe that makes agent-initiated
+		// spawning purely additive (see config.Subagents' doc).
+		subagentsConfig = func() config.Subagents { return config.Subagents{} }
+	}
+
+	s := &Supervisor{
 		root:             root,
 		store:            store,
 		ownsStore:        ownsStore,
@@ -404,13 +479,24 @@ func New(cfg Config) (*Supervisor, error) {
 		toolsConfig:      toolsConfig,
 		searchConfig:     searchConfig,
 		skillsConfig:     skillsConfig,
+		subagentsConfig:  subagentsConfig,
 		lspManager:       lspdiag.NewManager(),
 		mcpConfig:        mcpConfig,
+		mcpAtStart:       mcpAtStart,
 		mcpManager:       mcpManager,
 		roster:           make(map[string]*managed),
 		watchers:         make(map[*watcher]struct{}),
 		watchDone:        make(chan struct{}),
-	}, nil
+	}
+	if cfg.Subagents != nil {
+		// Built HERE, after the struct exists, because the in-process answer
+		// ([LocalSubagents]) closes over the *Supervisor construction is still
+		// building. A nil factory leaves s.subagents nil, which
+		// [subagent.NewTool] reads as "no spawner" and refuses to build a tool
+		// for — see Config.Subagents' doc for why that polarity is load-bearing.
+		s.subagents = cfg.Subagents(s)
+	}
+	return s, nil
 }
 
 // sessionGuard builds the per-session permission plumbing: a fresh reply Gate
@@ -485,6 +571,13 @@ func New(cfg Config) (*Supervisor, error) {
 // connection at that snapshot — the caller (Create/Resume) emits it as a
 // visible, non-fatal notice once the session's id is known.
 //
+// spawn (internal/subagent) is registered only when config.Subagents enables
+// agent-initiated spawning — the zero value does not, so an unconfigured
+// session's tool surface is byte-identical to one built before subagents
+// existed. It is returned to the caller (nil when unregistered) for the same
+// reason the decision gate is: sessionGuard runs BEFORE the session id is
+// minted, so [register] must bind it afterwards (see [subagent.Tool.Bind]).
+//
 // skillNote is sessionGuard's out-of-band final return: the operator-facing
 // summary of anything skillset.Load skipped (oversized, malformed, or
 // shadowed by a higher-precedence directory — see [skillset.Summarize]), or
@@ -492,7 +585,7 @@ func New(cfg Config) (*Supervisor, error) {
 // being emitted here because sessionGuard runs before the session — and so
 // its id, the one thing [event.NewSessionError] needs — exists; Create and
 // Resume both emit it once the session is registered (see their own calls).
-func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.Gate, decisions *decision.Gate, tools loop.ToolRegistry, ix *toolindex.Index, skillNote string, mcpDown []string) {
+func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.Gate, decisions *decision.Gate, spawn *subagent.Tool, tools loop.ToolRegistry, ix *toolindex.Index, skillNote string, mcpDown []string) {
 	gate := loop.NewGate()
 	dgate := decision.NewGate("")
 	askUser := decision.NewAskUser(dgate)
@@ -536,6 +629,16 @@ func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.
 	if skillTool, ok := skillset.NewTool(skillSet, skillsCfg); ok {
 		extra = append(extra, skillTool)
 	}
+	// Same per-session re-read, and the same conditional-registration shape
+	// web_search and skill already use: nothing is appended (and no tool is even
+	// constructed) unless an operator opted in. TWO switches, not one, and both
+	// must be on: the config (re-read per session) and a non-nil seam (fixed at
+	// New). A deployment that cannot host a child — a worker with no router
+	// dial-back — has no seam, so no amount of config registers this tool.
+	if spawnTool, ok := subagent.NewTool(s.subagents, s.subagentsConfig()); ok {
+		spawn = spawnTool
+		extra = append(extra, spawnTool)
+	}
 	// MCP-federated tools join the SAME extra slice, before ix.SearchTool()
 	// — see the doc above.
 	extra = append(extra, mcpSnap.Tools...)
@@ -564,7 +667,7 @@ func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.
 		if ix != nil {
 			tools = ix.Wrap(tools)
 		}
-		return yoloGuard{engine: engine}, gate, dgate, tools, ix, skillNote, mcpDown
+		return yoloGuard{engine: engine}, gate, dgate, spawn, tools, ix, skillNote, mcpDown
 	}
 	container := sandbox.New()
 	rg := loop.RuleGuard{Engine: engine, Container: container, Target: sandbox.ToolTarget}
@@ -572,7 +675,7 @@ func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.
 	if ix != nil {
 		tools = ix.Wrap(tools)
 	}
-	return rg, gate, dgate, tools, ix, skillNote, mcpDown
+	return rg, gate, dgate, spawn, tools, ix, skillNote, mcpDown
 }
 
 // emitMCPDownNotices publishes one visible, non-fatal session.error per
@@ -669,7 +772,7 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts CreateOptio
 		return SessionInfo{}, err
 	}
 
-	guard, gate, decisions, tools, ix, skillNote, mcpDown := s.sessionGuard(opts.Cwd)
+	guard, gate, decisions, spawn, tools, ix, skillNote, mcpDown := s.sessionGuard(opts.Cwd)
 	// Fold the tool index's hint into the system prompt HERE, not in
 	// internal/prompt.Compose's caller — see sysprompt.AppendHint's doc for
 	// why this join lives in internal/prompt rather than being re-derived
@@ -679,9 +782,29 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts CreateOptio
 	if ix != nil {
 		system = sysprompt.AppendHint(system, ix.Hint())
 	}
+	// ParentID/Depth/MaxDepth put the child runner in EXACTLY the state
+	// [runner.Spawn] constructs — that method is those three assignments plus
+	// runner.New plus an event — without calling it. Spawn cannot be called
+	// here: it needs the parent's live *runner.Runner in this process, while
+	// gofer holds a [Session] interface behind the newSession factory seam
+	// (every test harness fakes it) and, under --workers, the parent runner
+	// lives in a different OS PROCESS entirely.
+	//
+	// So gofer consumes the seam's CONTRACT rather than its call: the sidecar
+	// derives the depth and enforces the cap (see resolveParent, already run
+	// above), and the SDK is TOLD the result. The SDK's journal records
+	// parent_id/depth in its root meta entry when told (session.WithMetaParent),
+	// which is a write-only PROJECTION — nothing in gofer reads it back, and the
+	// sidecar remains the single authority.
+	//
+	// A root session forwards zero values, which the SDK omits from that entry
+	// entirely (omitempty, and runner.New only passes WithMetaParent for a
+	// non-empty ParentID), so an unchanged root session's journal stays
+	// byte-identical to one written before this line existed.
 	sess, err := s.newSession(ctx, runner.Options{
 		Root: s.root, Cwd: opts.Cwd, Model: opts.Model, System: system,
 		Params: opts.Params, MaxIters: opts.MaxIters, Agent: opts.Agent,
+		ParentID: meta.ParentID, Depth: meta.Depth, MaxDepth: s.maxSubagentDepth,
 		Guard: guard, Approver: gate, Tools: tools,
 	})
 	if err != nil {
@@ -709,7 +832,7 @@ func (s *Supervisor) Create(ctx context.Context, prompt string, opts CreateOptio
 		}
 	}
 
-	m, err := s.register(sess, opts.Model, opts.Params.Thinking.Effort, opts.Cwd, gate, decisions, meta, false)
+	m, err := s.register(sess, opts.Model, opts.Params.Thinking.Effort, opts.Cwd, gate, decisions, spawn, meta, false)
 	if err != nil {
 		// Lost a race with Close between the isClosed check above and here:
 		// tear down the just-built session so it does not leak. Its store is
@@ -822,16 +945,23 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 	// exactly when a client reopened it from somewhere else.
 	meta, _ := lookupDiskSession(s.root, id)
 
-	guard, gate, decisions, tools, ix, skillNote, mcpDown := s.sessionGuard(opts.Cwd)
+	guard, gate, decisions, spawn, tools, ix, skillNote, mcpDown := s.sessionGuard(opts.Cwd)
 	// Same hint fold as Create — see its comment.
 	system := opts.System
 	if ix != nil {
 		system = sysprompt.AppendHint(system, ix.Hint())
 	}
+	// Only MaxDepth is forwarded on the resume path. ParentID/Depth are journal
+	// STATE, not policy: [runner.Resume] recovers a child's lineage from its own
+	// root meta entry, so passing them again would either duplicate what the
+	// journal already says or — for a session whose sidecar and journal
+	// disagree — quietly overwrite it. The cap is policy and comes from config
+	// on every open, matching runner.Resume's own documented split.
 	sess, err := s.resumeSession(ctx, id, runner.Options{
 		Root: s.root, Cwd: opts.Cwd, Model: opts.Model, System: system,
 		Params: opts.Params, MaxIters: opts.MaxIters, Agent: meta.Agent,
-		Guard: guard, Approver: gate, Tools: tools,
+		MaxDepth: s.maxSubagentDepth,
+		Guard:    guard, Approver: gate, Tools: tools,
 	})
 	if err != nil {
 		return SessionInfo{}, fmt.Errorf("supervisor: resume %s: %w", id, err)
@@ -853,7 +983,7 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 		}
 	}
 
-	m, err := s.register(sess, opts.Model, opts.Params.Thinking.Effort, opts.Cwd, gate, decisions, meta, true)
+	m, err := s.register(sess, opts.Model, opts.Params.Thinking.Effort, opts.Cwd, gate, decisions, spawn, meta, true)
 	if err != nil {
 		_ = sess.Close()
 		return SessionInfo{}, fmt.Errorf("supervisor: resume %s: %w", id, err)
@@ -908,13 +1038,37 @@ func (s *Supervisor) Resume(ctx context.Context, id string, opts ResumeOptions) 
 // is published into the roster below — so a concurrent Kill can never
 // observe a session whose teardown hasn't been stashed yet (see
 // Config.OnRegister's doc).
-func (s *Supervisor) register(sess Session, model, effort, cwd string, gate *loop.Gate, decisions *decision.Gate, meta sessionMeta, resumed bool) (*managed, error) {
+func (s *Supervisor) register(sess Session, model, effort, cwd string, gate *loop.Gate, decisions *decision.Gate, spawn *subagent.Tool, meta sessionMeta, resumed bool) (*managed, error) {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		return nil, ErrClosed
 	}
 	m := newManaged(sess, model, effort, s.clock(), s.clock, s.notify, cwd, gate, decisions, meta, resumed, s.onRegister, s.compaction)
+	// Stamp the session id onto the spawn tool for the SAME reason (and at the
+	// same instant) it is stamped onto the decision gate below: a tool built in
+	// sessionGuard cannot know the id runner.New was about to mint, and this id
+	// is the ParentID of every child it spawns. Skipped when subagents are off,
+	// in which case no such tool was built.
+	if spawn != nil {
+		spawn.Bind(m.id)
+	}
+	// A CHILD session reports its result to its parent when its first turn
+	// settles (see managed.reportToParentOnce). Wired here, before the pump
+	// starts, so the field is published to that goroutine by the same
+	// happens-before the pump's own start provides.
+	//
+	// Gated on `spawn != nil`, which IS the subagents opt-in: sessionGuard built
+	// a spawn tool for this session if and only if config.Subagents was enabled
+	// when it ran. Re-reading the config here instead would both duplicate that
+	// disk read and perform it under s.mu, and could disagree with the tool
+	// surface this very session was built with if the file changed in between.
+	// So a gofer that never opted into subagents behaves exactly as it did
+	// before — including for a child an OPERATOR created with `gofer run
+	// --parent`.
+	if spawn != nil && meta.ParentID != "" {
+		m.reportParent = s.subagents.Report
+	}
 	// Stamp the session id onto the decision gate the moment it is knowable —
 	// before m is published anywhere and before anything can run a turn against
 	// it, so no request can ever open with an empty session id (see

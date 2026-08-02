@@ -254,14 +254,16 @@ func TestRosterServesFromCacheWithoutWorkerRPCs(t *testing.T) {
 	sup, _ := adoptCountingWorker(t, root, w)
 
 	// Bring-up costs a small CONSTANT number of roster calls, independent of how
-	// often the roster is later read: one for the cache seed, plus one from
-	// adoption's own wirestream Load (its sessionCwd lookup resolves the session's
-	// cwd off a roster row — pre-existing, and unrelated to this cache). What
-	// matters is that the number does not GROW with reads; the bound is asserted
-	// so a new per-bring-up RPC still has to be a deliberate change.
+	// often the roster is later read: one for the cache seed. It used to be two —
+	// adoption's own wirestream Load looked the session's cwd up off a roster row
+	// before sending it back as session/load's cwd, which stopped happening when
+	// the client stopped echoing the journal's cwd (jedwards1230/gofer#326). The
+	// assertion stays a BOUND rather than an exact count: what matters is that the
+	// number does not GROW with reads, and that a new per-bring-up RPC has to be a
+	// deliberate change.
 	seedCalls := w.rosterCalls.Load()
 	if seedCalls < 1 || seedCalls > 2 {
-		t.Fatalf("bring-up issued %d gofer/roster calls, want 1 (seed) or 2 (seed + adoption's cwd lookup)", seedCalls)
+		t.Fatalf("bring-up issued %d gofer/roster calls, want 1 (the cache seed)", seedCalls)
 	}
 
 	ctx := context.Background()

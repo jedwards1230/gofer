@@ -1,0 +1,24 @@
+
+gofer v0.3.0
+claude-sonnet-5 · ~/orchestration
+1 awaiting input · 1 working · 0 completed
+
+~/orchestration
+↓ 2 more
+────────────────────────────────────────────────────────────────────────────────
+❯ describe a task for a new session · ! for shell mode
+enter open · space peek · tab toggle view · ctrl-x delete · ? shortcuts
+────────────────────────────────────────────────────────────────────────────────
+Session directory is gone
+"wire the app root" was recorded in "/home/j/projects/deleted-by-a-cleanup",
+which no longer exists — so it cannot be reopened where it was.
+
+  Warning: the session will load DIFFERENT local context there. Project config
+  (.gofer/config.json), user commands (<cwd>/.gofer/commands), skills, and file
+  resolution are all cwd-scoped — you are rebasing this session's environment,
+  not just pointing it somewhere that exists.
+
+Directory: /tmp/rehomed▏
+  no directories found here — type a path instead
+
+type a path · ↑/↓ browse · enter re-init here · esc back

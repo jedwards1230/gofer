@@ -1,0 +1,24 @@
+
+gofer v0.3.0
+claude-sonnet-5 · ~/orchestration
+1 awaiting input · 1 working · 0 completed
+
+~/orchestration
+▸ wire the app root             Working · overview <-> peek <-> attach nav    2m
+  review the supervisor contr…  Needs input · turn finished — awaiting the…   5m
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+Status Config Model Thinking Usage Stats Context [MCP] Skills Resume Help
+────────────────────────────────────────────────────────────────────────────────
+MCP servers: 1 connected of 4 configured
+  github          stdio (configured)  connected
+  linear          http (configured)   not connected
+  legacy-ws       ? (configured)      unsupported transport
+  scratch         stdio (configured)  disabled
+Federated tools: 7 total across connected servers
+Tool schemas: index (configured) — 6 index-only, 1 resident
+Not reported (gofer#302): per-server tools, down-reason, down-since
+←/→ to switch tabs · esc to close

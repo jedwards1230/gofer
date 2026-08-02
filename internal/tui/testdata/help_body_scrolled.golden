@@ -1,13 +1,13 @@
+  /status                          Show session, cwd, and provider status
+  /thinking [low|medium|high|off]  Set the reasoning effort for this session (/…
   /usage                           Show this session's token and cost consumpti…
   /yolo [on|off]                   Toggle guardrails for new sessions
 Global
-  ctrl+c  Quit gofer
+  ctrl+c  Quit gofer (press twice)
   ctrl+y  Toggle guardrails for new sessions (same as /yolo)
   ctrl+a  Select the whole screen and copy it (empty input bar)
   alt+a   Copy the WHOLE transcript, scrolled-off content included (attach, emp…
   ctrl+r  Toggle reply-on-run for shell commands (reply now / queue)
 Roster
   ↑/↓        Move the roster selection
-  enter      Open the selected session, or run what's typed
-  →          Open the selected session (empty dispatch bar)
-↑ 12 more · ↓ 62 more
+↑ 12 more · ↓ 64 more

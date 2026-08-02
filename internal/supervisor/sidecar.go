@@ -51,6 +51,23 @@ type sessionMeta struct {
 	// ArchivedAt is when the session was archived; the zero time for a session
 	// that never was. Diagnostic only — Archived is the load-bearing flag.
 	ArchivedAt time.Time `json:"archivedAt,omitempty"`
+	// Reported records that this CHILD session has already delivered its one
+	// report to its parent (see [managed.reportToParentOnce]).
+	//
+	// It lives here, and not only in the live [managed]'s sync.Once, because the
+	// bound is per SESSION and a session outlives the process that ran it. A
+	// killed-and-resumed child gets a brand-new managed with a brand-new Once,
+	// so an in-memory bound alone re-arms the report on every `gofer resume
+	// <child-id>` — which is exactly the unbounded parent↔child prompting loop
+	// the bound exists to prevent, reachable from the TUI's /resume.
+	//
+	// It is claimed BEFORE the report is delivered, so the failure direction is
+	// at-most-once rather than at-least-once: a crash between the claim and the
+	// delivery loses a report (a parent that waits, which a human notices),
+	// while the reverse would duplicate one (a loop with no human in it).
+	// Zero value (false) is a child that has not reported yet, which is what
+	// every session predating this field reads back as.
+	Reported bool `json:"reported,omitempty"`
 	// Prompt is this session's composed system prompt provenance — which
 	// files composed it, its content hash, and its length — recorded by
 	// [RecordPrompt] for the CLI paths that build a session directly via
@@ -132,7 +149,31 @@ type promptMeta struct {
 // roster metadata is always recordable: each is the whole point of the sidecar
 // for a plain root session that has no parent/agent link.
 func (m sessionMeta) recordable() bool {
-	return m.ParentID != "" || m.Agent != "" || m.Archived || m.Prompt != nil || m.Derived != nil
+	return m.ParentID != "" || m.Agent != "" || m.Archived || m.Reported || m.Prompt != nil || m.Derived != nil
+}
+
+// claimReport marks id's sidecar under dir as having delivered its one
+// child→parent report, reporting whether THIS call won the claim. false with a
+// nil error means the report was already delivered (by this process, or by a
+// previous one before a kill/resume) and must not be sent again.
+//
+// The read-modify-write runs under [sidecarMu] like every other sidecar
+// mutation, so it is atomic against a concurrent archive or derived-metadata
+// write — and, because it is a single guarded read-then-write, two goroutines
+// racing to report the same session cannot both win.
+func claimReport(dir, id string) (won bool, err error) {
+	err = updateSessionMeta(dir, id, func(m *sessionMeta) bool {
+		if m.Reported {
+			return false
+		}
+		m.Reported = true
+		won = true
+		return true
+	})
+	if err != nil {
+		return false, err
+	}
+	return won, nil
 }
 
 // sidecarPath is the sidecar file for id in the session directory dir (the
