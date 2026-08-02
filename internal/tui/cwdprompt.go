@@ -571,10 +571,29 @@ func (a App) cwdDirCandidatesCmd() tea.Cmd {
 // absolute path, and a relative one would be resolved against the DAEMON's
 // working directory — a different machine's idea of "here", which is precisely
 // the silent substitution this whole prompt exists to prevent.
+//
+// base is normalized before anything is derived from it, rather than trusted:
+// it comes from [CommandEnv.Cwd], which is free-form enough to hold a "~/…"
+// string, and seeding from that verbatim would emit candidates that are neither
+// absolute nor tilde-free — contradicting the contract above. [resolveChosenDir]
+// would still expand whichever one the user picked, so this was never a wire
+// bug; it made the guarantee true HERE too, so the invariant is not left resting
+// on a single downstream caller. A base that cannot be made absolute yields no
+// candidates at all: the free-text entry still works, and a guessed root is the
+// one thing this prompt must never offer.
 func directoriesOf(paths []string, base string, limit int) []string {
+	base = expandHome(strings.TrimSpace(base))
 	if base == "" {
 		return nil
 	}
+	if !filepath.IsAbs(base) {
+		abs, err := filepath.Abs(base)
+		if err != nil {
+			return nil
+		}
+		base = abs
+	}
+	base = filepath.Clean(base)
 	seen := map[string]bool{base: true}
 	out := []string{base}
 	for _, p := range paths {
