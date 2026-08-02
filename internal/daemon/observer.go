@@ -118,6 +118,38 @@ func (d *Daemon) startSessionObserver(sessionID string) {
 				if !ok {
 					return
 				}
+				// Fast path, ADVISORY only. The authoritative
+				// double-delivery guard is the promptHandlerActive check
+				// inside BroadcastRawEvent/BroadcastSessionUpdate below and
+				// it stays there — this is purely "don't pay json.Marshal
+				// for output we are about to discard". During a live turn
+				// the relay methods return immediately, so without this the
+				// observer marshals every message and every tool delta of
+				// every turn only to throw the bytes away.
+				//
+				// Kept here rather than pushed down into the relay methods
+				// on purpose: BroadcastRawEvent takes PRE-MARSHALLED bytes
+				// precisely so the router's verbatim worker envelope crosses
+				// it untouched (see event_relay.go's marshal-once note —
+				// a re-encode there would silently shed tool.call.finished's
+				// Diagnostics/Spill* fields). Moving the marshal inside it
+				// would mean re-encoding the one path that must not be.
+				//
+				// Because the check is advisory, a future third caller that
+				// forgets it is still CORRECT, only slower — the guard that
+				// decides delivery is never the one being duplicated here.
+				//
+				// It does move this observer's stand-down decision earlier by
+				// one marshal: a handler that ENDS between here and the
+				// broadcast now suppresses an event the later check would have
+				// let through. That is the same at-most-one-event turn
+				// boundary BroadcastRawEvent's guard doc already accepts, on
+				// the same side (suppress, never double-deliver), and a
+				// client's durable transcript comes from the journal replay on
+				// attach rather than from this live path.
+				if d.promptHandlerActive(sessionID) {
+					continue
+				}
 				raw, merr := json.Marshal(e)
 				if merr != nil {
 					// Kind only — never the marshalled event, which may carry
