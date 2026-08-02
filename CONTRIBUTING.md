@@ -125,10 +125,16 @@ delete it, leave `cmd.Env` nil, and gate the hand-off on the feature that needs
 it so a deployment that never opted in carries no credential at all.
 
 The same property bounds `config.SecretRef`: its `env:VAR` form resolves against
-gofer's **own** environment at use time, so a credential supplied that way is
-readable by the model through the bash tool. That is a reasonable trade for an
-operator-scoped API key and the wrong one for anything whose disclosure is worth
-more than the session — prefer `file:/path` as the blast radius grows.
+gofer's **own** environment at use time (`os.LookupEnv`), so any credential
+supplied that way is readable by the model through the bash tool. That is not
+one key — it holds for every `SecretRef` consumer, including each MCP server's
+`env` and `headers` (`internal/mcpconn`'s `resolveEnv`/`resolveHeaders`), so an
+`Authorization` bearer for an HTTP MCP server configured as `env:` is
+model-readable on the same terms.
+
+That is a reasonable trade for an operator-scoped, per-service credential and
+the wrong one as the blast radius grows. `SecretRef` already supports
+`file:/path` — prefer it whenever disclosure would cost more than the session.
 
 ## Before you open a PR
 
