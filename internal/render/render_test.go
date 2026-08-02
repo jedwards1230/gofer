@@ -91,6 +91,39 @@ func TestHuman(t *testing.T) {
 			want: "· session.compacted  1 message replaced with a summary\n",
 		},
 		{
+			// The whole point of the start line: a headless stream that would
+			// otherwise sit silent for the length of a summarizer call. Its
+			// count must read the same way the terminal's does, since correlating
+			// the pair by eye is the only correlation this renderer offers.
+			name: "compaction start then success",
+			events: []event.Event{
+				event.NewSessionCompactionStarted(sid, "entry-9", 4),
+				event.NewSessionCompacted(sid, "entry-9", 4, "claude-sonnet-5",
+					provider.Usage{InputTokens: 4000, OutputTokens: 200}, "condensed summary"),
+			},
+			want: "· session.compaction_started  summarizing 4 messages…\n" +
+				"· session.compacted  4 messages replaced with a summary\n",
+		},
+		{
+			// The failure terminal must carry its reason AND say the context was
+			// left alone — an operator who saw the start line needs to know the
+			// compaction did not land, not just that it stopped.
+			name: "compaction start then failure",
+			events: []event.Event{
+				event.NewSessionCompactionStarted(sid, "entry-9", 4),
+				event.NewSessionCompactionFailed(sid, "entry-9", 4, "summarizer: context deadline exceeded"),
+			},
+			want: "· session.compaction_started  summarizing 4 messages…\n" +
+				"· session.compaction_failed  4 messages left uncompacted: summarizer: context deadline exceeded\n",
+		},
+		{
+			name: "compaction start, singular",
+			events: []event.Event{
+				event.NewSessionCompactionStarted(sid, "entry-1", 1),
+			},
+			want: "· session.compaction_started  summarizing 1 message…\n",
+		},
+		{
 			// event.MessageUser (the user's own prompt) never deltas — see its
 			// doc — so unlike reasoning/text, MessageStarted writes nothing and
 			// the settled MessageFinished is the only content this renderer

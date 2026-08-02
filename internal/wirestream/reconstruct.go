@@ -477,8 +477,12 @@ func (r *Reconstructor) handleGoferEvent(raw json.RawMessage) {
 		ev = event.NewSessionResumed(w.SessionID)
 	case event.KindSessionForked:
 		ev = event.NewSessionForked(w.SessionID, w.At, w.Label)
+	case event.KindSessionCompactionStarted:
+		ev = event.NewSessionCompactionStarted(w.SessionID, w.ReplacesThrough, w.Messages)
 	case event.KindSessionCompacted:
 		ev = event.NewSessionCompacted(w.SessionID, w.ReplacesThrough, w.MessagesCompacted, w.Model, w.Usage, w.Summary)
+	case event.KindSessionCompactionFailed:
+		ev = event.NewSessionCompactionFailed(w.SessionID, w.ReplacesThrough, w.Messages, w.Err)
 	case event.KindSessionKilled:
 		ev = event.NewSessionKilled(w.SessionID)
 	case event.KindSessionArchived:
@@ -557,11 +561,25 @@ type goferEventWire struct {
 	At    string `json:"at"`
 	Label string `json:"label"`
 
-	// session.compacted (Usage is shared with turn.finished below)
+	// session.compacted (Usage is shared with turn.finished below).
+	// ReplacesThrough is shared with session.compaction_started and
+	// session.compaction_failed, which carry the same boundary — it is what
+	// correlates a start with whichever terminal follows it.
 	ReplacesThrough   string `json:"replaces_through"`
 	MessagesCompacted int    `json:"messages_compacted"`
 	Model             string `json:"model"`
 	Summary           string `json:"summary"`
+
+	// session.compaction_started / session.compaction_failed. The key is
+	// `messages`, NOT session.compacted's `messages_compacted`, and that
+	// asymmetry is the SDK's deliberate choice rather than an oversight here:
+	// this is a PRE-compaction count taken before the summarizer runs, so
+	// reporting it under `messages_compacted` would claim a compacted count for
+	// a compaction that has not happened. Decoding it into the same Go field as
+	// MessagesCompacted would silently re-introduce exactly that conflation.
+	// (session.compaction_failed's "error" is the Err field in the
+	// session.error group below — one field decodes both kinds' identical key.)
+	Messages int `json:"messages"`
 
 	// session.error
 	Err   string `json:"error"`

@@ -34,6 +34,20 @@ Tape/scenario names follow one slug schema, `<area>-<view>[-<state>]`
   history is load-bearing: compaction replaces a long context, so an indicator
   over an empty transcript would show the widget while misrepresenting what
   produces it.
+- `transcript-auto-compacting.tape` — the SAME indicator reached the other way:
+  AUTOMATIC compaction (gofer#300), with no slash command and no keystroke.
+  Captured as a before/after PAIR (`transcript-auto-compacting-before`,
+  `-after`) because the reviewable claim is that the indicator APPEARED ON ITS
+  OWN, which a single frame cannot show — compare the two and the untouched
+  input line between them. The scene publishes `session.compaction_started` on a
+  TIMER (`autoCompactingApp`, `autoCompactDelay`) rather than seeding it into
+  the replay backlog: seeding would put the indicator on screen the instant the
+  tape attaches and destroy the "before" frame. No terminal event is ever
+  published, so the indicator persists to the end. Same mid-bucket timing
+  discipline as `transcript-compacting` above, with ~500ms of slack either side
+  for process-startup jitter. The clearing paths (both terminals, a closed
+  subscription, a session switch) are unit-tested instead — a tape cannot assert
+  that something is absent for the right reason.
 - `transcript-overflow-recovery.tape` — the failure-triggered compaction
   sequence (jedwards1230/gofer#279): a user prompt, then the non-fatal
   `context window exceeded — compacting…` notice, then the `session.compacted`
