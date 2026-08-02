@@ -91,6 +91,23 @@ rather than red).
 
 `docs/TESTING.md` has the longer list.
 
+## In a comment, point at the rule — don't restate it
+
+When a comment needs a rule that is written down elsewhere, **link to it**:
+`[Config.Field]`, a named function, a section of this file. Restate it only if
+you are willing to maintain a second copy.
+
+A restated rule rots **silently**. The canonical statement changes, the copy
+keeps asserting the old one, and a stale comment is indistinguishable from a true
+one — nothing mechanical tells them apart, because the test suite verifies
+behaviour and says nothing about whether the prose agrees. A pointer rots
+**visibly**: rewrite the target and every reference now reads the new text, so
+the ones that no longer fit show up. Making decay visible is the cheapest defence
+available, and for a comment it is close to the only one.
+
+`internal/router`'s `buildWorkerCmd` is the worked example — it points at
+`Config.RouterToken` and at the section above rather than re-explaining either.
+
 ## Local install
 
 Use `make install` (not a bare `go install ./cmd/gofer`) to install gofer
