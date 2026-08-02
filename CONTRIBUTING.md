@@ -111,18 +111,28 @@ it defends against other local *users* while leaving the secret open to the
 *agent*, which is the principal this codebase exists to run. Two mechanisms make
 that concrete, and both are worth re-checking rather than taking on faith:
 
-- The SDK's bash tool execs with `cmd.Env` left nil (`tool/bash.go`), and Go
-  gives a child process with a nil `Env` its parent's environment. Anything in a
-  gofer process's environment is therefore one `env` away from the model.
-- `internal/sandbox` does not change that. The bwrap profile binds the
-  filesystem and unshares the network (`--ro-bind`, `--bind`, `--unshare-net`);
-  neither backend passes `--clearenv`/`--unsetenv` or filters the environment at
-  all. Containment covers the filesystem and the network, not the environment.
+- The SDK's bash tool execs with `cmd.Env` left nil
+  (`agent-sdk-go`'s `tool/bash.go` — the SDK module, not a path in this repo),
+  and Go gives a child process with a nil `Env` its parent's environment.
+  Anything in a gofer process's environment is therefore one `env` away from the
+  model.
+- `internal/sandbox` does not change that. The bwrap profile
+  (`internal/sandbox/profile_bwrap.go`) binds the filesystem and unshares the
+  network (`--ro-bind`, `--bind`, `--unshare-net`); neither backend passes
+  `--clearenv`/`--unsetenv` or filters the environment at all. Containment
+  covers the filesystem and the network, not the environment.
 
 So when a gofer process must hand a credential to another process it spawns:
-write it as a `0600` file, pass the *path*, have the recipient read it once and
-delete it, leave `cmd.Env` nil, and gate the hand-off on the feature that needs
-it so a deployment that never opted in carries no credential at all.
+
+1. Write the secret to a `0600` file.
+2. Pass the **path**, never the value — not in argv, not in the environment.
+3. Have the recipient read it once and **delete** it.
+4. Leave `cmd.Env` nil so the child inherits the parent's environment unchanged
+   and gains nothing from the hand-off.
+5. Gate the whole hand-off on the feature that needs it, so a deployment that
+   never opted in carries no credential at all.
+6. Sweep a leftover file with the recipient's other runtime artifacts, for the
+   case where it dies before reading.
 
 The same property bounds `config.SecretRef`: its `env:VAR` form resolves against
 gofer's **own** environment at use time (`os.LookupEnv`), so any credential
