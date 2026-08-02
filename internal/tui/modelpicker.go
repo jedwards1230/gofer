@@ -54,6 +54,7 @@ import (
 	"github.com/jedwards1230/gofer/internal/modelcatalog"
 	"github.com/jedwards1230/gofer/internal/modelmeta"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
+	"github.com/jedwards1230/gofer/internal/uicopy"
 )
 
 // modelRow is one flattened row in the picker's provider-grouped list.
@@ -226,7 +227,7 @@ func (v modelPickerView) lines() []string {
 	}
 	rows := v.rows()
 	if len(rows) == 0 {
-		return append(out, v.theme.WarnStyle().Render("No providers authenticated. Run /login (or 'gofer login <anthropic|openai>')."))
+		return append(out, v.theme.WarnStyle().Render(uicopy.ModelPickerNoProviders))
 	}
 	active := v.activeModel()
 	lastProvider := ""
@@ -245,9 +246,9 @@ func (v modelPickerView) lines() []string {
 // string edit uses.
 func (v modelPickerView) entryLine() string {
 	if v.entry == "" {
-		return v.theme.MutedStyle().Render("Model id: (type any id, listed or not)")
+		return v.theme.MutedStyle().Render(uicopy.ModelPickerEntryPrompt)
 	}
-	return "Model id: " + v.entry + "▏"
+	return uicopy.ModelPickerEntryPrefix + v.entry + "▏"
 }
 
 // candidateLine renders what Enter would commit for the typed entry, or the
@@ -333,7 +334,7 @@ func catalogDescriptionLine(m modelcatalog.Model) string {
 	info, err := provider.Resolve(m.ID)
 	if err != nil {
 		if m.ContextWindow > 0 {
-			return fmt.Sprintf("%s · %s context · pricing unknown", head, formatContextWindow(m.ContextWindow))
+			return uicopy.ModelPickerContextOnly(head, formatContextWindow(m.ContextWindow))
 		}
 		return head
 	}
@@ -342,7 +343,7 @@ func catalogDescriptionLine(m modelcatalog.Model) string {
 	// (see modelcatalog.codexFloor), so it defers rather than reporting 0.
 	ctxSeg := contextSegment(info)
 	if m.ContextWindow > 0 {
-		ctxSeg = formatContextWindow(m.ContextWindow) + " context"
+		ctxSeg = uicopy.ModelPickerContextSegment(formatContextWindow(m.ContextWindow))
 	}
 	return fmt.Sprintf("%s · %s · %s", head, ctxSeg, pricingSegment(info))
 }
@@ -379,9 +380,9 @@ func modelDescriptionLine(id string) string {
 // incomplete registry row can't fabricate a limit either.
 func contextSegment(info provider.ModelInfo) string {
 	if info.Unregistered || info.ContextWindow == 0 {
-		return "context unknown"
+		return uicopy.ModelPickerContextUnknown
 	}
-	return formatContextWindow(info.ContextWindow) + " context"
+	return uicopy.ModelPickerContextSegment(formatContextWindow(info.ContextWindow))
 }
 
 // pricingSegment renders info's per-Mtok input/output rates, or "pricing
@@ -393,9 +394,9 @@ func contextSegment(info provider.ModelInfo) string {
 // two.
 func pricingSegment(info provider.ModelInfo) string {
 	if info.Unregistered || info.Pricing.Input == 0 || info.Pricing.Output == 0 {
-		return "pricing unknown"
+		return uicopy.ModelPickerPricingUnknown
 	}
-	return fmt.Sprintf("$%s/$%s per Mtok", formatPrice(info.Pricing.Input), formatPrice(info.Pricing.Output))
+	return uicopy.ModelPickerPricing(formatPrice(info.Pricing.Input), formatPrice(info.Pricing.Output))
 }
 
 // formatContextWindow renders a token count as a compact "1M"/"400K" style

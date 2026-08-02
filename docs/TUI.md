@@ -1473,6 +1473,25 @@ tui/
   help composed from the focused component's `ShortHelp()`.
 - **Dispatch precedence as a rule**: dialog stack > active pane/screen >
   global keys.
+- **Operator copy lives in `internal/uicopy`, not at the call site.** Every
+  phrase a human reads is a constant or a formatting function there, so a
+  phrase changes in one place and a second locale becomes possible later.
+  Constants rather than a keyed map on purpose: a mistyped key in a map returns
+  `""` and renders a blank line, which nothing catches; a mistyped constant
+  does not compile. Parameterised copy is a function with named arguments
+  rather than an exported format string, so two interpolated values cannot be
+  transposed silently.
+
+  The split that matters is **audience, not location**: model-facing text —
+  tool descriptions, prompt fragments, anything the agent reads — is behaviour,
+  not copy, and stays out of the catalog. `shell.go`'s fold header and
+  no-output marker are the live example, and the shell run *note* is
+  genuinely both (written into the model's context and rendered to the
+  operator), so it stays put too. `TestNoInlineOperatorCopy` enforces the rule
+  and `allowedInlineCopy` records every exception with its reason. It is a
+  floor, not a ceiling: it only sees multi-word prose, because a bare word is
+  indistinguishable from a map key by syntax alone — single-word labels still
+  belong in the catalog, they just are not mechanically enforced.
 
 ## Load-bearing patterns (design in from day one)
 

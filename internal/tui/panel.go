@@ -25,6 +25,7 @@ import (
 	"github.com/jedwards1230/gofer/internal/modelcatalog"
 	"github.com/jedwards1230/gofer/internal/modelmeta"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
+	"github.com/jedwards1230/gofer/internal/uicopy"
 )
 
 // commandPanelTab identifies one tab in the command panel's tab bar.
@@ -61,17 +62,17 @@ type panelTab struct {
 // once (capabilities.go). Resume sits last: it is the only tab that acts on a
 // DIFFERENT session than the one the panel describes.
 var panelTabs = []panelTab{
-	{panelStatus, "Status"},
-	{panelConfig, "Config"},
-	{panelModel, "Model"},
-	{panelEffort, "Thinking"},
-	{panelUsage, "Usage"},
-	{panelStats, "Stats"},
-	{panelContext, "Context"},
-	{panelMCP, "MCP"},
-	{panelSkills, "Skills"},
-	{panelResume, "Resume"},
-	{panelHelp, "Help"},
+	{panelStatus, uicopy.PanelTabStatus},
+	{panelConfig, uicopy.PanelTabConfig},
+	{panelModel, uicopy.PanelTabModel},
+	{panelEffort, uicopy.PanelTabThinking},
+	{panelUsage, uicopy.PanelTabUsage},
+	{panelStats, uicopy.PanelTabStats},
+	{panelContext, uicopy.PanelTabContext},
+	{panelMCP, uicopy.PanelTabMCP},
+	{panelSkills, uicopy.PanelTabSkills},
+	{panelResume, uicopy.PanelTabResume},
+	{panelHelp, uicopy.PanelTabHelp},
 }
 
 // panelHeight is the fixed number of rows the command panel occupies in the
@@ -340,17 +341,17 @@ func (p commandPanel) Height(width int) int {
 func (p commandPanel) footerText() string {
 	switch p.active {
 	case panelConfig:
-		return "Type to filter · Enter/↓ to select · ↑ to tabs · Esc to clear"
+		return uicopy.PanelFooterConfig
 	case panelModel:
-		return "Type a model id · ↑/↓ to browse · Enter to select · Esc to clear"
+		return uicopy.PanelFooterModel
 	case panelResume:
-		return "Type to filter · ↑/↓ to browse · Enter to resume · Esc to clear"
+		return uicopy.PanelFooterResume
 	case panelEffort:
-		return "↑/↓ to choose · Enter to select · Esc to close"
+		return uicopy.PanelFooterEffort
 	case panelHelp:
-		return "↑/↓ to scroll · ←/→ to switch tabs · esc to close"
+		return uicopy.PanelFooterHelp
 	}
-	return "←/→ to switch tabs · esc to close"
+	return uicopy.PanelFooterDefault
 }
 
 // tabBar renders the tab labels, bracketing the active one, joined to fit
@@ -706,7 +707,7 @@ func (a App) applyModelSelection(selected string, sess *SessionInfo) (App, tea.C
 			// zero-value config — that would overwrite config.json and drop
 			// the user's permissions/telemetry settings. Surface it and abort,
 			// preserving the on-disk state (mirrors the SaveConfig-error path).
-			a.setStatus(sevDanger, "couldn't load config: "+err.Error())
+			a.setStatus(sevDanger, uicopy.PanelConfigLoadFailed(err.Error()))
 			a.panel = nil
 			return a, nil
 		}
@@ -715,7 +716,7 @@ func (a App) applyModelSelection(selected string, sess *SessionInfo) (App, tea.C
 	cfg.Session.Model = selected
 	if a.commandEnv.SaveConfig != nil {
 		if err := a.commandEnv.SaveConfig(cfg); err != nil {
-			a.setStatus(sevDanger, "couldn't save default model: "+err.Error())
+			a.setStatus(sevDanger, uicopy.PanelSaveDefaultModelFailed(err.Error()))
 			a.panel = nil
 			return a, nil
 		}
@@ -737,8 +738,8 @@ func (a App) applyModelSelection(selected string, sess *SessionInfo) (App, tea.C
 	if sess == nil {
 		// The overview: no running session to swap, only the default.
 		a.setStatus(a.defaultReachSeverity(sevOK), a.withDefaultReach(
-			"Default model set to "+modelmeta.DisplayName(selected)+".",
-			"Default saved; attached daemon adopts it unless pinned."))
+			uicopy.PanelDefaultModelSet(modelmeta.DisplayName(selected)),
+			uicopy.PanelDefaultSavedDaemonHedged))
 		return a, a.probeDaemonDefaultCmd(outcomeDefaultOnly, selected)
 	}
 
@@ -753,10 +754,10 @@ func (a App) applyModelSelection(selected string, sess *SessionInfo) (App, tea.C
 		// most likely looking at — the running session — did not move.
 		if a.commandEnv.DaemonBacked {
 			a.setStatus(sevWarn, a.withDefaultReach(
-				"Live model swap needs the same provider — this session keeps its model.",
-				"Provider differs — session keeps its model; default saved."))
+				uicopy.PanelLiveSwapNeedsSameProvider,
+				uicopy.PanelProviderDiffersDefaultSaved))
 		} else {
-			a.setStatus(sevWarn, "Live model swap needs the same provider — default set for new sessions; this session keeps its model.")
+			a.setStatus(sevWarn, uicopy.PanelLiveSwapNeedsSameProviderNew)
 		}
 		return a, a.probeDaemonDefaultCmd(outcomeProviderMismatch, selected)
 	}
@@ -765,8 +766,8 @@ func (a App) applyModelSelection(selected string, sess *SessionInfo) (App, tea.C
 	// on the daemon path, in-process on the local one — so this half of the
 	// message is unconditional. Only the DEFAULT's reach differs.
 	a.setStatus(a.defaultReachSeverity(sevOK), a.withDefaultReach(
-		"Model set to "+modelmeta.DisplayName(selected)+".",
-		"Model set for this session; daemon adopts the default unless pinned."))
+		uicopy.PanelModelSet(modelmeta.DisplayName(selected)),
+		uicopy.PanelModelSetDaemonHedged))
 	sessionID, sup := sess.ID, a.sup
 	probe := a.probeDaemonDefaultCmd(outcomeLiveSwap, selected)
 	return a, func() tea.Msg {
@@ -842,7 +843,7 @@ func (a App) applyEffortSelection(effort string, sess *SessionInfo) (App, tea.Cm
 			// Same width discipline as every other status note (see
 			// withDefaultReach): short enough that the remedy survives
 			// truncation at the 80-column floor.
-			a.setStatus(sevDanger, modelmeta.DisplayName(model)+" doesn't support reasoning effort — switch with /model.")
+			a.setStatus(sevDanger, uicopy.PanelEffortUnsupported(modelmeta.DisplayName(model)))
 			a.panel = nil
 			return a, nil
 		}
@@ -855,7 +856,7 @@ func (a App) applyEffortSelection(effort string, sess *SessionInfo) (App, tea.Cm
 			// Same data-loss guard as applyModelSelection: never fall through to
 			// SaveConfig with a zero-value config, which would overwrite
 			// config.json and drop the user's permissions/telemetry settings.
-			a.setStatus(sevDanger, "couldn't load config: "+err.Error())
+			a.setStatus(sevDanger, uicopy.PanelConfigLoadFailed(err.Error()))
 			a.panel = nil
 			return a, nil
 		}
@@ -864,7 +865,7 @@ func (a App) applyEffortSelection(effort string, sess *SessionInfo) (App, tea.Cm
 	cfg.Session.Effort = effort
 	if a.commandEnv.SaveConfig != nil {
 		if err := a.commandEnv.SaveConfig(cfg); err != nil {
-			a.setStatus(sevDanger, "couldn't save default reasoning effort: "+err.Error())
+			a.setStatus(sevDanger, uicopy.PanelSaveDefaultEffortFailed(err.Error()))
 			a.panel = nil
 			return a, nil
 		}
@@ -879,11 +880,11 @@ func (a App) applyEffortSelection(effort string, sess *SessionInfo) (App, tea.Cm
 		// (see config.Session.Effort), so "new sessions will use it" would be
 		// an overclaim on either backend, which is also why this path needs
 		// none of /model's daemon-reach hedging.
-		a.setStatus(sevOK, "Default reasoning effort saved: "+effortLabel(effort)+".")
+		a.setStatus(sevOK, uicopy.PanelDefaultEffortSaved(effortLabel(effort)))
 		return a, nil
 	}
 
-	a.setStatus(sevOK, "Reasoning effort set to "+effortLabel(effort)+" for this session.")
+	a.setStatus(sevOK, uicopy.PanelEffortSet(effortLabel(effort)))
 	sessionID, sup := sess.ID, a.sup
 	return a, func() tea.Msg {
 		// Off the Update loop: on the daemon path this is a network call. Any
@@ -996,21 +997,21 @@ func (a App) applyDaemonDefault(msg daemonDefaultProbedMsg) App {
 	case outcomeProviderMismatch:
 		// Warn regardless: the running session did not move either way.
 		if adopted {
-			a.setStatus(sevWarn, "Provider differs — session keeps its model; daemon took the default.")
+			a.setStatus(sevWarn, uicopy.PanelProviderDiffersDaemonAdopted)
 		} else {
-			a.setStatus(sevWarn, "Provider differs — session keeps its model; daemon is pinned.")
+			a.setStatus(sevWarn, uicopy.PanelProviderDiffersDaemonPinned)
 		}
 	case outcomeLiveSwap:
 		if adopted {
-			a.setStatus(sevOK, "Model set for this session; the daemon took the new default.")
+			a.setStatus(sevOK, uicopy.PanelModelSetDaemonAdopted)
 		} else {
-			a.setStatus(sevWarn, "Model set for this session; the daemon is pinned to another default.")
+			a.setStatus(sevWarn, uicopy.PanelModelSetDaemonPinned)
 		}
 	default: // outcomeDefaultOnly
 		if adopted {
-			a.setStatus(sevOK, "Default model saved; the attached daemon adopted it.")
+			a.setStatus(sevOK, uicopy.PanelDefaultSavedDaemonAdopted)
 		} else {
-			a.setStatus(sevWarn, "Default saved; the attached daemon is pinned to another model.")
+			a.setStatus(sevWarn, uicopy.PanelDefaultSavedDaemonPinned)
 		}
 	}
 	return a

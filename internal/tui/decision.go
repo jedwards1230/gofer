@@ -39,6 +39,7 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/acp"
 
 	"github.com/jedwards1230/gofer/internal/tui/theme"
+	"github.com/jedwards1230/gofer/internal/uicopy"
 )
 
 // pendingDecision is the state of one unresolved structured-decision request.
@@ -300,51 +301,44 @@ func (p pendingDecision) chosenOption(i int) bool {
 func (p pendingDecision) hint() string {
 	switch {
 	case p.noting:
-		return "Enter to save the note · Esc to discard"
+		return uicopy.DecisionHintNoting
 	case p.typing && p.multi():
 		// Multi-question: Enter records a draft, it does not submit the request.
-		return "Enter to save · Esc to discard"
+		return uicopy.DecisionHintTypingMulti
 	case p.typing:
-		return "Enter to submit · Esc to cancel"
+		return uicopy.DecisionHintTyping
 	case p.onSubmitTab():
-		return "Enter to submit · Tab to switch questions · Esc to cancel"
+		return uicopy.DecisionHintSubmitTab
 	case p.multi():
-		return "Enter to select · ↑/↓ to navigate · n to add notes · Tab to switch questions · Esc to cancel"
+		return uicopy.DecisionHintMulti
 	default:
-		return "Enter to select · ↑/↓ to navigate · Esc to cancel"
+		return uicopy.DecisionHintSingle
 	}
 }
 
-// The prompt's fixed vocabulary. The focus caret and its gutter are the shared
+// The prompt's fixed vocabulary — the glyphs and padding, the copy beside them
+// having moved to [uicopy]. The focus caret and its gutter are the shared
 // [choiceCaret]/[choiceGutter] (choicelist.go) — the same selection marker the
 // approval prompt and every other list here use; the rationale indent puts the
 // sub-line two cells past its option's label, which is what makes it read as
 // belonging to that option rather than to the list.
 const (
-	decisionChip             = "decision"
-	decisionRationaleIndent  = "       "
-	decisionFreeTextGlyph    = "›"
-	decisionFreeTextLabel    = "Type something."
-	decisionChatGlyph        = "↳"
-	decisionChatLabel        = "Chat about this"
-	decisionRecommendedLabel = "(Recommended)"
-	decisionCursorGlyph      = "▏" // matches Model.inputLine's cursor
+	decisionRationaleIndent = "       "
+	decisionFreeTextGlyph   = "›"
+	decisionChatGlyph       = "↳"
+	decisionCursorGlyph     = "▏" // matches Model.inputLine's cursor
 )
 
-// The multi-question vocabulary: the tab strip's checkboxes and end arrows, the
-// side panel's divider and section headings, and the Submit tab's wording.
+// The multi-question vocabulary: the tab strip's checkboxes and end arrows, its
+// inter-tab gap, and the side panel's divider. The tab and section labels those
+// glyphs lead are in [uicopy].
 const (
 	decisionAnsweredGlyph   = "✔"
 	decisionUnansweredGlyph = "□"
 	decisionPrevGlyph       = "←"
 	decisionNextGlyph       = "→"
 	decisionTabGap          = "   "
-	decisionSubmitLabel     = "Submit"
-	decisionUnansweredNote  = "not answered — cancelled on submit"
 	decisionPanelDivider    = "│"
-	decisionPanelContext    = "context"
-	decisionPanelReference  = "reference"
-	decisionPanelNotes      = "notes"
 )
 
 // The side panel's width budget. The panel takes about a third of the frame,
@@ -394,7 +388,7 @@ func renderDecisionPrompt(th theme.Theme, p pendingDecision, width int) []string
 	// being mistaken for a two-question strip. The bullet binds them as one
 	// "decision · <title>" label instead — and a single question still draws no
 	// tab strip at all (only p.multi() does, below).
-	header := th.WarnStyle().Render(decisionChip)
+	header := th.WarnStyle().Render(uicopy.DecisionChip)
 	if title := p.chipTitle(); title != "" {
 		header += th.MutedStyle().Render(" · ") + title
 	}
@@ -427,7 +421,7 @@ func renderDecisionPrompt(th theme.Theme, p pendingDecision, width int) []string
 // while the agent is blocked on all of them.
 func (p pendingDecision) chipTitle() string {
 	if p.multi() {
-		return fmt.Sprintf("%d questions", len(p.questions))
+		return uicopy.DecisionQuestionCount(len(p.questions))
 	}
 	return p.question().Title
 }
@@ -470,7 +464,7 @@ func (p pendingDecision) tabStrip(th theme.Theme, width int) string {
 // checkbox reports whether EVERY question has been answered, so the strip
 // answers "am I done?" without a trip to the Submit tab.
 func (p pendingDecision) tabCell(th theme.Theme, i int) string {
-	label := decisionSubmitLabel
+	label := uicopy.DecisionSubmitLabel
 	answered := p.answeredCount() == len(p.questions)
 	if i < len(p.questions) {
 		label = p.questions[i].Title
@@ -592,9 +586,9 @@ func (p pendingDecision) panelLines(th theme.Theme, width int) []string {
 	}
 
 	var out []string
-	out = section(out, decisionPanelContext, p.question().Context)
+	out = section(out, uicopy.DecisionPanelContext, p.question().Context)
 	if row, ok := p.focused(); ok && row.kind == decisionRowOption {
-		out = section(out, decisionPanelReference, p.question().Options[row.opt].Reference)
+		out = section(out, uicopy.DecisionPanelReference, p.question().Options[row.opt].Reference)
 	}
 	if p.noting {
 		// The live editor renders even when empty — an open editor with nothing
@@ -602,11 +596,11 @@ func (p pendingDecision) panelLines(th theme.Theme, width int) []string {
 		if len(out) > 0 {
 			out = append(out, "")
 		}
-		out = append(out, th.MutedStyle().Render(decisionPanelNotes))
+		out = append(out, th.MutedStyle().Render(uicopy.DecisionPanelNotes))
 		out = append(out, wrap(p.notes.Render(decisionCursorGlyph), width)...)
 		return out
 	}
-	return section(out, decisionPanelNotes, p.draft().notes)
+	return section(out, uicopy.DecisionPanelNotes, p.draft().notes)
 }
 
 // rowLines renders the prompt's selectable rows at the given width through the
@@ -634,7 +628,7 @@ func (p pendingDecision) rowLines(th theme.Theme, width int) []string {
 			opt := q.Options[row.opt]
 			label := opt.Label
 			if opt.Recommended {
-				label += "  " + th.AccentStyle().Render(decisionRecommendedLabel)
+				label += "  " + th.AccentStyle().Render(uicopy.DecisionRecommendedLabel)
 			}
 			if p.chosenOption(row.opt) {
 				label += "  " + th.AccentStyle().Render(decisionAnsweredGlyph)
@@ -650,7 +644,7 @@ func (p pendingDecision) rowLines(th theme.Theme, width int) []string {
 			}
 
 		case decisionRowFreeText:
-			body := decisionFreeTextLabel
+			body := uicopy.DecisionFreeTextLabel
 			switch text, ok := p.draftText(); {
 			case p.typing:
 				// The placeholder gives way to the live buffer with its cursor
@@ -667,7 +661,7 @@ func (p pendingDecision) rowLines(th theme.Theme, width int) []string {
 			cr.label = body
 
 		case decisionRowChat:
-			label := decisionChatLabel
+			label := uicopy.DecisionChatLabel
 			if _, chat := p.draft().outcome.(acp.DecisionOutcomeChat); chat {
 				label += "  " + th.AccentStyle().Render(decisionAnsweredGlyph)
 			}
@@ -676,7 +670,7 @@ func (p pendingDecision) rowLines(th theme.Theme, width int) []string {
 
 		case decisionRowSubmit:
 			cr.leader = th.AccentStyle().Render(decisionAnsweredGlyph) + " "
-			cr.label = fmt.Sprintf("%s %d of %d", decisionSubmitLabel, p.answeredCount(), len(p.questions))
+			cr.label = uicopy.DecisionSubmitProgress(p.answeredCount(), len(p.questions))
 		}
 		crows = append(crows, cr)
 	}
@@ -696,7 +690,7 @@ func (p pendingDecision) draftText() (string, bool) {
 // cancelled one, and the user is entitled to see that before committing rather
 // than discover it in the agent's next message.
 func (p pendingDecision) submitBody(th theme.Theme, width int) []string {
-	body := wrap(fmt.Sprintf("Review and submit %d answers.", len(p.questions)), width)
+	body := wrap(uicopy.DecisionSubmitReview(len(p.questions)), width)
 	body = append(body, "")
 
 	labels := make([]string, len(p.questions))
@@ -732,7 +726,7 @@ func (p pendingDecision) submitBody(th theme.Theme, width int) []string {
 // summarize renders one question's drafted answer as the Submit tab's one-line
 // summary.
 func (p pendingDecision) summarize(i int, draft decisionDraft) string {
-	summary := decisionUnansweredNote
+	summary := uicopy.DecisionUnansweredNote
 	switch o := draft.outcome.(type) {
 	case acp.DecisionOutcomeSelected:
 		summary = o.OptionID
@@ -747,12 +741,12 @@ func (p pendingDecision) summarize(i int, draft decisionDraft) string {
 	case acp.DecisionOutcomeText:
 		summary = o.Text
 	case acp.DecisionOutcomeChat:
-		summary = decisionChatLabel
+		summary = uicopy.DecisionChatLabel
 	case acp.DecisionOutcomeCancelled:
-		summary = decisionUnansweredNote
+		summary = uicopy.DecisionUnansweredNote
 	}
 	if draft.notes != "" {
-		summary += " · " + decisionPanelNotes
+		summary += " · " + uicopy.DecisionPanelNotes
 	}
 	return summary
 }

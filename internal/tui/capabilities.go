@@ -12,12 +12,12 @@ package tui
 
 import (
 	"context"
-	"strconv"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/jedwards1230/gofer/internal/capability"
+	"github.com/jedwards1230/gofer/internal/uicopy"
 )
 
 // capabilitiesTimeout bounds the capability fetch. A package constant rather
@@ -117,18 +117,18 @@ func capabilityTab(tab commandPanelTab) bool {
 // internal/tui/testkit).
 func unknownCapabilityLines(subject string) []string {
 	return []string{
-		subject + ": UNKNOWN — this backend cannot report it.",
-		"This is NOT \"none configured\": nothing here has been read.",
-		"An attached `gofer daemon --workers` router owns no supervisor, so",
-		"no MCP manager and no skill set exist in that process to report;",
-		"each session's worker owns its own. A daemon older than",
-		"gofer/capabilities answers the same way.",
+		uicopy.CapabilitiesUnknown(subject),
+		uicopy.CapabilitiesUnknownNotEmpty,
+		uicopy.CapabilitiesUnknownRouter1,
+		uicopy.CapabilitiesUnknownRouter2,
+		uicopy.CapabilitiesUnknownRouter3,
+		uicopy.CapabilitiesUnknownRouter4,
 	}
 }
 
 // loadingCapabilityLines is the in-flight body both tabs render.
 func loadingCapabilityLines(subject string) []string {
-	return []string{"Loading " + subject + "…"}
+	return []string{uicopy.CapabilitiesLoading(subject)}
 }
 
 // fitRows lays a variable-length item list between fixed head and tail lines
@@ -171,6 +171,6 @@ func fitRows(head, items, tail []string, height int) []string {
 	// than leaving the case unhandled.
 	shown := max(room-1, 0)
 	out = append(out, items[:shown]...)
-	out = append(out, "  +"+strconv.Itoa(len(items)-shown)+" more")
+	out = append(out, uicopy.CapabilitiesMoreRows(len(items)-shown))
 	return append(out, tail...)
 }

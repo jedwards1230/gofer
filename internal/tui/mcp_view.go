@@ -19,13 +19,13 @@ package tui
 // noticed, the view says so on screen — see [mcpView.omissionLine].
 
 import (
-	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/jedwards1230/gofer/internal/capability"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
+	"github.com/jedwards1230/gofer/internal/uicopy"
 )
 
 // mcpView renders the MCP tab. Like every other read-only tab it is a pure
@@ -54,9 +54,9 @@ func (v mcpView) View(width, height int) string {
 func (v mcpView) lines(height int) []string {
 	switch {
 	case v.caps.pending && !v.caps.loaded:
-		return loadingCapabilityLines("MCP servers")
+		return loadingCapabilityLines(uicopy.MCPLoadingSubject)
 	case !v.caps.loaded || !v.caps.answer.Known:
-		return unknownCapabilityLines("MCP")
+		return unknownCapabilityLines(uicopy.MCPUnknownSubject)
 	}
 
 	mcp := v.caps.answer.Snapshot.MCP
@@ -64,8 +64,8 @@ func (v mcpView) lines(height int) []string {
 		// "none configured" and UNKNOWN above must never read alike — they are
 		// opposite claims, and an Ascii golden sees only the words.
 		return []string{
-			"MCP servers: none configured.",
-			"Add one under mcp.servers in config.json.",
+			uicopy.MCPNoServers,
+			uicopy.MCPAddServerHint,
 		}
 	}
 
@@ -75,7 +75,7 @@ func (v mcpView) lines(height int) []string {
 		rows = append(rows, v.serverLine(s))
 	}
 	tail := []string{
-		"Federated tools: " + strconv.Itoa(mcp.ConnectedTools) + " total across connected servers",
+		uicopy.MCPFederatedTools(mcp.ConnectedTools),
 	}
 	if line := schemaModeLine(mcp); line != "" {
 		tail = append(tail, line)
@@ -84,7 +84,7 @@ func (v mcpView) lines(height int) []string {
 		// Above the omission line, because unlike that one this is ACTIONABLE
 		// and explains why a server the reader just configured is missing from
 		// the list above.
-		tail = append(tail, v.theme.WarnStyle().Render("config.json changed since startup — restart gofer to apply"))
+		tail = append(tail, v.theme.WarnStyle().Render(uicopy.MCPConfigDrifted))
 	}
 	tail = append(tail, v.omissionLine())
 	return fitRows(head, rows, tail, height)
@@ -98,7 +98,7 @@ func (v mcpView) headerLine(servers []capability.Server) string {
 			connected++
 		}
 	}
-	return "MCP servers: " + strconv.Itoa(connected) + " connected of " + strconv.Itoa(len(servers)) + " configured"
+	return uicopy.MCPServerCounts(connected, len(servers))
 }
 
 // serverLine renders one server: name, its CONFIGURED transport, and its
@@ -122,18 +122,18 @@ func (v mcpView) serverLine(s capability.Server) string {
 	state := ""
 	switch {
 	case !s.Enabled:
-		state = "disabled"
+		state = uicopy.MCPStateDisabled
 	case transport == "":
-		state = "unsupported transport"
+		state = uicopy.MCPStateUnsupportedTransport
 	case s.Connected:
-		state = "connected"
+		state = uicopy.MCPStateConnected
 	default:
-		state = "not connected"
+		state = uicopy.MCPStateNotConnected
 	}
 	if transport == "" {
 		transport = "?"
 	}
-	line := "  " + padCell(s.Name, 16) + padCell(transport+" (configured)", 20) + state
+	line := "  " + padCell(s.Name, 16) + padCell(uicopy.MCPTransportConfigured(transport), 20) + state
 	switch {
 	case s.Connected:
 		return v.theme.OKStyle().Render(line)
@@ -149,7 +149,7 @@ func (v mcpView) serverLine(s capability.Server) string {
 // Naming the issue makes the line self-retiring: when gofer#302 lands, the
 // data exists and this line goes with it.
 func (v mcpView) omissionLine() string {
-	return v.theme.MutedStyle().Render("Not reported (gofer#302): per-server tools, down-reason, down-since")
+	return v.theme.MutedStyle().Render(uicopy.MCPOmissions)
 }
 
 // schemaModeLine renders how the federated tools reach the model — CONFIGURED
@@ -181,13 +181,11 @@ func schemaModeLine(mcp capability.MCP) string {
 	case "":
 		return ""
 	case "index":
-		return "Tool schemas: index (configured) — " +
-			strconv.Itoa(mcp.IndexOnlyTools) + " index-only, " +
-			strconv.Itoa(mcp.ResidentTools) + " resident"
+		return uicopy.MCPSchemaModeIndex(mcp.IndexOnlyTools, mcp.ResidentTools)
 	case "preload":
-		return "Tool schemas: preload (configured) — every schema preloaded"
+		return uicopy.MCPSchemaModePreload
 	default:
-		return "Tool schemas: " + mcp.SchemaMode + " (configured) — unrecognized by this gofer"
+		return uicopy.MCPSchemaModeUnrecognized(mcp.SchemaMode)
 	}
 }
 

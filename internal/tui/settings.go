@@ -12,7 +12,10 @@ package tui
 // concern: a plugin can add rows under plugin.<name>.<key> once plugin
 // loading exists (M7) without this type changing shape.
 
-import "github.com/jedwards1230/gofer/internal/config"
+import (
+	"github.com/jedwards1230/gofer/internal/config"
+	"github.com/jedwards1230/gofer/internal/uicopy"
+)
 
 // SettingKind selects a [Setting]'s edit affordance.
 type SettingKind int
@@ -48,7 +51,7 @@ func settingsRegistry() []Setting {
 	return []Setting{
 		{
 			Key:   "session.model",
-			Label: "Default model",
+			Label: uicopy.SettingsDefaultModel,
 			Kind:  SettingString,
 			Get:   func(c config.Config) string { return c.Session.Model },
 			Set: func(c config.Config, v string) config.Config {
@@ -63,7 +66,7 @@ func settingsRegistry() []Setting {
 			// the current one, and a literal "" would render as a blank cell
 			// indistinguishable from an unset row.
 			Key:     "session.effort",
-			Label:   "Reasoning effort",
+			Label:   uicopy.SettingsReasoningEffort,
 			Kind:    SettingEnum,
 			Options: []string{"off", "low", "medium", "high"},
 			Get:     func(c config.Config) string { return effortLabel(c.Session.Effort) },
@@ -77,7 +80,7 @@ func settingsRegistry() []Setting {
 		},
 		{
 			Key:     "session.permission_mode",
-			Label:   "Permission mode",
+			Label:   uicopy.SettingsPermissionMode,
 			Kind:    SettingEnum,
 			Options: []string{"ask", "yolo"},
 			Get: func(c config.Config) string {
@@ -93,7 +96,7 @@ func settingsRegistry() []Setting {
 		},
 		{
 			Key:     "tui.roster_view",
-			Label:   "Roster view",
+			Label:   uicopy.SettingsRosterView,
 			Kind:    SettingEnum,
 			Options: []string{"flat", "grouped"},
 			Get: func(c config.Config) string {
@@ -109,7 +112,7 @@ func settingsRegistry() []Setting {
 		},
 		{
 			Key:   "tui.autoscroll",
-			Label: "Auto-scroll transcript",
+			Label: uicopy.SettingsAutoscrollTranscript,
 			Kind:  SettingBool,
 			Get: func(c config.Config) string {
 				if c.TUI.AutoscrollEnabled() {
@@ -125,7 +128,7 @@ func settingsRegistry() []Setting {
 		},
 		{
 			Key:   "tui.mouse",
-			Label: "Mouse capture (scroll + selection)",
+			Label: uicopy.SettingsMouseCapture,
 			Kind:  SettingBool,
 			Get: func(c config.Config) string {
 				if c.TUI.MouseEnabled() {
@@ -148,7 +151,7 @@ func settingsRegistry() []Setting {
 			// config.TUI.ShellQueueDefault), so the enum only ever shows the two
 			// live options.
 			Key:     "tui.shell_reply_mode",
-			Label:   "Shell reply mode",
+			Label:   uicopy.SettingsShellReplyMode,
 			Kind:    SettingEnum,
 			Options: []string{"reply", "queue"},
 			Get: func(c config.Config) string {
@@ -171,7 +174,7 @@ func settingsRegistry() []Setting {
 			// documented on config.Compaction; this bool is the one genuinely
 			// UI-appropriate knob the feature introduces.
 			Key:   "compaction.enabled",
-			Label: "Automatic compaction",
+			Label: uicopy.SettingsAutomaticCompaction,
 			Kind:  SettingBool,
 			Get: func(c config.Config) string {
 				if c.Compaction.AutoEnabled() {
@@ -186,7 +189,7 @@ func settingsRegistry() []Setting {
 		},
 		{
 			Key:   "lsp.enabled",
-			Label: "LSP diagnostics",
+			Label: uicopy.SettingsLSPDiagnostics,
 			Kind:  SettingBool,
 			Get: func(c config.Config) string {
 				if c.LSP.IsEnabled() {
@@ -206,7 +209,7 @@ func settingsRegistry() []Setting {
 			// index in context, with schemas resolved on demand via
 			// tool_search (M7 workstream 4). See config.Tools.Schemas.
 			Key:     "tools.schema_mode",
-			Label:   "Tool schema mode",
+			Label:   uicopy.SettingsToolSchemaMode,
 			Kind:    SettingEnum,
 			Options: []string{"preload", "index"},
 			Get:     func(c config.Config) string { return string(c.Tools.Schemas()) },
@@ -222,7 +225,7 @@ func settingsRegistry() []Setting {
 			// configured is rejected at config load (config.Search.validate),
 			// not silently accepted by this row.
 			Key:     "search.provider",
-			Label:   "Web search provider",
+			Label:   uicopy.SettingsWebSearchProvider,
 			Kind:    SettingEnum,
 			Options: []string{"none", "brave", "searxng"},
 			Get:     func(c config.Config) string { return string(c.Search.Selected()) },
@@ -233,7 +236,7 @@ func settingsRegistry() []Setting {
 		},
 		{
 			Key:   "telemetry.enabled",
-			Label: "Telemetry enabled",
+			Label: uicopy.SettingsTelemetryEnabled,
 			Kind:  SettingBool,
 			Get: func(c config.Config) string {
 				if c.Telemetry.Enabled {
@@ -248,7 +251,7 @@ func settingsRegistry() []Setting {
 		},
 		{
 			Key:   "telemetry.endpoint",
-			Label: "Telemetry endpoint",
+			Label: uicopy.SettingsTelemetryEndpoint,
 			Kind:  SettingString,
 			Get:   func(c config.Config) string { return c.Telemetry.Endpoint },
 			Set: func(c config.Config, v string) config.Config {

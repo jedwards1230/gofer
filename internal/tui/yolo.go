@@ -29,6 +29,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/jedwards1230/gofer/internal/config"
+	"github.com/jedwards1230/gofer/internal/uicopy"
 )
 
 // permissionModeTarget is what a /yolo invocation resolves to: the bare form
@@ -74,9 +75,9 @@ func parseYoloArgs(args []string) (permissionModeTarget, string) {
 		case "off", "ask":
 			return yoloOff, ""
 		}
-		return yoloToggle, "/yolo takes on or off — got " + strconv.Quote(args[0])
+		return yoloToggle, uicopy.YoloUnknownArgumentPrefix + strconv.Quote(args[0])
 	default:
-		return yoloToggle, "/yolo takes at most one argument — got " + strconv.Itoa(len(args))
+		return yoloToggle, uicopy.YoloTooManyArgumentsPrefix + strconv.Itoa(len(args))
 	}
 }
 
@@ -108,7 +109,7 @@ func (a App) applyPermissionMode(target permissionModeTarget) (App, tea.Cmd) {
 	if a.commandEnv.Config != nil {
 		c, err := a.commandEnv.Config()
 		if err != nil {
-			a.setStatus(sevDanger, "couldn't load config: "+err.Error())
+			a.setStatus(sevDanger, uicopy.YoloConfigLoadErrorPrefix+err.Error())
 			return a, nil
 		}
 		cfg = c
@@ -118,7 +119,7 @@ func (a App) applyPermissionMode(target permissionModeTarget) (App, tea.Cmd) {
 	cfg.Session.PermissionMode = string(next)
 	if a.commandEnv.SaveConfig != nil {
 		if err := a.commandEnv.SaveConfig(cfg); err != nil {
-			a.setStatus(sevDanger, "couldn't save permission mode: "+err.Error())
+			a.setStatus(sevDanger, uicopy.YoloSaveErrorPrefix+err.Error())
 			return a, nil
 		}
 	}
@@ -128,21 +129,13 @@ func (a App) applyPermissionMode(target permissionModeTarget) (App, tea.Cmd) {
 	// Close it — the toggle is a committing action, same as a /model select.
 	a.panel = nil
 
+	// The two notes both name NEW sessions and neither claims anything about
+	// the running one — see this file's doc, and [uicopy.YoloOnNote] for why
+	// the wording is measured the way it is.
 	if next == config.PermissionModeYolo {
-		a.setStatus(sevWarn, yoloOnNote)
+		a.setStatus(sevWarn, uicopy.YoloOnNote)
 	} else {
-		a.setStatus(sevOK, yoloOffNote)
+		a.setStatus(sevOK, uicopy.YoloOffNote)
 	}
 	return a, nil
 }
-
-// The two notes, as constants so the width test can measure them and /help can
-// stay silent about wording. Both name NEW sessions and neither claims anything
-// about the running one — see this file's doc. Both fit inside the 80-column
-// floor the golden tests pin, with room to spare: the status line is truncated
-// to the terminal width (App.render), and a caveat that gets cut off leaves the
-// unqualified overclaim behind.
-const (
-	yoloOnNote  = "Guardrails OFF (yolo) for NEW sessions; running sessions keep theirs."
-	yoloOffNote = "Guardrails ON (ask) for new sessions; running sessions keep theirs."
-)

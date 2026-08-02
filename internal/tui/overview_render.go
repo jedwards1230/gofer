@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/jedwards1230/gofer/internal/tui/theme"
+	"github.com/jedwards1230/gofer/internal/uicopy"
 	"github.com/jedwards1230/gofer/internal/versionskew"
 )
 
@@ -177,17 +178,17 @@ func identityHeaderLines(th theme.Theme, meta OverviewMeta, width int) []string 
 func (o Overview) header(width int) []string {
 	working, needsInput, idle, finished := o.counts()
 	segs := []string{
-		fmt.Sprintf("%d awaiting input", needsInput),
-		fmt.Sprintf("%d working", working),
+		uicopy.OverviewAwaitingInput(needsInput),
+		uicopy.OverviewWorking(working),
 	}
 	// Idle rows (reloaded/at-rest) are a less-common state — surface the segment
 	// only when there is one, so an ordinary roster's header is byte-identical to
 	// what it has always been while a roster that HAS idle rows accounts for them
 	// instead of dropping them from the tally entirely.
 	if idle > 0 {
-		segs = append(segs, fmt.Sprintf("%d idle", idle))
+		segs = append(segs, uicopy.OverviewIdle(idle))
 	}
-	segs = append(segs, fmt.Sprintf("%d completed", finished))
+	segs = append(segs, uicopy.OverviewCompleted(finished))
 	counts := strings.Join(segs, " · ")
 	return append(identityHeaderLines(o.theme, o.meta, width), truncate(o.theme.MutedStyle().Render(counts), width), o.skewSeparator(width))
 }
@@ -205,12 +206,10 @@ func (o Overview) header(width int) []string {
 func (o Overview) skewSeparator(width int) string {
 	switch versionskew.Classify(o.meta.Version, o.meta.DaemonVersion) {
 	case versionskew.Older:
-		return truncate(o.theme.WarnStyle().Render(fmt.Sprintf(
-			"⚠ daemon is stale (%s < %s) — press R to restart",
+		return truncate(o.theme.WarnStyle().Render(uicopy.OverviewDaemonStale(
 			shortVersion(o.meta.DaemonVersion), shortVersion(o.meta.Version))), width)
 	case versionskew.Differs:
-		return truncate(o.theme.WarnStyle().Render(fmt.Sprintf(
-			"⚠ daemon is a different build (%s) — press R to restart if it is stale",
+		return truncate(o.theme.WarnStyle().Render(uicopy.OverviewDaemonDiffers(
 			shortVersion(o.meta.DaemonVersion))), width)
 	default:
 		return ""
@@ -263,7 +262,7 @@ func (o Overview) body(width, avail, scroll int) []string {
 
 	lines, selLine := o.rows(width)
 	if len(lines) == 0 {
-		empty := o.theme.MutedStyle().Render("No sessions yet — type below to start one.")
+		empty := o.theme.MutedStyle().Render(uicopy.OverviewNoSessions)
 		return pad([]string{truncate(empty, width)}, avail)
 	}
 	var below int
@@ -294,7 +293,7 @@ func (o Overview) overflowNote(lines []string, below, width int) []string {
 	}
 	// Copy: window/scrollTail return sub-slices of the caller's backing array.
 	out := append([]string(nil), lines...)
-	out[len(out)-1] = truncate(o.theme.MutedStyle().Render(fmt.Sprintf("↓ %d more", below+1)), width)
+	out[len(out)-1] = truncate(o.theme.MutedStyle().Render(uicopy.OverviewMoreBelow(below+1)), width)
 	return out
 }
 
@@ -567,7 +566,7 @@ func (o Overview) rowLabel(s SessionInfo) string {
 func (o Overview) tally(s SessionInfo) string {
 	u := s.Usage
 	total := u.InputTokens + u.OutputTokens + u.CacheReadTokens + u.CacheWriteTokens
-	return humanElapsed(sessionElapsed(s)) + " · ↓ " + humanTokens(total) + " tokens"
+	return humanElapsed(sessionElapsed(s)) + " · ↓ " + humanTokens(total) + uicopy.OverviewTokensUnit
 }
 
 // sessionElapsed is how long a session has been running: last activity minus
@@ -691,7 +690,7 @@ func (o Overview) dispatch(width int, hide bool) []string {
 		// The empty dispatch bar is the ordinary prompt where a new session
 		// starts, so it carries the `! for shell mode` discoverability hint (the
 		// only place a user can learn `!` opens shell mode before typing it).
-		line = "❯ " + o.theme.MutedStyle().Render("describe a task for a new session · ! for shell mode")
+		line = "❯ " + o.theme.MutedStyle().Render(uicopy.OverviewDispatchPlaceholder)
 	case strings.HasPrefix(o.input.String(), "!"):
 		// Shell mode: the sigil is the prompt — no `❯ ` glyph (round-5).
 		line = shellInputLine(o.theme, o.input, "▏")
@@ -725,13 +724,12 @@ func (o Overview) hintText() string {
 	// dispatch detail ([App.confirmDestroy] picks the right one off the
 	// session's status) the operator never needs to know.
 	if o.ctrlXArmed {
-		return "ctrl-x again to confirm deletion"
+		return uicopy.OverviewConfirmDelete
 	}
-	const base = "enter open · space peek · tab toggle view · ctrl-x delete"
 	if o.layout().tree {
-		return base + " · ctrl-t stop agents"
+		return uicopy.OverviewHint + uicopy.OverviewHintStopAgents
 	}
-	return base + " · ? shortcuts"
+	return uicopy.OverviewHint + uicopy.OverviewHintShortcuts
 }
 
 // humanAge renders a duration as a compact age string ("now", "5m", "3h",
@@ -739,7 +737,7 @@ func (o Overview) hintText() string {
 func humanAge(d time.Duration) string {
 	switch {
 	case d < time.Minute:
-		return "now"
+		return uicopy.OverviewAgeNow
 	case d < time.Hour:
 		return fmt.Sprintf("%dm", int(d.Minutes()))
 	case d < 24*time.Hour:
@@ -755,24 +753,14 @@ func humanAge(d time.Duration) string {
 func humanDuration(d time.Duration) string {
 	switch {
 	case d < time.Minute:
-		return "just now"
+		return uicopy.OverviewJustNow
 	case d < time.Hour:
-		return plural(int(d.Minutes()), "minute")
+		return uicopy.Minutes(int(d.Minutes()))
 	case d < 24*time.Hour:
-		return plural(int(d.Hours()), "hour")
+		return uicopy.Hours(int(d.Hours()))
 	default:
-		return plural(int(d.Hours()/24), "day")
+		return uicopy.Days(int(d.Hours() / 24))
 	}
-}
-
-// plural renders a count with its unit, pluralized by adding an "s" past one
-// ("1 subagent", "3 subagents") — shared by [humanDuration]'s long-form units
-// and the bulk-stop status note (see [App.handleOverviewKey]).
-func plural(n int, unit string) string {
-	if n == 1 {
-		return fmt.Sprintf("%d %s", n, unit)
-	}
-	return fmt.Sprintf("%d %ss", n, unit)
 }
 
 // pad returns lines extended with blank lines to exactly n rows (never

@@ -2,7 +2,6 @@ package tui
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"time"
 
@@ -15,6 +14,7 @@ import (
 	"github.com/jedwards1230/gofer/internal/decision"
 	"github.com/jedwards1230/gofer/internal/tui/layout"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
+	"github.com/jedwards1230/gofer/internal/uicopy"
 	"github.com/jedwards1230/gofer/internal/usercmd"
 )
 
@@ -1160,7 +1160,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// session.compacted event appends to the transcript — the durable record.
 		// A status note on top of it would be a second, redundant voice, so the
 		// off-screen note set at dispatch is simply retired here.
-		if a.status == compactingNote {
+		if a.status == uicopy.CompactingNote {
 			a.clearStatus()
 		}
 		return a, nil
@@ -1185,7 +1185,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case daemonRestartMsg:
 		if msg.err != nil {
-			a.setStatus(sevDanger, fmt.Sprintf("Daemon restart failed: %s", msg.err.Error()))
+			a.setStatus(sevDanger, uicopy.DaemonRestartFailed(msg.err.Error()))
 			return a, nil
 		}
 		// The replacement is up and this client is reconnected (the bridge swapped
@@ -1194,7 +1194,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// immediately — the visible proof the restart worked. Also fold in the
 		// replacement's build version so the header stops warning about the
 		// daemon this restart just replaced (see [App.doRestartDaemon]).
-		a.setStatus(sevOK, "Daemon restarted; roster restored.")
+		a.setStatus(sevOK, uicopy.DaemonRestarted)
 		a.over = a.over.WithDaemonVersion(msg.version)
 		return a, a.fetchRosterNow
 
@@ -1429,8 +1429,10 @@ func (a App) handleKey(msg tea.KeyPressMsg, prevArmed string) (tea.Model, tea.Cm
 // the two independent implementations read identically. It changes TEXT, not
 // just color (a.status renders in [sevWarn]'s style, but the Ascii golden
 // profile cannot see that) — the same reason the roster's ctrl+x confirm
-// swaps its hint text rather than relying on the row highlight alone.
-const quitArmedNote = "ctrl-c again to quit"
+// swaps its hint text rather than relying on the row highlight alone. The
+// wording itself lives in internal/uicopy; this is the local name the two
+// call sites share.
+const quitArmedNote = uicopy.QuitArmedNote
 
 // confirmQuit is the ctrl+c double-tap quit confirm (gofer#314), shared by
 // every site that intercepts ctrl+c on [App]: the live global-keymap row
@@ -1639,10 +1641,10 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// poll; this note still covers the window while the sweep is in flight.
 		ids := a.over.Descendants(a.over.SelectedID())
 		if len(ids) == 0 {
-			a.setStatus(sevWarn, "No subagents under this session.")
+			a.setStatus(sevWarn, uicopy.NoSubagentsToStop)
 			return a, nil
 		}
-		a.setStatus(sevOK, fmt.Sprintf("Stopping %s.", plural(len(ids), "subagent")))
+		a.setStatus(sevOK, uicopy.StoppingSubagents(len(ids)))
 		return a, a.doKillTree(ids)
 
 	case key.Text == "R" && a.over.InputEmpty() && a.over.daemonStale():
@@ -1655,7 +1657,7 @@ func (a App) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// and — since the local backend never shows that banner — only ever on a
 		// daemon-backed overview. The restart runs as a background Cmd; its
 		// daemonRestartMsg refreshes the roster from the replacement (Update).
-		a.setStatus(sevOK, "Restarting daemon…")
+		a.setStatus(sevOK, uicopy.DaemonRestarting)
 		return a, a.doRestartDaemon()
 
 	case key.Text == "?" && a.over.InputEmpty():

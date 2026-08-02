@@ -17,6 +17,7 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/event"
 
 	"github.com/jedwards1230/gofer/internal/tui/testkit"
+	"github.com/jedwards1230/gofer/internal/uicopy"
 )
 
 // requestApprovalSpec is [requestApproval] with a caller-chosen spec — the
@@ -332,7 +333,7 @@ func TestAppApprovalExplainLandingMidEditKeepsTheEditor(t *testing.T) {
 	if !strings.Contains(frame, "sandbox profile denies deletes") {
 		t.Errorf("the agent's rationale never reached the frame:\n%s", frame)
 	}
-	if !strings.Contains(flattenPrompt(frame), warnAmendOverride) {
+	if !strings.Contains(flattenPrompt(frame), uicopy.ApprovalAmendOverrideWarning) {
 		t.Errorf("the explain repaint dropped the amend warning:\n%s", frame)
 	}
 }

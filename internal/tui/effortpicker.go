@@ -59,6 +59,7 @@ import (
 
 	"github.com/jedwards1230/gofer/internal/modelmeta"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
+	"github.com/jedwards1230/gofer/internal/uicopy"
 )
 
 // effortLevel is one row of the picker: the value committed to
@@ -77,10 +78,10 @@ type effortLevel struct {
 // until something sets one), so the list reads as a ramp from the default
 // upward rather than as an arbitrary vocabulary dump.
 var effortLevels = []effortLevel{
-	{"", "off", "no explicit level; the provider decides"},
-	{provider.EffortLow, "low", "least reasoning, fastest turns"},
-	{provider.EffortMedium, "medium", "balanced reasoning"},
-	{provider.EffortHigh, "high", "most reasoning, slowest and priciest turns"},
+	{"", "off", uicopy.EffortOffBlurb},
+	{provider.EffortLow, "low", uicopy.EffortLowBlurb},
+	{provider.EffortMedium, "medium", uicopy.EffortMediumBlurb},
+	{provider.EffortHigh, "high", uicopy.EffortHighBlurb},
 }
 
 // effortAliases maps the spellings a user may type at `/thinking <value>` onto
@@ -300,11 +301,11 @@ func (v effortPickerView) lines() []string {
 		// Kept short on purpose: this line is truncated to the panel width, and
 		// a remedy that falls off the right edge leaves only the complaint.
 		out = append(out, v.theme.WarnStyle().Render(
-			modelmeta.DisplayName(model)+" doesn't support reasoning effort — switch with /model."))
+			uicopy.EffortPickerUnsupported(modelmeta.DisplayName(model))))
 	} else {
-		header := "Reasoning effort:"
+		header := uicopy.EffortPickerHeader
 		if model != "" {
-			header = "Reasoning effort for " + modelmeta.DisplayName(model) + ":"
+			header = uicopy.EffortPickerHeaderFor(modelmeta.DisplayName(model))
 		}
 		out = append(out, v.theme.MutedStyle().Render(header))
 	}

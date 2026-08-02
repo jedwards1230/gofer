@@ -21,10 +21,10 @@ package tui
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/jedwards1230/gofer/internal/tui/theme"
+	"github.com/jedwards1230/gofer/internal/uicopy"
 )
 
 // contextBarWidth is the fixed cell count of the /context fill bar — wide
@@ -59,20 +59,20 @@ func (v contextView) View(width, height int) string {
 // wall of zeros or a divide-by-nothing percentage.
 func (v contextView) lines() []string {
 	if v.sess == nil {
-		return []string{v.theme.MutedStyle().Render("No active session — attach to see its context usage.")}
+		return []string{v.theme.MutedStyle().Render(uicopy.ContextNoSession)}
 	}
 	used := v.sess.LastUsage.InputTokens + v.sess.LastUsage.CacheReadTokens
 	if used == 0 {
-		return []string{v.theme.MutedStyle().Render("No turn has completed yet — nothing measured.")}
+		return []string{v.theme.MutedStyle().Render(uicopy.ContextNoTurn)}
 	}
 
-	out := []string{"Model: " + orDash(v.sess.Model)}
+	out := []string{uicopy.ContextModelRow(orDash(v.sess.Model))}
 	if v.sess.ContextWindow <= 0 {
 		// Unknown window (an unregistered model): counts only, per house rule
 		// — 0 means unknown, never "no window", so no percentage is shown and
 		// nothing is divided by it.
-		out = append(out, "Context window: unknown for this model")
-		out = append(out, "Last measured input: "+strconv.Itoa(used)+" tokens")
+		out = append(out, uicopy.ContextWindowUnknown)
+		out = append(out, uicopy.ContextLastMeasured(used))
 		return out
 	}
 
@@ -82,10 +82,10 @@ func (v contextView) lines() []string {
 		free = 0
 	}
 	out = append(out,
-		"Context window: "+strconv.Itoa(v.sess.ContextWindow)+" tokens",
+		uicopy.ContextWindowRow(v.sess.ContextWindow),
 		contextBar(used, v.sess.ContextWindow)+fmt.Sprintf(" %.0f%%", pct),
-		"In use: "+strconv.Itoa(used)+" tokens (measured — this session's last turn)",
-		"Free: "+strconv.Itoa(free)+" tokens",
+		uicopy.ContextInUse(used),
+		uicopy.ContextFree(free),
 	)
 	out = append(out, v.thresholdLine())
 	return out
@@ -106,9 +106,9 @@ func (v contextView) thresholdLine() string {
 		return ""
 	}
 	if !cfg.Compaction.AutoEnabled() {
-		return "Auto-compaction: off (/compact still available)"
+		return uicopy.ContextAutoCompactionOff
 	}
-	return fmt.Sprintf("Auto-compacts at: %.0f%% (/compact to do it now)", cfg.Compaction.Threshold()*100)
+	return uicopy.ContextAutoCompactsAt(cfg.Compaction.Threshold() * 100)
 }
 
 // contextBar renders a fixed-width block-cell fill bar: ⌈used/window⌉ of

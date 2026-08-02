@@ -65,12 +65,32 @@ import (
 
 	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
+	"github.com/jedwards1230/gofer/internal/uicopy"
 )
 
 // fallbackShell is the interpreter the escape runs under when $SHELL is unset
 // or empty (a bare cron-ish environment, a stripped container). POSIX sh is
 // the one interpreter every supported host is guaranteed to have.
 const fallbackShell = "/bin/sh"
+
+// The strings below are MODEL-facing, and are deliberately excluded from
+// internal/uicopy — see that package's doc for the audience split. They are not
+// copy; they are behaviour. The model reads them as instructions about what the
+// folded block is, so rewording one changes what the agent DOES (the fold header
+// exists precisely to stop it re-running the user's commands), and the day a
+// second locale exists, translating one would silently change how gofer acts.
+// Three groups, all reached from [App.composePrompt] / [shellRun.contextBlock]:
+//
+//   - [shellFoldHeader] and [shellNoOutputMarker], immediately below.
+//   - `[exit %d]` and `[output truncated]` in [shellRun.contextBlock]. The
+//     transcript's operator-facing near-duplicates of those two (`exit N` and
+//     `… output truncated`, [Model.renderShellRunLines]) DO live in uicopy —
+//     same words, opposite answer, because one goes to the model and one goes
+//     to the screen.
+//   - [shellRun.note] (set in [runShellCmd]), which is genuinely dual-audience:
+//     the same value is written into the model's context as `[%s]` AND rendered
+//     danger-styled to the operator, so translating it would change what the
+//     model reads.
 
 // shellFoldHeader frames the folded `!` block once, ahead of the `$ cmd` lines,
 // so the model reads what follows as output the USER produced locally rather
@@ -205,7 +225,7 @@ func parseShellEscape(buf string) (line string, inContext bool, ok bool) {
 func (a App) dispatchShell(buf string) (App, tea.Cmd) {
 	line, inContext, ok := parseShellEscape(buf)
 	if !ok {
-		a.setStatus(sevWarn, "nothing to run — type a command after !")
+		a.setStatus(sevWarn, uicopy.ShellNothingToRun)
 		return a, nil
 	}
 	a.shellSeq++
@@ -472,9 +492,9 @@ func (r shellRun) contextBlock() string {
 // label can never be the thing that leaks a `!!` run.
 func (r shellRun) shellDispositionLabel() string {
 	if r.inContext {
-		return "sent with your next message"
+		return uicopy.ShellSentWithNextMessage
 	}
-	return "not sent to the agent"
+	return uicopy.ShellNotSentToAgent
 }
 
 // shellRunStatus is the one-line acknowledgement a finished run posts on the
@@ -492,9 +512,9 @@ func (r shellRun) shellRunStatus() (statusSeverity, string) {
 		// disposition is as relevant here as on the other branches.
 		return sevDanger, fmt.Sprintf("%s: %s%s", r.line, r.note, disp)
 	case r.exitCode != 0:
-		return sevWarn, fmt.Sprintf("%s exited %d%s", r.line, r.exitCode, disp)
+		return sevWarn, uicopy.ShellRunExited(r.line, r.exitCode, disp)
 	default:
-		return sevOK, "ran " + r.line + disp
+		return sevOK, uicopy.ShellRunOK(r.line, disp)
 	}
 }
 
