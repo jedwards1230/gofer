@@ -108,7 +108,32 @@ type Config struct {
 	// BearerToken, when non-empty, is required of every WebSocket upgrade
 	// (see [Daemon.Handler]). Empty disables auth — appropriate only for a
 	// loopback-bound daemon.
+	//
+	// This is the OPERATOR's credential: the one they set with --token or
+	// $GOFER_TOKEN and hand to their own clients. It is the only one
+	// [ValidateListen] accepts as authorization for a non-loopback bind.
 	BearerToken string
+	// ExtraTokens are additional credentials this daemon accepts on the same
+	// upgrade, for callers the EMBEDDER mints rather than the operator — today
+	// the router's worker dial-back (see internal/router's Config.RouterToken).
+	//
+	// They exist so a component that needs to call this daemon is not handed
+	// the operator's own token. A leaked extra token therefore does not
+	// disclose $GOFER_TOKEN — which an operator may share with other tooling
+	// and which outlives any one process — and it can be rotated by restarting
+	// the process that minted it, without touching the operator's credential.
+	//
+	// What it does NOT do, stated plainly because the difference is easy to
+	// assume away: authorization here is per-CONNECTION, not per-method (see
+	// [Daemon.authorized], called once at upgrade). An extra token therefore
+	// carries the SAME authority on the wire as BearerToken. This is credential
+	// separation, not privilege reduction. Scoping a token to the methods it
+	// actually needs would require carrying the authenticated identity from the
+	// upgrade into per-request dispatch, which this type does not do today.
+	//
+	// Empty entries are ignored. They are never accepted when BearerToken is
+	// empty, because auth is off entirely in that case.
+	ExtraTokens []string
 	// DefaultModel is the fallback a session/new request resolves to when it
 	// supplies no (or an empty) model, and the model a session/load request
 	// always resolves to (ACP's LoadSessionRequest has no model field).
@@ -860,13 +885,25 @@ func pingLoop(ctx context.Context, conn *websocket.Conn, cancel context.CancelFu
 	}
 }
 
-// authorized reports whether r carries the configured bearer token. A
-// [Config] with no BearerToken accepts every connection — the operator's
-// choice for a loopback-only daemon. The token is read from the standard
-// Authorization: Bearer header, falling back to a "token" query parameter for
-// clients (e.g. some mobile WebSocket libraries) that cannot set a custom
-// upgrade header. Comparison is constant-time; the token itself is never
-// logged or included in any error.
+// authorized reports whether r carries the configured bearer token, or any of
+// [Config.ExtraTokens]. A [Config] with no BearerToken accepts every connection
+// — the operator's choice for a loopback-only daemon. The token is read from the
+// standard Authorization: Bearer header, falling back to a "token" query
+// parameter for clients (e.g. some mobile WebSocket libraries) that cannot set a
+// custom upgrade header. The token itself is never logged or included in any
+// error.
+//
+// Every candidate is compared, with no early return on a match, so the work done
+// depends on how many tokens are configured and not on which one matched (or
+// whether any did).
+//
+// Each comparison is constant-time in the CONTENTS, which is the property that
+// matters here — stated that precisely because subtle.ConstantTimeCompare's own
+// doc says the time taken "is a function of the length of the slices" and that a
+// length mismatch "returns 0 immediately". So a presented token's LENGTH is not
+// hidden, only its bytes. That is fine for this use (a token's length is not the
+// secret) and would not be fine if it were, which is why the limit is written
+// down rather than rounded up to "constant-time".
 func (d *Daemon) authorized(r *http.Request) bool {
 	if d.cfg.BearerToken == "" {
 		return true
@@ -878,7 +915,18 @@ func (d *Daemon) authorized(r *http.Request) bool {
 	if token == "" {
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(token), []byte(d.cfg.BearerToken)) == 1
+	ok := subtle.ConstantTimeCompare([]byte(token), []byte(d.cfg.BearerToken))
+	for _, extra := range d.cfg.ExtraTokens {
+		if extra == "" {
+			// An empty entry would otherwise make every empty-token request
+			// authorized. The empty-token case already returned above, but the
+			// guard stays so a future caller cannot reintroduce it by passing a
+			// slice with a hole in it.
+			continue
+		}
+		ok |= subtle.ConstantTimeCompare([]byte(token), []byte(extra))
+	}
+	return ok == 1
 }
 
 // bearerFromHeader extracts the token from an "Authorization: Bearer <token>"

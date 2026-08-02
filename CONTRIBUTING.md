@@ -91,6 +91,23 @@ rather than red).
 
 `docs/TESTING.md` has the longer list.
 
+## In a comment, point at the rule — don't restate it
+
+When a comment needs a rule that is written down elsewhere, **link to it**:
+`[Config.Field]`, a named function, a section of this file. Restate it only if
+you are willing to maintain a second copy.
+
+A restated rule rots **silently**. The canonical statement changes, the copy
+keeps asserting the old one, and a stale comment is indistinguishable from a true
+one — nothing mechanical tells them apart, because the test suite verifies
+behaviour and says nothing about whether the prose agrees. A pointer rots
+**visibly**: rewrite the target and every reference now reads the new text, so
+the ones that no longer fit show up. Making decay visible is the cheapest defence
+available, and for a comment it is close to the only one.
+
+`internal/router`'s `buildWorkerCmd` is the worked example — it points at
+`Config.RouterToken` and at the section above rather than re-explaining either.
+
 ## Local install
 
 Use `make install` (not a bare `go install ./cmd/gofer`) to install gofer
@@ -136,12 +153,27 @@ So when a gofer process must hand a credential to another process it spawns:
 1. Write the secret to a `0600` file.
 2. Pass the **path**, never the value — not in argv, not in the environment.
 3. Have the recipient read it once and **delete** it.
-4. Leave `cmd.Env` nil so the child inherits the parent's environment unchanged
-   and gains nothing from the hand-off.
+4. Set `cmd.Env` **explicitly**, stripped of every credential variable — never
+   leave it nil. See below: nil does not mean "empty", it means "inherit".
 5. Gate the whole hand-off on the feature that needs it, so a deployment that
    never opted in carries no credential at all.
 6. Sweep a leftover file with the recipient's other runtime artifacts, for the
    case where it dies before reading.
+
+**Not passing a secret is not the same as not leaking one.** Step 4 originally
+read "leave `cmd.Env` nil so the child inherits the parent's environment
+unchanged", which is exactly backwards, and the way it was wrong is the point: a
+nil `cmd.Env` means **inherit**, so a spawned worker received the whole
+environment of the process that spawned it — including `$GOFER_TOKEN`, which is
+where a daemon's bearer token comes from by documented default. Nothing ever
+*assigned* the token into the child's environment; it was already there. A
+component can hand over no secret and still leak one.
+
+The test guarding that had the matching shape of error: it iterated `cmd.Env`
+looking for the token while a neighbouring assertion required `cmd.Env` to be
+nil, so it ran zero times and could not fail. **When you assert that a secret is
+absent from a child's environment, assert against the environment the child will
+actually run with** — for a nil `Env` that is the parent's, not an empty set.
 
 The same property bounds `config.SecretRef`: its `env:VAR` form resolves against
 gofer's **own** environment at use time (`os.LookupEnv`), so any credential

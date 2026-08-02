@@ -18,6 +18,21 @@ import (
 	"github.com/jedwards1230/gofer/internal/worker"
 )
 
+// newSupervisor is the seam a test swaps to observe the [supervisor.Config] a
+// worker actually builds — the same shape as this package's startDaemonProcess
+// and serveForeground seams.
+//
+// It exists for one assertion that nothing else in the process can make: that a
+// worker started WITHOUT --router hands supervisor.New a nil Subagents factory.
+// That property is the "a worker never creates a session" invariant, and a
+// worker's tool surface is not observable from outside it — gofer/capabilities
+// carries MCP servers and skills, not builtins, and driving the spawn tool would
+// need a real model turn. Asserting on the startup warning instead was tried and
+// is too weak: the warning is computed from the local variable BEFORE
+// supervisor.New is reached, so re-adding the fail-open default immediately
+// above the call left the warning intact and the whole suite green.
+var newSupervisor = supervisor.New
+
 // readRouterTokenFile reads the router dial-back bearer token from path and
 // DELETES the file, so the credential exists on disk only for the moment
 // between the router writing it and this worker starting.
@@ -211,7 +226,7 @@ func runSessionWorker(ctx context.Context, args []string, stdout, stderr io.Writ
 			"session", *session)
 	}
 
-	sup, err := supervisor.New(supervisor.Config{
+	sup, err := newSupervisor(supervisor.Config{
 		Root:        rootDir,
 		Permissions: cfg.Engine,
 		// Same config-driven subagent depth cap as `gofer daemon`: the worker

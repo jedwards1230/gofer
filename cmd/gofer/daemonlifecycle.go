@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -93,8 +94,9 @@ var newDaemonProcess = func() daemonProcess { return osDaemonProcess{} }
 type daemonStartSpec struct {
 	root   string
 	listen string
-	// token is a bearer token; it is passed to the child through the
-	// environment, never argv (which `ps` exposes), and is never printed.
+	// token is a bearer token. It is handed to the child through a 0600 file
+	// (see buildDaemonRestartCmd) — never argv, which `ps` exposes, and never
+	// the environment, which the agent reads. It is never printed.
 	token string
 }
 
@@ -116,37 +118,85 @@ func spawnDetachedDaemon(_ context.Context, spec daemonStartSpec) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("resolve gofer executable: %w", err)
 	}
-	resolvedRoot, err := supervisor.ResolveRoot(spec.root)
+	cmd, logPath, err := buildDaemonRestartCmd(exe, spec)
 	if err != nil {
 		return 0, err
 	}
-	logDir := filepath.Join(resolvedRoot, "logs")
-	if err := os.MkdirAll(logDir, 0o700); err != nil {
-		return 0, fmt.Errorf("create daemon logs directory: %w", err)
-	}
-
-	args := []string{"daemon", "--root", resolvedRoot}
-	if spec.listen != "" {
-		args = append(args, "--listen", spec.listen)
-	}
-	// exec.Command, NOT exec.CommandContext: binding the child's lifetime to
-	// this CLI invocation's context would kill the daemon we just started the
-	// moment `gofer daemon restart` returns.
-	cmd := exec.Command(exe, args...)
-	cmd.Env = os.Environ()
-	if spec.token != "" {
-		// Environment, never argv: the daemon reads $GOFER_TOKEN (see runDaemon),
-		// and argv is world-visible through `ps`.
-		cmd.Env = append(cmd.Env, "GOFER_TOKEN="+spec.token)
-	}
-
-	pid, err := daemon.SpawnDetached(cmd, filepath.Join(logDir, "daemon.out.log"))
+	pid, err := daemon.SpawnDetached(cmd, logPath)
 	if err != nil {
 		return 0, err
 	}
 	reaped := daemon.Reap(cmd)
 	go func() { <-reaped }()
 	return pid, nil
+}
+
+// buildDaemonRestartCmd shapes the (unstarted) replacement-daemon command and
+// performs the token hand-off, returning the command and the path its stdio is
+// appended to.
+//
+// Split from [spawnDetachedDaemon] so the hand-off is assertable without
+// actually forking a daemon: the property that matters — the bearer token
+// reaches the child through a 0600 file and through NEITHER argv nor the
+// environment — is a property of the command, not of the running process.
+func buildDaemonRestartCmd(exe string, spec daemonStartSpec) (*exec.Cmd, string, error) {
+	resolvedRoot, err := supervisor.ResolveRoot(spec.root)
+	if err != nil {
+		return nil, "", err
+	}
+	logDir := filepath.Join(resolvedRoot, "logs")
+	if err := os.MkdirAll(logDir, 0o700); err != nil {
+		return nil, "", fmt.Errorf("create daemon logs directory: %w", err)
+	}
+
+	args := []string{"daemon", "--root", resolvedRoot}
+	if spec.listen != "" {
+		args = append(args, "--listen", spec.listen)
+	}
+
+	if spec.token != "" {
+		// A 0600 FILE, never argv and never the environment.
+		//
+		// argv is world-visible through `ps`. The environment is worse here
+		// despite being invisible to other users: a `--workers` daemon spawns
+		// worker processes that run a model with a shell, and a child process
+		// inherits its parent's environment by default, so a token placed here
+		// is one `env` away from the agent (see CONTRIBUTING.md's "The
+		// environment is not a safe channel for a secret"). This spawn used to
+		// append GOFER_TOKEN and reasoned "environment, never argv" — correct
+		// about argv, and the wrong conclusion.
+		//
+		// runDaemon already reads <root>/daemon.env as its final token
+		// fallback, so the child picks this up with no new flag; the file is
+		// 0600 in the same root as endpoint.json, which already stores this
+		// exact token at rest, so it adds no new exposure class.
+		if err := writeDaemonEnvToken(resolvedRoot, spec.token); err != nil {
+			return nil, "", fmt.Errorf("hand the bearer token to the replacement daemon: %w", err)
+		}
+	}
+
+	// exec.Command, NOT exec.CommandContext: binding the child's lifetime to
+	// this CLI invocation's context would kill the daemon we just started the
+	// moment `gofer daemon restart` returns.
+	cmd := exec.Command(exe, args...)
+	// Explicit, and stripped of the token this function just handed over by
+	// file. Inheriting it here would put the credential back in the very
+	// channel the file exists to avoid — and, under --workers, into every
+	// worker the replacement daemon goes on to spawn.
+	cmd.Env = withoutEnvVar(os.Environ(), "GOFER_TOKEN")
+	return cmd, filepath.Join(logDir, "daemon.out.log"), nil
+}
+
+// withoutEnvVar returns env with every entry naming name removed.
+func withoutEnvVar(env []string, name string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		if n, _, _ := strings.Cut(kv, "="); n == name {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 // stopOutcome describes what stopDaemon did, so the calling command can report
