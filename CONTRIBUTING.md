@@ -145,6 +145,8 @@ model-readable on the same terms.
 That is a reasonable trade for an operator-scoped, per-service credential and
 the wrong one as the blast radius grows. `SecretRef` already supports
 `file:/path` — prefer it whenever disclosure would cost more than the session.
+Whether gofer should narrow the `env:` form further is open, and tracked in
+gofer#354.
 
 ## Before you open a PR
 
