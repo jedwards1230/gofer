@@ -159,6 +159,33 @@ about the workaround.
   boundary is a different case — but then the fix is an explicit character
   class, not `**`.)
 
+- **"Add a non-unix stub so `cmd/gofer` cross-compiles."** Reports that a new
+  reference to a `//go:build unix` helper in `internal/daemon` (`ProcessAlive`,
+  `LockWorker`, `SpawnDetached`, `Reap`) breaks the Windows/plan9 build, usually
+  citing `cmd/gofer/service_other.go` as the pattern to follow, are **wrong about
+  what that pattern is for**. `service_other.go` is `//go:build !darwin && !linux`
+  — it keeps the **BSDs** green, and those are `unix`, so the `internal/daemon`
+  unix files apply there normally. It has never been about non-unix.
+
+  `cmd/gofer` does not build on Windows today and did not before any such PR: it
+  depends transitively on `internal/router` and `internal/worker`, which already
+  call four unix-only `internal/daemon` helpers. Adding `process_other.go` alone
+  removes two of the five errors and leaves three. plan9 additionally fails
+  inside `bubbletea/v2` and `grpc`, which no change here can fix. The release
+  matrix (`.github/workflows/release.yml`) targets only linux and darwin.
+
+  Verify before believing either side — the "before" must actually fail
+  differently from the "after":
+
+  ```bash
+  GOOS=windows GOARCH=amd64 go build ./cmd/gofer/   # fails, on base and on HEAD alike
+  GOOS=freebsd GOARCH=amd64 go build ./cmd/gofer/   # passes — this is what the stubs protect
+  ```
+
+  Making non-unix build is a real (unfiled) project spanning `internal/daemon`,
+  `internal/router`, and `internal/worker` — not a one-file stub, and not the job
+  of a PR that merely moves a call site. Reply with the two commands and resolve.
+
 If you refute one of these, add it here rather than only in the PR thread — the
 bot has no memory across pull requests, but this file does.
 

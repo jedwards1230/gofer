@@ -57,11 +57,11 @@ type daemonProcess interface {
 	signal(pid int, sig syscall.Signal) error
 }
 
-// osDaemonProcess is the real [daemonProcess]: signal-0 liveness (pidAlive) and
-// a genuine signal delivery.
+// osDaemonProcess is the real [daemonProcess]: signal-0 liveness
+// (daemon.ProcessAlive) and a genuine signal delivery.
 type osDaemonProcess struct{}
 
-func (osDaemonProcess) alive(pid int) bool { return pidAlive(pid) }
+func (osDaemonProcess) alive(pid int) bool { return daemon.ProcessAlive(pid) }
 
 func (osDaemonProcess) signal(pid int, sig syscall.Signal) error {
 	if pid <= 0 {
