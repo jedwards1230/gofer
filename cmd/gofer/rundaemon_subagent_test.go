@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/jedwards1230/gofer/internal/config"
 )
 
 // TestSubagentLinkNewSessionParams pins `gofer run --parent/--agent`'s wiring
@@ -76,6 +78,51 @@ func TestRunRejectsSubagentFlagsWithoutDaemon(t *testing.T) {
 			}
 			if !strings.Contains(ue.msg, "gofer daemon") {
 				t.Errorf("usage error %q does not name the remedy", ue.msg)
+			}
+		})
+	}
+}
+
+// TestRouterDialBackGatedOnSubagentsOptIn is the credential-exposure gate.
+//
+// Under --workers the router hands every worker its dial-back coordinates, and
+// the token half is the daemon's own bearer token — a credential equivalent to
+// arbitrary code execution as the daemon's user. An operator who never enabled
+// subagents must not pay that exposure, and must see no change to a worker at
+// all: this is the one place the feature could otherwise reach a user who
+// declined it.
+//
+// Both halves are asserted, and the token half separately: an address with no
+// token would dial a token-required router unauthenticated, which is a
+// confusing 401 rather than a clean "not configured".
+func TestRouterDialBackGatedOnSubagentsOptIn(t *testing.T) {
+	const token = "daemon-bearer-token"
+	tests := []struct {
+		name      string
+		cfg       config.Subagents
+		listen    string
+		wantAddr  string
+		wantToken string
+	}{
+		{"disabled hands over nothing", config.Subagents{}, "127.0.0.1:7333", "", ""},
+		{"disabled with agents listed still hands over nothing",
+			config.Subagents{Agents: []string{"go-developer"}}, "127.0.0.1:7333", "", ""},
+		{"enabled hands over both", config.Subagents{Enabled: true}, "127.0.0.1:7333", "127.0.0.1:7333", token},
+		// A wildcard bind is a valid thing to BIND and a meaningless thing to
+		// DIAL; normalizing to loopback is correct (the worker is always on the
+		// same host) and tighter than forwarding it verbatim.
+		{"wildcard bind normalizes to loopback", config.Subagents{Enabled: true}, "0.0.0.0:7333", "127.0.0.1:7333", token},
+		{"empty host normalizes to loopback", config.Subagents{Enabled: true}, ":7333", "127.0.0.1:7333", token},
+		{"ipv6 wildcard normalizes to loopback", config.Subagents{Enabled: true}, "[::]:7333", "127.0.0.1:7333", token},
+		{"an explicit host is left alone", config.Subagents{Enabled: true}, "192.168.1.50:7333", "192.168.1.50:7333", token},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := routerDialBackAddr(tc.cfg, tc.listen); got != tc.wantAddr {
+				t.Errorf("routerDialBackAddr(%q) = %q, want %q", tc.listen, got, tc.wantAddr)
+			}
+			if got := routerDialBackToken(tc.cfg, token); got != tc.wantToken {
+				t.Errorf("routerDialBackToken = %q, want %q", got, tc.wantToken)
 			}
 		})
 	}

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -251,10 +252,29 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 			// gofer/hello binaryVersion to classify skew. effectiveVersion() is
 			// the SAME derivation every worker stamps itself with (see
 			// runSessionWorker), so identical local builds compare equal.
-			Version:    effectiveVersion(),
-			SelfExe:    selfExe,
-			Logger:     logger,
-			MaxWorkers: *maxWorkers,
+			Version: effectiveVersion(),
+			SelfExe: selfExe,
+			// The dial-back coordinates every spawned worker uses to create
+			// subagent sessions and deliver a finished child's report — BOTH
+			// EMPTY unless the operator enabled subagents.
+			//
+			// Gated at STARTUP, not per session, and that asymmetry with the
+			// tool registration is real: the tool is re-resolved per session
+			// (config.Subagents reaches the next session with no restart), but
+			// a worker's dial-back is fixed when the worker process forks, and
+			// the router's own address is fixed when it binds. Enabling
+			// subagents on a running `--workers` daemon therefore takes a
+			// restart — the same shape as adding an MCP server (see
+			// supervisor.Config.MCP).
+			//
+			// The gate is not merely tidiness. Handing a worker the daemon's
+			// bearer token at all is a credential exposure an operator who
+			// never asked for subagents must not pay: nothing else about a
+			// worker changes when this feature is off.
+			RouterAddr:  routerDialBackAddr(cfg.Subagents, *listen),
+			RouterToken: routerDialBackToken(cfg.Subagents, bearerToken),
+			Logger:      logger,
+			MaxWorkers:  *maxWorkers,
 		})
 		if rerr != nil {
 			return fmt.Errorf("build router: %w", rerr)
@@ -294,6 +314,14 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 			Search: searchConfigResolver(rootDir),
 			// Same reasoning, for skills.* — see skillsConfigResolver.
 			Skills: skillsConfigResolver(rootDir),
+			// Same re-read-per-session shape, for subagents.* — see
+			// subagentsConfigResolver. This is the NON-workers branch, so the
+			// answer to "where does a spawn go" is this same supervisor: it hosts
+			// every session in this process and is under no MaxSessions cap, so
+			// it asks for the in-process seam by name. The `--workers` branch
+			// above never reaches here; its workers each answer for themselves.
+			SubagentsConfig: subagentsConfigResolver(rootDir),
+			Subagents:       supervisor.LocalSubagents,
 			// Attach a per-session telemetry observer at registration, before the
 			// session's first turn — subscribing here (rather than after a turn
 			// has already started) means Events' replay backlog is still empty,
@@ -730,6 +758,70 @@ func skillsConfigResolver(root string) func() config.Skills {
 		}
 		return cfg.Skills
 	}
+}
+
+// subagentsConfigResolver is [supervisor.Config.SubagentsConfig] for a process
+// rooted at root — searchConfigResolver's subagent-axis twin, same shape and
+// reason: a `subagents.*` write governs the next session this process starts
+// rather than only the next process.
+//
+// A config that won't load resolves to the zero [config.Subagents] — DISABLED,
+// the fail-safe [config.Subagents.IsEnabled] itself falls back to: no spawn tool
+// registered at all, and no child→parent report path. That polarity matters more
+// here than for the other sections: subagents are opt-in, so a transiently
+// unreadable config must never be the reason a session gains a tool.
+func subagentsConfigResolver(root string) func() config.Subagents {
+	return func() config.Subagents {
+		cfg, err := config.Load(config.DefaultPath(root))
+		if err != nil {
+			return config.Subagents{}
+		}
+		return cfg.Subagents
+	}
+}
+
+// routerDialBackAddr resolves the address a `--workers` router hands its
+// workers to dial back on, or "" when the operator did not enable subagents —
+// in which case a worker is spawned exactly as it was before this feature
+// existed.
+//
+// A WILDCARD bind is normalized to loopback. `--listen 0.0.0.0:7333` names
+// every interface, which is a valid thing to BIND and a meaningless thing to
+// DIAL: connecting to 0.0.0.0 happens to reach loopback on Linux and macOS, so
+// forwarding it verbatim works by accident rather than by design (and not at
+// all on some stacks). A worker is always on the same host as its router, so
+// loopback is both correct and the tightest thing to hand it. An empty host
+// ("":7333, Go's own bind-all spelling) is normalized the same way.
+func routerDialBackAddr(cfg config.Subagents, listen string) string {
+	if !cfg.IsEnabled() {
+		return ""
+	}
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		// No host:port shape at all (a bare host, or malformed): hand it over
+		// unchanged rather than inventing an address. ValidateListen already
+		// ran against this exact string, and a worker that cannot dial it fails
+		// its spawn loudly.
+		return listen
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, port)
+}
+
+// routerDialBackToken is [routerDialBackAddr]'s token half: the daemon's own
+// bearer token when subagents are enabled, and "" otherwise.
+//
+// Kept as its own function rather than folded into the caller so the gate is
+// stated once per value and cannot drift — a router with an address but no
+// token dials unauthenticated, which against a token-required daemon is a
+// confusing 401 rather than a clean refusal.
+func routerDialBackToken(cfg config.Subagents, token string) string {
+	if !cfg.IsEnabled() {
+		return ""
+	}
+	return token
 }
 
 // guardLiveEndpoint reports whether a still-running `gofer daemon` already

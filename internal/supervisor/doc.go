@@ -74,6 +74,37 @@
 // it is the daemon clients actually talk to — so both must read the link, or an
 // offline subagent tree would flatten on the isolated path only.
 //
+// Create also forwards the resolved ParentID/Depth/MaxDepth into
+// [runner.Options], which puts the child runner in exactly the state
+// [runner.Runner.Spawn] constructs without calling it (Spawn needs the parent's
+// live *runner.Runner in this process, which the [Config.NewSession] factory
+// seam — and, under M6, a worker process boundary — puts out of reach). The SDK
+// records parent_id/depth in the journal's root meta entry as a result; that is
+// a write-only PROJECTION with no reader here. The sidecar remains the single
+// AUTHORITY, and event.SessionSpawned is deliberately unhandled: a handler would
+// be a second, divergent record of the same fact.
+//
+// # Agent-initiated subagents ([Subagents])
+//
+// [Config.SubagentsConfig] decides whether a MODEL may create children of its
+// own. It is OPT-IN and its zero value is disabled: with it unset, sessionGuard
+// registers no spawn tool (so the tool surface is byte-identical to one built
+// before the feature existed) and no child reports to its parent — including a
+// child an operator created with `gofer run --parent`.
+//
+// [Config.Subagents] is the second switch, and BOTH must be on. It builds where
+// a spawn and a report actually go: [LocalSubagents] is the in-process answer
+// ([Supervisor.Create] / [Supervisor.Send] on this same supervisor), and a
+// `--workers` session injects a router dial-back instead, since its own daemon
+// hosts exactly one session. NIL means this supervisor cannot create a child at
+// all — the state a worker started without `--router` is in — and then no config
+// can register the tool or the report path. A finished child
+// delivers its final assistant text to its parent as that parent's next PROMPT,
+// through the ordinary FIFO queue — so it never interrupts a turn, and never
+// more than once per child. That bound is DURABLE, recorded in the child's own
+// sidecar rather than in the live session object, so it survives the kill and
+// resume that would otherwise re-arm it (see [managed.reportToParentOnce]).
+//
 // # Prompt queue and steering
 //
 // [Supervisor.Send] never rejects a busy session. A prompt sent to an idle

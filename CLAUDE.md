@@ -82,12 +82,14 @@ make install                                       # local install, truthfully v
   `<root>/config.json`, written via `config.Save` — indented, mode 0600,
   atomic); sections are the permissions ruleset (M3), `Session`/`TUI` (M4),
   `Telemetry`, `Daemon` (incl. `drain_timeout_ms`), and M7's `Prompt`/
-  `Tools`/`MCP`/`Search`/`Skills`/`LSP` sections, plus the shared `SecretRef`
-  (`env:`/`file:`, resolved at use time, never inlined). `Prompt` is read by
-  `internal/prompt`; `LSP`/`MCP`/`Tools`/`Search`/`Skills` by
-  `internal/supervisor`'s session wiring (`internal/websearch` and the SDK's
-  `toolindex` consume `Search`/`Tools` respectively; `internal/skillset`
-  consumes `Skills`; `internal/mcpconn` consumes `MCP`). See its package doc.
+  `Tools`/`MCP`/`Search`/`Skills`/`LSP`/`Subagents` sections, plus the shared
+  `SecretRef` (`env:`/`file:`, resolved at use time, never inlined). `Prompt`
+  is read by `internal/prompt`; `LSP`/`MCP`/`Tools`/`Search`/`Skills`/
+  `Subagents` by `internal/supervisor`'s session wiring (`internal/websearch`
+  and the SDK's `toolindex` consume `Search`/`Tools` respectively;
+  `internal/skillset` consumes `Skills`; `internal/mcpconn` consumes `MCP`;
+  `internal/subagent` consumes `Subagents`, whose zero value is DISABLED — the
+  only section that fails safe to "off"). See its package doc.
 - `internal/prompt/` — composes a session's system prompt from
   `config.Prompt.Files` (the replacement for cmd/gofer's old
   `defaultSystemPrompt` string constant): `builtin:`/absolute/`~/`/cwd-then-
@@ -133,6 +135,20 @@ make install                                       # local install, truthfully v
   disabling. Also the seam that fixes the project-vs-global skill precedence
   bug (`config.Skills.Directories` lists the project directory first, since
   the SDK's `skill.Load` is first-directory-wins).
+- `internal/subagent/` — the `spawn_subagent` tool: the model-facing surface
+  of agent-initiated subagent spawning, registered by
+  `internal/supervisor`'s `sessionGuard` ONLY when `config.Subagents` enables
+  it AND the supervisor has a spawner seam (the same `(tool, ok)` +
+  guarded-append shape `web_search`/`skill` use), so an unconfigured session's
+  tool surface is byte-identical to one built before subagents existed. A leaf
+  over the SDK and `internal/config`; it drives a narrow `Spawner` seam and
+  owns no policy — the depth cap, the parent lookup, and the child's inherited
+  model/cwd all live behind it. The seam's two implementations are
+  `supervisor.LocalSubagents` (in-process `Create`/`Send`) and
+  `internal/worker.RouterSubagents` (dials the router, because a worker is a
+  single-session daemon and cannot host a sibling); a worker with no
+  `--router` supplies NEITHER, and `supervisor.Config.Subagents` fails closed
+  on nil so config alone can never install a local spawner in a worker.
 - `internal/decision/` — gofer's structured-decision round trip: the
   `ask_user` tool (gofer's first tool of its own) plus the per-session `Gate`
   it blocks on, carrying `acp` decision types over a gofer-native transport

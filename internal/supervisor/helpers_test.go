@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -16,6 +17,7 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/runner"
 	"github.com/jedwards1230/agent-sdk-go/session"
 
+	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/supervisor"
 )
 
@@ -81,6 +83,23 @@ type fakeSession struct {
 	compactCalls []string
 	// compactErr, when non-nil, is what Compact returns — see failCompact.
 	compactErr error
+	// compactHold, when non-nil, blocks Compact until it is CLOSED, and
+	// compactEnter signals (idempotently — a session compacts more than once)
+	// that a Compact has started blocking. Armed by holdCompact. A real
+	// summarizer round trip takes real time, and a fake that returns instantly
+	// gives a test no window in which to observe what happens WHILE a session
+	// is compacting — which is the whole subject of
+	// TestSubagentReportLandsAfterParentCompaction.
+	compactHold  chan struct{}
+	compactEnter func()
+
+	// trace, when non-nil, records this fake's Prompt/Compact phase
+	// transitions into a SHARED, ordered log (see callTrace). Ordering across
+	// two sessions' goroutines is the property under test in the report-back
+	// test, and it cannot be reconstructed from per-session counters after the
+	// fact — it has to be recorded as it happens, at the moment each call
+	// crosses the seam.
+	trace *callTrace
 
 	// lastUsageModel/lastUsageValue/lastUsageOk back LastUsage — armed by
 	// setLastUsage to script the "most recently settled turn" pressure figure
@@ -164,8 +183,10 @@ func (f *fakeSession) Prompt(ctx context.Context, text string) error {
 	f.calls = append(f.calls, text)
 	permReq := f.permReq
 	askInput := f.askInput
+	trace := f.trace
 	f.mu.Unlock()
 
+	trace.add(f.id + ":prompt:" + text)
 	f.started <- text
 
 	if askInput != "" {
@@ -344,7 +365,22 @@ func (f *fakeSession) Compact(_ context.Context, instructions string) error {
 	f.mu.Lock()
 	f.compactCalls = append(f.compactCalls, instructions)
 	err := f.compactErr
+	hold, enter, trace := f.compactHold, f.compactEnter, f.trace
 	f.mu.Unlock()
+
+	trace.add(f.id + ":compact:start")
+	if hold != nil {
+		enter()
+		select {
+		case <-hold:
+		case <-time.After(10 * time.Second):
+			// A held Compact that is never released means the test's own
+			// sequencing broke. Unblock so the failure surfaces as a failed
+			// assertion rather than a hung package.
+		}
+	}
+	defer trace.add(f.id + ":compact:end")
+
 	if err != nil {
 		return err
 	}
@@ -360,6 +396,67 @@ func (f *fakeSession) failCompact(err error) {
 	defer f.mu.Unlock()
 	f.compactErr = err
 }
+
+// holdCompact arms this fake so the NEXT (and every later) Compact blocks
+// until the returned release func is called, and returns a channel closed the
+// moment a Compact has actually started blocking. Both are needed: a test that
+// only released would still be racing the pump into the compaction it means to
+// observe from the outside.
+func (f *fakeSession) holdCompact() (entered <-chan struct{}, release func()) {
+	hold := make(chan struct{})
+	started := make(chan struct{})
+	f.mu.Lock()
+	f.compactHold = hold
+	f.compactEnter = sync.OnceFunc(func() { close(started) })
+	f.mu.Unlock()
+	return started, sync.OnceFunc(func() { close(hold) })
+}
+
+// setTrace points this fake at a shared ordered call log (see callTrace).
+func (f *fakeSession) setTrace(tr *callTrace) {
+	f.mu.Lock()
+	f.trace = tr
+	f.mu.Unlock()
+}
+
+// callTrace is an ordered, concurrency-safe log of seam crossings across
+// SEVERAL fake sessions — the only way to assert that one session's event
+// happened after another's, since each runs on its own pump goroutine. A nil
+// *callTrace records nothing, so every fake that does not opt in pays one nil
+// check per call.
+type callTrace struct {
+	mu      sync.Mutex
+	entries []string
+}
+
+func (t *callTrace) add(entry string) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.entries = append(t.entries, entry)
+	t.mu.Unlock()
+}
+
+// snapshot returns a copy of the log so far, in call order.
+func (t *callTrace) snapshot() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]string(nil), t.entries...)
+}
+
+// indexOf returns the position of the first entry equal to want, or -1.
+func (t *callTrace) indexOf(want string) int {
+	for i, e := range t.snapshot() {
+		if e == want {
+			return i
+		}
+	}
+	return -1
+}
+
+// has reports whether want has been recorded.
+func (t *callTrace) has(want string) bool { return t.indexOf(want) >= 0 }
 
 // compactCallCount returns how many times Compact was called.
 func (f *fakeSession) compactCallCount() int {
@@ -409,6 +506,13 @@ type harness struct {
 	newN   atomic.Int64
 	resN   atomic.Int64
 
+	// subagents is what a harness-built supervisor's SubagentsConfig resolver
+	// returns. It is read per session (see sessionGuard), so a test may flip it
+	// between Creates — which is the point: the resolver exists so a config
+	// write reaches the NEXT session, and a field sampled once at construction
+	// could not express that. Written and read only from the test goroutine.
+	subagents config.Subagents
+
 	mu       sync.Mutex
 	sessions map[string]*fakeSession
 }
@@ -454,6 +558,13 @@ func newHarnessWithConfig(t *testing.T, mutate func(*supervisor.Config)) *harnes
 			fs.tools = opts.Tools
 			return fs, nil
 		},
+		// The harness stands in for an IN-PROCESS deployment — one supervisor
+		// hosting every session, under no MaxSessions cap — so it names the
+		// in-process seam exactly as cmd/gofer's daemon and TUI paths do.
+		// Deliberately set BEFORE mutate, so a test that wants the other
+		// deployment (a worker with no router dial-back, which supplies no
+		// factory at all) can clear it — see TestNoSeamMeansNoSpawning.
+		Subagents: supervisor.LocalSubagents,
 	}
 	if mutate != nil {
 		mutate(&cfg)
@@ -470,8 +581,19 @@ func newHarnessWithConfig(t *testing.T, mutate func(*supervisor.Config)) *harnes
 
 // register builds and records a fakeSession at the on-disk path a real
 // FileStore would use for id under cwd's project slug.
+//
+// The DIRECTORY is really created (the journal file itself is not — these fakes
+// journal nothing). That matters because the supervisor writes real artifacts
+// BESIDE a session's journal — the `<id>.meta.json` sidecar, and in particular
+// the durable one-report-per-child claim (see managed.reportToParentOnce) —
+// and a fake whose directory does not exist would make every one of those
+// writes fail for reasons that have nothing to do with the code under test.
 func (h *harness) register(id, cwd string) *fakeSession {
-	path := filepath.Join(h.root, "sessions", session.Slugify(cwd), id+".jsonl")
+	dir := filepath.Join(h.root, "sessions", session.Slugify(cwd))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		h.t.Fatalf("harness: create session dir: %v", err)
+	}
+	path := filepath.Join(dir, id+".jsonl")
 	fs := newFakeSession(id, path)
 	h.mu.Lock()
 	h.sessions[id] = fs

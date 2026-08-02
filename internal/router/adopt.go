@@ -479,6 +479,11 @@ func killHandleProcess(h *workerHandle) {
 // GC failure is never worth failing a create or a scan over.
 func removeWorkerArtifacts(sessionID string) {
 	_ = daemon.RemoveWorkerEndpoint(sessionID)
+	// A worker that died before reading its dial-back credential leaves the
+	// token file behind; sweep it here so a 0600 secret never outlives the
+	// worker it was minted for. The happy path already deleted it (the worker
+	// removes it the moment it reads it), so this is normally a no-op.
+	removeWorkerRouterToken(sessionID)
 	if sockPath, err := daemon.WorkerSocketPath(sessionID); err == nil {
 		if rmErr := os.Remove(sockPath); rmErr != nil && !os.IsNotExist(rmErr) {
 			// Best-effort only: a leftover socket is harmless (a fresh worker
