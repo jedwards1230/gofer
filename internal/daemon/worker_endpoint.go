@@ -37,7 +37,7 @@ type WorkerEndpoint struct {
 	// `<uuid>.json` names, but NOT in the socket name.
 	Addr string `json:"addr"`
 	// PID is the worker process's own pid, used by the router's adoption scan
-	// for a signal-0 liveness probe (`pidAlive`) before it bothers to dial.
+	// for a signal-0 liveness probe ([ProcessAlive]) before it bothers to dial.
 	PID int `json:"pid"`
 	// BinaryVersion is the worker's build version, the cheap pre-dial version
 	// hint the router reads from the file to make an adopt/spawn/skew-route

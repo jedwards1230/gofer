@@ -26,10 +26,12 @@ func deadPid(t *testing.T) int {
 	return cmd.Process.Pid
 }
 
-// TestPidAlive covers daemon.ProcessAlive's two ends: the current test
-// process's own pid (definitely alive) and a just-exited child's pid
-// (definitely dead).
-func TestPidAlive(t *testing.T) {
+// TestDaemonProcessAlive covers daemon.ProcessAlive's two ends: the current
+// test process's own pid (definitely alive) and a just-exited child's pid
+// (definitely dead). Named for the call site's spelling (daemon.ProcessAlive)
+// rather than a bare TestProcessAlive, which would collide by name with
+// internal/daemon's own test of the same helper.
+func TestDaemonProcessAlive(t *testing.T) {
 	if !daemon.ProcessAlive(os.Getpid()) {
 		t.Error("daemon.ProcessAlive(os.Getpid()) = false, want true")
 	}
