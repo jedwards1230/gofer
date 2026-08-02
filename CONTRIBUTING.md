@@ -98,6 +98,38 @@ stale-daemon version-skew banner. `make build` does the same into `bin/gofer`.
 - **SDK promotion test**: code moves down into the SDK only when a second
   application would need it unchanged. Supervision, roster, and TUI stay here.
 
+## The environment is not a safe channel for a secret
+
+**In gofer the model has a shell, so treat any process environment an agent's
+tools can reach as readable by the model.** argv and the environment are *both*
+unsafe channels for a secret. The safe hand-off is a `0600` file the recipient
+reads once and deletes.
+
+The tempting reasoning is "argv is world-readable via `ps`, so pass it in the
+environment instead". That is correct about argv and wrong about the conclusion:
+it defends against other local *users* while leaving the secret open to the
+*agent*, which is the principal this codebase exists to run. Two mechanisms make
+that concrete, and both are worth re-checking rather than taking on faith:
+
+- The SDK's bash tool execs with `cmd.Env` left nil (`tool/bash.go`), and Go
+  gives a child process with a nil `Env` its parent's environment. Anything in a
+  gofer process's environment is therefore one `env` away from the model.
+- `internal/sandbox` does not change that. The bwrap profile binds the
+  filesystem and unshares the network (`--ro-bind`, `--bind`, `--unshare-net`);
+  neither backend passes `--clearenv`/`--unsetenv` or filters the environment at
+  all. Containment covers the filesystem and the network, not the environment.
+
+So when a gofer process must hand a credential to another process it spawns:
+write it as a `0600` file, pass the *path*, have the recipient read it once and
+delete it, leave `cmd.Env` nil, and gate the hand-off on the feature that needs
+it so a deployment that never opted in carries no credential at all.
+
+The same property bounds `config.SecretRef`: its `env:VAR` form resolves against
+gofer's **own** environment at use time, so a credential supplied that way is
+readable by the model through the bash tool. That is a reasonable trade for an
+operator-scoped API key and the wrong one for anything whose disclosure is worth
+more than the session — prefer `file:/path` as the blast radius grows.
+
 ## Before you open a PR
 
 - Make sure all CI checks pass locally first (the commands above, exactly as CI
