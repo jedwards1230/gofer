@@ -137,7 +137,7 @@ func TestDaemonCapabilitiesFailureStaysUnknownAndReadsNothingLocally(t *testing.
 	cwd := t.TempDir()
 	writeBackendSkill(t, filepath.Join(cwd, ".gofer", "skills", "cwd-local-skill"), "cwd-local-skill")
 
-	answer, err := daemonCapabilities(c, cwd)(context.Background())
+	answer, err := daemonCapabilities(constantClient(c), cwd)(context.Background())
 	if err == nil {
 		t.Error("a broken connection must surface its error to the closure's caller")
 	}
@@ -183,7 +183,7 @@ func TestAttachWiresDaemonCapabilities(t *testing.T) {
 	clientRoot := t.TempDir()
 	writeBackendSkill(t, filepath.Join(clientRoot, "skills", "attach-client-only"), "attach-client-only")
 
-	env := attachCommandEnv(c, clientRoot, t.TempDir())
+	env := attachCommandEnv(constantClient(c), clientRoot, t.TempDir())
 	if env.Capabilities == nil {
 		t.Fatal("gofer attach supplied no Capabilities closure — /mcp and /skills are permanently UNKNOWN there")
 	}
