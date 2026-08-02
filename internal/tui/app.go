@@ -145,19 +145,26 @@ type App struct {
 	shellRuns []shellRun
 	shellSeq  int
 
-	// compactingSince is when an explicit `/compact` was dispatched, or the
-	// zero time when none is in flight. It drives the transient "compacting
-	// context…" indicator at the transcript tail ([Model.WithCompacting]) and
-	// the elapsed seconds it counts, and it is what [compactTickMsg] reschedules
-	// itself on — so the once-per-second tick exists only while a compaction
-	// does, and stops on its own.
+	// compactingSince is when the compaction currently in flight began, or the
+	// zero time when none is. It drives the transient "compacting context…"
+	// indicator at the transcript tail ([Model.WithCompacting]) and the elapsed
+	// seconds it counts, and it is what [compactTickMsg] reschedules itself on —
+	// so the once-per-second tick exists only while a compaction does, and stops
+	// on its own.
 	//
-	// This covers the EXPLICIT path only. Automatic compaction (the pump's
-	// maybeAutoCompact) is triggered daemon-side, and the Event contract carries
-	// only session.compacted — the COMPLETION. There is no session.compacting
-	// event to hang an indicator on, so an automatic compaction still shows
-	// nothing until it lands; closing that gap is an agent-sdk-go contract
-	// change, not a TUI one (see gofer #300).
+	// It is set from TWO sources, which is what makes it cover automatic
+	// compaction as well as explicit (gofer#300):
+	//
+	//  1. `/compact` dispatch ([runCompact]), which latches optimistically at
+	//     the moment the user asked rather than waiting for the round trip.
+	//  2. event.SessionCompactionStarted, which is the ONLY signal an automatic
+	//     compaction gives — the pump's maybeAutoCompact is triggered
+	//     supervisor-side with no client RPC in flight to hang an indicator on.
+	//
+	// It is cleared by [App.applyCompactionEvent] on either of the start's two
+	// terminals, by compactDoneMsg, by [App.switchSession], and — load-bearing,
+	// not defensive — on sessClosedMsg. See applyCompactionEvent for why a
+	// closed subscription MUST clear it.
 	compactingSince time.Time
 
 	// shellQueue is the sticky reply-now/queue mode ctrl+r toggles (keymap.go).
@@ -702,6 +709,12 @@ func (a *App) switchSession(id string) tea.Cmd {
 	a.sub = nil
 	a.decSub = nil
 	a.scroll = 0 // a different session's transcript starts back at the tail
+	// The indicator describes the session being LEFT, and its terminal event
+	// will arrive on a subscription that is already closed — carrying the latch
+	// across would paint another session's transcript with a compaction that is
+	// not its own. (The old subscription's sessClosedMsg cannot clear it here:
+	// sessID has already moved, so that message is dropped as stale.)
+	a.compactingSince = time.Time{}
 	return a.subscribe(id)
 }
 
@@ -1049,11 +1062,23 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// PermissionRequested, cleared on a matching PermissionResolved) —
 		// see Model.Ingest and approval.go.
 		a.ingestAttach(msg.ev)
+		// The compaction indicator is App state, not Model state — like the
+		// turn-in-flight indicator it is composed per render (attachModel's
+		// WithCompacting) and must never enter the durable item list. Driving it
+		// here rather than in Model.Ingest keeps that split intact.
+		if a.applyCompactionEvent(msg.ev) {
+			return a, tea.Batch(waitForEvent(msg.id, msg.sub), compactTick())
+		}
 		return a, waitForEvent(msg.id, msg.sub)
 
 	case sessClosedMsg:
 		if msg.id == a.sessID {
 			a.sub = nil
+			// A severed subscription is the one way a latched compaction
+			// indicator never sees its terminal event, so it is cleared here
+			// rather than left to a terminal that is no longer coming. See
+			// [App.applyCompactionEvent].
+			a.compactingSince = time.Time{}
 		}
 		return a, nil
 

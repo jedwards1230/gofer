@@ -2304,11 +2304,43 @@ nothing for as long as it runs:
   background-agents summary, never silent: message count, a `~before → after`
   token line explicitly labeled an *estimate*, the model, and the summary text).
 
-Note the progress half covers the EXPLICIT path only. Automatic compaction is
-triggered daemon-side and the Event contract carries only `session.compacted`,
-the completion — there is no `session.compacting` to hang an indicator on, so an
-automatic compaction still shows nothing until it lands. Closing that is an
-agent-sdk-go contract change (gofer#300), not a TUI one.
+The progress half covers AUTOMATIC compaction too (gofer#300, agent-sdk-go
+v0.24.0). It used to cover the explicit path only: automatic compaction is
+triggered supervisor-side with no client call in flight, and the Event contract
+carried only `session.compacted` — the completion — so the transcript simply
+froze for the length of a summarizer call with nothing to explain it. The SDK
+now brackets that call with `session.compaction_started` and, on the failure
+side, `session.compaction_failed`, and `App.applyCompactionEvent` latches the
+same `⋯ compacting context… (Ns)` indicator off the start event. The state is
+read from the contract, never inferred — no stall detection, no token-count
+watching.
+
+Two consequences worth knowing:
+
+- **A failed compaction says so.** `session.compaction_failed` clears the
+  indicator *and* raises a danger note carrying the reason. An indicator that
+  merely blinked out would be indistinguishable from one that succeeded, leaving
+  the user believing their context was summarized when it was not (it is not —
+  nothing the runner acknowledges as journaled happened).
+- **A severed subscription clears it.** The start/terminal pair is total over
+  what the SDK *publishes*, not over what a client *receives*: a
+  force-unsubscribe or a broker close (an ordinary ctrl+c) can cut the stream
+  between the two, and the only signal is the channel closing. `sessClosedMsg`
+  therefore clears the latch, or one severed subscription would leave
+  "compacting context…" on screen counting up forever.
+
+- **The elapsed counter is not authoritative over the daemon transport.** It
+  prefers the start event's own publish time, so a client attaching *mid*
+  compaction counts from when the work began rather than from when it connected.
+  That timestamp is **zero on the daemon path**: `internal/wirestream` rebuilds
+  events through the SDK's exported `New*` constructors, which cannot set the
+  unexported `seq`/`ts` meta, and the SDK exposes no way to restore it. There the
+  counter falls back to receipt time and so *understates* elapsed by the
+  transport hop. Read it as "at least this long", not as the true duration.
+
+Captured as a before/after pair in `vhs/transcript-auto-compacting.tape` — the
+claim being that the indicator appears with nothing typed, which one frame
+cannot show.
 
 The failure-triggered recovery (jedwards1230/gofer#279) is the one automatic
 case that *does* announce itself first, and it reuses the blocks above rather

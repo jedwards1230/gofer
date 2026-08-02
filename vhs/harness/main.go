@@ -63,7 +63,7 @@ type step struct {
 // vocabulary is spelled out, so the two never drift apart. Slugs follow
 // `<area>-<view>[-<state>]`, kebab-case: transcript-* (the attach scenes),
 // roster-* (the overview scene), panel-* (the command-panel scenes).
-const scenarioHelp = "transcript-tool-call | transcript-approval | transcript-compacting | transcript-overflow-recovery | roster-overview | roster-cwd-home | roster-cwd-missing | panel-status-overview | panel-status | panel-status-cwd-home | panel-config | panel-model | panel-model-empty | panel-model-daemon-refresh | panel-thinking | panel-usage | panel-stats | panel-help | panel-resume | panel-capabilities | panel-capabilities-unknown"
+const scenarioHelp = "transcript-tool-call | transcript-approval | transcript-compacting | transcript-auto-compacting | transcript-overflow-recovery | roster-overview | roster-cwd-home | roster-cwd-missing | panel-status-overview | panel-status | panel-status-cwd-home | panel-config | panel-model | panel-model-empty | panel-model-daemon-refresh | panel-thinking | panel-usage | panel-stats | panel-help | panel-resume | panel-capabilities | panel-capabilities-unknown"
 
 func main() {
 	scenario := flag.String("scenario", "transcript-tool-call", "scripted scene to play: "+scenarioHelp)
@@ -102,6 +102,11 @@ func main() {
 		// state under capture is reached by DISPATCHING a slash command, not by
 		// replaying an event stream — the tape types /compact itself.
 		model = compactingApp()
+	case "transcript-auto-compacting":
+		// The same indicator as transcript-compacting, reached the OTHER way:
+		// no slash command and no keystroke, just the event contract. See
+		// autoCompactingApp.
+		model = autoCompactingApp()
 	case "transcript-overflow-recovery":
 		// A settled sequence, not an in-flight state: the tape only attaches
 		// and photographs the seeded backlog (see overflowRecoveryHistory).
@@ -310,6 +315,43 @@ func compactingApp() tea.Model {
 	sup := newVHSSupervisor(cannedSessions())
 	sup.compactHold = 30 * time.Second
 	sup.seed(compactableHistory()...)
+	return commandViewAppOver(cannedCommandEnv(), sup)
+}
+
+// autoCompactDelay is how long autoCompactingApp waits before publishing the
+// compaction start. It has to be long enough that the tape can attach and
+// photograph the transcript BEFORE the indicator exists — the "before" half of
+// the pair — with room for process startup jitter on either side.
+const autoCompactDelay = 4 * time.Second
+
+// autoCompactingApp is the AUTOMATIC-compaction scene (gofer#300), and the
+// distinction from [compactingApp] above is the whole point: nothing is typed.
+//
+// compactingApp captures an indicator the user ASKED for — the tape types
+// /compact, and the indicator lives as long as that call is held. Automatic
+// compaction has no call and no keystroke: it is triggered supervisor-side, and
+// before session.compaction_started existed the transcript simply froze for a
+// minute with nothing on screen to explain it. So this scene publishes the
+// start event on a timer with no input at all, which is the only honest mock of
+// a compaction the client did not initiate.
+//
+// The delay is what makes a before/after PAIR possible. Seeding the start into
+// the replay backlog instead would put the indicator on screen the instant the
+// tape attaches, leaving no "before" frame — and a single frame of an indicator
+// cannot show that it APPEARED on its own, which is the reviewable claim.
+//
+// No terminal event is ever published, so the indicator persists until the tape
+// quits — the same reason compactingApp holds its Compact call.
+func autoCompactingApp() tea.Model {
+	sup := newVHSSupervisor(cannedSessions())
+	sup.seed(compactableHistory()...)
+	go func() {
+		time.Sleep(autoCompactDelay)
+		// ReplacesThrough and the message count match compactableHistory's two
+		// seeded turns, so the figures on screen describe the transcript under
+		// them rather than arbitrary numbers.
+		sup.broker.Publish(event.NewSessionCompactionStarted("sess-1", "entry-482", 14))
+	}()
 	return commandViewAppOver(cannedCommandEnv(), sup)
 }
 

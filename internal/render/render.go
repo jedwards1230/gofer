@@ -44,6 +44,16 @@ func NewHuman(w io.Writer, color bool) *Human {
 	return &Human{w: w, color: color}
 }
 
+// messageCount renders n as a pluralized message count. The three compaction
+// kinds all report one, and they must agree: a reader correlating a start with
+// its terminal is comparing these figures by eye.
+func messageCount(n int) string {
+	if n == 1 {
+		return "1 message"
+	}
+	return fmt.Sprintf("%d messages", n)
+}
+
 // Render writes a human-readable representation of e. Message deltas stream
 // inline (reasoning dimmed, text raw); every other event kind renders as a
 // single line.
@@ -83,15 +93,21 @@ func (h *Human) Render(e event.Event) error {
 		h.marker(ev.Kind(), fmt.Sprintf("%s → %s", ev.ID, ev.Verdict))
 	case event.SessionError:
 		h.marker(ev.Kind(), ev.Err)
+	case event.SessionCompactionStarted:
+		// The start of a compaction, which streams nothing and can run a minute
+		// or more. In a headless stream this line is the only thing standing
+		// between the operator and a silent, unexplained stall.
+		h.marker(ev.Kind(), fmt.Sprintf("summarizing %s…", messageCount(ev.Messages)))
 	case event.SessionCompacted:
 		// Compaction must never render as a bare, detail-free marker like the
 		// default case below — an operator watching this stream needs to see
 		// WHAT changed, not just that some lifecycle event fired.
-		unit := "message"
-		if ev.MessagesCompacted != 1 {
-			unit = "messages"
-		}
-		h.marker(ev.Kind(), fmt.Sprintf("%d %s replaced with a summary", ev.MessagesCompacted, unit))
+		h.marker(ev.Kind(), fmt.Sprintf("%s replaced with a summary", messageCount(ev.MessagesCompacted)))
+	case event.SessionCompactionFailed:
+		// The other terminal. It must carry the reason: an operator who saw the
+		// start line above needs to know the compaction did NOT land, and that
+		// the session's context is therefore unchanged rather than summarized.
+		h.marker(ev.Kind(), fmt.Sprintf("%s left uncompacted: %s", messageCount(ev.Messages), ev.Err))
 	default:
 		h.marker(e.Kind(), "")
 	}
