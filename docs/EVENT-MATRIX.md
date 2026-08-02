@@ -13,7 +13,7 @@ without a row here is a kind whose gaps nobody will notice.
 
 ## How to read it
 
-Rows are the SDK's full `event` union (`agent-sdk-go/event/`, 23 types, verified against the
+Rows are the SDK's full `event` union (`agent-sdk-go/event/`, 21 types, verified against the
 `v0.24.0` tag gofer pins in `go.mod`). Columns are the five hops, **in stream order**:
 
 | # | Path | Where |
