@@ -62,7 +62,8 @@ type sinkCall struct {
 // It is a hand-written literal rather than a marshaled event on purpose: the
 // test must compare against bytes it CONTROLS, so a change to the event type's
 // own MarshalJSON cannot quietly make both sides of the comparison agree. Note
-// the discriminator is "type" (see [goferEventWire]); "kind" is the message-kind
+// the discriminator is "type" (an event's own MarshalJSON envelope names it
+// that way, which is what [event.Unmarshal] reads); "kind" is the message-kind
 // field, which a tool frame does not use.
 const spillFinishedParams = `{"type":"tool.call.finished","session_id":"sess-spill","id":"call-7",` +
 	`"name":"diag_tool","input":{"path":"main.go"},"result":"ok","is_error":false,` +

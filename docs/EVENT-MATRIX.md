@@ -39,8 +39,11 @@ Two structural notes that explain most of the table:
   Permission events are the one exception: they are deliberately special-cased onto dedicated
   wire methods rather than `gofer/event`.
 - **Column 4 applies only under `--workers`,** where it is the *sole* decode path for a worker's
-  `gofer/event` frames. Unlike 2 and 3 it is an explicit per-kind switch, which is exactly why
-  it is where kinds go missing. In the in-process daemon there is no wirestream hop at all.
+  `gofer/event` frames. In the in-process daemon there is no wirestream hop at all. It *used* to
+  be an explicit per-kind switch, which is exactly why it was where kinds went missing; it now
+  delegates to the SDK's own `event.Unmarshal`, the maintained inverse of the `MarshalJSON` that
+  wrote the frame, so it is generic like 2 and 3 and a new kind joins it for free.
+  `TestReconstructCarriesEveryEventKind` fails the build if that ever regresses.
 
 ## The matrix
 
@@ -48,24 +51,24 @@ Legend: **Y** carried · **—** not carried (annotated below) · **n/a** cannot
 
 | Event kind | 1. ACP | 2. in-turn | 3. out-of-turn | 4. wirestream | 5. TUI |
 |---|---|---|---|---|---|
-| `session.created` | — a | Y | Y | Y | — d |
-| `session.resumed` | — a | Y | Y | Y | — d |
+| `session.created` | — a | Y | n/a k | Y | — d |
+| `session.resumed` | — a | Y | n/a k | Y | — d |
 | `session.forked` | — a | Y | Y | Y | — d |
 | `session.compacted` | **— GAP 1** | Y | Y | Y | Y |
 | `session.killed` | — a | Y | Y | Y | — d |
 | `session.archived` | — a | Y | Y | Y | — d |
 | `session.spawned` | — a | n/a b | n/a b | — b | n/a b |
-| `session.info` | Y | Y | Y | Y | **— GAP 3** |
-| `session.config` | Y | Y | Y | **— GAP 2** | **— GAP 2** |
-| `plan` | Y | Y | Y | **— GAP 2** | **— GAP 2** |
+| `session.info` | Y | Y | n/a k | Y | **— GAP 2** |
+| `session.config` | Y | Y | Y | Y n | **— GAP 2** |
+| `plan` | Y | Y | n/a l | Y n | **— GAP 2** |
 | `turn.started` | — a | Y | Y | Y | Y |
-| `turn.finished` | Y (cond.) c | Y | Y | Y | Y |
+| `turn.finished` | Y (cond.) c | Y | Y | Y n | Y |
 | `message.started` | — e | Y | Y | Y | Y |
 | `message.delta` | Y | Y | Y | Y | Y |
 | `message.finished` | Y (cond.) c | Y | Y | Y | Y |
 | `tool.call.started` | Y | Y | Y | Y | Y |
 | `tool.call.delta` | — f | Y | Y | Y | Y |
-| `tool.call.finished` | Y | Y | Y | Y | Y |
+| `tool.call.finished` | Y | Y | Y | Y n | Y |
 | `permission.requested` | Y g | Y h | — i | Y h | Y |
 | `permission.resolved` | Y g | Y h | — i | Y h | Y |
 | `session.error` | — j | Y | Y | Y | Y |
@@ -175,27 +178,66 @@ is upstream of gofer and wider than the `--workers` relay: it affects the in-pro
 Tracked as `jedwards1230/agent-sdk-go#139`. Note this is *orthogonal* to the worker-side relay —
 fixing one does not fix the other.
 
-**GAP 2 — `plan` and `session.config` are dropped by wirestream, so they are invisible under
-`--workers`.** `handleGoferEvent`'s switch (`internal/wirestream/reconstruct.go:437-486`) has 16
-cases and no `event.KindPlan` / `event.KindSessionConfig`; both fall to a `default` that returns
-before reaching either `rec.broker.Publish(ev)` or the `r.sink(...)` push seam. Consequences:
+**GAP 2 — `session.info`, `session.config` and `plan` have no live path into the TUI.** No
+`case` for any of them in `Model.Ingest`, and none is named in the deliberate fall-through comment
+at `model.go:561-564`. For `session.info` the effect is minor and self-correcting: titles come
+instead from the roster snapshot on the ~1s tick (`status.go:77-80`, `overview_render.go:554`,
+`peek.go:76`), so a rename during an active attach is invisible only until the next refresh. For
+`plan` and `session.config` there is no such fallback — the TUI simply never renders a plan, in
+ANY mode, and tracks a model change only through the roster.
 
-- Neither reaches `Supervisor.SubscribeLive` (`internal/router/methods.go:64`), which is what the
-  outer daemon's in-turn loop drains — so these are dropped **in-turn as well as out-of-turn**.
-  This is strictly worse than the compaction gap, which was out-of-turn only.
-- The drop happens one layer *below* the out-of-turn relay, so the worker-side observer added
-  for `session.compacted` does not incidentally fix it.
-- Both kinds are genuinely reachable: `plan` from the builtin `update_plan` tool
-  (`internal/config/tools.go:25`, emitted at `agent-sdk-go/loop/loop.go:386`), `session.config`
-  from `advertiseModelChange` (`internal/daemon/handlers.go`) on every model swap.
-- In-process is unaffected — that path has no wirestream hop and its watchers are generic.
+This is recorded rather than fixed because "not handled and not documented as deliberate" is
+exactly the ambiguity this table exists to remove. **Do not confuse it with the transport gap
+below**: fixing wirestream (note n) put both kinds on the wire and into every ACP client, and
+changed nothing about the TUI, because the two failures are at different layers.
 
-**GAP 3 — `session.info` has no live path into the TUI.** No `case` for it in `Model.Ingest`,
-and it is *not* named in the deliberate fall-through comment at `model.go:561-564`. Titles are
-sourced instead from the roster snapshot on the ~1s tick (`status.go:77-80`,
-`overview_render.go:554`, `peek.go:76`), so a rename during an active attach is invisible until
-the next refresh. Minor, and self-correcting — recorded because "not handled and not documented
-as deliberate" is exactly the ambiguity this table exists to remove.
+## Fixed
+
+**n — `plan`, `session.config`, `TurnFinished.ContextWindow` and `ToolCallFinished.Edits` used to
+be dropped by wirestream under `--workers`; they are carried now.** `handleGoferEvent` decoded
+frames with a hand-rolled 16-case switch over `event.New*` constructors plus a local struct
+mirroring the union's payload fields. Two decoders for one encoding is a synchronization
+obligation, and it had been unmet four ways at once — silently, because a kind nothing decodes is
+indistinguishable from a kind nothing sends:
+
+- `plan` and `session.config` had no case at all and fell to a `default` returning before BOTH
+  `rec.broker.Publish(ev)` and the `r.sink(...)` push seam. Neither reached
+  `Supervisor.SubscribeLive` (`internal/router/methods.go:64`) either, which is what the outer
+  daemon's in-turn loop drains — so both were dropped **in-turn as well as out-of-turn**, strictly
+  worse than the compaction gap that was out-of-turn only, and one layer BELOW the out-of-turn
+  relay, so the worker-side observer did not incidentally fix them.
+- `TurnFinished.ContextWindow` and `ToolCallFinished.Edits` were shed field-wise: the SDK sets both
+  on the built event after construction, so no constructor signature could carry them. The first
+  was user-visible — ACP gates its `usage_update` projection on `ContextWindow > 0` (note c), so a
+  pure-ACP peer attached through a router received no usage update at all.
+
+The fix is to delegate to the SDK's `event.Unmarshal`, the maintained inverse of the `MarshalJSON`
+that wrote the frame, and delete the local mirror — which removes the obligation instead of
+re-discharging it. `TestReconstructCarriesEveryEventKind` pins every kind's full payload round
+trip against it, so a reintroduced per-kind path fails the build.
+
+**k — unreachable, not carried.** `session.created` and `session.resumed` are published *before*
+any daemon-side subscription can exist (SDK `session/session.go:113`; `runner/runner.go:462`), and
+both out-of-turn relays subscribe LIVE (no retained backlog — see `observer.go`'s subscribe-timing
+note). `session.info`'s only out-of-turn emit is the first-title capture on the
+Create-with-prompt path (`internal/supervisor/managed.go:354`), which is pre-subscribe for the
+same reason; on `session/prompt` the emit is in-turn. The mechanism in these cells is generic and
+would carry them — nothing ever arrives on it. This is the same reachable-vs-carried distinction
+note i draws for permissions.
+
+**l — `plan` is in-turn only.** Its sole publish site in the SDK is inside the agent loop
+(`loop/loop.go:386`, from the `update_plan` builtin), so a prompt handler is necessarily active in
+the worker daemon and the out-of-turn relay never sees it.
+
+**m — a stale-roster sibling, still open.** The router's own `advertiseModelChange` would
+re-advertise `session.config` locally, which would have masked the transport gap above. It does
+not fire, because `applyRosterEvent` (`internal/router/rostercache.go:119-160`) folds
+Status/Title/Usage/Cost but **not** `Model`, and the cache is seeded once
+(`rostercache.go:85-104`) with no re-seed. So under `--workers` the router serves a stale `Model`
+for a handle's whole life after any `SetModel` — `gofer ps`, `session/list` and the TUI status /
+`/model` surfaces report the OLD model — and `current == prev` suppresses the advertisement.
+Wrong data rather than absent data, and out of scope here (roster aggregation, not event
+transport): tracked as `jedwards1230/gofer#352`.
 
 ## Related
 

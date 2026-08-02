@@ -16,14 +16,22 @@ import (
 // daemon's gofer/event notifications — the M3 lossless-attach wire contract
 // (internal/daemon/handlers.go's methodGoferEvent): each notification's
 // params ARE one source event's own MarshalJSON envelope, verbatim, so
-// reconstruction here is pure decode-and-republish — decode the envelope's
-// "type" discriminator, rebuild the exact concrete [event.Event] via the
-// SDK's exported event.New* constructors (see handleGoferEvent's dispatch
-// table), and Publish it to this session's local broker. There is no lossy
-// projection step and no open-message bookkeeping: every field the source
-// event carried (incl. tool.call.delta's streaming input fragments and
-// tool.call.finished's Diagnostics/Spill* fields, both entirely absent from
-// ACP's session/update) survives the round trip. session/update itself is
+// reconstruction here is pure decode-and-republish — hand the bytes to the
+// SDK's [event.Unmarshal], the maintained inverse of the MarshalJSON that
+// wrote them, and Publish the resulting concrete [event.Event] to this
+// session's local broker. There is no lossy projection step and no
+// open-message bookkeeping: every field the source event carried (incl.
+// tool.call.delta's streaming input fragments and tool.call.finished's
+// Diagnostics/Spill* fields, both entirely absent from ACP's session/update)
+// survives the round trip.
+//
+// That losslessness is now STRUCTURAL. It used to rest on a hand-rolled
+// per-kind dispatch table plus a local mirror of the union's payload fields,
+// which is a claim someone has to keep true by hand — and it had quietly
+// stopped being true (see handleGoferEvent). Delegating to the SDK's own
+// decoder means a kind or field added to the union is carried the day it
+// exists, and TestReconstructCarriesEveryEventKind fails the build if that ever
+// regresses. session/update itself is
 // IGNORED on this path — it still goes out (serving an ACP client, on the
 // same connection), this core just never reads it (see
 // handleNotification). It also drives the turn lifecycle's one FALLBACK case
@@ -428,13 +436,37 @@ func (r *Reconstructor) handleNotification(n daemon.Notification) {
 // handleGoferEvent decodes one gofer/event notification's params — the
 // source [event.Event]'s own MarshalJSON envelope, verbatim (methodGoferEvent's
 // doc) — and republishes the exact same concrete event onto its session's
-// broker, via the SDK's exported event.New* constructors: a pure
-// decode-dispatch-publish, no open-message bookkeeping. seq/time are NOT
-// restored (event.New* always builds seq=0/time=zero); rec.broker reassigns
-// them at Publish, same as it already does for every other event this core
-// publishes — "lossless" here means every event kind, every payload field,
-// and ordering, not source seq/time (see the package doc for why that's by
-// design, not a gap).
+// broker, via the SDK's exported [event.Unmarshal]: a pure decode-and-publish,
+// no open-message bookkeeping. seq/time do not survive in effect — Unmarshal
+// restores them from the envelope and rec.broker reassigns both at Publish,
+// same as it already does for every other event this core publishes —
+// "lossless" here means every event kind, every payload field, and ordering,
+// not source seq/time (see the package doc for why that's by design, not a
+// gap).
+//
+// # Why the SDK's decoder and not a switch here
+//
+// This method used to carry its own 16-case dispatch table over event.New*
+// constructors, plus a goferEventWire mirroring the union's payload fields. Two
+// decoders for one encoding is a synchronization obligation, and it had been
+// unmet for four items at once — every one of them silent, because a kind that
+// is never decoded looks exactly like a kind that is never sent:
+//
+//   - `plan` and `session.config` had no case at all, so both fell to the
+//     default and returned BEFORE the sink and the publish. Under --workers
+//     that is the sole decode path for a worker's frames, so neither kind
+//     reached any client in that mode — in-turn as well as out-of-turn, which
+//     is strictly worse than the out-of-turn compaction gap this file's
+//     jedwards1230/gofer#280 work started from, and not fixed by it.
+//   - `turn.finished` lost ContextWindow and `tool.call.finished` lost Edits:
+//     both are set on the built event AFTER construction in the SDK, so no
+//     constructor signature could carry them. The first was user-visible —
+//     ACP's projection gates its usage_update on ContextWindow > 0, so a
+//     pure-ACP peer attached through a router received no usage update at all.
+//
+// event.Unmarshal is maintained next to the MarshalJSON that produced these
+// bytes and is documented as its inverse, so delegating to it removes the
+// obligation rather than re-discharging it.
 //
 // It also maintains rec.turnTerminated, the demuxer-only signal
 // [Reconstructor.handleTurnEnd] reads to decide whether its fallback terminal
@@ -444,7 +476,7 @@ func (r *Reconstructor) handleNotification(n daemon.Notification) {
 // Both this method and handleTurnEnd run only on the demuxer goroutine (see
 // the package doc), so no lock guards turnTerminated.
 //
-// r.session(w.SessionID) below will, in practice, always find an
+// r.session(sessionID) below will, in practice, always find an
 // already-mapped entry rather than create one: this connection only receives
 // a notification for a session it has ATTACHED to, and it attaches only by
 // issuing session/load (loadHistory) or session/prompt (Send) for that
@@ -460,75 +492,63 @@ func (r *Reconstructor) handleNotification(n daemon.Notification) {
 // fresh, unloaded broker" rather than a nil dereference, not because this
 // path is expected to fire in normal operation.
 func (r *Reconstructor) handleGoferEvent(raw json.RawMessage) {
-	var w goferEventWire
-	if err := json.Unmarshal(raw, &w); err != nil || w.SessionID == "" {
+	// The SDK's own inverse of the envelope it wrote, NOT a hand-rolled switch.
+	// This is what makes "lossless" a property rather than a list someone has to
+	// keep in sync: event.Unmarshal is maintained beside the MarshalJSON that
+	// produced these bytes, so a kind (or a FIELD) added to the union is carried
+	// here the day it exists. The hand-rolled dispatch table this replaces had
+	// silently fallen four behind — `plan` and `session.config` were dropped
+	// whole (invisible to every client under --workers, in-turn as well as out —
+	// jedwards1230/gofer#280's own open question), and turn.finished's
+	// ContextWindow and tool.call.finished's Edits were shed field-wise, the
+	// first of which killed every ACP usage_update through a router, because the
+	// ACP projection gates that update on ContextWindow > 0.
+	//
+	// Seq/time are NOT preserved in effect: Unmarshal restores them from the
+	// envelope, and rec.broker.Publish below reassigns both, exactly as it did
+	// for the zero-valued seq/time the old event.New* constructors produced (see
+	// the package doc for why that is by design, not a gap).
+	//
+	// An undecodable frame returns WITHOUT invoking the sink, same as before: a
+	// kind from a newer producer yields event.ErrUnknownKind, which is
+	// protocol-drift tolerance rather than a reason to crash replay, and a
+	// consumer must not be handed a frame this core could not decode.
+	ev, err := event.Unmarshal(raw)
+	if err != nil {
 		return
 	}
-	rec := r.session(w.SessionID)
+	sessionID := ev.SessionID()
+	if sessionID == "" {
+		return
+	}
+
+	// permission.* is excluded from gofer/event BY CONTRACT (methodGoferEvent's
+	// doc): it travels the dedicated gofer/permission_* methods, which
+	// handleNotification dispatches separately. Dropped here EXPLICITLY rather
+	// than by falling off the end of a decode, because event.Unmarshal decodes
+	// both kinds perfectly well — so without this the contract would be enforced
+	// by nothing, and a frame that does reach this path (an adopted session
+	// finishing a turn whose original prompt handler is gone — see
+	// docs/EVENT-MATRIX.md note i) would be delivered TWICE: once here and once
+	// on its own method.
+	if k := ev.Kind(); k == event.KindPermissionRequested || k == event.KindPermissionResolved {
+		return
+	}
+
+	rec := r.session(sessionID)
 	if rec == nil {
 		return // reconstructor closing: drop the event
 	}
 
-	var ev event.Event
-	switch w.Type {
-	case event.KindSessionCreated:
-		ev = event.NewSessionCreated(w.SessionID)
-	case event.KindSessionResumed:
-		ev = event.NewSessionResumed(w.SessionID)
-	case event.KindSessionForked:
-		ev = event.NewSessionForked(w.SessionID, w.At, w.Label)
-	case event.KindSessionCompactionStarted:
-		ev = event.NewSessionCompactionStarted(w.SessionID, w.ReplacesThrough, w.Messages)
-	case event.KindSessionCompacted:
-		ev = event.NewSessionCompacted(w.SessionID, w.ReplacesThrough, w.MessagesCompacted, w.Model, w.Usage, w.Summary)
-	case event.KindSessionCompactionFailed:
-		ev = event.NewSessionCompactionFailed(w.SessionID, w.ReplacesThrough, w.Messages, w.Err)
-	case event.KindSessionKilled:
-		ev = event.NewSessionKilled(w.SessionID)
-	case event.KindSessionArchived:
-		ev = event.NewSessionArchived(w.SessionID)
-	case event.KindSessionError:
-		ev = event.NewSessionError(w.SessionID, w.Err, w.Fatal)
-	case event.KindSessionInfo:
-		ev = event.NewSessionInfoUpdated(w.SessionID, w.Title)
-	case event.KindTurnStarted:
+	// rec.turnTerminated is demuxer-only bookkeeping the decode cannot carry —
+	// see this method's doc and [Reconstructor.handleTurnEnd].
+	switch e := ev.(type) {
+	case event.TurnStarted:
 		rec.turnTerminated = false
-		ev = event.NewTurnStarted(w.SessionID)
-	case event.KindTurnFinished:
-		if w.StopReason != "tool_use" {
+	case event.TurnFinished:
+		if e.StopReason != "tool_use" {
 			rec.turnTerminated = true
 		}
-		ev = event.NewTurnFinishedCost(w.SessionID, w.StopReason, w.Usage, w.Cost)
-	case event.KindMessageStarted:
-		ev = event.NewMessageStarted(w.SessionID, w.Kind)
-	case event.KindMessageDelta:
-		ev = event.NewMessageDelta(w.SessionID, w.Kind, w.Text)
-	case event.KindMessageFinished:
-		ev = event.NewMessageFinishedMeta(w.SessionID, w.Kind, w.Content, w.Meta)
-	case event.KindToolCallStarted:
-		// Agent is assigned AFTER construction because the SDK carries it that
-		// way too — it is set on the built event at emit time rather than taken
-		// as a constructor argument (see event.ToolCallStarted.Agent's doc), so
-		// mirroring that here keeps the reconstruction field-for-field faithful
-		// to what the daemon marshalled. Dropping it would silently
-		// un-attribute every subagent tool call for a remote client (the TUI's
-		// approval prompt reads it to say "from the `<agent>` agent").
-		started := event.NewToolCallStarted(w.SessionID, w.ID, w.Name, w.Input)
-		started.Agent = w.Agent
-		ev = started
-	case event.KindToolCallDelta:
-		delta := event.NewToolCallDelta(w.SessionID, w.ID, w.Delta)
-		delta.Agent = w.Agent
-		ev = delta
-	case event.KindToolCallFinished:
-		finished := event.NewToolCallFinishedSpill(w.SessionID, w.ID, w.Input, w.Result, w.IsError, w.Diagnostics, w.SpillPath, w.SpillBytes, w.SpillSHA256)
-		finished.Agent = w.Agent
-		ev = finished
-	default:
-		// permission.* (excluded from gofer/event by contract — see
-		// methodGoferEvent's doc) or an unknown/future kind: protocol-drift
-		// tolerance, not a reason to crash replay.
-		return
 	}
 	// The sink sees the frame BOTH ways — the verbatim bytes and the event just
 	// decoded from them — immediately before the local publish, so a consumer
@@ -540,81 +560,9 @@ func (r *Reconstructor) handleGoferEvent(raw json.RawMessage) {
 	// invoking the sink — a consumer must not forward a frame this core could not
 	// decode, or the two fan-outs would disagree about what the stream contains.
 	if r.sink != nil {
-		r.sink(w.SessionID, raw, ev)
+		r.sink(sessionID, raw, ev)
 	}
 	rec.broker.Publish(ev)
-}
-
-// goferEventWire decodes a gofer/event notification's params: the union of
-// every [event.Event] concrete type's MarshalJSON payload fields this core
-// needs to rebuild one via the matching event.New* constructor (see
-// handleGoferEvent's dispatch table). One struct covers every kind because
-// encoding/json ignores JSON fields absent from a given kind's envelope and
-// leaves the corresponding Go fields at their zero value — exactly what an
-// unpopulated kind's fields should decode to anyway. Field names/tags mirror
-// each type's MarshalJSON in the SDK's event/event.go exactly.
-type goferEventWire struct {
-	Type      string `json:"type"`
-	SessionID string `json:"session_id"`
-
-	// session.forked
-	At    string `json:"at"`
-	Label string `json:"label"`
-
-	// session.compacted (Usage is shared with turn.finished below).
-	// ReplacesThrough is shared with session.compaction_started and
-	// session.compaction_failed, which carry the same boundary — it is what
-	// correlates a start with whichever terminal follows it.
-	ReplacesThrough   string `json:"replaces_through"`
-	MessagesCompacted int    `json:"messages_compacted"`
-	Model             string `json:"model"`
-	Summary           string `json:"summary"`
-
-	// session.compaction_started / session.compaction_failed. The key is
-	// `messages`, NOT session.compacted's `messages_compacted`, and that
-	// asymmetry is the SDK's deliberate choice rather than an oversight here:
-	// this is a PRE-compaction count taken before the summarizer runs, so
-	// reporting it under `messages_compacted` would claim a compacted count for
-	// a compaction that has not happened. Decoding it into the same Go field as
-	// MessagesCompacted would silently re-introduce exactly that conflation.
-	// (session.compaction_failed's "error" is the Err field in the
-	// session.error group below — one field decodes both kinds' identical key.)
-	Messages int `json:"messages"`
-
-	// session.error
-	Err   string `json:"error"`
-	Fatal bool   `json:"fatal"`
-
-	// session.info
-	Title string `json:"title"`
-
-	// turn.finished
-	StopReason string         `json:"stop_reason"`
-	Usage      provider.Usage `json:"usage"`
-	Cost       *provider.Cost `json:"cost"`
-
-	// message.started / message.delta / message.finished
-	Kind    event.MessageKind `json:"kind"`
-	Text    string            `json:"text"`
-	Content string            `json:"content"`
-	Meta    map[string]string `json:"meta"`
-
-	// tool.call.started / tool.call.delta / tool.call.finished
-	ID    string          `json:"id"`
-	Name  string          `json:"name"`
-	Input json.RawMessage `json:"input"`
-	Delta string          `json:"delta"`
-	// Agent is the originating agent id all three tool-call kinds carry
-	// (omitempty on the wire — an un-attributed call simply has no "agent"
-	// key, which decodes to ""). handleGoferEvent assigns it after
-	// construction, matching how the SDK sets it.
-	Agent       string   `json:"agent"`
-	Result      string   `json:"result"`
-	IsError     bool     `json:"is_error"`
-	Diagnostics []string `json:"diagnostics"`
-	SpillPath   string   `json:"spill_path"`
-	SpillBytes  int64    `json:"spill_bytes"`
-	SpillSHA256 string   `json:"spill_sha256"`
 }
 
 // handlePermissionRequested reconstructs a gofer/permission_requested
