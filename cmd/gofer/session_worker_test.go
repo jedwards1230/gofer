@@ -18,6 +18,7 @@ import (
 
 	"github.com/jedwards1230/agent-sdk-go/acp"
 
+	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/daemon"
 	"github.com/jedwards1230/gofer/internal/worker"
 )
@@ -87,6 +88,19 @@ func (b *syncBuffer) String() string {
 // on-disk artifacts.
 func startSessionWorker(t *testing.T, sessionID string, extra ...string) (hs worker.Handshake, root string, stop func()) {
 	t.Helper()
+	root = t.TempDir()
+	hs, _, stop = startSessionWorkerIn(t, root, "error", sessionID, extra...)
+	return hs, root, stop
+}
+
+// startSessionWorkerIn is [startSessionWorker] over a root the caller already
+// owns (so it can seed <root>/config.json BEFORE the worker reads it) and at a
+// caller-chosen log level, and it hands back the worker's stderr so a test can
+// assert on a startup diagnostic. Both knobs exist for
+// TestSessionWorkerNeverInstallsLocalSubagents; every other caller wants the
+// defaults and goes through startSessionWorker.
+func startSessionWorkerIn(t *testing.T, root, logLevel, sessionID string, extra ...string) (hs worker.Handshake, stderr *syncBuffer, stop func()) {
+	t.Helper()
 	shortWorkerRuntimeDir(t)
 	// A credential must RESOLVE (never be used): runSessionWorker resolves its
 	// model from the sole credentialed provider, and runner.New pre-flights that
@@ -107,15 +121,14 @@ func startSessionWorker(t *testing.T, sessionID string, extra ...string) (hs wor
 	// setup, which is the pre-handshake path — survivable now that the pipe is
 	// closed on return, but it would fail with a confusing log-level error in a
 	// test about session ids. Pin it.
-	t.Setenv("GOFER_LOG_LEVEL", "error")
+	t.Setenv("GOFER_LOG_LEVEL", logLevel)
 
-	root = t.TempDir()
 	args := append([]string{"--session", sessionID, "--root", root}, extra...)
 
 	// An io.Pipe stands in for the worker's stdout so the handshake is read
 	// through the same "scan lines until one decodes" path the router uses.
 	pr, pw := io.Pipe()
-	stderr := &syncBuffer{}
+	stderr = &syncBuffer{}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
@@ -172,7 +185,7 @@ func startSessionWorker(t *testing.T, sessionID string, extra ...string) (hs wor
 		_ = pw.Close()
 	}
 	t.Cleanup(stop)
-	return hs, root, stop
+	return hs, stderr, stop
 }
 
 // TestSessionWorkerPinsSessionID is the guard on the production session-id
@@ -301,5 +314,45 @@ func TestSessionWorkerRequiresSession(t *testing.T) {
 	}
 	if stdout.Len() != 0 {
 		t.Errorf("stdout = %q, want nothing (stdout carries only the handshake line)", stdout.String())
+	}
+}
+
+// TestSessionWorkerNeverInstallsLocalSubagents is the regression test for the
+// gofer#345 review finding: a session worker started WITHOUT `--router` but
+// with `subagents.enabled` set in config silently received the in-process,
+// session-creating subagent seam.
+//
+// That broke the invariant this whole deployment rests on — the router creates
+// every child; a worker never creates a session. A worker's embedded daemon is
+// built with MaxSessions: 1, and that cap governs `session/new` only, so a
+// locally-installed seam let `spawn_subagent` mint children straight past both
+// the cap and the router.
+//
+// # Why this asserts on a log line
+//
+// A worker's tool surface is not observable from outside it: `gofer/capabilities`
+// carries MCP servers and skills, not builtins, and driving the tool would need
+// a real model turn. What IS observable — and is the same decision — is the
+// startup warning runSessionWorker emits when it resolves the seam to nothing
+// while config asks for subagents. The warning is keyed off the RESOLVED seam,
+// not off the `--router` branch, so installing supervisor.LocalSubagents in
+// that branch removes the warning and fails this test (mutation-confirmed).
+func TestSessionWorkerNeverInstallsLocalSubagents(t *testing.T) {
+	root := t.TempDir()
+	// The misconfiguration: opted in, with nothing to spawn through.
+	if err := config.Save(config.DefaultPath(root), config.Config{
+		Subagents: config.Subagents{Enabled: true},
+	}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	sessionID := uuid.Must(uuid.NewV7()).String()
+	// No --router: the one flag that would give this worker a legal answer.
+	_, stderr, stop := startSessionWorkerIn(t, root, "warn", sessionID)
+	stop()
+
+	if got := stderr.String(); !strings.Contains(got, "no --router dial-back") {
+		t.Errorf("a worker with subagents.enabled and no --router did not warn that spawning is unavailable —\n"+
+			"it resolved a subagent seam it must not have.\nstderr: %s", got)
 	}
 }

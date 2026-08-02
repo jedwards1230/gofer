@@ -558,6 +558,13 @@ func newHarnessWithConfig(t *testing.T, mutate func(*supervisor.Config)) *harnes
 			fs.tools = opts.Tools
 			return fs, nil
 		},
+		// The harness stands in for an IN-PROCESS deployment — one supervisor
+		// hosting every session, under no MaxSessions cap — so it names the
+		// in-process seam exactly as cmd/gofer's daemon and TUI paths do.
+		// Deliberately set BEFORE mutate, so a test that wants the other
+		// deployment (a worker with no router dial-back, which supplies no
+		// factory at all) can clear it — see TestNoSeamMeansNoSpawning.
+		Subagents: supervisor.LocalSubagents,
 	}
 	if mutate != nil {
 		mutate(&cfg)

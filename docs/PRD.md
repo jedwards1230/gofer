@@ -557,15 +557,27 @@ also runs under `context.WithoutCancel` of the session's base context plus its
 own deadline, because the LAST report of a session's life is exactly the one
 racing a `Kill` that cancels it.
 
-**One seam, two deployments.** `supervisor.Subagents` (`Spawn`/`Report`) is the
-only abstraction. The in-process daemon answers it with its own `Create`/`Send`.
-Under `--workers`, **the ROUTER creates every child and a worker never creates a
-session**: a worker's embedded daemon is built with `MaxSessions: 1` — a worker
-IS a single-session daemon — so it structurally cannot host a sibling. The
-worker dials the router back (`--router <addr>`) and uses the existing
-`session/new` `_meta` and `session/prompt` wire, adding no protocol. That keeps
-exactly one place in gofer that mints sessions and forks processes — the same
-place that enforces `--max-workers`.
+**One seam, three answers — and the third is "no".** `supervisor.Subagents`
+(`Spawn`/`Report`) is the only abstraction. The in-process daemon answers it with
+its own `Create`/`Send` (`supervisor.LocalSubagents`). Under `--workers`, **the
+ROUTER creates every child and a worker never creates a session**: a worker's
+embedded daemon is built with `MaxSessions: 1` — a worker IS a single-session
+daemon — so it structurally cannot host a sibling. The worker dials the router
+back (`--router <addr>`) and uses the existing `session/new` `_meta` and
+`session/prompt` wire, adding no protocol. That keeps exactly one place in gofer
+that mints sessions and forks processes — the same place that enforces
+`--max-workers`.
+
+The third answer is what holds that invariant up structurally. A worker with no
+`--router` supplies **no seam at all**, and `supervisor.Config.Subagents` fails
+CLOSED: nil means this supervisor cannot create a child, so `spawn_subagent` is
+not registered and no report path is wired, whatever `subagents.enabled` says.
+The session-creating implementation is reachable only by naming
+`supervisor.LocalSubagents`, which a worker never does. Before that polarity was
+fixed, nil meant "install the in-process default", so a worker started without
+`--router` but with subagents enabled in config silently received it — spawning
+children inside a single-session worker, past both the router and the
+`MaxSessions` cap. Such a worker now warns at startup rather than going quiet.
 
 **The dial-back credential reaches a worker through neither argv nor the
 environment.** It is written as a 0600 `<workers-dir>/<uuid>.token` file the

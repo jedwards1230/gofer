@@ -138,14 +138,17 @@ make install                                       # local install, truthfully v
 - `internal/subagent/` — the `spawn_subagent` tool: the model-facing surface
   of agent-initiated subagent spawning, registered by
   `internal/supervisor`'s `sessionGuard` ONLY when `config.Subagents` enables
-  it (the same `(tool, ok)` + guarded-append shape `web_search`/`skill` use),
-  so an unconfigured session's tool surface is byte-identical to one built
-  before subagents existed. A leaf over the SDK and `internal/config`; it
-  drives a narrow `Spawner` seam and owns no policy — the depth cap, the
-  parent lookup, and the child's inherited model/cwd all live behind it. The
-  seam's two implementations are `internal/supervisor`'s own in-process
-  `Create`/`Send` and `internal/worker.RouterSubagents` (dials the router,
-  because a worker is a single-session daemon and cannot host a sibling).
+  it AND the supervisor has a spawner seam (the same `(tool, ok)` +
+  guarded-append shape `web_search`/`skill` use), so an unconfigured session's
+  tool surface is byte-identical to one built before subagents existed. A leaf
+  over the SDK and `internal/config`; it drives a narrow `Spawner` seam and
+  owns no policy — the depth cap, the parent lookup, and the child's inherited
+  model/cwd all live behind it. The seam's two implementations are
+  `supervisor.LocalSubagents` (in-process `Create`/`Send`) and
+  `internal/worker.RouterSubagents` (dials the router, because a worker is a
+  single-session daemon and cannot host a sibling); a worker with no
+  `--router` supplies NEITHER, and `supervisor.Config.Subagents` fails closed
+  on nil so config alone can never install a local spawner in a worker.
 - `internal/decision/` — gofer's structured-decision round trip: the
   `ask_user` tool (gofer's first tool of its own) plus the per-session `Gate`
   it blocks on, carrying `acp` decision types over a gofer-native transport

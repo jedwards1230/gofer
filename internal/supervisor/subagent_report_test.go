@@ -342,7 +342,7 @@ func TestSubagentReportSurvivesResumeExactlyOnce(t *testing.T) {
 	sup, err := supervisor.New(supervisor.Config{
 		Root:            root,
 		Store:           store,
-		Subagents:       seam,
+		Subagents:       func(*supervisor.Supervisor) supervisor.Subagents { return seam },
 		SubagentsConfig: func() config.Subagents { return config.Subagents{Enabled: true} },
 		NewSession: func(ctx context.Context, opts runner.Options) (supervisor.Session, error) {
 			opts.Store = store

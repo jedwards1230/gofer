@@ -92,10 +92,13 @@
 // before the feature existed) and no child reports to its parent — including a
 // child an operator created with `gofer run --parent`.
 //
-// When it is on, [Config.Subagents] is where a spawn and a report actually go.
-// Nil resolves to the in-process answer ([Supervisor.Create] / [Supervisor.Send]
-// on this same supervisor); a `--workers` session injects a router dial-back
-// instead, since its own daemon hosts exactly one session. A finished child
+// [Config.Subagents] is the second switch, and BOTH must be on. It builds where
+// a spawn and a report actually go: [LocalSubagents] is the in-process answer
+// ([Supervisor.Create] / [Supervisor.Send] on this same supervisor), and a
+// `--workers` session injects a router dial-back instead, since its own daemon
+// hosts exactly one session. NIL means this supervisor cannot create a child at
+// all — the state a worker started without `--router` is in — and then no config
+// can register the tool or the report path. A finished child
 // delivers its final assistant text to its parent as that parent's next PROMPT,
 // through the ordinary FIFO queue — so it never interrupts a turn, and never
 // more than once per child. That bound is DURABLE, recorded in the child's own

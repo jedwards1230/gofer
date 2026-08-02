@@ -154,21 +154,27 @@ func runSessionWorker(ctx context.Context, args []string, stdout, stderr io.Writ
 	}()
 	logger = wrappedLogger
 
-	// The subagent seam must exist BEFORE the supervisor, because
-	// supervisor.Config takes it by value at construction — while the seam
-	// itself reads the supervisor back (for the parent's model/cwd). sup is
-	// therefore declared here and closed over lazily, the same shape runDaemon
-	// uses for its out-of-turn event relay's `var d *daemon.Daemon`.
+	// The subagent seam reads the supervisor back (for the parent's model/cwd)
+	// while the supervisor is being constructed with the seam. supervisor.Config
+	// takes a FACTORY for exactly that reason, so the seam is built with the
+	// live *Supervisor in hand rather than closed over a variable assigned
+	// later.
 	//
 	// It dials nothing until a session actually spawns, so a worker whose
 	// session never delegates pays nothing even if the router is unreachable.
-	// Nil when no --router was given: supervisor.New then installs its
-	// in-process default, which a single-session daemon can never satisfy — but
-	// the spawn tool is not registered at all unless subagents.enabled is set,
-	// so the only way to reach that state is an operator who opted in on a
-	// worker with no dial-back, who gets a clear tool error rather than silence.
-	var sup *supervisor.Supervisor
-	var subagents supervisor.Subagents
+	//
+	// NIL WHEN NO --router WAS GIVEN, and nil is the whole point: a worker never
+	// creates a session (see internal/worker's package doc — its embedded daemon
+	// is MaxSessions: 1), so with no dial-back there is no legal answer to a
+	// spawn and this process must not have one. supervisor.New leaves its seam
+	// nil in turn, which suppresses the spawn tool and the child→parent report
+	// regardless of what subagents.enabled says — the ONLY way to obtain the
+	// session-creating implementation is to name supervisor.LocalSubagents, and
+	// a worker never does. Passing supervisor.LocalSubagents here would let a
+	// worker mint children locally, bypassing the router and the daemon's
+	// MaxSessions cap; that is what the nil expresses and what
+	// TestSessionWorkerNeverInstallsLocalSubagents pins.
+	var subagents func(*supervisor.Supervisor) supervisor.Subagents
 	if addr := *routerAddr; addr != "" {
 		// Consumed and deleted HERE, at startup, before the supervisor exists
 		// and long before any tool call can run — so the credential is in this
@@ -178,12 +184,34 @@ func runSessionWorker(ctx context.Context, args []string, stdout, stderr io.Writ
 		if terr != nil {
 			return terr
 		}
-		seam := worker.NewRouterSubagents(addr, token, func() *supervisor.Supervisor { return sup }, logger)
-		subagents = seam
-		defer func() { _ = seam.Close() }()
+		// The factory runs synchronously inside supervisor.New below, on this
+		// goroutine, so seam is assigned before anything reads it — including
+		// the deferred close, which runs at THIS function's exit and tolerates
+		// a supervisor.New that failed before ever calling the factory.
+		var seam *worker.RouterSubagents
+		defer func() {
+			if seam != nil {
+				_ = seam.Close()
+			}
+		}()
+		subagents = func(s *supervisor.Supervisor) supervisor.Subagents {
+			seam = worker.NewRouterSubagents(addr, token, func() *supervisor.Supervisor { return s }, logger)
+			return seam
+		}
+	}
+	if subagents == nil && cfg.Subagents.IsEnabled() {
+		// An operator opted into subagents on a worker that has no way to
+		// deliver one. Suppressing the tool is correct (see above) but silence
+		// about it is not: the symptom is a model that never delegates and a
+		// parent that never hears back, neither of which points at the cause.
+		// Read off the startup snapshot rather than the per-session resolver
+		// because the dial-back this warns about is fixed for the process's
+		// life — a later config edit cannot make this worker able to spawn.
+		logger.Warn("subagents.enabled is set but this worker has no --router dial-back: spawn_subagent is not registered and no report will reach a parent",
+			"session", *session)
 	}
 
-	sup, err = supervisor.New(supervisor.Config{
+	sup, err := supervisor.New(supervisor.Config{
 		Root:        rootDir,
 		Permissions: cfg.Engine,
 		// Same config-driven subagent depth cap as `gofer daemon`: the worker
@@ -213,9 +241,11 @@ func runSessionWorker(ctx context.Context, args []string, stdout, stderr io.Writ
 		// Same reasoning for skills.* — see skillsConfigResolver.
 		Skills: skillsConfigResolver(rootDir),
 		// Same re-read-per-session shape, for subagents.* — see
-		// subagentsConfigResolver. Unlike the in-process daemon this worker DOES
-		// supply the seam: its own daemon is capped at one session, so a spawn
-		// has to leave the process (see internal/worker.RouterSubagents).
+		// subagentsConfigResolver. Unlike the in-process daemon this worker never
+		// names supervisor.LocalSubagents: its own daemon is capped at one
+		// session, so a spawn either leaves the process (see
+		// internal/worker.RouterSubagents) or does not happen. See the seam's
+		// construction above for why a nil factory is the fail-closed answer.
 		SubagentsConfig: subagentsConfigResolver(rootDir),
 		Subagents:       subagents,
 		// Pin the sole session's id to --session (design Option A) through the

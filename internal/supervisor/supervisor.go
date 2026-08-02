@@ -157,18 +157,34 @@ type Config struct {
 	// path too), this decides whether a MODEL may ask for a child at all.
 	SubagentsConfig func() config.Subagents
 
-	// Subagents is the seam a session's spawn tool and a finished child's report
-	// travel through (see [Subagents]). Nil — the default — resolves in [New] to
-	// [localSubagents]: plain in-process Create/Send on this same supervisor,
-	// which is the right answer for every deployment except a `--workers`
-	// session, whose single-session daemon must route through the router
-	// instead and injects its own here.
+	// Subagents BUILDS the seam a session's spawn tool and a finished child's
+	// report travel through (see [Subagents]). Nil — the default — means this
+	// supervisor has NO way to create a child session: no spawn tool is
+	// registered whatever SubagentsConfig says, and no child reports to its
+	// parent.
 	//
-	// A nil Subagents therefore does NOT disable the feature; SubagentsConfig
-	// does. Keeping the two apart means the in-process daemon needs exactly ONE
-	// thing wired — the config resolver — and cannot half-enable subagents by
-	// forgetting the seam.
-	Subagents Subagents
+	// # Why nil fails CLOSED, and why it is a factory
+	//
+	// A deployment that can host sibling sessions passes [LocalSubagents], which
+	// answers spawn with a plain in-process Create/Send on this same supervisor.
+	// A `--workers` session passes its own router dial-back
+	// ([internal/worker.NewRouterSubagents]) instead, because its embedded daemon
+	// is built with MaxSessions: 1 and structurally cannot host a sibling.
+	//
+	// A worker with no dial-back configured passes NOTHING — and that is exactly
+	// why nil cannot mean "install the in-process default". It did once, and the
+	// result was that a worker started without `--router` but with
+	// `subagents.enabled` set silently got [localSubagents] and could mint child
+	// sessions inside a single-session worker, bypassing both the router and the
+	// daemon's MaxSessions cap (gofer#345 review). The invariant "the router
+	// creates every child; a worker never creates a session" now holds because
+	// the session-creating implementation is unreachable without asking for it by
+	// name, not because a comment says so.
+	//
+	// It is a factory rather than a value because [localSubagents] needs the
+	// *Supervisor that construction is still building; a caller cannot express
+	// that from outside. Every other caller ignores the argument.
+	Subagents func(*Supervisor) Subagents
 
 	// Store, when set, is used instead of building a store from Root, and is
 	// NOT closed by [Supervisor.Close] — the caller owns its lifecycle. Test
@@ -251,10 +267,13 @@ type Supervisor struct {
 	// resolver becomes a constant zero-value factory, i.e. DISABLED).
 	subagentsConfig func() config.Subagents
 
-	// subagents mirrors Config.Subagents; never nil after New (a nil seam
-	// resolves to localSubagents over this supervisor). It is only ever
-	// CONSULTED when subagentsConfig() is enabled — see sessionGuard and
-	// register.
+	// subagents is what Config.Subagents built, and is NIL whenever that factory
+	// was nil — this supervisor then has no way to create a child session at
+	// all, which is the state a worker with no router dial-back is in. Both
+	// consumers treat nil as "the feature does not exist here": subagent.NewTool
+	// refuses to build a tool without a spawner (so sessionGuard registers
+	// none), and register's report wiring is gated on that same tool. Enabling
+	// subagentsConfig cannot conjure one.
 	subagents Subagents
 
 	// resumeMu serializes Resume end-to-end (roster check through
@@ -461,7 +480,6 @@ func New(cfg Config) (*Supervisor, error) {
 		searchConfig:     searchConfig,
 		skillsConfig:     skillsConfig,
 		subagentsConfig:  subagentsConfig,
-		subagents:        cfg.Subagents,
 		lspManager:       lspdiag.NewManager(),
 		mcpConfig:        mcpConfig,
 		mcpAtStart:       mcpAtStart,
@@ -470,13 +488,13 @@ func New(cfg Config) (*Supervisor, error) {
 		watchers:         make(map[*watcher]struct{}),
 		watchDone:        make(chan struct{}),
 	}
-	if s.subagents == nil {
-		// The in-process answer: spawn is Create, report is Send, both on this
-		// same supervisor. Installed HERE rather than accepted as a Config field
-		// value because it needs the *Supervisor that construction is still
-		// building — see Config.Subagents' doc for why nil means "local", not
-		// "disabled".
-		s.subagents = localSubagents{sup: s}
+	if cfg.Subagents != nil {
+		// Built HERE, after the struct exists, because the in-process answer
+		// ([LocalSubagents]) closes over the *Supervisor construction is still
+		// building. A nil factory leaves s.subagents nil, which
+		// [subagent.NewTool] reads as "no spawner" and refuses to build a tool
+		// for — see Config.Subagents' doc for why that polarity is load-bearing.
+		s.subagents = cfg.Subagents(s)
 	}
 	return s, nil
 }
@@ -613,8 +631,10 @@ func (s *Supervisor) sessionGuard(cwd string) (guard loop.Guard, approver *loop.
 	}
 	// Same per-session re-read, and the same conditional-registration shape
 	// web_search and skill already use: nothing is appended (and no tool is even
-	// constructed) unless an operator opted in. s.subagents is never nil after
-	// New — the config, not the seam, is the switch.
+	// constructed) unless an operator opted in. TWO switches, not one, and both
+	// must be on: the config (re-read per session) and a non-nil seam (fixed at
+	// New). A deployment that cannot host a child — a worker with no router
+	// dial-back — has no seam, so no amount of config registers this tool.
 	if spawnTool, ok := subagent.NewTool(s.subagents, s.subagentsConfig()); ok {
 		spawn = spawnTool
 		extra = append(extra, spawnTool)

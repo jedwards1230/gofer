@@ -15,7 +15,7 @@ import (
 //
 //   - The plain in-process daemon answers it with [Supervisor.Create] and
 //     [Supervisor.Send] on the very same supervisor — see [localSubagents],
-//     which [New] installs whenever [Config.Subagents] is nil.
+//     which [New] installs when handed [LocalSubagents] as its factory.
 //   - A `--workers` session answers it over the wire: a worker's embedded
 //     daemon is built with MaxSessions: 1 (a worker IS a single-session daemon
 //     — see internal/worker's package doc), so it structurally cannot host a
@@ -48,10 +48,18 @@ type Subagents interface {
 	Report(ctx context.Context, parentID, text string) error
 }
 
+// LocalSubagents is [Config.Subagents] for a deployment that can host sibling
+// sessions itself: the in-process daemon and the fallback in-process supervisor
+// the bare `gofer` TUI builds. It is the ONLY way to obtain the session-creating
+// implementation, and every caller of it is a process that owns a supervisor
+// with no MaxSessions cap.
+//
+// A `--workers` session worker must never pass this — see [Config.Subagents].
+func LocalSubagents(s *Supervisor) Subagents { return localSubagents{sup: s} }
+
 // localSubagents is the in-process [Subagents]: a spawn is a plain
 // [Supervisor.Create] and a report a plain [Supervisor.Send], both on the SAME
-// supervisor that hosts the parent. [New] installs it whenever [Config.Subagents]
-// is nil, which is every non-worker deployment.
+// supervisor that hosts the parent. Reachable only through [LocalSubagents].
 //
 // # Why a reentrant Create from a running session's pump is safe
 //

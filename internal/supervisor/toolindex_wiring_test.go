@@ -42,6 +42,10 @@ func newToolsHarness(t *testing.T, tools func() config.Tools, search func() conf
 		// h.subagents after construction and still have it reach the next
 		// session — see the field's doc.
 		SubagentsConfig: func() config.Subagents { return h.subagents },
+		// An in-process deployment, like newHarnessWithConfig: the CONFIG is
+		// what these tests vary, so the seam must be present or "registered
+		// only when configured" would pass for the wrong reason.
+		Subagents: supervisor.LocalSubagents,
 		NewSession: func(_ context.Context, opts runner.Options) (supervisor.Session, error) {
 			id := "sess-" + strconv.FormatInt(atomic.AddInt64(&nextID, 1), 10)
 			fs := h.register(id, opts.Cwd)

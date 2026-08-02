@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/jedwards1230/agent-sdk-go/loop"
+	"github.com/jedwards1230/agent-sdk-go/provider"
 	"github.com/jedwards1230/agent-sdk-go/provider/faux"
 	"github.com/jedwards1230/agent-sdk-go/runner"
 	"github.com/jedwards1230/agent-sdk-go/session"
@@ -238,6 +239,71 @@ func TestSpawnToolAbsentWhenDisabled(t *testing.T) {
 	}
 	if _, ok := h.session(parent.ID).tools.Get(subagent.ToolName); ok {
 		t.Fatalf("%s resolved with subagents disabled", subagent.ToolName)
+	}
+}
+
+// TestNoSeamMeansNoSpawning pins the OTHER switch, and it is a regression test
+// for a real hole: a supervisor built with no [supervisor.Config.Subagents]
+// factory has no way to create a child session, and config alone must not be
+// able to conjure one.
+//
+// The hole (gofer#345 review): Config.Subagents used to treat nil as "install
+// the in-process localSubagents", so the seam failed OPEN. A `gofer
+// session-worker` started WITHOUT `--router` supplies no seam — it cannot, since
+// its embedded daemon is MaxSessions: 1 and a worker never creates a session —
+// and therefore silently received the session-creating implementation. With
+// `subagents.enabled` set in config, spawn_subagent then minted children inside
+// a single-session worker, bypassing the router and the daemon's MaxSessions
+// cap both.
+//
+// The subagents CONFIG here is enabled on purpose: this test is meaningless
+// against the disabled zero value, because then the config switch alone would
+// explain the absence and the seam's polarity would go untested.
+func TestNoSeamMeansNoSpawning(t *testing.T) {
+	h := newHarnessWithConfig(t, func(cfg *supervisor.Config) {
+		// The deployment a worker with no router dial-back is in: enabled by
+		// config, and structurally unable to host a child.
+		cfg.Subagents = nil
+		cfg.SubagentsConfig = func() config.Subagents { return config.Subagents{Enabled: true} }
+	})
+	ctx := context.Background()
+
+	parent, err := h.sup.Create(ctx, "", supervisor.CreateOptions{Cwd: "/proj", Model: "claude-haiku-4-5"})
+	if err != nil {
+		t.Fatalf("Create parent: %v", err)
+	}
+	if _, ok := h.session(parent.ID).tools.Get(subagent.ToolName); ok {
+		t.Fatalf("%s resolved on a supervisor with no subagent seam — enabling it in config must not install a local spawner", subagent.ToolName)
+	}
+
+	// The report half rides the same seam and must be off for the same reason:
+	// a child here has nothing to report THROUGH. Registering it would mean the
+	// supervisor found a spawner after all.
+	child, err := h.sup.Create(ctx, "", supervisor.CreateOptions{
+		Cwd: "/proj", Model: "claude-haiku-4-5", ParentID: parent.ID, Agent: "go-developer",
+	})
+	if err != nil {
+		t.Fatalf("Create child: %v", err)
+	}
+	cs := h.session(child.ID)
+	cs.setFold([]provider.Message{provider.AssistantText("done")})
+	if err := h.sup.Send(ctx, child.ID, "do the work"); err != nil {
+		t.Fatalf("Send child: %v", err)
+	}
+	cs.waitStarted(t)
+	cs.finish(t, nil)
+	waitForStatus(t, h.sup, child.ID, supervisor.StatusNeedsInput)
+
+	// A report reaches the parent as its next prompt (see
+	// managed.reportToParentOnce), so it is visible either still queued or
+	// already run. Both must be empty.
+	if q, err := h.sup.QueueList(ctx, parent.ID); err != nil {
+		t.Fatalf("QueueList parent: %v", err)
+	} else if len(q) != 0 {
+		t.Fatalf("child queued a report on its parent with no subagent seam installed: %v", q)
+	}
+	if got := reportPrompts(h.session(parent.ID)); len(got) != 0 {
+		t.Fatalf("parent ran a report turn with no subagent seam installed: %v", got)
 	}
 }
 

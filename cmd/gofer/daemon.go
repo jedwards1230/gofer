@@ -315,10 +315,13 @@ func serveDaemonForeground(ctx context.Context, args []string, stdout, stderr io
 			// Same reasoning, for skills.* — see skillsConfigResolver.
 			Skills: skillsConfigResolver(rootDir),
 			// Same re-read-per-session shape, for subagents.* — see
-			// subagentsConfigResolver. Config.Subagents (the SEAM) is left nil
-			// deliberately: the in-process daemon's answer to "where does a spawn
-			// go" is this same supervisor, which supervisor.New installs itself.
+			// subagentsConfigResolver. This is the NON-workers branch, so the
+			// answer to "where does a spawn go" is this same supervisor: it hosts
+			// every session in this process and is under no MaxSessions cap, so
+			// it asks for the in-process seam by name. The `--workers` branch
+			// above never reaches here; its workers each answer for themselves.
 			SubagentsConfig: subagentsConfigResolver(rootDir),
+			Subagents:       supervisor.LocalSubagents,
 			// Attach a per-session telemetry observer at registration, before the
 			// session's first turn — subscribing here (rather than after a turn
 			// has already started) means Events' replay backlog is still empty,
