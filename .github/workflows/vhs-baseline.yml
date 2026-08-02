@@ -29,6 +29,9 @@
 # stale yet — but that held by author discipline (CONTRIBUTING.md's "capture
 # new TUI states as you go"), not by the filter being complete, which is the
 # same silent-staleness risk gofer#294 is about.
+name: VHS baseline
+run-name: VHS baseline · ${{ github.sha }}
+
 on:
   push:
     branches: [main]
