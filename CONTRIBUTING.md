@@ -98,6 +98,56 @@ stale-daemon version-skew banner. `make build` does the same into `bin/gofer`.
 - **SDK promotion test**: code moves down into the SDK only when a second
   application would need it unchanged. Supervision, roster, and TUI stay here.
 
+## The environment is not a safe channel for a secret
+
+**In gofer the model has a shell, so treat any process environment an agent's
+tools can reach as readable by the model.** argv and the environment are *both*
+unsafe channels for a secret. The safe hand-off is a `0600` file the recipient
+reads once and deletes.
+
+The tempting reasoning is "argv is world-readable via `ps`, so pass it in the
+environment instead". That is correct about argv and wrong about the conclusion:
+it defends against other local *users* while leaving the secret open to the
+*agent*, which is the principal this codebase exists to run. Two mechanisms make
+that concrete, and both are worth re-checking rather than taking on faith:
+
+- The SDK's bash tool execs with `cmd.Env` left nil
+  (`agent-sdk-go`'s `tool/bash.go` — the SDK module, not a path in this repo),
+  and Go gives a child process with a nil `Env` its parent's environment.
+  Anything in a gofer process's environment is therefore one `env` away from the
+  model.
+- `internal/sandbox` does not change that. The bwrap profile
+  (`internal/sandbox/profile_bwrap.go`) binds the filesystem and unshares the
+  network (`--ro-bind`, `--bind`, `--unshare-net`); neither backend passes
+  `--clearenv`/`--unsetenv` or filters the environment at all. Containment
+  covers the filesystem and the network, not the environment.
+
+So when a gofer process must hand a credential to another process it spawns:
+
+1. Write the secret to a `0600` file.
+2. Pass the **path**, never the value — not in argv, not in the environment.
+3. Have the recipient read it once and **delete** it.
+4. Leave `cmd.Env` nil so the child inherits the parent's environment unchanged
+   and gains nothing from the hand-off.
+5. Gate the whole hand-off on the feature that needs it, so a deployment that
+   never opted in carries no credential at all.
+6. Sweep a leftover file with the recipient's other runtime artifacts, for the
+   case where it dies before reading.
+
+The same property bounds `config.SecretRef`: its `env:VAR` form resolves against
+gofer's **own** environment at use time (`os.LookupEnv`), so any credential
+supplied that way is readable by the model through the bash tool. That is not
+one key — it holds for every `SecretRef` consumer, including each MCP server's
+`env` and `headers` (`internal/mcpconn`'s `resolveEnv`/`resolveHeaders`), so an
+`Authorization` bearer for an HTTP MCP server configured as `env:` is
+model-readable on the same terms.
+
+That is a reasonable trade for an operator-scoped, per-service credential and
+the wrong one as the blast radius grows. `SecretRef` already supports
+`file:/path` — prefer it whenever disclosure would cost more than the session.
+Whether gofer should narrow the `env:` form further is open, and tracked in
+gofer#354.
+
 ## Before you open a PR
 
 - Make sure all CI checks pass locally first (the commands above, exactly as CI
