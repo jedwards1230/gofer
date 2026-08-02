@@ -59,6 +59,15 @@ entire correctness suite and surfaced only when a user said it felt slow.
   Concurrent benchmarks are marked `allocs-only` in the baseline and skip the
   `B/op` half — at one iteration their byte total is decided by goroutine
   scheduling and swings ~200% with no code change.
+- **A concurrent benchmark must batch its work per iteration.** `allocs-only`
+  exempts the byte total, not the count: Go charges allocations process-wide, so
+  peer goroutines land in the window and move the count too (gofer#334). The
+  stray is a small absolute number that does not grow with the work per
+  iteration, so batching — `broadcastsPerOp`, `liveCallsPerOp` — is what keeps
+  the count gateable. Size it for a ≥4× margin against the measured stray.
+  Re-baselining or widening the tolerance would quiet the same alarm by
+  shrinking what the gate can catch; batching does not, which is why it is the
+  remedy both times this has come up.
 - **A legitimate cost increase means updating the baseline** —
   `scripts/bench.sh --update` — and saying in the PR why the extra work is worth
   it. The baseline is committed precisely so that argument happens in review
