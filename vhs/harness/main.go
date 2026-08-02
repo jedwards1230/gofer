@@ -233,9 +233,10 @@ func overviewScene() tea.Model {
 
 // overviewCwdHomeScene builds the roster over sessions with absolute
 // (not pre-tilde'd, unlike every other scene's fixture Cwd) working
-// directories, so [tui.Overview]'s cwd group headers exercise the REAL
-// $HOME-contraction path (gofer#337) rather than rendering a literal "~"
-// string that never touches the code under test.
+// directories — and an absolute meta Cwd for the identity header — so both
+// [tui.Overview]'s cwd group headers and the header's own `model · cwd` line
+// exercise the REAL $HOME-contraction path (gofer#337) rather than rendering a
+// literal "~" string that never touches the code under test.
 //
 // roster-cwd-home.tape runs this scenario TWICE, with HOME set to a
 // different value each time — that env var, not a code difference, is the
@@ -250,7 +251,12 @@ func overviewScene() tea.Model {
 // contracted it into the nonsensical "~other/notes".
 func overviewCwdHomeScene() tea.Model {
 	now := fixedNow
-	meta := tui.OverviewMeta{App: "gofer", Version: "0.4.0", Model: "fable-5", Now: now}
+	// An ABSOLUTE meta Cwd, so the identity header's `model · cwd` line rides
+	// the same HOME swap as the group headers below it. It was previously
+	// omitted entirely, which is why the tape could not show the header
+	// spelling $HOME out while the group header two lines below contracted the
+	// same path — see [identityHeaderLines].
+	meta := tui.OverviewMeta{App: "gofer", Version: "0.4.0", Model: "fable-5", Cwd: "/Users/justin/orchestration/repos/gofer", Now: now}
 	sessions := []tui.SessionInfo{
 		{ID: "sess-1", Title: "wire the websocket ACP listener", Summary: "streaming the daemon handshake", Status: tui.StatusWorking, Cwd: "/Users/justin/orchestration/repos/gofer", Updated: now.Add(-30 * time.Second)},
 		{ID: "sess-2", Title: "keycloak path-b groundwork", Summary: "turn finished — awaiting the next prompt", Status: tui.StatusNeedsInput, Cwd: "/Users/justin", Updated: now.Add(-5 * time.Minute)},
