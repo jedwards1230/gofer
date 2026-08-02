@@ -13,8 +13,8 @@ without a row here is a kind whose gaps nobody will notice.
 
 ## How to read it
 
-Rows are the SDK's full `event` union (`agent-sdk-go/event/`, 21 types, verified against the
-`v0.23.0` tag gofer pins in `go.mod`). Columns are the five hops, **in stream order**:
+Rows are the SDK's full `event` union (`agent-sdk-go/event/`, 23 types, verified against the
+`v0.24.0` tag gofer pins in `go.mod`). Columns are the five hops, **in stream order**:
 
 | # | Path | Where |
 |---|---|---|
@@ -55,6 +55,8 @@ Legend: **Y** carried · **—** not carried (annotated below) · **n/a** cannot
 | `session.resumed` | — a | Y | n/a k | Y | — d |
 | `session.forked` | — a | Y | Y | Y | — d |
 | `session.compacted` | **— GAP 1** | Y | Y | Y | Y |
+| `session.compaction_started` | — a | Y | Y | Y o | Y o |
+| `session.compaction_failed` | — a | Y | Y | Y o | Y o |
 | `session.killed` | — a | Y | Y | Y | — d |
 | `session.archived` | — a | Y | Y | Y | — d |
 | `session.spawned` | — a | n/a b | n/a b | — b | n/a b |
@@ -87,7 +89,8 @@ session roster, so there is nothing to project these onto.
 boundary.**
 
 Do not justify this row with "the SDK has no concept of a session parent" — that was true once
-and is **false at v0.23.0**, the version `go.mod` pins. The SDK models parentage as first-class
+and is **false at v0.24.0**, the version `go.mod` pins (re-verified against that tag: the line
+citations below all still resolve). The SDK models parentage as first-class
 journal state: `session/entry.go:117,123` persist `parent_id`/`depth` in the root `session_meta`
 entry, `runner/runner.go:275-276` writes them via `session.WithMetaParent`, and
 `runner/runner.go:420,443-444` recovers them on resume.
@@ -215,6 +218,29 @@ The fix is to delegate to the SDK's `event.Unmarshal`, the maintained inverse of
 that wrote the frame, and delete the local mirror — which removes the obligation instead of
 re-discharging it. `TestReconstructCarriesEveryEventKind` pins every kind's full payload round
 trip against it, so a reintroduced per-kind path fails the build.
+
+**o — the two kinds SDK v0.24.0 added, and what they cost under each decode.**
+`session.compaction_started` and `session.compaction_failed` are published by `runner.Compact`
+(`runner/compact.go:231,269,283,297`) — the SAME out-of-turn path `session.compacted` takes, so
+they became live gofer events the moment the SDK was bumped.
+
+Be precise about what this demonstrates, because the obvious stronger claim is false: they were
+NOT silently dropped. `jedwards1230/gofer#300` (PR #351) hand-added both cases to the switch,
+along with a `Messages` field and a paragraph explaining why the wire key is `messages` and not
+`session.compacted`'s `messages_compacted` — an asymmetry the SDK's own decoder already handles.
+That is the actual cost: **two kinds arriving meant a human had to notice, hand-write two cases,
+add a payload field, and get a naming subtlety right, in a PR about a TUI indicator.** Under the
+delegation they are carried with no change to `internal/wirestream` at all. The kinds that DID go
+silently missing are note n's four, which no such PR happened to cover.
+
+`internal/router/outofturn_compact_test.go` asserts `session.compaction_started` end to end
+rather than trusting the unit round trip, since it is the newest kind to cross the whole chain.
+
+Column 5 is `Y` for both: PR #351's compaction indicator consumes them directly
+(`internal/tui/compact.go:78,107`), and `app.go:160` records that `session.compaction_started` is
+the ONLY signal an automatic compaction has begun. That is worth pairing with the transport
+above — the indicator is a TUI feature whose entire premise is that these two events arrive, and
+under `--workers` they arrive only because something decodes them.
 
 **k — unreachable, not carried.** `session.created` and `session.resumed` are published *before*
 any daemon-side subscription can exist (SDK `session/session.go:113`; `runner/runner.go:462`), and

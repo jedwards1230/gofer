@@ -97,7 +97,7 @@ func TestOutOfTurnCompactionReachesAttachedClient(t *testing.T) {
 	// below travelled the out-of-turn path and could not have arrived any other
 	// way.
 	watcher := mustDial(t, ctx, addr)
-	kinds := watchKinds(watcher, event.KindSessionCompacted)
+	kinds := watchKinds(watcher, event.KindSessionCompactionStarted, event.KindSessionCompacted)
 	if _, err := watcher.Call(ctx, acp.MethodSessionLoad, acp.LoadSessionRequest{
 		SessionID: sessionID,
 		Cwd:       cwd,
@@ -110,6 +110,13 @@ func TestOutOfTurnCompactionReachesAttachedClient(t *testing.T) {
 	// with ErrRunning otherwise.
 	mustCompact(t, ctx, driver, sessionID)
 
+	// Both terminals of the compaction, not just the settled one.
+	// session.compaction_started arrived with SDK v0.24.0 and rides the same
+	// runner.Compact publish path, so it is out-of-turn for exactly the same
+	// reason — and it is worth asserting HERE rather than trusting the unit
+	// round trip, because it is the first kind to cross this whole chain that
+	// nobody hand-wrote a decode case for.
+	awaitKind(t, kinds, event.KindSessionCompactionStarted, "the out-of-turn compaction start")
 	awaitKind(t, kinds, event.KindSessionCompacted, "the out-of-turn compaction")
 }
 

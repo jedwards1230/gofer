@@ -153,6 +153,15 @@ func TestReconstructCarriesEveryEventKind(t *testing.T) {
 			provider.Usage{InputTokens: 903, OutputTokens: 121, CacheReadTokens: 41, CacheWriteTokens: 11,
 				Raw: map[string]int{"reasoning_tokens": 12}},
 			"a summary of the compacted turns")},
+		// The two kinds SDK v0.24.0 added. They are the demonstration this test's
+		// premise is not hypothetical: both are published by runner.Compact —
+		// the same out-of-turn path session.compacted takes — so the mere act of
+		// bumping the SDK made them live gofer events, and the 16-case switch
+		// this file's fix deleted would have dropped both on arrival, silently,
+		// with every other test in the repo still green.
+		{event.KindSessionCompactionStarted, event.NewSessionCompactionStarted(sid, "entry-42", 17)},
+		{event.KindSessionCompactionFailed, event.NewSessionCompactionFailed(sid, "entry-42", 17,
+			"summarizer refused: context too small")},
 		{event.KindSessionKilled, event.NewSessionKilled(sid)},
 		{event.KindSessionArchived, event.NewSessionArchived(sid)},
 		{event.KindSessionSpawned, event.NewSessionSpawned(sid, "child-9", "researcher", 2)},
