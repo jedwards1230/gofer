@@ -8,12 +8,12 @@ BenchmarkAppRenderConfigSize/config=large/loader=direct 4838 431360
 BenchmarkAppRenderConfigSize/config=small/loader=cached 3571 304136
 BenchmarkAppRenderConfigSize/config=small/loader=direct 3597 307416
 BenchmarkAppRenderMassiveTranscript 355045 32236456
-BenchmarkBroadcastRawEvent/message_delta/peers=1 15 1048 allocs-only
-BenchmarkBroadcastRawEvent/message_delta/peers=32 235 21928 allocs-only
-BenchmarkBroadcastRawEvent/message_delta/peers=8 67 12136 allocs-only
-BenchmarkBroadcastRawEvent/tool_call_finished/peers=1 19 2504 allocs-only
-BenchmarkBroadcastRawEvent/tool_call_finished/peers=32 234 33424 allocs-only
-BenchmarkBroadcastRawEvent/tool_call_finished/peers=8 66 9424 allocs-only
+BenchmarkBroadcastRawEvent/message_delta/peers=1 1934 148224 allocs-only
+BenchmarkBroadcastRawEvent/message_delta/peers=32 29740 1862888 allocs-only
+BenchmarkBroadcastRawEvent/message_delta/peers=8 8220 571304 allocs-only
+BenchmarkBroadcastRawEvent/tool_call_finished/peers=1 1937 232824 allocs-only
+BenchmarkBroadcastRawEvent/tool_call_finished/peers=32 29751 4297944 allocs-only
+BenchmarkBroadcastRawEvent/tool_call_finished/peers=8 8213 1145256 allocs-only
 BenchmarkComposedAttach/turns=1 1332 164648
 BenchmarkComposedAttach/turns=10 3990 421008
 BenchmarkComposedAttach/turns=100 30371 3014576
