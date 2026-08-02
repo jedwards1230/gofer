@@ -17,13 +17,9 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/jedwards1230/agent-sdk-go/event"
-)
 
-// compactingNote is the status line a `/compact` dispatched from OFF the attach
-// screen leaves behind. It is a named constant because [App.Update]'s
-// compactDoneMsg case clears the status only when it still holds exactly this
-// text — a note some other event set in the meantime is newer and must win.
-const compactingNote = "Compacting context…"
+	"github.com/jedwards1230/gofer/internal/uicopy"
+)
 
 // compactTickInterval is how often the in-progress indicator redraws. One
 // second: the indicator's only moving part is a whole-second elapsed counter,
@@ -112,7 +108,7 @@ func (a *App) applyCompactionEvent(ev event.Event) (armTick bool) {
 		// context was summarized when it was not. Nothing the runner acknowledges
 		// as journaled happened, so the session's context is exactly what it was.
 		a.compactingSince = time.Time{}
-		a.setStatus(sevDanger, "compaction failed: "+e.Err)
+		a.setStatus(sevDanger, uicopy.CompactionFailed(e.Err))
 	}
 	return false
 }
@@ -145,13 +141,13 @@ func (a *App) applyCompactionEvent(ev event.Event) (armTick bool) {
 func runCompact(a App, args []string) (App, tea.Cmd) {
 	sess := a.currentSessionInfo()
 	if sess == nil {
-		a.setStatus(sevDanger, "/compact needs an attached session")
+		a.setStatus(sevDanger, uicopy.CompactNeedsSession)
 		return a, nil
 	}
 	instructions := strings.Join(args, " ")
 	a.compactingSince = time.Now()
 	if a.scr != screenAttach {
-		a.setStatus(sevOK, compactingNote)
+		a.setStatus(sevOK, uicopy.CompactingNote)
 	}
 
 	sessionID, sup := sess.ID, a.sup

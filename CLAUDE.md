@@ -74,6 +74,15 @@ make install                                       # local install, truthfully v
   `/thinking`, `/usage`, `/stats`, `/context`, `/mcp`, `/skills`, `/resume`,
   `/help`), plus the session-lifecycle commands `/new` and `/quit`, the
   `/yolo` guardrail toggle, and the declarative keymap `/help` renders from.
+- `internal/uicopy/` — the single home for operator-facing TUI copy: every
+  phrase a human reads on screen, as typed constants and formatting functions
+  rather than a keyed map, so a mistyped entry is a compile error instead of a
+  blank line. **Model-facing text is not copy and must not live here** — a tool
+  description or prompt fragment changes what the agent *does*, so translating
+  one would silently change behaviour. The exceptions still inline in
+  `internal/tui` (all in `shell.go`, all read by the model) are enumerated in
+  `allowedInlineCopy` and enforced by `TestNoInlineOperatorCopy`. A stdlib-only
+  leaf; nothing imports it but `internal/tui`.
 - `internal/tuibridge/` — adapts the daemon supervisor to the TUI's narrow
   `Supervisor` interface (the single seam importing both).
 - `internal/render/` — turns a session's typed event stream into terminal

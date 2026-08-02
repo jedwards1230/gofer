@@ -10,6 +10,7 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/provider"
 
 	"github.com/jedwards1230/gofer/internal/decision"
+	"github.com/jedwards1230/gofer/internal/uicopy"
 )
 
 // The TUI is a client of the daemon's supervisor, never a privileged peer: it
@@ -55,15 +56,15 @@ const (
 func (s SessionStatus) String() string {
 	switch s {
 	case StatusWorking:
-		return "Working"
+		return uicopy.SessionStatusWorking
 	case StatusNeedsInput:
-		return "Needs input"
+		return uicopy.SessionStatusNeedsInput
 	case StatusFinished:
-		return "Finished"
+		return uicopy.SessionStatusFinished
 	case StatusIdle:
-		return "Idle"
+		return uicopy.SessionStatusIdle
 	default:
-		return "Unknown"
+		return uicopy.SessionStatusUnknown
 	}
 }
 

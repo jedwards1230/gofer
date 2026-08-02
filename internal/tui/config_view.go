@@ -18,6 +18,7 @@ import (
 
 	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
+	"github.com/jedwards1230/gofer/internal/uicopy"
 )
 
 // configView renders and drives the Config tab. cursor is the index into
@@ -87,14 +88,14 @@ func (v configView) lines() []string {
 	out := []string{v.filterLine()}
 	rows := v.filteredSettings()
 	if len(rows) == 0 {
-		out = append(out, v.theme.MutedStyle().Render("No settings match."))
+		out = append(out, v.theme.MutedStyle().Render(uicopy.ConfigNoMatches))
 		return out
 	}
 	for i, s := range rows {
 		out = append(out, v.rowLine(i, s))
 	}
 	if v.err != "" {
-		out = append(out, v.theme.DangerStyle().Render("Error: "+v.err))
+		out = append(out, v.theme.DangerStyle().Render(uicopy.ConfigError(v.err)))
 	}
 	return out
 }
@@ -103,9 +104,9 @@ func (v configView) lines() []string {
 // when empty, else the typed filter text.
 func (v configView) filterLine() string {
 	if v.filter == "" {
-		return v.theme.MutedStyle().Render("Search settings…")
+		return v.theme.MutedStyle().Render(uicopy.ConfigSearchPlaceholder)
 	}
-	return "Search: " + v.filter
+	return uicopy.ConfigSearchPrefix(v.filter)
 }
 
 // rowLine renders one setting's "Label … value" row, marking and

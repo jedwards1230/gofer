@@ -20,6 +20,7 @@ import (
 
 	"github.com/jedwards1230/gofer/internal/tui/testkit"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
+	"github.com/jedwards1230/gofer/internal/uicopy"
 )
 
 // editorFor opens an editor over body under the "cmd" key — the shape every
@@ -414,8 +415,8 @@ func TestAmendEditorRenderCarriesTheOverrideWarning(t *testing.T) {
 				m = m.ApplyApprovalAmendKey(k)
 			}
 			got := flattenPrompt(testkit.Render(m, testkit.Width, testkit.Height))
-			if !strings.Contains(got, warnAmendOverride) {
-				t.Errorf("the open amend editor is missing the override warning %q:\n%s", warnAmendOverride, got)
+			if !strings.Contains(got, uicopy.ApprovalAmendOverrideWarning) {
+				t.Errorf("the open amend editor is missing the override warning %q:\n%s", uicopy.ApprovalAmendOverrideWarning, got)
 			}
 		})
 	}
@@ -438,12 +439,12 @@ func TestAmendEditorRememberWarningOnlyWithRemember(t *testing.T) {
 				m = m.ToggleApprovalRemember()
 			}
 			got := flattenPrompt(testkit.Render(m, testkit.Width, testkit.Height))
-			if strings.Contains(got, warnAmendRemember) != remember {
+			if strings.Contains(got, uicopy.ApprovalAmendRememberWarning) != remember {
 				t.Errorf("remember=%v: the remembered-amend sentence %q present=%v, want %v\n%s",
-					remember, warnAmendRemember, !remember, remember, got)
+					remember, uicopy.ApprovalAmendRememberWarning, !remember, remember, got)
 			}
 			// The override warning is unconditional either way.
-			if !strings.Contains(got, warnAmendOverride) {
+			if !strings.Contains(got, uicopy.ApprovalAmendOverrideWarning) {
 				t.Errorf("remember=%v: missing the override warning:\n%s", remember, got)
 			}
 		})
@@ -483,8 +484,8 @@ func TestAmendEditorSurvivesTheShortFrameCollapse(t *testing.T) {
 			// ...and the editor came through it whole.
 			for _, want := range []string{
 				"rm -rf /tmp/x --dry-run" + amendCursorGlyph, // the edited line AND its cursor
-				warnAmendOverride, // the no-re-validation warning
-				warnAmendRemember, // ...and its remembered-amend half
+				uicopy.ApprovalAmendOverrideWarning,          // the no-re-validation warning
+				uicopy.ApprovalAmendRememberWarning,          // ...and its remembered-amend half
 				"ctrl+s approve edited",
 			} {
 				if !strings.Contains(flat, want) {

@@ -12,12 +12,12 @@ package tui
 // so a markdown command can never diverge from a typed one.
 
 import (
-	"strconv"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/jedwards1230/gofer/internal/config"
+	"github.com/jedwards1230/gofer/internal/uicopy"
 	"github.com/jedwards1230/gofer/internal/usercmd"
 )
 
@@ -70,11 +70,7 @@ func (a App) loadUserCommandsCmd() tea.Cmd {
 func (a App) applyUserCommands(msg userCommandsMsg) App {
 	a.registry.setLayer(sourceMarkdown, userCommands(msg.cmds))
 	if n := len(msg.warns); n > 0 {
-		note := "skipped " + strconv.Itoa(n) + " command file"
-		if n > 1 {
-			note += "s"
-		}
-		a.setStatus(sevWarn, note+": "+msg.warns[0].Error())
+		a.setStatus(sevWarn, uicopy.UserCommandsSkipped(n)+": "+msg.warns[0].Error())
 	}
 	return a
 }
@@ -137,12 +133,12 @@ func userCommands(loaded []usercmd.Command) []Command {
 func runUserCommand(uc usercmd.Command) func(App, []string) (App, tea.Cmd) {
 	return func(a App, args []string) (App, tea.Cmd) {
 		if a.sessID == "" {
-			a.setStatus(sevDanger, "/"+uc.Name+" sends a prompt — attach a session first (→ on the roster)")
+			a.setStatus(sevDanger, uicopy.UserCommandNeedsSession(uc.Name))
 			return a, nil
 		}
 		prompt := strings.TrimSpace(usercmd.Expand(uc.Body, args))
 		if prompt == "" {
-			a.setStatus(sevWarn, "/"+uc.Name+" expanded to an empty prompt — nothing sent")
+			a.setStatus(sevWarn, uicopy.UserCommandEmptyExpansion(uc.Name))
 			return a, nil
 		}
 		// Same tail-snap a hand-typed prompt does (handleAttachKey): the reply

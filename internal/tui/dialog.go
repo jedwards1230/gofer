@@ -19,6 +19,7 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/acp"
 
 	"github.com/jedwards1230/gofer/internal/config"
+	"github.com/jedwards1230/gofer/internal/uicopy"
 )
 
 // handleApprovalKey handles key presses while the peeked/attached session
@@ -132,7 +133,7 @@ func (a App) escapeApproval() (tea.Model, tea.Cmd) {
 func (a App) beginAmend() (tea.Model, tea.Cmd) {
 	next, ok := a.sess.BeginApprovalAmend()
 	if !ok {
-		a.setStatus(sevWarn, "This call has no editable command to amend.")
+		a.setStatus(sevWarn, uicopy.DialogAmendUnavailable)
 		return a, nil
 	}
 	a.sess = next
@@ -182,7 +183,7 @@ func (a App) commitAmend() (tea.Model, tea.Cmd) {
 	}
 	input, ok, err := a.sess.AmendedInput()
 	if err != nil {
-		a.setStatus(sevDanger, "amend: "+err.Error())
+		a.setStatus(sevDanger, uicopy.DialogAmendErrorPrefix+err.Error())
 		return a, nil
 	}
 	if !ok {
@@ -591,7 +592,7 @@ func (a App) applyPermissionExplained(msg permissionExplainedMsg) App {
 	}
 	if msg.err != nil {
 		a.sess = a.sess.ClearApprovalExplaining()
-		a.setStatus(sevDanger, "explain: "+msg.err.Error())
+		a.setStatus(sevDanger, uicopy.DialogExplainErrorPrefix+msg.err.Error())
 		return a
 	}
 	a.sess = a.sess.SetApprovalRationale(msg.rationale)

@@ -18,13 +18,13 @@ package tui
 // removed, not a second insertion primitive.
 
 import (
-	"fmt"
 	"strings"
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/jedwards1230/gofer/internal/config"
+	"github.com/jedwards1230/gofer/internal/uicopy"
 )
 
 // handlePaste inserts a pasted payload into whichever text-entry surface is
@@ -70,7 +70,7 @@ func (a App) handlePaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
 
 	if clipped {
 		// A caveat, not a failure: the paste DID land, just truncated.
-		a.setStatus(sevWarn, fmt.Sprintf("paste clipped to %d bytes (tui.max_paste_bytes)", a.pasteLimitBytes()))
+		a.setStatus(sevWarn, uicopy.PasteClipped(a.pasteLimitBytes()))
 	}
 	// A pasted "/mod" (or "@internal/") is as much an active token as a typed
 	// one, so the autocomplete menu re-syncs off a paste exactly as it does

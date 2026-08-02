@@ -15,13 +15,13 @@ package tui
 // app.go).
 
 import (
-	"fmt"
 	"strings"
 	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/jedwards1230/gofer/internal/tui/theme"
+	"github.com/jedwards1230/gofer/internal/uicopy"
 )
 
 // commandMenuMaxRows caps how many rows the popup shows at once before it
@@ -300,11 +300,11 @@ func (m commandMenu) Lines(width int) []string {
 	lines := make([]string, 0, visibleN+3)
 	lines = append(lines, strings.Repeat("─", width))
 	if start > 0 {
-		lines = append(lines, truncate(m.theme.MutedStyle().Render(fmt.Sprintf("↑ %d more", start)), width))
+		lines = append(lines, truncate(m.theme.MutedStyle().Render(uicopy.CommandMenuMoreAbove(start)), width))
 	}
 	lines = append(lines, rows[start:start+visibleN]...)
 	if hidden := n - start - visibleN; hidden > 0 {
-		lines = append(lines, truncate(m.theme.MutedStyle().Render(fmt.Sprintf("↓ %d more", hidden)), width))
+		lines = append(lines, truncate(m.theme.MutedStyle().Render(uicopy.CommandMenuMoreBelow(hidden)), width))
 	}
 	return lines
 }

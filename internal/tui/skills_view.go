@@ -18,11 +18,11 @@ package tui
 // knowable — it arrives as a diagnostic — and is shown.
 
 import (
-	"strconv"
 	"strings"
 
 	"github.com/jedwards1230/gofer/internal/capability"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
+	"github.com/jedwards1230/gofer/internal/uicopy"
 )
 
 // skillsView renders the Skills tab: a pure value, constructed inline per
@@ -49,9 +49,9 @@ func (v skillsView) View(width, height int) string {
 func (v skillsView) lines(height int) []string {
 	switch {
 	case v.caps.pending && !v.caps.loaded:
-		return loadingCapabilityLines("skills")
+		return loadingCapabilityLines(uicopy.SkillsLoadingSubject)
 	case !v.caps.loaded || !v.caps.answer.Known:
-		return unknownCapabilityLines("Skills")
+		return unknownCapabilityLines(uicopy.SkillsUnknownSubject)
 	}
 
 	skills := v.caps.answer.Snapshot.Skills
@@ -59,7 +59,7 @@ func (v skillsView) lines(height int) []string {
 		// Distinct wording from the UNKNOWN body above — "none found" is a
 		// read that happened, and the directories it searched are the useful
 		// half of the answer.
-		return append([]string{"Skills: none found."}, v.directoryLines(skills)...)
+		return append([]string{uicopy.SkillsNoneFound}, v.directoryLines(skills)...)
 	}
 
 	head := []string{v.headerLine(skills)}
@@ -90,12 +90,12 @@ func (v skillsView) headerLine(skills capability.Skills) string {
 			disabled++
 		}
 	}
-	line := "Skills: " + strconv.Itoa(len(skills.Loaded)) + " loaded"
+	line := uicopy.SkillsHeaderLoaded(len(skills.Loaded))
 	if disabled > 0 {
-		line += ", " + strconv.Itoa(disabled) + " disabled"
+		line += uicopy.SkillsHeaderDisabled(disabled)
 	}
 	if n := len(skills.Diagnostics); n > 0 {
-		line += ", " + strconv.Itoa(n) + " skipped"
+		line += uicopy.SkillsHeaderSkipped(n)
 	}
 	return line
 }
@@ -110,10 +110,10 @@ func (v skillsView) headerLine(skills capability.Skills) string {
 func (v skillsView) skillLine(s capability.Skill) string {
 	line := "  " + padCell(s.Name, 18) + s.Description
 	if s.Truncated {
-		line += " (truncated)"
+		line += uicopy.SkillsTruncatedSuffix
 	}
 	if s.Disabled {
-		return v.theme.MutedStyle().Render(line + " (disabled)")
+		return v.theme.MutedStyle().Render(line + uicopy.SkillsDisabledSuffix)
 	}
 	return line
 }
@@ -139,9 +139,9 @@ func (v skillsView) skillLine(s capability.Skill) string {
 // is safe to keep short.
 func (v skillsView) diagnosticLine(d capability.Diagnostic) string {
 	if d.Shadowed {
-		return v.theme.WarnStyle().Render("  shadowed  " + d.Path)
+		return v.theme.WarnStyle().Render(uicopy.SkillsShadowedRow(d.Path))
 	}
-	return v.theme.DangerStyle().Render("  skipped   " + d.Path + ": " + d.Detail)
+	return v.theme.DangerStyle().Render(uicopy.SkillsSkippedRow(d.Path, d.Detail))
 }
 
 // directoryLines renders the resolved discovery order, first-wins — the useful
@@ -153,7 +153,7 @@ func (v skillsView) directoryLines(skills capability.Skills) []string {
 		return nil
 	}
 	out := make([]string, 0, len(skills.Directories)+1)
-	out = append(out, "Searched, in precedence order (first match wins):")
+	out = append(out, uicopy.SkillsSearchedInOrder)
 	for _, dir := range skills.Directories {
 		out = append(out, "  "+displayHome(dir))
 	}
@@ -165,5 +165,5 @@ func (v skillsView) directoryLines(skills capability.Skills) []string {
 // index carries no path, so the winning file is knowable only by re-deriving
 // it, and a wrong path here would be worse than none.
 func (v skillsView) omissionLine() string {
-	return v.theme.MutedStyle().Render("Source paths shown for shadowed/skipped files only — the index carries none")
+	return v.theme.MutedStyle().Render(uicopy.SkillsSourcePathsOmitted)
 }

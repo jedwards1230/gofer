@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/jedwards1230/gofer/internal/tui/theme"
+	"github.com/jedwards1230/gofer/internal/uicopy"
 )
 
 // cardChrome is the fixed number of rows the peek card occupies below the
@@ -91,7 +92,7 @@ func (p Peek) View(width, height int) string {
 
 	var replyLine string
 	if p.reply == "" {
-		replyLine = "❯ " + p.theme.MutedStyle().Render("reply")
+		replyLine = "❯ " + p.theme.MutedStyle().Render(uicopy.PeekReplyPlaceholder)
 	} else {
 		// displaySafe for the same reason inputBuffer.Render applies it: the
 		// reply is a one-row line in a fixed-height card, and a paste can put
@@ -99,8 +100,7 @@ func (p Peek) View(width, height int) string {
 		replyLine = "❯ " + displaySafe(p.reply) + "▏"
 	}
 
-	footer := truncate(p.theme.MutedStyle().Render(
-		"enter to open · space/esc to close · ctrl+x×2 to delete"), width)
+	footer := truncate(p.theme.MutedStyle().Render(uicopy.PeekFooter), width)
 
 	out := strings.Split(p.over.Rail(width, railH), "\n")
 	out = append(out, rule, title, truncate(waiting, width), truncate(replyLine, width), rule, footer)
@@ -120,12 +120,12 @@ func (p Peek) View(width, height int) string {
 func statusVerb(st SessionStatus) string {
 	switch st {
 	case StatusWorking:
-		return "working"
+		return uicopy.PeekVerbWorking
 	case StatusFinished:
-		return "finished"
+		return uicopy.PeekVerbFinished
 	case StatusIdle:
-		return "idle"
+		return uicopy.PeekVerbIdle
 	default:
-		return "waiting"
+		return uicopy.PeekVerbWaiting
 	}
 }

@@ -33,12 +33,11 @@ package tui
 // The prompt states the recorded directory that went missing, and — because
 // a session's local context is cwd-scoped in ways that are invisible until they
 // bite — states out loud that re-initing somewhere else REBASES that context.
-// [cwdReinitWarning] is that copy; it is asserted by a named test
+// [uicopy.CwdReinitWarning] is that copy; it is asserted by a named test
 // (TestCwdMissingPromptWarnsAboutCwdScopedContext) rather than left to review.
 
 import (
 	"context"
-	"fmt"
 	"path"
 	"path/filepath"
 	"sort"
@@ -49,6 +48,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/jedwards1230/gofer/internal/tui/theme"
+	"github.com/jedwards1230/gofer/internal/uicopy"
 )
 
 // cwdMissingNotifier is the narrow seam a [Supervisor] implementation may also
@@ -126,25 +126,6 @@ const (
 	cwdChoiceArchive
 	cwdChoiceCount
 )
-
-// cwdReinitWarning is the load-bearing copy of this whole prompt: the reason
-// "just point it somewhere that exists" is not a safe default.
-//
-// A session's local context is resolved against its cwd in four separate places
-// — project config, user slash commands, skills, and file resolution — none of
-// which announce themselves when they silently resolve differently. Re-initing
-// elsewhere therefore REBASES the session's environment; it does not merely
-// relocate it. That has to be said in the UI, at the moment of the choice, not
-// only in a doc a user reading this prompt is not holding.
-//
-// Kept as a single unwrapped sentence and wrapped at render width by
-// [cwdMissingPrompt.sections], so the assertion that it is on screen
-// (TestCwdMissingPromptWarnsAboutCwdScopedContext) can normalise whitespace and
-// still match regardless of where the wrap lands.
-const cwdReinitWarning = "Warning: the session will load DIFFERENT local context there. " +
-	"Project config (.gofer/config.json), user commands (<cwd>/.gofer/commands), skills, " +
-	"and file resolution are all cwd-scoped — you are rebasing this session's environment, " +
-	"not just pointing it somewhere that exists."
 
 // cwdPromptMaxRows caps how much of the frame the prompt may take, the same way
 // panelHeight caps the command panel: the screen underneath still has to show
@@ -261,13 +242,13 @@ func (p cwdMissingPrompt) stepCandidate(delta int) cwdMissingPrompt {
 // tallest thing here (four wrapped rows at 80 columns) and the only rows that
 // are pure prose. They come off only when the actionable rows alone still do not
 // fit, so on any ordinary terminal the warning renders in full — it is the copy
-// the whole ruling turns on (see [cwdReinitWarning]).
+// the whole ruling turns on (see [uicopy.CwdReinitWarning]).
 func (p cwdMissingPrompt) sections(th theme.Theme, width int, compact bool) (head, body []string) {
 	if width < 1 {
 		width = 1
 	}
 	head = []string{strings.Repeat("─", width)}
-	head = append(head, th.DangerStyle().Render(truncate("Session directory is gone", width)))
+	head = append(head, th.DangerStyle().Render(truncate(uicopy.CwdSessionDirGone, width)))
 	head = append(head, wrapStyled(th.InkStyle(), p.headline(), width)...)
 	head = append(head, "")
 	if p.stage == cwdStageDir {
@@ -280,8 +261,7 @@ func (p cwdMissingPrompt) sections(th theme.Theme, width int, compact bool) (hea
 // directory is not decoration: it is how a user tells "I deleted that project"
 // from "the volume isn't mounted", and the two have different answers.
 func (p cwdMissingPrompt) headline() string {
-	return fmt.Sprintf("%s was recorded in %s, which no longer exists — so it cannot be reopened where it was.",
-		p.sessionLabel(), strconv.Quote(p.cwd))
+	return uicopy.CwdHeadline(p.sessionLabel(), p.cwd)
 }
 
 // sessionLabel names the session in prose: its roster title where there is one,
@@ -291,7 +271,7 @@ func (p cwdMissingPrompt) sessionLabel() string {
 	if p.title != "" {
 		return strconv.Quote(p.title)
 	}
-	return "Session " + p.sessionID
+	return uicopy.CwdSessionLabel(p.sessionID)
 }
 
 // choiceLines renders the three-way choice list through the shared vertical
@@ -305,20 +285,20 @@ func (p cwdMissingPrompt) sessionLabel() string {
 func (p cwdMissingPrompt) choiceLines(th theme.Theme, width int, compact bool) []string {
 	var warning []string
 	if !compact {
-		warning = indentStyled(th.WarnStyle(), cwdReinitWarning, "    ", width)
+		warning = indentStyled(th.WarnStyle(), uicopy.CwdReinitWarning, "    ", width)
 	}
 	rows := []choiceRow{
 		{
 			leader:   "1 ",
-			label:    "Re-init this session in a new directory…",
+			label:    uicopy.CwdChoiceReinit,
 			sublines: warning,
 		},
-		{leader: "2 ", label: "Cancel — leave this session untouched (it stays unattachable)."},
-		{leader: "3 ", label: "Archive / delete this session — its journal is kept."},
+		{leader: "2 ", label: uicopy.CwdChoiceCancel},
+		{leader: "3 ", label: uicopy.CwdChoiceArchive},
 	}
 	out := choiceListLines(th, rows, p.cursor, width)
 	out = append(out, "")
-	return append(out, th.MutedStyle().Render(truncate("↑/↓ move · 1-3 pick · enter choose · esc cancel", width)))
+	return append(out, th.MutedStyle().Render(truncate(uicopy.CwdChoiceHint, width)))
 }
 
 // dirLines renders the directory stage: the same warning (still on screen at
@@ -327,17 +307,17 @@ func (p cwdMissingPrompt) choiceLines(th theme.Theme, width int, compact bool) [
 func (p cwdMissingPrompt) dirLines(th theme.Theme, width int, compact bool) []string {
 	var out []string
 	if !compact {
-		out = indentStyled(th.WarnStyle(), cwdReinitWarning, "  ", width)
+		out = indentStyled(th.WarnStyle(), uicopy.CwdReinitWarning, "  ", width)
 		out = append(out, "")
 	}
-	out = append(out, truncate("Directory: "+p.entry.Render("▏"), width))
+	out = append(out, truncate(uicopy.CwdDirectory(p.entry.Render("▏")), width))
 
 	cands := p.candidates()
 	switch {
 	case !p.loaded:
-		out = append(out, th.MutedStyle().Render(truncate("  finding directories…", width)))
+		out = append(out, th.MutedStyle().Render(truncate(uicopy.CwdFindingDirs, width)))
 	case len(cands) == 0:
-		out = append(out, th.MutedStyle().Render(truncate("  no directories found here — type a path instead", width)))
+		out = append(out, th.MutedStyle().Render(truncate(uicopy.CwdNoDirsFound, width)))
 	default:
 		for i, d := range cands {
 			if len(out) >= cwdPromptMaxRows-2 {
@@ -352,7 +332,7 @@ func (p cwdMissingPrompt) dirLines(th theme.Theme, width int, compact bool) []st
 		}
 	}
 	out = append(out, "")
-	return append(out, th.MutedStyle().Render(truncate("type a path · ↑/↓ browse · enter re-init here · esc back", width)))
+	return append(out, th.MutedStyle().Render(truncate(uicopy.CwdDirHint, width)))
 }
 
 // render draws the prompt at the given size, clipped to at most
@@ -821,6 +801,6 @@ func (a App) commitCwdReinit() (tea.Model, tea.Cmd) {
 	}
 	id := a.cwdPrompt.sessionID
 	a.cwdPrompt = nil
-	a.setStatus(sevOK, fmt.Sprintf("Reopening session in %s.", displayHome(dir)))
+	a.setStatus(sevOK, uicopy.CwdReopening(displayHome(dir)))
 	return a, a.doResume(id, dir)
 }

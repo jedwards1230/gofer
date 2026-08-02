@@ -35,7 +35,11 @@ package tui
 // readline keymap; the rows below name the same bindings so /help can show
 // them without a second document.
 
-import tea "charm.land/bubbletea/v2"
+import (
+	tea "charm.land/bubbletea/v2"
+
+	"github.com/jedwards1230/gofer/internal/uicopy"
+)
 
 // keyScope is where a binding applies — the grouping /help renders under.
 type keyScope int
@@ -60,27 +64,27 @@ const (
 func (s keyScope) label() string {
 	switch s {
 	case scopeOverview:
-		return "Roster"
+		return uicopy.KeyScopeRoster
 	case scopePeek:
-		return "Peek"
+		return uicopy.KeyScopePeek
 	case scopeAttach:
-		return "Attach"
+		return uicopy.KeyScopeAttach
 	case scopeInput:
-		return "Text entry"
+		return uicopy.KeyScopeTextEntry
 	case scopePrefix:
-		return "Input prefixes"
+		return uicopy.KeyScopeInputPrefixes
 	case scopePanel:
-		return "Command panel"
+		return uicopy.KeyScopeCommandPanel
 	case scopeMenu:
-		return "Autocomplete popup"
+		return uicopy.KeyScopeAutocomplete
 	case scopeApproval:
-		return "Approval prompt"
+		return uicopy.KeyScopeApproval
 	case scopeAmend:
-		return "Amending a tool call"
+		return uicopy.KeyScopeAmend
 	case scopeDecision:
-		return "Agent question (ask_user)"
+		return uicopy.KeyScopeDecision
 	default:
-		return "Global"
+		return uicopy.KeyScopeGlobal
 	}
 }
 
@@ -129,14 +133,14 @@ func globalKeymap() []keyBinding {
 		{
 			Keys:  "ctrl+c",
 			Scope: scopeGlobal,
-			Desc:  "Quit gofer (press twice)",
+			Desc:  uicopy.KeyQuit,
 			match: func(k tea.Key) bool { return k.Mod.Contains(tea.ModCtrl) && k.Code == 'c' },
 			run:   func(a App) (tea.Model, tea.Cmd) { return a.confirmQuit() },
 		},
 		{
 			Keys:  "ctrl+y",
 			Scope: scopeGlobal,
-			Desc:  "Toggle guardrails for new sessions (same as /yolo)",
+			Desc:  uicopy.KeyToggleGuardrails,
 			match: func(k tea.Key) bool { return k.Mod.Contains(tea.ModCtrl) && k.Code == 'y' },
 			run: func(a App) (tea.Model, tea.Cmd) {
 				next, cmd := a.applyPermissionMode(yoloToggle)
@@ -146,7 +150,7 @@ func globalKeymap() []keyBinding {
 		{
 			Keys:  "ctrl+a",
 			Scope: scopeGlobal,
-			Desc:  "Select the whole screen and copy it (empty input bar)",
+			Desc:  uicopy.KeySelectAll,
 			match: func(k tea.Key) bool { return k.Mod.Contains(tea.ModCtrl) && k.Code == 'a' },
 			// Only on an empty input bar — with text in it, ctrl+a stays
 			// "move to line start" (see keyBinding.enabled).
@@ -159,7 +163,7 @@ func globalKeymap() []keyBinding {
 		{
 			Keys:  "alt+a",
 			Scope: scopeGlobal,
-			Desc:  "Copy the WHOLE transcript, scrolled-off content included (attach, empty input)",
+			Desc:  uicopy.KeyCopyTranscript,
 			match: func(k tea.Key) bool { return k.Mod.Contains(tea.ModAlt) && k.Code == 'a' },
 			// Attach only — it is the only screen with a transcript — and only on
 			// an empty input bar, matching ctrl+a's gate so the two select/copy
@@ -174,7 +178,7 @@ func globalKeymap() []keyBinding {
 		{
 			Keys:  "ctrl+r",
 			Scope: scopeGlobal,
-			Desc:  "Toggle reply-on-run for shell commands (reply now / queue)",
+			Desc:  uicopy.KeyToggleShellReply,
 			match: func(k tea.Key) bool { return k.Mod.Contains(tea.ModCtrl) && k.Code == 'r' },
 			run: func(a App) (tea.Model, tea.Cmd) {
 				// No status note: the shell-mode rule label already flips between
@@ -191,83 +195,83 @@ func globalKeymap() []keyBinding {
 // rows are not dispatched from here and what that costs.
 func screenKeymap() []keyBinding {
 	return []keyBinding{
-		{Keys: "↑/↓", Scope: scopeOverview, Desc: "Move the roster selection"},
-		{Keys: "enter", Scope: scopeOverview, Desc: "Open the selected session, or run what's typed"},
-		{Keys: "→", Scope: scopeOverview, Desc: "Open the selected session (empty dispatch bar)"},
-		{Keys: "space", Scope: scopeOverview, Desc: "Peek the selected session (empty dispatch bar)"},
-		{Keys: "tab", Scope: scopeOverview, Desc: "Switch flat / grouped roster view"},
-		{Keys: "esc", Scope: scopeOverview, Desc: "Clear the dispatch bar"},
-		{Keys: "ctrl+x", Scope: scopeOverview, Desc: "Delete the selected session (press twice to confirm)"},
-		{Keys: "ctrl+t", Scope: scopeOverview, Desc: "Stop every subagent under the selected session"},
-		{Keys: "R", Scope: scopeOverview, Desc: "Restart a stale daemon (shown only when the daemon is out of date)"},
-		{Keys: "pgup/pgdn", Scope: scopeOverview, Desc: "Scroll the roster"},
-		{Keys: "?", Scope: scopeOverview, Desc: "Open this help (empty dispatch bar)"},
+		{Keys: "↑/↓", Scope: scopeOverview, Desc: uicopy.KeyRosterMove},
+		{Keys: "enter", Scope: scopeOverview, Desc: uicopy.KeyRosterOpenOrRun},
+		{Keys: "→", Scope: scopeOverview, Desc: uicopy.KeyRosterOpen},
+		{Keys: "space", Scope: scopeOverview, Desc: uicopy.KeyRosterPeek},
+		{Keys: "tab", Scope: scopeOverview, Desc: uicopy.KeyRosterToggleView},
+		{Keys: "esc", Scope: scopeOverview, Desc: uicopy.KeyRosterClearDispatch},
+		{Keys: "ctrl+x", Scope: scopeOverview, Desc: uicopy.KeyRosterDelete},
+		{Keys: "ctrl+t", Scope: scopeOverview, Desc: uicopy.KeyRosterStopSubagents},
+		{Keys: "R", Scope: scopeOverview, Desc: uicopy.KeyRosterRestartDaemon},
+		{Keys: "pgup/pgdn", Scope: scopeOverview, Desc: uicopy.KeyRosterScroll},
+		{Keys: "?", Scope: scopeOverview, Desc: uicopy.KeyRosterHelp},
 
-		{Keys: "enter", Scope: scopePeek, Desc: "Open the session, or send the typed reply"},
-		{Keys: "space", Scope: scopePeek, Desc: "Close back to the roster (empty reply)"},
-		{Keys: "esc", Scope: scopePeek, Desc: "Close back to the roster"},
-		{Keys: "↑/↓", Scope: scopePeek, Desc: "Move the roster selection"},
-		{Keys: "ctrl+x", Scope: scopePeek, Desc: "Delete the selected session (press twice to confirm)"},
+		{Keys: "enter", Scope: scopePeek, Desc: uicopy.KeyPeekOpenOrReply},
+		{Keys: "space", Scope: scopePeek, Desc: uicopy.KeyPeekCloseEmpty},
+		{Keys: "esc", Scope: scopePeek, Desc: uicopy.KeyPeekClose},
+		{Keys: "↑/↓", Scope: scopePeek, Desc: uicopy.KeyRosterMove},
+		{Keys: "ctrl+x", Scope: scopePeek, Desc: uicopy.KeyRosterDelete},
 
-		{Keys: "←", Scope: scopeAttach, Desc: "Back out to the parent session, else the roster (empty input)"},
-		{Keys: "↓", Scope: scopeAttach, Desc: "Drill into this session's subagents (empty input)"},
-		{Keys: "enter", Scope: scopeAttach, Desc: "Send the prompt, or run a /command"},
-		{Keys: "esc", Scope: scopeAttach, Desc: "Interrupt the running turn"},
-		{Keys: "pgup/pgdn", Scope: scopeAttach, Desc: "Scroll the transcript"},
+		{Keys: "←", Scope: scopeAttach, Desc: uicopy.KeyAttachBack},
+		{Keys: "↓", Scope: scopeAttach, Desc: uicopy.KeyAttachDrillSubagents},
+		{Keys: "enter", Scope: scopeAttach, Desc: uicopy.KeyAttachSend},
+		{Keys: "esc", Scope: scopeAttach, Desc: uicopy.KeyAttachInterrupt},
+		{Keys: "pgup/pgdn", Scope: scopeAttach, Desc: uicopy.KeyAttachScroll},
 
-		{Keys: "←/→", Scope: scopeInput, Desc: "Move one character"},
-		{Keys: "alt+←/→", Scope: scopeInput, Desc: "Move one word"},
-		{Keys: "home/ctrl+a", Scope: scopeInput, Desc: "Move to line start (ctrl+a selects the screen when the bar is empty)"},
-		{Keys: "end/ctrl+e", Scope: scopeInput, Desc: "Move to line end"},
-		{Keys: "backspace", Scope: scopeInput, Desc: "Delete the character before the cursor"},
-		{Keys: "delete/ctrl+d", Scope: scopeInput, Desc: "Delete the character at the cursor"},
-		{Keys: "alt+backspace/ctrl+w", Scope: scopeInput, Desc: "Delete the word before the cursor"},
-		{Keys: "ctrl+u", Scope: scopeInput, Desc: "Delete to line start"},
-		{Keys: "ctrl+k", Scope: scopeInput, Desc: "Delete to line end"},
+		{Keys: "←/→", Scope: scopeInput, Desc: uicopy.KeyInputMoveChar},
+		{Keys: "alt+←/→", Scope: scopeInput, Desc: uicopy.KeyInputMoveWord},
+		{Keys: "home/ctrl+a", Scope: scopeInput, Desc: uicopy.KeyInputLineStart},
+		{Keys: "end/ctrl+e", Scope: scopeInput, Desc: uicopy.KeyInputLineEnd},
+		{Keys: "backspace", Scope: scopeInput, Desc: uicopy.KeyInputDeleteCharBefore},
+		{Keys: "delete/ctrl+d", Scope: scopeInput, Desc: uicopy.KeyInputDeleteCharAt},
+		{Keys: "alt+backspace/ctrl+w", Scope: scopeInput, Desc: uicopy.KeyInputDeleteWordBefore},
+		{Keys: "ctrl+u", Scope: scopeInput, Desc: uicopy.KeyInputDeleteToLineStart},
+		{Keys: "ctrl+k", Scope: scopeInput, Desc: uicopy.KeyInputDeleteToLineEnd},
 
 		// The input prefixes are a SUBMIT-TIME grammar rather than keys (see
 		// App.dispatchInput, shell.go), but they are the part of the input
 		// surface a user is least likely to discover unaided, so /help carries
 		// them beside the bindings.
-		{Keys: "/name", Scope: scopePrefix, Desc: "Run a slash command (see Commands above)"},
-		{Keys: "!cmd", Scope: scopePrefix, Desc: "Run a shell command; its output joins the model's context"},
-		{Keys: "!!cmd", Scope: scopePrefix, Desc: "Run a shell command, keeping its output OUT of context"},
-		{Keys: "@path", Scope: scopePrefix, Desc: "Complete a file path into the prompt (the path, not its contents)"},
+		{Keys: "/name", Scope: scopePrefix, Desc: uicopy.KeyPrefixSlash},
+		{Keys: "!cmd", Scope: scopePrefix, Desc: uicopy.KeyPrefixShell},
+		{Keys: "!!cmd", Scope: scopePrefix, Desc: uicopy.KeyPrefixShellQuiet},
+		{Keys: "@path", Scope: scopePrefix, Desc: uicopy.KeyPrefixPath},
 
-		{Keys: "↑/↓", Scope: scopeMenu, Desc: "Move the highlighted entry"},
-		{Keys: "tab", Scope: scopeMenu, Desc: "Complete the highlighted entry"},
-		{Keys: "enter", Scope: scopeMenu, Desc: "Run the highlighted command"},
-		{Keys: "esc", Scope: scopeMenu, Desc: "Close the popup, keep the typed text"},
+		{Keys: "↑/↓", Scope: scopeMenu, Desc: uicopy.KeyMenuMove},
+		{Keys: "tab", Scope: scopeMenu, Desc: uicopy.KeyMenuComplete},
+		{Keys: "enter", Scope: scopeMenu, Desc: uicopy.KeyMenuRun},
+		{Keys: "esc", Scope: scopeMenu, Desc: uicopy.KeyMenuClose},
 
-		{Keys: "←/→", Scope: scopePanel, Desc: "Switch tabs"},
-		{Keys: "↑/↓", Scope: scopePanel, Desc: "Move within the active tab"},
-		{Keys: "enter", Scope: scopePanel, Desc: "Commit the active tab's selection"},
-		{Keys: "esc", Scope: scopePanel, Desc: "Clear the tab's state, then close the panel"},
+		{Keys: "←/→", Scope: scopePanel, Desc: uicopy.KeyPanelSwitchTabs},
+		{Keys: "↑/↓", Scope: scopePanel, Desc: uicopy.KeyPanelMove},
+		{Keys: "enter", Scope: scopePanel, Desc: uicopy.KeyPanelCommit},
+		{Keys: "esc", Scope: scopePanel, Desc: uicopy.KeyPanelClose},
 
-		{Keys: "a/y/1", Scope: scopeApproval, Desc: "Allow the tool call"},
-		{Keys: "d/n/2", Scope: scopeApproval, Desc: "Deny the tool call"},
-		{Keys: "r", Scope: scopeApproval, Desc: "Toggle remember"},
-		{Keys: "ctrl+e", Scope: scopeApproval, Desc: "Ask the agent why it wants this call"},
-		{Keys: "tab", Scope: scopeApproval, Desc: "Edit the tool input before approving"},
-		{Keys: "esc", Scope: scopeApproval, Desc: "Dismiss without replying"},
+		{Keys: "a/y/1", Scope: scopeApproval, Desc: uicopy.KeyApprovalAllow},
+		{Keys: "d/n/2", Scope: scopeApproval, Desc: uicopy.KeyApprovalDeny},
+		{Keys: "r", Scope: scopeApproval, Desc: uicopy.KeyApprovalRemember},
+		{Keys: "ctrl+e", Scope: scopeApproval, Desc: uicopy.KeyApprovalExplain},
+		{Keys: "tab", Scope: scopeApproval, Desc: uicopy.KeyApprovalAmend},
+		{Keys: "esc", Scope: scopeApproval, Desc: uicopy.KeyApprovalDismiss},
 
 		// The amend editor swallows almost every key into the text buffer (it
 		// reuses the shared input keymap), so only its two escapes are bindings
 		// in the sense this table means — including ctrl+e, which in here is the
 		// keymap's jump-to-line-end rather than the prompt's explain.
-		{Keys: "ctrl+s", Scope: scopeAmend, Desc: "Approve the call with the edited input"},
-		{Keys: "esc", Scope: scopeAmend, Desc: "Cancel the edit, back to the prompt"},
+		{Keys: "ctrl+s", Scope: scopeAmend, Desc: uicopy.KeyAmendApprove},
+		{Keys: "esc", Scope: scopeAmend, Desc: uicopy.KeyAmendCancel},
 
 		// The rows gated on a MULTI-question request (tab/shift+tab, ←/→, n) are
 		// listed unconditionally: this table has no way to express "only when the
 		// agent asked more than one thing", and a user reading /help outside a
 		// prompt has no request in front of them either way.
-		{Keys: "↑/↓", Scope: scopeDecision, Desc: "Move between the offered answers"},
-		{Keys: "1-9", Scope: scopeDecision, Desc: "Answer with that numbered option"},
-		{Keys: "enter", Scope: scopeDecision, Desc: "Answer with the focused row, or submit"},
-		{Keys: "tab/shift+tab", Scope: scopeDecision, Desc: "Move between questions (multi-question only)"},
-		{Keys: "n", Scope: scopeDecision, Desc: "Annotate the focused answer (multi-question only)"},
-		{Keys: "esc", Scope: scopeDecision, Desc: "Close an editor, else cancel the question"},
+		{Keys: "↑/↓", Scope: scopeDecision, Desc: uicopy.KeyDecisionMoveAnswer},
+		{Keys: "1-9", Scope: scopeDecision, Desc: uicopy.KeyDecisionNumbered},
+		{Keys: "enter", Scope: scopeDecision, Desc: uicopy.KeyDecisionSubmit},
+		{Keys: "tab/shift+tab", Scope: scopeDecision, Desc: uicopy.KeyDecisionMoveQuestion},
+		{Keys: "n", Scope: scopeDecision, Desc: uicopy.KeyDecisionAnnotate},
+		{Keys: "esc", Scope: scopeDecision, Desc: uicopy.KeyDecisionCancel},
 	}
 }
 

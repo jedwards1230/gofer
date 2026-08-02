@@ -11,12 +11,13 @@ package tui
 import (
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/jedwards1230/agent-sdk-go/provider"
+
+	"github.com/jedwards1230/gofer/internal/uicopy"
 )
 
 // Command is one entry in the slash-command [Registry]: a name plus the
@@ -222,53 +223,53 @@ func newBuiltinRegistry() Registry {
 	var r Registry
 	r.register(Command{
 		Name:    "status",
-		Summary: "Show session, cwd, and provider status",
+		Summary: uicopy.CommandStatusSummary,
 		Run:     openPanel(panelStatus),
 	})
 	r.register(Command{
 		Name:    "usage",
-		Summary: "Show this session's token and cost consumption",
+		Summary: uicopy.CommandUsageSummary,
 		Run:     openPanel(panelUsage),
 	})
 	r.register(Command{
 		Name:    "stats",
-		Summary: "Show session lifecycle and roster-wide totals",
+		Summary: uicopy.CommandStatsSummary,
 		Run:     openPanel(panelStats),
 	})
 	r.register(Command{
 		Name:    "config",
 		Aliases: []string{"cfg"},
-		Summary: "View and edit settings",
+		Summary: uicopy.CommandConfigSummary,
 		Run:     openPanel(panelConfig),
 	})
 	r.register(Command{
 		Name:    "model",
-		ArgHint: "[id]",
-		Summary: "Pick the active/default model",
+		ArgHint: uicopy.CommandModelArgHint,
+		Summary: uicopy.CommandModelSummary,
 		Run:     runModel,
 	})
 	r.register(Command{
 		Name:    "new",
-		Summary: "Start a new session and attach to it",
+		Summary: uicopy.CommandNewSummary,
 		Run:     runNew,
 	})
 	r.register(Command{
 		Name:    "resume",
-		ArgHint: "[session-id]",
-		Summary: "Reopen a session from disk",
+		ArgHint: uicopy.CommandResumeArgHint,
+		Summary: uicopy.CommandResumeSummary,
 		Run:     runResume,
 	})
 	r.register(Command{
 		Name:    "quit",
 		Aliases: []string{"exit"},
-		Summary: "Quit gofer",
+		Summary: uicopy.CommandQuitSummary,
 		Run:     runQuit,
 	})
 	r.register(Command{
 		Name:    "thinking",
 		Aliases: []string{"effort"},
-		ArgHint: "[low|medium|high|off]",
-		Summary: "Set the reasoning effort for this session",
+		ArgHint: uicopy.CommandThinkingArgHint,
+		Summary: uicopy.CommandThinkingSummary,
 		Run:     runThinking,
 	})
 	r.register(Command{
@@ -281,33 +282,33 @@ func newBuiltinRegistry() Registry {
 		// one. Instructions are still accepted and forwarded — see
 		// runCompact — just not invited via autocomplete.
 		Name:    "compact",
-		Summary: "Summarize this session's history and replace it with the summary",
+		Summary: uicopy.CommandCompactSummary,
 		Run:     runCompact,
 	})
 	r.register(Command{
 		Name:    "context",
-		Summary: "Show how full this session's context window is",
+		Summary: uicopy.CommandContextSummary,
 		Run:     openPanel(panelContext),
 	})
 	r.register(Command{
 		Name:    "mcp",
-		Summary: "Show configured MCP servers and their connection state",
+		Summary: uicopy.CommandMCPSummary,
 		Run:     openPanel(panelMCP),
 	})
 	r.register(Command{
 		Name:    "skills",
-		Summary: "Show discovered SKILL.md skills and loader diagnostics",
+		Summary: uicopy.CommandSkillsSummary,
 		Run:     openPanel(panelSkills),
 	})
 	r.register(Command{
 		Name:    "yolo",
-		ArgHint: "[on|off]",
-		Summary: "Toggle guardrails for new sessions",
+		ArgHint: uicopy.CommandYoloArgHint,
+		Summary: uicopy.CommandYoloSummary,
 		Run:     runYolo,
 	})
 	r.register(Command{
 		Name:    "help",
-		Summary: "List commands and keys",
+		Summary: uicopy.CommandHelpSummary,
 		Run:     openPanel(panelHelp),
 	})
 	return r
@@ -349,7 +350,7 @@ func runQuit(a App, _ []string) (App, tea.Cmd) {
 // "/new fix the flaky test" would drop text the user clearly meant to send.
 func runNew(a App, args []string) (App, tea.Cmd) {
 	if len(args) > 0 {
-		a.setStatus(sevDanger, "/new takes no arguments — it opens an empty session; type the prompt there")
+		a.setStatus(sevDanger, uicopy.CommandNewTakesNoArgs)
 		return a, nil
 	}
 	return a, a.doCreate("")
@@ -378,12 +379,12 @@ func runResume(a App, args []string) (App, tea.Cmd) {
 	// than one argument is always a mistake — reported by name rather than
 	// silently taking args[0], the same rule runModel applies.
 	if len(args) > 1 {
-		a.setStatus(sevDanger, "/resume takes a single session id — got "+strconv.Itoa(len(args))+" arguments")
+		a.setStatus(sevDanger, uicopy.CommandResumeWantsOneID(len(args)))
 		return a, nil
 	}
 	id := args[0]
 	if !validSessionID(id) {
-		a.setStatus(sevDanger, "can't resume "+strconv.Quote(id)+": not a valid session id")
+		a.setStatus(sevDanger, uicopy.CommandResumeInvalidID(id))
 		return a, nil
 	}
 	// A BLANK cwd, for the same reason [App.handleResumeSelect] sends one: this
@@ -465,12 +466,12 @@ func runModel(a App, args []string) (App, tea.Cmd) {
 	// actionable, whereas applying the first token would quietly set a model
 	// the user did not ask for.
 	if len(args) > 1 {
-		a.setStatus(sevDanger, "/model takes a single model id — got "+strconv.Itoa(len(args))+" arguments")
+		a.setStatus(sevDanger, uicopy.CommandModelWantsOneID(len(args)))
 		return a, nil
 	}
 	id := args[0]
 	if _, err := provider.Resolve(id); err != nil {
-		a.setStatus(sevDanger, "can't use model "+strconv.Quote(id)+": "+err.Error())
+		a.setStatus(sevDanger, uicopy.CommandModelUnusable(id, err.Error()))
 		return a, nil
 	}
 	return a.applyModelSelection(id, a.currentSessionInfo())
@@ -498,12 +499,12 @@ func runThinking(a App, args []string) (App, tea.Cmd) {
 	// than one argument is always a mistake — rejected by name rather than
 	// silently applying args[0], for the same reason /model does.
 	if len(args) > 1 {
-		a.setStatus(sevDanger, "/thinking takes a single level — got "+strconv.Itoa(len(args))+" arguments")
+		a.setStatus(sevDanger, uicopy.CommandThinkingWantsOneLevel(len(args)))
 		return a, nil
 	}
 	effort, ok := parseEffortArg(args[0])
 	if !ok {
-		a.setStatus(sevDanger, "can't use reasoning effort "+strconv.Quote(args[0])+": want low, medium, high, or off")
+		a.setStatus(sevDanger, uicopy.CommandThinkingUnusableLevel(args[0]))
 		return a, nil
 	}
 	return a.applyEffortSelection(effort, a.currentSessionInfo())
@@ -530,7 +531,7 @@ func (a App) dispatchSlash(buf string) (App, tea.Cmd) {
 	name, args := parseSlash(buf)
 	cmd, ok := a.registry.Lookup(name)
 	if !ok {
-		a.setStatus(sevDanger, "unknown command: /"+name)
+		a.setStatus(sevDanger, uicopy.CommandUnknown(name))
 		return a, nil
 	}
 	return cmd.Run(a, args)
