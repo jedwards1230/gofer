@@ -353,8 +353,13 @@ opinion. gofer supplies all three:
   requires the session to be idle) — the one gap this closes: a per-session
   out-of-turn watcher (`cmd/gofer/daemon.go`'s `OnRegister` hook) relays such
   events through the same guarded broadcast the M6 router relay already used,
-  so a remote peer sees them too. The M6 `--workers` path does not yet wire
-  this watcher — a known follow-up, not silently left.
+  so a remote peer sees them too. The M6 `--workers` path wires the same
+  property from the worker side instead: a session-worker's daemon runs a
+  standing per-session observer (`daemon.Config.RelayOutOfTurnEvents`, set only
+  in `internal/worker`) that puts an out-of-turn event on the wire, where the
+  router's existing event relay fans it out. Exactly one of the two is ever
+  enabled for a given session, so a compaction is delivered once, in both
+  deployments.
 - **`/compact [instructions]`** — explicit, idle-only (mirrors `/kill`/
   `/archive`'s precondition), forwards free-text instructions verbatim ("" is
   the SDK's own default). No `ArgHint`: like `/new`'s prompt, every string is

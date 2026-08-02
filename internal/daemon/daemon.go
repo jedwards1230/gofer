@@ -183,6 +183,38 @@ type Config struct {
 	// unchanged.
 	ReplayPendingPermissionsOnAttach bool
 
+	// RelayOutOfTurnEvents makes this daemon keep a STANDING, no-replay
+	// subscription on every session it hosts and rebroadcast each event to that
+	// session's attached peers — the fix for events published with NO
+	// session/prompt in flight, which would otherwise reach nobody.
+	//
+	// The daemon's ordinary fan-out (broadcastGoferEvent/broadcastUpdate) runs
+	// only from INSIDE an active session/prompt handler, plus a couple of
+	// one-off call sites (advertiseModelChange); there is no continuous drain of
+	// a session's broker otherwise (see the package doc). Compaction breaks that
+	// assumption: session.compacted is published with no prompt in flight at all
+	// — the explicit gofer/compact requires the session to be IDLE, and the
+	// automatic trigger fires from the supervisor's pump BETWEEN turns — so
+	// without this the hard "auto-compaction must be visible in the transcript,
+	// never silent" requirement holds only where something else happens to be
+	// draining the broker.
+	//
+	// The one caller that needs it is the M6 session-worker
+	// (docs/milestones/M6-process-isolation.md): a worker's events reach the
+	// router — and through it every attached client — only over the wire, and
+	// nothing puts an out-of-turn event on that wire. The `gofer daemon`
+	// in-process path must leave it FALSE: cmd/gofer's supervisor OnRegister hook
+	// already runs the equivalent watcher there, and enabling both would deliver
+	// every out-of-turn event twice.
+	//
+	// Rebroadcast goes through the same exported, already-guarded relay methods
+	// the M6 router drives ([Daemon.BroadcastRawEvent] /
+	// [Daemon.BroadcastSessionUpdate]), so their promptHandlerActive check — not
+	// a second hand-rolled guard — is what keeps this from double-delivering a
+	// live turn's events alongside handleSessionPrompt's own fan-out. See
+	// [Daemon.startSessionObserver].
+	RelayOutOfTurnEvents bool
+
 	// LoadSettleTimeout bounds how long handleSessionLoad waits for a session's
 	// in-flight turn to finish journaling before it folds and replays history
 	// (see [Supervisor.AwaitSettled] and issue #137). The wait is best-effort:
@@ -301,6 +333,18 @@ type Daemon struct {
 	decisionRoutes     map[decisionKey]struct{}
 	pendingDecisions   map[decisionKey]decisionRequestedParams
 	decisionReqCancels map[decisionKey]context.CancelFunc
+
+	// observerMu guards observers.
+	observerMu sync.Mutex
+	// observers maps a session id to the identity token of its standing
+	// out-of-turn event observer, so a session that is loaded repeatedly (every
+	// re-attach calls session/load) grows exactly ONE observer rather than one
+	// per attach — a second subscription would double-deliver every out-of-turn
+	// event. Populated only when [Config.RelayOutOfTurnEvents] is set; an
+	// ordinary daemon never writes to it. Each entry is removed by its own
+	// goroutine on exit, so the map is bounded by the sessions currently being
+	// observed, not by sessions ever seen. See [Daemon.startSessionObserver].
+	observers map[string]*sessionObserver
 }
 
 // decisionKey identifies one outstanding structured-decision request.
@@ -350,6 +394,8 @@ func New(sup Supervisor, cfg Config) *Daemon {
 		decisionRoutes:     make(map[decisionKey]struct{}),
 		pendingDecisions:   make(map[decisionKey]decisionRequestedParams),
 		decisionReqCancels: make(map[decisionKey]context.CancelFunc),
+
+		observers: make(map[string]*sessionObserver),
 	}
 }
 

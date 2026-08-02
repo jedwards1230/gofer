@@ -63,6 +63,31 @@ Rules:
   sockets. `cmd/gofer/session_worker_test.go` covers the worker entrypoint and
   its pinned session id; `internal/router/crashisolation_test.go` covers a
   killed worker leaving the router and its other sessions intact.
+- **out-of-turn delivery under `--workers`**:
+  `internal/router/outofturn_compact_test.go` drives a real `gofer/compact`
+  (idle-only by contract, so the "no prompt in flight" condition needs no timing
+  trick) on a session hosted by a real worker process, and asserts the resulting
+  `session.compacted` reaches a client that is *merely attached*. The whole
+  four-hop chain is the property, so a fake relay cannot stand in — note that
+  `internal/router/resume_test.go`'s `recordingRelay` stops two hops short, and a
+  green run there is **not** coverage for this.
+
+  The same file's `TestOutOfTurnModelChangeReachesAttachedClient` is the second
+  kind (`session.config`, driven by `gofer/set_model` on an idle session), and it
+  is there because the two failed at **different hops**: compaction was never put
+  on the wire, while `session.config` was on the wire the whole time and died in
+  the router's decode. One test does not cover the other, which is the general
+  lesson — "an out-of-turn event reaches a client" is a property of a chain, and
+  each hop can drop a different kind.
+- **every event kind survives the wire → broker round trip**:
+  `internal/wirestream/kindcoverage_internal_test.go` marshals one fully-populated
+  event per kind in the SDK's union, feeds the bytes through `handleGoferEvent`,
+  and requires the published event to equal `event.Unmarshal` of the same bytes,
+  field for field. It exists because a kind (or a single FIELD) that nothing
+  decodes is indistinguishable from one nothing sends: `plan`, `session.config`,
+  `TurnFinished.ContextWindow` and `ToolCallFinished.Edits` were all silently
+  dropped here at once, and every correctness test in the repo stayed green.
+  Populate every field of a new kind — a zero field cannot show that it was lost.
 
 ## Visual capture (VHS)
 

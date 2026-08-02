@@ -264,6 +264,20 @@ func Serve(ctx context.Context, opts Options) error {
 		// the outstanding gate (live in-flight state, not journaled) reaches it
 		// only if this worker re-emits it there (design §7).
 		ReplayPendingPermissionsOnAttach: true,
+		// Keep a standing drain on this session's broker, so an event published
+		// with NO session/prompt in flight still reaches the router (and through
+		// it every attached client) instead of being fanned out to nobody.
+		// session.compacted is the event that forces this: explicit gofer/compact
+		// is idle-only and the automatic trigger fires between turns, so under
+		// --workers a compaction was previously invisible — defeating the hard
+		// requirement that auto-compaction be visible in the transcript, never
+		// silent (jedwards1230/gofer#280).
+		//
+		// The WORKER is the only place this may be set. cmd/gofer's in-process
+		// path already runs the equivalent watcher off the supervisor's OnRegister
+		// hook, and the router-facing daemon relays what the worker sends — either
+		// one also setting this would deliver every out-of-turn event twice.
+		RelayOutOfTurnEvents: true,
 	})
 
 	// 6. Handshake, THEN serve. The router treats the handshake as "ready to be

@@ -468,6 +468,11 @@ func handleSessionNew(d *Daemon, ctx context.Context, _ *peer, params json.RawMe
 		}
 		return nil, appError(err)
 	}
+	// Start this session's standing out-of-turn event observer. A no-op unless
+	// [Config.RelayOutOfTurnEvents] is set (the M6 worker) — see
+	// [Daemon.startSessionObserver], including why it subscribes live here even
+	// though Create publishes its MCP-down/skill notices before returning.
+	d.startSessionObserver(info.ID)
 	// Only log the subagent keys when there IS a link: every ordinary root create
 	// would otherwise carry two empty attributes on every line.
 	logArgs := []any{"session", info.ID}
@@ -570,6 +575,18 @@ func handleSessionLoad(d *Daemon, ctx context.Context, p *peer, params json.RawM
 	// failed above never reaches here — means the registry only ever holds
 	// peers attached to a session the daemon actually resumed.
 	d.attachPeer(op.SessionID, p)
+
+	// Start this session's standing out-of-turn event observer (a no-op unless
+	// [Config.RelayOutOfTurnEvents] is set, and idempotent per session — see
+	// [Daemon.startSessionObserver]). It goes HERE, not after the replays below,
+	// so the settle wait + fold is not a window in which a live out-of-turn event
+	// is silently dropped. The cost is that such an event may interleave with the
+	// replay frames rather than following them: harmless, because both paths reach
+	// this peer through the same writeMu-serialized [peer.writeJSON] (so frames
+	// never corrupt each other), and because a session/load NEVER guaranteed an
+	// ordering against concurrent live traffic in the first place — see the
+	// concurrency note on this handler.
+	d.startSessionObserver(op.SessionID)
 
 	// Wait — bounded, best-effort — for the session's in-flight turn to finish
 	// journaling before folding, so a load landing in the async-journaling window
@@ -1573,6 +1590,13 @@ func (d *Daemon) broadcastGoferEvent(sessionID string, e event.Event) {
 // direct fan-out both deliver the snapshot; a config_option_update is an
 // authoritative, idempotent full snapshot (not a delta), so a duplicate is a
 // harmless re-render.
+//
+// That duplicate becomes the ORDINARY case, not a race, on a daemon running with
+// [Config.RelayOutOfTurnEvents] (the M6 worker): the standing observer drains the
+// EmitConfigOptions publish above and rebroadcasts it, alongside this direct
+// fan-out. It is left as-is for exactly the reason the race is — the snapshot is
+// idempotent — and removing the direct fan-out instead would silently regress
+// every deployment that does NOT run the observer, which is all of them but one.
 func (d *Daemon) advertiseModelChange(sessionID, prev, current string) {
 	if current == "" || current == prev {
 		return

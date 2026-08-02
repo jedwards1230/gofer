@@ -185,20 +185,23 @@
 // its own prompt handlers is driving that session, so a client-driven turn is
 // never delivered twice.
 //
-// What the bridge does NOT reach: a worker has no continuous broker drain
-// outside its own session/prompt handler (see internal/daemon's
-// advertiseModelChange). So the tail of a turn whose DRIVING CONNECTION was
-// severed mid-flight — the pre-upgrade turn in a daemon hot-upgrade, whose
-// client went away with the old daemon — is published to the worker's broker
-// and never put on the wire at all. The router cannot forward a frame that was
-// never sent, so that tail is NOT STREAMED LIVE. It is not lost, though: the
-// worker journals it, and it comes back as folded history on the session's next
-// session/load, so a client that re-attaches sees the complete transcript.
-// Streaming it live instead would need a standing observer on the WORKER side
-// (in internal/daemon, which the worker runs), gated behind a Config flag
-// beside ReplayPendingPermissionsOnAttach and relying on exactly the
-// promptHandlerActive guard this slice shipped to avoid double delivery. That is
-// deferred, not oversighted.
+// What the bridge cannot do alone: it can only forward a frame the worker
+// actually sent, and a worker's own fan-out runs solely from inside its
+// session/prompt handler (see internal/daemon's advertiseModelChange). An event
+// published with NO prompt in flight — a compaction, or the tail of a turn whose
+// DRIVING CONNECTION was severed mid-flight — therefore never reached the wire
+// at all. That is now closed on the WORKER side rather than here: a worker sets
+// [daemon.Config.RelayOutOfTurnEvents], which keeps a standing per-session
+// observer draining its broker and rebroadcasting through the same
+// promptHandlerActive-guarded relay methods, so the frame reaches this router and
+// this bridge fans it out like any other (jedwards1230/gofer#280). The guard is
+// what keeps the two from double-delivering a turn a client is driving.
+//
+// One case stays out of reach by construction: an event published while NO
+// client is attached to the worker at all (the worker's peer set is empty, so
+// the observer broadcasts to nobody). That is not a loss — the worker journals
+// it, and it comes back as folded history on the session's next session/load, so
+// a client that re-attaches sees the complete transcript.
 //
 // # Event-decode skew: which direction is supported (§5, §6)
 //
