@@ -3,6 +3,7 @@ package supervisor_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -190,4 +191,137 @@ closed:
 	if _, err := h.sup.WatchRoster(ctx); !errors.Is(err, supervisor.ErrClosed) {
 		t.Fatalf("WatchRoster after Close = %v, want ErrClosed", err)
 	}
+}
+
+// statusIn returns id's status in snap, and whether id was present at all.
+func statusIn(snap []supervisor.SessionInfo, id string) (supervisor.SessionStatus, bool) {
+	for _, s := range snap {
+		if s.ID == id {
+			return s.Status, true
+		}
+	}
+	return 0, false
+}
+
+// awaitStatus drains ch until id reports want, failing with why on the
+// deadline. Unlike [waitForSnapshot] it names the status it never saw, because
+// the failure it guards against is specifically "the watcher converged to the
+// WRONG terminal status and then went quiet".
+func awaitStatus(t *testing.T, ch <-chan []supervisor.SessionInfo, id string, want supervisor.SessionStatus, why string) {
+	t.Helper()
+	last := "none observed"
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case snap, ok := <-ch:
+			if !ok {
+				t.Fatalf("watcher channel closed before %s reported %s\n  %s", id, want, why)
+			}
+			if st, present := statusIn(snap, id); present {
+				last = st.String()
+				if st == want {
+					return
+				}
+			} else {
+				last = "absent from roster"
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for %s to report %s (last status seen: %s)\n  %s",
+				id, want, last, why)
+		}
+	}
+}
+
+// TestWatchRoster_SeedNeverOverwritesANewerSnapshot pins the ordering rule that
+// makes latest-wins delivery correct: a snapshot is PUSHED in the order it was
+// COMPUTED, so the last push is never stale.
+//
+// It is the regression test for gofer#138. Delivery coalesces to `latest`
+// (watcher.push), so whichever push lands last decides what the watcher sees.
+// When WatchRoster computed its seed OUTSIDE watchMu, a subscriber that was
+// descheduled between the two could push a snapshot older than one a concurrent
+// notify had already delivered — and because a settled session makes no further
+// roster change, nothing ever corrected it. The watcher sat on a permanently
+// stale "working" row: a 5s timeout for every waiter on the terminal transition
+// (Supervisor.AwaitSettled, session/load's settle barrier, the TUI roster).
+//
+// The interleaving has no input that provokes it, so the seed is parked by
+// watchSeedTestHook rather than raced for; see that hook's doc.
+func TestWatchRoster_SeedNeverOverwritesANewerSnapshot(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	entry, err := h.sup.Create(ctx, "hi", supervisor.CreateOptions{Cwd: "/proj", Model: "m"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	fs := h.session(entry.ID)
+	fs.waitStarted(t) // the turn is in flight, so any snapshot now reads "working"
+
+	// The witness subscribes normally, before the hook is armed: it is how the
+	// test observes whether a notify managed to push while the seed was parked.
+	witness, err := h.sup.WatchRoster(ctx)
+	if err != nil {
+		t.Fatalf("WatchRoster (witness): %v", err)
+	}
+
+	parked, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	defer supervisor.SetWatchSeedTestHook(func() {
+		once.Do(func() {
+			close(parked)
+			<-release
+		})
+	})()
+
+	type subscription struct {
+		ch  <-chan []supervisor.SessionInfo
+		err error
+	}
+	subCh := make(chan subscription, 1)
+	go func() {
+		ch, err := h.sup.WatchRoster(ctx)
+		subCh <- subscription{ch, err}
+	}()
+	<-parked // the seed snapshot is computed ("working") but not yet pushed
+
+	// Settle the turn while the seed is parked. This is the session's LAST
+	// roster change, so a watcher that loses this transition never gets another
+	// chance to learn it.
+	fs.finish(t, nil)
+
+	// While a seed is mid-flight, no notify may push: computing and pushing
+	// share one critical section, so the pump's needs-input snapshot cannot
+	// overtake the older seed. The grace period only decides how reliably this
+	// catches the unserialized case — it is never what makes the serialized case
+	// correct.
+	grace := time.After(200 * time.Millisecond)
+racing:
+	for {
+		select {
+		case snap, ok := <-witness:
+			if !ok {
+				t.Fatal("witness channel closed mid-test")
+			}
+			if st, present := statusIn(snap, entry.ID); present && st == supervisor.StatusNeedsInput {
+				t.Fatal("a notify pushed while a seed snapshot was mid-flight: snapshots are " +
+					"computed outside the push lock, so a stale seed can overwrite it and the " +
+					"watcher is left on a permanently wrong status (gofer#138)")
+			}
+		case <-grace:
+			break racing
+		}
+	}
+
+	close(release)
+
+	sub := <-subCh
+	if sub.err != nil {
+		t.Fatalf("WatchRoster (parked): %v", sub.err)
+	}
+	awaitStatus(t, sub.ch, entry.ID, supervisor.StatusNeedsInput,
+		"the seed overwrote the newer needs-input snapshot, and a settled session publishes nothing further")
+	awaitStatus(t, witness, entry.ID, supervisor.StatusNeedsInput,
+		"the pump's needs-input notify never reached an already-registered watcher")
 }
