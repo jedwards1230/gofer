@@ -3,20 +3,33 @@
 # ns/op is deliberately absent — see the header of scripts/bench.sh.
 # A 4th field of 'allocs-only' gates that benchmark on allocs/op only
 # (concurrent benchmarks: their B/op is scheduling-dependent).
-# gofer#343 evidence-collection in progress: gathering ubuntu-latest B/op
-# samples for BroadcastRawEvent via repeated `bench` job re-runs on this PR.
-# This note is replaced with the decision + numbers before the PR is finalized.
+# gofer#343: BroadcastRawEvent's six rows had their B/op gating restored
+# 2026-08-03 (PR #373), on ubuntu-latest evidence rather than local numbers —
+# gofer#340 explicitly declined to make this call on one quiet laptop, since
+# that reasoning is what produced gofer#334. 15 independent `bench`-job
+# samples were taken on ubuntu-latest (CI run 30859219819 / job attempts
+# 91837259836-91842208470, PR #373). Per-row B/op spread across those 15
+# samples, as a fraction of the OLD (locally-set) baseline: message_delta/
+# peers=1 11.11%, tool_call_finished/peers=1 7.06%, message_delta/peers=8
+# 1.53%, tool_call_finished/peers=8 1.53%, message_delta/peers=32 0.35%,
+# tool_call_finished/peers=32 0.44%. The B/op figures below are each row's
+# MEDIAN across those 15 samples (not a single run, not a local number).
+# Re-margined against that median, the worst row (message_delta/peers=1)
+# swings +5.37%/-5.41%, a 4.65x margin against the 25% tolerance; every other
+# row clears 6.9x, most over 50x. allocs/op is untouched (it already gated
+# correctly and the samples confirm the committed values still hold).
+# Full writeup: CONTRIBUTING.md "Performance is a gate, not a follow-up".
 BenchmarkAppRenderConfigSize/config=large/loader=cached 3571 304136
 BenchmarkAppRenderConfigSize/config=large/loader=direct 4838 431360
 BenchmarkAppRenderConfigSize/config=small/loader=cached 3571 304136
 BenchmarkAppRenderConfigSize/config=small/loader=direct 3597 307416
 BenchmarkAppRenderMassiveTranscript 355045 32236456
-BenchmarkBroadcastRawEvent/message_delta/peers=1 1934 148224 allocs-only
-BenchmarkBroadcastRawEvent/message_delta/peers=32 29740 1862888 allocs-only
-BenchmarkBroadcastRawEvent/message_delta/peers=8 8220 571304 allocs-only
-BenchmarkBroadcastRawEvent/tool_call_finished/peers=1 1937 232824 allocs-only
-BenchmarkBroadcastRawEvent/tool_call_finished/peers=32 29751 4297944 allocs-only
-BenchmarkBroadcastRawEvent/tool_call_finished/peers=8 8213 1145256 allocs-only
+BenchmarkBroadcastRawEvent/message_delta/peers=1 1934 152648
+BenchmarkBroadcastRawEvent/message_delta/peers=32 29740 1788888
+BenchmarkBroadcastRawEvent/message_delta/peers=8 8220 526480
+BenchmarkBroadcastRawEvent/tool_call_finished/peers=1 1937 228984
+BenchmarkBroadcastRawEvent/tool_call_finished/peers=32 29751 4217088
+BenchmarkBroadcastRawEvent/tool_call_finished/peers=8 8213 1141416
 BenchmarkComposedAttach/turns=1 1332 164648
 BenchmarkComposedAttach/turns=10 3990 421008
 BenchmarkComposedAttach/turns=100 30371 3014576
