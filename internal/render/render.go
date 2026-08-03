@@ -57,7 +57,8 @@ func messageCount(n int) string {
 
 // Render writes a human-readable representation of e. Message deltas stream
 // inline (reasoning dimmed, text raw); every other event kind renders as a
-// single line.
+// single line, except MessageFinished{MessageUser}, which echoes the user's
+// own prompt verbatim and so may itself span multiple lines.
 func (h *Human) Render(e event.Event) error {
 	switch ev := e.(type) {
 	case event.MessageStarted:
@@ -123,11 +124,11 @@ func (h *Human) Render(e event.Event) error {
 // split the marker across terminal rows and misalign every marker after it
 // in the stream, defeating the one-line contract this doc comment claims.
 func (h *Human) marker(kind, detail string) {
-	if detail == "" {
+	if detail = collapseWhitespace(detail); detail == "" {
 		h.write(fmt.Sprintf("· %s\n", kind))
 		return
 	}
-	h.write(fmt.Sprintf("· %s  %s\n", kind, collapseWhitespace(detail)))
+	h.write(fmt.Sprintf("· %s  %s\n", kind, detail))
 }
 
 // collapseWhitespace collapses every run of whitespace in s — including

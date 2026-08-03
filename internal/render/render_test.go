@@ -179,6 +179,19 @@ func TestHumanMarkerCollapsesEmbeddedNewlines(t *testing.T) {
 			detail: "boom",
 			want:   "· session.error  boom\n",
 		},
+		{
+			// A detail that is non-empty but entirely whitespace must collapse
+			// to the SAME empty-detail marker form as "", not to a marker with
+			// a dangling trailing space before the newline.
+			name:   "whitespace-only detail collapses to the empty-detail form",
+			detail: "\n\n",
+			want:   "· session.error\n",
+		},
+		{
+			name:   "leading and trailing whitespace is trimmed",
+			detail: "  boom  ",
+			want:   "· session.error  boom\n",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
