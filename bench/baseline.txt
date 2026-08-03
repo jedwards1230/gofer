@@ -3,6 +3,9 @@
 # ns/op is deliberately absent — see the header of scripts/bench.sh.
 # A 4th field of 'allocs-only' gates that benchmark on allocs/op only
 # (concurrent benchmarks: their B/op is scheduling-dependent).
+# gofer#343 evidence-collection in progress: gathering ubuntu-latest B/op
+# samples for BroadcastRawEvent via repeated `bench` job re-runs on this PR.
+# This note is replaced with the decision + numbers before the PR is finalized.
 BenchmarkAppRenderConfigSize/config=large/loader=cached 3571 304136
 BenchmarkAppRenderConfigSize/config=large/loader=direct 4838 431360
 BenchmarkAppRenderConfigSize/config=small/loader=cached 3571 304136
