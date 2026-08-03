@@ -1,15 +1,16 @@
 // Package scripts tests scripts/bench.sh's own parse and threshold logic —
 // the one thing standing between an allocation regression and main (gofer#344).
 //
-// It drives the real, unmodified script via exec.Command against synthetic
-// fixtures under testdata/, using the BENCH_RAW_FILE/BENCH_BASELINE_FILE test
-// seam documented in bench.sh's header. It never shells out to `go test
-// -bench` and never touches the real committed bench/baseline.txt — see
-// docs/TESTING.md's "Benchmark gate self-test" section for why this lives in
+// It drives bench.sh via exec.Command against synthetic fixtures under
+// testdata/, using the BENCH_RAW_FILE/BENCH_BASELINE_FILE test seam
+// documented in bench.sh's header. It never shells out to `go test -bench`
+// and never touches the real committed bench/baseline.txt — see
+// docs/TESTING.md's "Testing the gate itself" section for why this lives in
 // go test rather than a shell-test framework.
 package scripts
 
 import (
+	_ "embed"
 	"errors"
 	"os"
 	"os/exec"
@@ -18,16 +19,38 @@ import (
 	"testing"
 )
 
-// runCheck runs the real scripts/bench.sh --check against the given
-// synthetic fixtures and returns its combined stdout+stderr and exit code.
-// rawFile/baselineFile are relative to this package's testdata/ dir.
+// benchScript is scripts/bench.sh, embedded so it is part of THIS package's
+// build graph. `go test`'s result cache keys off the package's source files;
+// it has no way to know that bench.sh — read only at runtime, via
+// exec.Command — is a dependency of TestBenchGate. Without go:embed, editing
+// bench.sh and re-running `go test` with a matching -run pattern can replay a
+// stale cached PASS from before the edit, which is exactly the "a green test
+// is not evidence" trap this package exists to guard against (hit for real
+// during this change's own mutation-testing pass — see the PR description).
+// Embedding makes bench.sh's bytes part of the compiled test binary, so
+// editing it invalidates the cache the same as editing any other .go file.
 //
-// bench.sh cds into the repo root before reading BENCH_RAW_FILE /
-// BENCH_BASELINE_FILE ([repo_root] near its top), so these must be resolved
-// to absolute paths here — a path relative to this test binary's cwd would
-// resolve against the wrong directory after that cd.
+//go:embed bench.sh
+var benchScript []byte
+
+// runCheck runs bench.sh --check, from a temp copy of the embedded script
+// (see benchScript), against the given synthetic fixtures, and returns its
+// combined stdout+stderr and exit code. rawFile/baselineFile are relative to
+// this package's testdata/ dir.
+//
+// bench.sh cds into its own script's parent directory before reading
+// BENCH_RAW_FILE/BENCH_BASELINE_FILE ([repo_root] near its top), so these
+// must be resolved to absolute paths here — a path relative to this test
+// binary's cwd would resolve against the wrong directory after that cd. The
+// temp copy's directory need not be the real repo root: every path bench.sh
+// touches under the two overrides is already absolute.
 func runCheck(t *testing.T, rawFile, baselineFile string) (output string, exitCode int) {
 	t.Helper()
+
+	tmpScript := filepath.Join(t.TempDir(), "bench.sh")
+	if err := os.WriteFile(tmpScript, benchScript, 0o755); err != nil { //nolint:gosec // test-only script copy, needs +x
+		t.Fatalf("writing embedded bench.sh to temp file: %v", err)
+	}
 
 	absRaw, err := filepath.Abs(rawFile)
 	if err != nil {
@@ -38,7 +61,7 @@ func runCheck(t *testing.T, rawFile, baselineFile string) (output string, exitCo
 		t.Fatalf("resolving baseline fixture path %q: %v", baselineFile, err)
 	}
 
-	cmd := exec.Command("bash", "bench.sh", "--check")
+	cmd := exec.Command("bash", tmpScript, "--check")
 	cmd.Env = append(os.Environ(),
 		"BENCH_RAW_FILE="+absRaw,
 		"BENCH_BASELINE_FILE="+absBaseline,
