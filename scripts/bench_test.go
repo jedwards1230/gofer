@@ -75,7 +75,11 @@ func TestBenchGate(t *testing.T) {
 			baseline: "testdata/regression_beyond_tolerance_baseline.txt",
 			wantExit: 1,
 			wantContains: []string{
+				// Both metrics regress +100% here (10->20 allocs, 1000->2000
+				// bytes) — assert both lines, not just one, to pin down that
+				// allocs/op and B/op still gate independently.
 				"REGRESSION: BenchmarkFoo allocs/op 10 -> 20",
+				"REGRESSION: BenchmarkFoo B/op 1000 -> 2000",
 			},
 		},
 		{

@@ -76,6 +76,11 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 baseline="${BENCH_BASELINE_FILE:-bench/baseline.txt}"
+# A stray exported BENCH_RAW_FILE/BENCH_BASELINE_FILE left in a developer's
+# shell would otherwise silently redirect a normal --check run with no sign
+# in the output that it happened — flag it the same way BENCH_PKGS's
+# narrowing is flagged below.
+[ -n "${BENCH_BASELINE_FILE:-}" ] && echo "bench.sh: BENCH_BASELINE_FILE override active -> $baseline" >&2
 # 25%: loose enough to absorb the odd map-growth or slice-doubling boundary that
 # shifts a count without changing the algorithm, tight enough that anything
 # accidentally quadratic (which is what actually goes wrong here) blows through
@@ -106,6 +111,7 @@ esac
 # unquoted word-splitting.
 read -ra pkgs <<<"${BENCH_PKGS:-./...}"
 if [ -n "${BENCH_RAW_FILE:-}" ]; then
+	echo "bench.sh: BENCH_RAW_FILE override active -> $BENCH_RAW_FILE" >&2
 	raw="$(cat "$BENCH_RAW_FILE")"
 else
 	echo "running benchmarks (-benchtime 1x) over ${pkgs[*]}..." >&2
