@@ -147,6 +147,54 @@ func TestHuman(t *testing.T) {
 	}
 }
 
+// TestHumanMarkerCollapsesEmbeddedNewlines asserts a marker's detail always
+// renders on exactly one line, even when the producer's string contains
+// embedded newlines — e.g. errors.Join's Error(), which joins with "\n" and
+// once reached event.SessionError's Err field (gofer#335). Nothing prevents
+// a future producer from doing the same, so this asserts the invariant at
+// the shared render path rather than at any one producer.
+func TestHumanMarkerCollapsesEmbeddedNewlines(t *testing.T) {
+	tests := []struct {
+		name   string
+		detail string
+		want   string
+	}{
+		{
+			name:   "single embedded newline",
+			detail: "first line\nsecond line",
+			want:   "· session.error  first line second line\n",
+		},
+		{
+			name:   "embedded CRLF",
+			detail: "first line\r\nsecond line",
+			want:   "· session.error  first line second line\n",
+		},
+		{
+			name:   "multiple consecutive newlines",
+			detail: "one\n\n\ntwo\nthree",
+			want:   "· session.error  one two three\n",
+		},
+		{
+			name:   "no newline is unaffected",
+			detail: "boom",
+			want:   "· session.error  boom\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			renderAll(t, render.NewHuman(&buf, false), []event.Event{event.NewSessionError(sid, tt.detail, true)})
+			got := buf.String()
+			if got != tt.want {
+				t.Errorf("output mismatch\n got: %q\nwant: %q", got, tt.want)
+			}
+			if n := strings.Count(got, "\n"); n != 1 {
+				t.Errorf("marker split across %d lines, want exactly 1: %q", n, got)
+			}
+		})
+	}
+}
+
 // TestHumanColor asserts reasoning is wrapped in ANSI dim codes when color is
 // on, and raw text is not.
 func TestHumanColor(t *testing.T) {
