@@ -4,11 +4,11 @@
 # A 4th field of 'allocs-only' gates that benchmark on allocs/op only
 # (concurrent benchmarks: their B/op is scheduling-dependent).
 # gofer#343: BroadcastRawEvent's six rows had their B/op gating restored
-# 2026-08-03 (PR #373), on ubuntu-latest evidence rather than local numbers —
-# gofer#340 explicitly declined to make this call on one quiet laptop, since
-# that reasoning is what produced gofer#334. 15 independent `bench`-job
-# samples were taken on ubuntu-latest (CI run 30859219819 / job attempts
-# 91837259836-91842208470, PR #373). Per-row B/op spread across those 15
+# 2026-08-03, on ubuntu-latest evidence rather than local numbers — gofer#340
+# explicitly declined to make this call on one quiet laptop, since that
+# reasoning is what produced gofer#334. 15 independent `bench`-job samples
+# were taken on ubuntu-latest (CI run 30859219819 / job attempts
+# 91837259836-91842208470). Per-row B/op spread across those 15
 # samples, as a fraction of the OLD (locally-set) baseline: message_delta/
 # peers=1 11.11%, tool_call_finished/peers=1 7.06%, message_delta/peers=8
 # 1.53%, tool_call_finished/peers=8 1.53%, message_delta/peers=32 0.35%,
