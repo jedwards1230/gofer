@@ -1,0 +1,3 @@
+BenchmarkConcurrent-8   1   100 ns/op   5000 B/op   10 allocs/op
+PASS
+ok  	example	1.234s
