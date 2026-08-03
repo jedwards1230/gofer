@@ -177,6 +177,24 @@ Tape/scenario names follow one slug schema, `<area>-<view>[-<state>]`
   Reuses the `transcript-compacting` scenario for its seeded two-turn history
   and populated usage footer; that scenario's `compactHold` is **inert** here,
   since this tape never dispatches `/compact`.
+- `transcript-scroll-select.tape` — auto-scroll while drag-selecting the
+  attach transcript (gofer#312), a **before/after pair**
+  (`transcript-scroll-select-before` / `transcript-scroll-select`). The
+  before frame tails a 40-turn seeded conversation to `turn 39` with the
+  identity header scrolled out of view — the exact shape the issue was
+  reported against ("i can only select whats already on screen"); the after
+  frame shows the header back on screen with the earliest turns highlighted,
+  and `turn 39` is nowhere in the frame at all (still part of the copied
+  selection, per `mouse_docscroll_test.go`'s
+  `TestDragAutoScrollExtendsSelectionAcrossBoundary`). The click/drag itself
+  is NOT typed by the tape — VHS's DSL has no mouse commands — so the
+  harness's `transcript-scroll-select` scenario
+  (`scrollSelectApp`/`scrollSelectMouseScript`, `vhs/harness/main.go`)
+  `Program.Send`s a real click plus sixty held-edge motion events on a fixed
+  post-start delay, the same "inject state the tape can't type" technique
+  `transcript-auto-compacting` uses for its timer-fired event. Read-only — a
+  drag-selection touches only client-side `selectionState`/`a.scroll`, never
+  the Supervisor.
 - `roster-peek.tape` — the peek card: the roster-only session summary opened
   with **space** on an empty dispatch bar (enter/→ *attach* instead). Peek does
   not subscribe to the session's event stream, so the card renders purely from

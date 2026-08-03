@@ -38,6 +38,7 @@ import (
 	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/decision"
 	"github.com/jedwards1230/gofer/internal/tui"
+	"github.com/jedwards1230/gofer/internal/tui/layout"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
 
@@ -58,12 +59,26 @@ type step struct {
 	pause time.Duration
 }
 
+// mouseStep is step's counterpart for a raw [tea.Msg] rather than a scripted
+// [event.Event] — specifically, a synthetic [tea.MouseClickMsg]/
+// [tea.MouseMotionMsg] the driver goroutine below injects via Program.Send.
+// It exists because VHS's own tape DSL has no mouse commands at all (Type and
+// named key presses only — see `vhs new`'s documentation block), so a scene
+// under real mouse-driven behavior (the click/drag/release sequence
+// [scrollSelectMouseScript] plays for gofer#312) has to be driven the same
+// way [autoCompactingApp]'s timer-fired event is: injected straight into the
+// running Program from process-owned Go code, not typed by the tape.
+type mouseStep struct {
+	msg   tea.Msg
+	pause time.Duration
+}
+
 // scenarioHelp is both the -scenario flag's usage text and the unknown-
 // scenario error's "want" list — the single place the harness's slug
 // vocabulary is spelled out, so the two never drift apart. Slugs follow
 // `<area>-<view>[-<state>]`, kebab-case: transcript-* (the attach scenes),
 // roster-* (the overview scene), panel-* (the command-panel scenes).
-const scenarioHelp = "transcript-tool-call | transcript-approval | transcript-compacting | transcript-auto-compacting | transcript-overflow-recovery | roster-overview | roster-cwd-home | roster-cwd-missing | panel-status-overview | panel-status | panel-status-cwd-home | panel-config | panel-model | panel-model-empty | panel-model-daemon-refresh | panel-thinking | panel-usage | panel-stats | panel-help | panel-resume | panel-capabilities | panel-capabilities-unknown"
+const scenarioHelp = "transcript-tool-call | transcript-approval | transcript-compacting | transcript-auto-compacting | transcript-overflow-recovery | transcript-scroll-select | roster-overview | roster-cwd-home | roster-cwd-missing | panel-status-overview | panel-status | panel-status-cwd-home | panel-config | panel-model | panel-model-empty | panel-model-daemon-refresh | panel-thinking | panel-usage | panel-stats | panel-help | panel-resume | panel-capabilities | panel-capabilities-unknown"
 
 func main() {
 	scenario := flag.String("scenario", "transcript-tool-call", "scripted scene to play: "+scenarioHelp)
@@ -75,10 +90,13 @@ func main() {
 	// the real [tui.App] instead — they have no scripted event.Event stream of
 	// their own; the tape types the slash command and any navigation keys
 	// directly into the running program's stdin, the same path a real
-	// terminal's keystrokes take.
+	// terminal's keystrokes take. transcript-scroll-select also drives the
+	// real App, but with a scripted MOUSE sequence (mouseScript) instead of
+	// keystrokes — see [mouseStep]'s doc for why.
 	var (
-		model  tea.Model = tui.NewProgram(theme.Default())
-		script []step
+		model       tea.Model = tui.NewProgram(theme.Default())
+		script      []step
+		mouseScript []mouseStep
 	)
 	switch *scenario {
 	case "transcript-tool-call":
@@ -111,6 +129,12 @@ func main() {
 		// A settled sequence, not an in-flight state: the tape only attaches
 		// and photographs the seeded backlog (see overflowRecoveryHistory).
 		model = overflowRecoveryApp()
+	case "transcript-scroll-select":
+		// gofer#312: auto-scroll while drag-selecting. mouseScript is what
+		// actually drives the click+drag — see [scrollSelectMouseScript]'s doc
+		// for why the tape itself can't.
+		model = scrollSelectApp()
+		mouseScript = scrollSelectMouseScript()
 	case "roster-cwd-missing":
 		// The same canned roster and env every panel-* scene renders — only the
 		// Supervisor's behavior differs, exactly as transcript-compacting swaps
@@ -149,6 +173,17 @@ func main() {
 		for _, s := range script {
 			p.Send(tui.EventMsg{Event: s.ev})
 			time.Sleep(s.pause)
+		}
+		// mouseScript (transcript-scroll-select only) waits scrollSelectDriverDelay
+		// past process start before its first Send, giving the tape time to
+		// attach and capture its OWN "before" frame first — see
+		// [scrollSelectMouseScript]'s doc.
+		if len(mouseScript) > 0 {
+			time.Sleep(scrollSelectDriverDelay - 600*time.Millisecond)
+			for _, s := range mouseScript {
+				p.Send(s.msg)
+				time.Sleep(s.pause)
+			}
 		}
 		time.Sleep(30 * time.Second) // safety hold; the tape normally quits sooner via Ctrl+C
 		p.Quit()
@@ -465,6 +500,70 @@ func overflowRecoveryHistory() []event.Event {
 		event.NewMessageFinished(s, event.MessageText, "The fan-out lives in listener.go: every accepted upgrade registers a subscription the router drains."),
 		event.NewTurnFinished(s, "end_turn", provider.Usage{InputTokens: 24180, OutputTokens: 390}),
 	}
+}
+
+// scrollSelectTurns is how many numbered turns [scrollSelectHistory] seeds —
+// enough to overflow any reasonably-sized VHS terminal, so scroll 0 tails to
+// the newest turn with the identity header scrolled fully out of view, the
+// exact shape gofer#312 was reported against ("i can only select whats
+// already on screen").
+const scrollSelectTurns = 40
+
+// scrollSelectDriverDelay is how long after process start
+// [scrollSelectMouseScript]'s click+drag sequence begins. It has to be long
+// enough that transcript-scroll-select.tape has already attached to the
+// session and captured its OWN "before" screenshot — mirrors
+// [autoCompactDelay]'s reasoning for the same before/after-pair shape.
+const scrollSelectDriverDelay = 3 * time.Second
+
+// scrollSelectApp is the transcript-scroll-select scene (gofer#312): a real
+// attach over a long transcript, whose click+drag is driven PROGRAMMATICALLY
+// by [scrollSelectMouseScript] rather than by the tape's own keystrokes — see
+// [mouseStep]'s doc for why VHS itself cannot express it.
+func scrollSelectApp() tea.Model {
+	sup := newVHSSupervisor(cannedSessions())
+	sup.seed(scrollSelectHistory()...)
+	return commandViewAppOver(cannedCommandEnv(), sup)
+}
+
+// scrollSelectHistory is scrollSelectTurns numbered user turns on sess-1 (the
+// roster's first row, so a bare Enter attaches it) — deliberately plain,
+// legible content: the turn NUMBERS are what makes the before/after pair
+// readable evidence that the drag actually scrolled back through history,
+// rather than a color or layout change a viewer has to take on faith.
+func scrollSelectHistory() []event.Event {
+	const s = "sess-1"
+	out := make([]event.Event, 0, scrollSelectTurns)
+	for i := range scrollSelectTurns {
+		out = append(out, event.NewMessageFinished(s, event.MessageUser, fmt.Sprintf("turn %d", i)))
+	}
+	return out
+}
+
+// scrollSelectMouseScript is the click+drag sequence transcript-scroll-select
+// plays back once attached: a click at the content's absolute top row
+// (layout.TopPadding) starts a document-coordinate selection there
+// (App.attachDocIndexAt — the header/transcript's own first visible row is
+// always a valid document row, whatever the terminal height, so this needs
+// no assumption about exactly where the transcript happens to overflow to),
+// and every following motion event held at that SAME row sits exactly at the
+// transcript window's top edge from the very first one (App.extendDocSelection),
+// so each scrolls a.scroll back by one document row and extends the
+// selection to match — the held-edge drag docs/TUI.md's "Mouse: scroll +
+// selection" section describes. 60 steps is comfortably more than any
+// reasonably-sized terminal needs to reach the document's own start (the
+// identity header); once there, further events are harmless no-ops
+// (extendDocSelection stops advancing a.scroll and keeps re-selecting the
+// same top row).
+func scrollSelectMouseScript() []mouseStep {
+	const pause = 70 * time.Millisecond
+	const steps = 60
+	out := make([]mouseStep, 0, steps+1)
+	out = append(out, mouseStep{tea.MouseClickMsg{X: 2, Y: layout.TopPadding, Button: tea.MouseLeft}, pause})
+	for range steps {
+		out = append(out, mouseStep{tea.MouseMotionMsg{X: 0, Y: layout.TopPadding, Button: tea.MouseLeft}, pause})
+	}
+	return out
 }
 
 func commandViewApp(env tui.CommandEnv) tea.Model {

@@ -2031,7 +2031,22 @@ func (a App) render() string {
 	if a.sel != nil && a.mouseSelectable() {
 		top, bottom, ok := selectableRegion(strings.Count(content, "\n") + 1)
 		if ok {
-			content = highlightSelection(content, *a.sel, a.theme, top, bottom)
+			sel := *a.sel
+			// A docMode selection's screen-row footprint depends on the
+			// CURRENT a.scroll, not whatever it was when the selection was
+			// created — see [selectionState]'s docWinStart/docWinAvail doc
+			// (a frozen selection stays visible across a later wheel scroll).
+			// Populate them fresh, every render, from [App.attachDocWindow]
+			// rather than caching them in a.sel itself.
+			if sel.docMode {
+				total := len(a.attachDocLines())
+				if start, avail, winOK := a.attachDocWindow(total); winOK {
+					sel.docWinStart, sel.docWinAvail = start, avail
+				} else {
+					sel.docWinAvail = 0
+				}
+			}
+			content = highlightSelection(content, sel, a.theme, top, bottom)
 		}
 	}
 

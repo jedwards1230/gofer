@@ -16,6 +16,21 @@ package tui
 // support (tea.SetClipboard — an OSC 52 "\x1b]52;c;<base64>\x07" sequence
 // written straight to the program's output, no external clipboard
 // dependency).
+//
+// A click that lands inside the ATTACH screen's header+transcript document
+// (attachDocLines) is the one exception to "screen-cell region" above: it
+// starts a DOCUMENT-coordinate selection instead (selectionState.docMode),
+// whose Y fields are document line indices rather than absolute screen
+// rows, so the anchor keeps meaning what it meant even after a.scroll moves
+// the window under it — see docMode's doc for why a screen-row anchor
+// cannot do that, and gofer#312 for the bug this closes: a drag that
+// reaches the transcript's top or bottom edge now scrolls a.scroll and
+// keeps extending, instead of clamping at whatever happened to be on
+// screen when the drag started. A click on the same screen's footer/menu/
+// panel (outside the document — that content is pinned and never scrolls)
+// falls through to the ordinary screen-row path unchanged, as does every
+// other screen: docMode is attach-transcript-only by construction, not a
+// new selectable surface.
 
 import (
 	"strings"
@@ -44,6 +59,64 @@ type selectionState struct {
 	startX, startY int
 	curX, curY     int
 
+	// docMode is true for a selection anchored inside the attach screen's
+	// header+transcript document ([App.attachDocLines]) rather than the
+	// rendered frame. It is decided ONCE, at the click that starts the
+	// selection ([App.handleMouseClick]): a click landing on a document row
+	// sets it true and startY/curY/anchorY (below) become DOCUMENT LINE
+	// INDICES instead of absolute screen rows; a click anywhere else (any
+	// non-attach screen, or attach's own footer/menu/panel chrome) leaves it
+	// false and every field keeps its ordinary screen-row meaning, exactly as
+	// before docMode existed.
+	//
+	// The reason this has to be a document index rather than a screen row:
+	// [App.selectedText] used to read [App.render]'s OWN OUTPUT, which can
+	// only ever contain the rows currently on screen. Auto-scrolling a
+	// screen-row anchor during a drag (bumping a.scroll and the anchor's row
+	// by the same delta) would make the anchor track the WRONG content the
+	// instant the frame re-renders at the new offset — highlightSelection
+	// would paint a range the frame never drew, and selectedText, still
+	// reading that frame, would return only whatever's on screen at
+	// release. Highlight and clipboard would disagree, which is the exact
+	// invariant gofer#307 established and gofer#312 must not break. A
+	// document index has no such problem: it names a line of TRANSCRIPT
+	// content, independent of which window a.scroll currently shows, so
+	// [App.selectedDocText] can always extract the full range regardless of
+	// scroll, while [highlightSelection] intersects it with whatever the
+	// CURRENT window shows (via docWinStart/docWinAvail below) to paint only
+	// what's actually visible this frame.
+	//
+	// Scoped deliberately to the attach transcript, not the whole frame:
+	// mixing a scrolling document range with the footer/menu/panel's fixed
+	// screen rows in ONE selection would need two coordinate spaces to agree
+	// on ordering and column extraction, which is exactly the complexity the
+	// document-coordinate design exists to avoid. The practical effect is
+	// that a drag which starts inside the transcript and continues past its
+	// bottom edge into the input box no longer selects the input box's own
+	// text the way a pre-#312 drag did (see docs/TUI.md's "Mouse: scroll +
+	// selection") — it clamps to the document's own last line and, if more
+	// transcript is off-screen in that direction, scrolls to reveal it
+	// instead. A drag that starts on the footer (docMode stays false) is
+	// completely unaffected: that content never scrolls, so the screen-row
+	// path already gets it right and there is no boundary to cross.
+	docMode bool
+
+	// docWinStart/docWinAvail are NOT part of a selection's persisted state —
+	// they are populated fresh by [App.render], from the CURRENT a.scroll,
+	// on every frame a docMode selection is drawn (see its call into
+	// highlightSelection), and read only by highlightSelection's docMode
+	// branch. They exist because a frozen (post-release) selection stays
+	// visible while the user keeps scrolling with the wheel/PgUp-PgDn (see
+	// docs/TUI.md: "does not clear on scroll"), so the screen rows a docMode
+	// span currently intersects can change on every render even though the
+	// span itself (startY..curY) never does — recomputing the window at
+	// render time, rather than caching it in a.sel, is what keeps the
+	// highlight accurate after such a scroll. docWinStart is the document
+	// index of the window's first visible row; docWinAvail is how many rows
+	// the window holds. docWinAvail <= 0 (never populated, or the frame
+	// currently has no room for any transcript row) means "paint nothing".
+	docWinStart, docWinAvail int
+
 	// wordSelect is true when the selection was opened by a double-click: the
 	// initial click snapped to a whole word (the ANCHOR, anchorY/anchorX0..
 	// anchorX1 below), and a subsequent drag extends the selection
@@ -51,7 +124,7 @@ type selectionState struct {
 	// selection always covers complete words, like a native terminal/editor.
 	// A plain (single-click) drag leaves this false and selects per-character.
 	wordSelect bool
-	anchorY    int // the double-clicked row
+	anchorY    int // the double-clicked row (a document index when docMode)
 	anchorX0   int // the anchor word's start column (inclusive)
 	anchorX1   int // the anchor word's end column (exclusive)
 }
@@ -85,6 +158,197 @@ func clampInt(v, lo, hi int) int {
 		return hi
 	}
 	return v
+}
+
+// attachFooterLen returns the row count [Model.view]'s footer occupies for
+// the composed attach model am at frame height fl.h: the pending
+// approval/decision prompt's own line count when one is pending, or the
+// ordinary spacer+menu+rule/input/rule(+status) footer otherwise. Measuring
+// through am (rather than a.sess) and fl.h (rather than a.height) matters for
+// the same reason [App.attachModel]'s doc gives: the prompt collapses its
+// rationale when the frame is short, so a different height would report a
+// footer length Model.view never actually rendered with. [App.transcriptRegion]
+// and [App.attachDocWindow] both measure through this one definition so
+// neither can disagree with what the frame actually drew.
+func (a App) attachFooterLen(am Model, fl frameLayout) int {
+	if prompt := am.promptLines(a.width, fl.h); prompt != nil {
+		return len(prompt)
+	}
+	footerLen := 1 + len(fl.menuLines) + 3 // spacer, menu, then rule/input/rule
+	if am.statusLine() != "" {
+		footerLen++
+	}
+	return footerLen
+}
+
+// attachDocLines returns the attach screen's full scrollable document — the
+// identity header ([attachHeaderLines]) followed by every transcript line
+// ([Model.transcriptLines], ANSI intact) — the exact slice [Model.view]
+// builds before [scrollTail] windows it down to the current frame (model.go).
+// A document-coordinate selection ([selectionState.docMode]) indexes into
+// this rather than into [App.render]'s output, so a range that has scrolled
+// off-screen is still fully present for [App.selectedDocText] to extract,
+// whatever the CURRENT a.scroll happens to be (gofer#312).
+func (a App) attachDocLines() []string {
+	am := a.attachModel()
+	header := attachHeaderLines(a.theme, a.over.meta, a.width)
+	body := am.transcriptLines(a.width)
+	lines := make([]string, 0, len(header)+len(body))
+	lines = append(lines, header...)
+	lines = append(lines, body...)
+	return lines
+}
+
+// attachDocWindow reports the CURRENT scroll window into [App.attachDocLines]
+// (total is that slice's length): avail is how many document rows the frame
+// has room to show right now, and start is the document index of the
+// window's first visible row — start+avail-1 (clamped to total-1) is its
+// last. Both mirror [scrollTail]'s own clamp (model.go/overview_render.go),
+// through the same [App.attachFooterLen] accounting [App.transcriptRegion]
+// uses, so this always agrees with what [Model.view] actually drew for the
+// current a.scroll. ok is false off the attach screen, or when the frame has
+// no room for a transcript row at all.
+func (a App) attachDocWindow(total int) (start, avail int, ok bool) {
+	if a.scr != screenAttach {
+		return 0, 0, false
+	}
+	fl := a.frameLayout()
+	am := a.attachModel()
+	avail = fl.h - a.attachFooterLen(am, fl)
+	if avail <= 0 {
+		return 0, 0, false
+	}
+	if total <= avail {
+		return 0, avail, true
+	}
+	maxOffset := total - avail
+	offset := clampInt(a.scroll, 0, maxOffset)
+	end := total - offset
+	start = end - avail
+	return start, avail, true
+}
+
+// attachDocIndexAt maps an absolute screen row y (tea.Mouse's own coordinate
+// space, the same one [App.handleMouseClick] receives) to its document index
+// in the CURRENT scroll window — docLines[idx] is the content y is showing
+// right now. ok is false when y falls outside the document's on-screen rows:
+// above the header, or below the transcript into the footer/menu/panel
+// (those stay screen-row selection — see [selectionState.docMode]) — or when
+// the row within the window is blank pad (a short conversation, nothing
+// rendered at that row yet).
+func (a App) attachDocIndexAt(docLines []string, y int) (idx int, ok bool) {
+	start, avail, ok := a.attachDocWindow(len(docLines))
+	if !ok {
+		return 0, false
+	}
+	row := y - layout.TopPadding
+	if row < 0 || row >= avail {
+		return 0, false
+	}
+	idx = start + row
+	if idx < 0 || idx >= len(docLines) {
+		return 0, false
+	}
+	return idx, true
+}
+
+// attachWordBoundsAt is [App.wordBoundsAt]'s document-coordinate counterpart:
+// the [start,end) column span of the word at column x on document row
+// docLines[idx], ANSI-stripped the same way wordBoundsAt strips the frame —
+// see [wordBoundsCells].
+func attachWordBoundsAt(docLines []string, idx, x int) (start, end int, ok bool) {
+	if idx < 0 || idx >= len(docLines) {
+		return 0, 0, false
+	}
+	return wordBoundsCells(ansi.Strip(docLines[idx]), x)
+}
+
+// dragScrollStep is how many document rows a.scroll moves per
+// tea.MouseMotionMsg while a document-coordinate drag ([App.extendDocSelection])
+// sits at the transcript window's top or bottom edge. One row per motion
+// event: cell-motion mouse reporting (1002) already throttles motion to
+// roughly one event per terminal cell the pointer crosses, so holding the
+// edge reads as a smooth, continuous scroll rather than a jump, and keeps
+// the selection's endpoint moving in exact lockstep with the newly revealed
+// row — see docMode's doc, "extend...monotonically...never jumping".
+const dragScrollStep = 1
+
+// extendDocSelection extends a document-coordinate ([selectionState.docMode])
+// drag to the pointer's current screen position (cx,cy), called from
+// [App.handleMouseMotion] and [App.handleMouseRelease] alike so a release
+// lands through the identical edge-scroll logic a preceding motion event
+// would have applied.
+//
+// While cy sits within the currently visible transcript window it maps
+// directly to the document row under it, exactly like a screen-coordinate
+// drag maps to a screen row. While cy sits AT OR PAST the window's top or
+// bottom edge — and there is more document in that direction still to
+// reveal — this instead scrolls a.scroll by [dragScrollStep] and extends the
+// selection to the newly revealed edge row, so the visible window and the
+// selection's reach grow together rather than jumping straight to a
+// document row that isn't on screen yet (gofer#312).
+//
+// Reaching the document's own top (index 0) or bottom (index total-1) —
+// scrolled as far as [scrollTail] allows — stops scrolling but keeps
+// tracking cy at that edge, so continuing to hold the pointer there simply
+// holds the selection at the document's own boundary rather than drifting
+// past it into the footer/menu chrome, which stays screen-row selection
+// outside docMode (see [selectionState.docMode]'s note on the footer
+// trade-off).
+func (a App) extendDocSelection(sel selectionState, cx, cy int) App {
+	docLines := a.attachDocLines()
+	total := len(docLines)
+	if total == 0 {
+		a.sel = &sel
+		return a
+	}
+	start, avail, ok := a.attachDocWindow(total)
+	if !ok {
+		a.sel = &sel
+		return a
+	}
+
+	switch {
+	case cy <= layout.TopPadding && start > 0:
+		a.scroll += dragScrollStep
+		if start, avail, ok = a.attachDocWindow(total); !ok {
+			a.sel = &sel
+			return a
+		}
+		cy = layout.TopPadding
+	case cy >= layout.TopPadding+avail-1 && start+avail < total:
+		a.scroll -= dragScrollStep
+		if a.scroll < 0 {
+			a.scroll = 0
+		}
+		if start, avail, ok = a.attachDocWindow(total); !ok {
+			a.sel = &sel
+			return a
+		}
+		cy = layout.TopPadding + avail - 1
+	}
+
+	idx, docOK := a.attachDocIndexAt(docLines, cy)
+	if !docOK {
+		// cy landed above the header or past the tail's own last row (the
+		// blank pad below a short conversation, or an extreme edge case the
+		// switch above didn't clamp) — snap to whichever document boundary
+		// is nearer instead of leaving the selection wherever it last was.
+		if cy < layout.TopPadding {
+			idx = start
+		} else {
+			idx = min(start+avail, total) - 1
+		}
+		idx = clampInt(idx, 0, total-1)
+	}
+
+	if sel.wordSelect {
+		sel.extendDocWord(docLines, idx, cx)
+	} else {
+		sel.curX, sel.curY = cx, idx
+	}
+	a.sel = &sel
+	return a
 }
 
 // transcriptRegion returns the inclusive [top, bottom] row range — in
@@ -141,25 +405,10 @@ func (a App) transcriptRegion() (top, bottom int, ok bool) {
 		am := a.attachModel()
 		transcript := len(am.transcriptLines(a.width))
 
-		// promptLines takes the same width AND height Model.view hands it
-		// (fl.h), through the same composed model: the prompt collapses its
-		// rationale when the frame is short, so measuring it at a different
-		// height — or with a different configured floor — would give a footer
-		// length the render never produced, and every highlight below it would
-		// be off by the difference. (The shell/background blocks are transcript
-		// items, not footer, so the footer length is unchanged by them —
-		// measuring through the same model just keeps the two call sites reading
-		// one source.)
-		var footerLen int
-		if prompt := am.promptLines(a.width, fl.h); prompt != nil {
-			footerLen = len(prompt)
-		} else {
-			footerLen = 1 + len(fl.menuLines) + 3 // spacer, menu, then rule/input/rule
-			if am.statusLine() != "" {
-				footerLen++
-			}
-		}
-		avail := fl.h - footerLen
+		// footerLen measurement shared with [App.attachDocWindow] — see
+		// [App.attachFooterLen]'s doc for why it must go through am and fl.h
+		// rather than a.sess/a.height.
+		avail := fl.h - a.attachFooterLen(am, fl)
 		if avail <= 0 {
 			return 0, 0, false
 		}
@@ -373,6 +622,30 @@ func (a App) handleMouseClick(msg tea.MouseClickMsg) (App, tea.Cmd) {
 	double := isDoubleClick(a.lastClickAt, now, a.lastClickX, a.lastClickY, m.X, m.Y)
 	a.lastClickAt, a.lastClickX, a.lastClickY = now, m.X, m.Y
 
+	// A click on the attach screen that lands within the header+transcript
+	// document starts a DOCUMENT-coordinate selection instead of the ordinary
+	// screen-row one — see [selectionState.docMode]. A click on the same
+	// screen's footer/menu/panel (outside the document) falls through to the
+	// screen-row path below unchanged.
+	if a.scr == screenAttach {
+		docLines := a.attachDocLines()
+		if idx, ok := a.attachDocIndexAt(docLines, m.Y); ok {
+			if double {
+				if x0, x1, ok := attachWordBoundsAt(docLines, idx, m.X); ok {
+					a.sel = &selectionState{
+						dragging: true, docMode: true, wordSelect: true,
+						startX: x0, startY: idx,
+						curX: x1 - 1, curY: idx,
+						anchorY: idx, anchorX0: x0, anchorX1: x1,
+					}
+					return a, nil
+				}
+			}
+			a.sel = &selectionState{dragging: true, docMode: true, startX: m.X, startY: idx, curX: m.X, curY: idx}
+			return a, nil
+		}
+	}
+
 	if double {
 		if x0, x1, ok := a.wordBoundsAt(m.X, m.Y); ok {
 			a.sel = &selectionState{
@@ -416,6 +689,12 @@ func (a App) handleMouseMotion(msg tea.MouseMotionMsg) App {
 		return a
 	}
 	sel := *a.sel
+	if sel.docMode {
+		// Document-coordinate drag: extending it may itself scroll a.scroll
+		// (when the pointer sits at the transcript window's edge — see its
+		// doc), so this returns the whole App, not just an updated sel.
+		return a.extendDocSelection(sel, m.X, m.Y)
+	}
 	if sel.wordSelect {
 		// Word-by-word extension: snap the moving end to the word under the
 		// cursor and keep the anchor word wholly covered, so a drag after a
@@ -451,6 +730,27 @@ func (s *selectionState) extendWord(a App, cx, cy int) {
 	}
 	s.startX, s.startY = s.anchorX0, s.anchorY
 	s.curX, s.curY = ce-1, cy
+}
+
+// extendDocWord is [selectionState.extendWord]'s document-coordinate
+// counterpart, called from [App.extendDocSelection]: identical
+// before/after-the-anchor logic (the anchor word's side decides which end
+// moves), snapped against [attachWordBoundsAt]/docLines instead of the
+// rendered frame, and idx (a document index) in place of a screen row.
+func (s *selectionState) extendDocWord(docLines []string, idx, cx int) {
+	cs, ce, ok := attachWordBoundsAt(docLines, idx, cx)
+	if !ok {
+		s.curX, s.curY = cx, idx
+		return
+	}
+	before := idx < s.anchorY || (idx == s.anchorY && ce <= s.anchorX0)
+	if before {
+		s.startX, s.startY = cs, idx
+		s.curX, s.curY = s.anchorX1-1, s.anchorY
+		return
+	}
+	s.startX, s.startY = s.anchorX0, s.anchorY
+	s.curX, s.curY = ce-1, idx
 }
 
 // wordBoundsAt returns the [start, end) visible-CELL span of the word under
@@ -509,10 +809,18 @@ func (a App) handleMouseRelease(msg tea.MouseReleaseMsg) (App, tea.Cmd) {
 		return a, nil
 	}
 	sel := *a.sel
-	sel.dragging = false
 	m := msg.Mouse()
-	sel.curX, sel.curY = m.X, m.Y
-	a.sel = &sel
+	if sel.docMode {
+		// Route the release position through the SAME edge-scroll logic a
+		// preceding motion event would have applied, so a release that lands
+		// directly at the edge (no intervening motion) still extends and
+		// scrolls rather than clamping short — see [App.extendDocSelection].
+		a = a.extendDocSelection(sel, m.X, m.Y)
+	} else {
+		sel.curX, sel.curY = m.X, m.Y
+		a.sel = &sel
+	}
+	a.sel.dragging = false
 
 	text := a.selectedText()
 	if text == "" {
@@ -542,6 +850,9 @@ func (a App) handleMouseRelease(msg tea.MouseReleaseMsg) (App, tea.Cmd) {
 func (a App) selectedText() string {
 	if a.sel == nil {
 		return ""
+	}
+	if a.sel.docMode {
+		return a.selectedDocText(*a.sel)
 	}
 	lines := strings.Split(ansi.Strip(a.render()), "\n")
 	top, bottom, ok := selectableRegion(len(lines))
@@ -574,6 +885,48 @@ func (a App) selectedText() string {
 	out := make([]string, 0, y1-y0+1)
 	for y := y0; y <= y1; y++ {
 		line := lines[y]
+		width := ansi.StringWidth(line)
+		left, right := 0, width
+		if y == spanY0 {
+			left = clampInt(x0, 0, width)
+		}
+		if y == spanY1 {
+			right = clampInt(x1+1, 0, width) // the released-over cell is included
+		}
+		if left >= right {
+			out = append(out, "")
+			continue
+		}
+		out = append(out, ansi.Cut(line, left, right))
+	}
+	return normalizeCopy(out)
+}
+
+// selectedDocText is [App.selectedText]'s document-coordinate counterpart
+// (sel.docMode — see its doc): it extracts sel's span straight out of
+// [App.attachDocLines], ANSI-stripped, rather than out of [App.render]'s
+// output, so a range that has scrolled off-screen is still fully present in
+// the copy — the reason document coordinates exist at all (gofer#312; see
+// docs/TUI.md's "Mouse: scroll + selection"). Column bounds and the
+// leading/trailing/interior-blank normalization ([normalizeCopy]) are
+// otherwise identical to selectedText's frame path; only the row source
+// differs, and there is no region to intersect against — every document row
+// is fair game regardless of what the current scroll window shows.
+func (a App) selectedDocText(sel selectionState) string {
+	docLines := a.attachDocLines()
+	if len(docLines) == 0 {
+		return ""
+	}
+	spanY0, x0, spanY1, x1 := sel.span()
+	y0 := clampInt(spanY0, 0, len(docLines)-1)
+	y1 := clampInt(spanY1, 0, len(docLines)-1)
+	if y0 > y1 {
+		return ""
+	}
+
+	out := make([]string, 0, y1-y0+1)
+	for y := y0; y <= y1; y++ {
+		line := ansi.Strip(docLines[y])
 		width := ansi.StringWidth(line)
 		left, right := 0, width
 		if y == spanY0 {
@@ -661,30 +1014,69 @@ func normalizeCopy(rows []string) string {
 // selectedText's raw-span column bounds (see its comment) — a row inside the
 // region that the clamped range still covers is fully painted, not bounded
 // by a click/release column that landed outside the region.
+//
+// sel.docMode ([selectionState]'s doc) is the one case where spanY0/spanY1
+// are DOCUMENT indices rather than screen rows the moment they leave
+// [selectionState.span]: painting must first intersect them with
+// docWinStart/docWinAvail (populated by [App.render] from the CURRENT
+// a.scroll — see their doc for why that has to happen at render time, not
+// once when the selection was created) to find which screen rows are both
+// on screen right now AND inside the selection, and only THOSE get painted —
+// content the span covers that has scrolled off is left for
+// [App.selectedDocText] to carry in the copy, never drawn here.
 func highlightSelection(content string, sel selectionState, th theme.Theme, regionTop, regionBottom int) string {
 	lines := strings.Split(content, "\n")
 	spanY0, x0, spanY1, x1 := sel.span()
+
+	y0, y1 := spanY0, spanY1
+	if sel.docMode {
+		if sel.docWinAvail <= 0 {
+			return content
+		}
+		winEnd := sel.docWinStart + sel.docWinAvail // exclusive
+		dy0 := max(spanY0, sel.docWinStart)
+		dy1 := min(spanY1, winEnd-1)
+		if dy0 > dy1 {
+			return content
+		}
+		y0 = layout.TopPadding + (dy0 - sel.docWinStart)
+		y1 = layout.TopPadding + (dy1 - sel.docWinStart)
+	}
+
 	// One-sided max/min, matching selectedText's intersection — see its
 	// comment for why a symmetric clamp of both bounds is wrong here (it
 	// would turn a span entirely outside the region into a false overlap on
 	// the region's near edge).
-	y0 := max(spanY0, regionTop)
-	y1 := min(spanY1, regionBottom)
-	if y0 > y1 || y0 >= len(lines) {
+	ry0 := max(y0, regionTop)
+	ry1 := min(y1, regionBottom)
+	if ry0 > ry1 || ry0 >= len(lines) {
 		return content
 	}
-	y1 = clampInt(y1, 0, len(lines)-1)
+	ry1 = clampInt(ry1, 0, len(lines)-1)
 
 	style := th.SelectionStyle()
-	for y := y0; y <= y1; y++ {
+	for y := ry0; y <= ry1; y++ {
 		line := lines[y]
 		width := ansi.StringWidth(line)
 		left, right := 0, width
-		if y == spanY0 {
-			left = clampInt(x0, 0, width)
-		}
-		if y == spanY1 {
-			right = clampInt(x1+1, 0, width)
+		if sel.docMode {
+			// Column bounds still key off the DOCUMENT row this screen row y
+			// maps to, not y itself — the doc-mode counterpart of the
+			// y == spanY0/spanY1 checks below.
+			docIdx := sel.docWinStart + (y - layout.TopPadding)
+			if docIdx == spanY0 {
+				left = clampInt(x0, 0, width)
+			}
+			if docIdx == spanY1 {
+				right = clampInt(x1+1, 0, width)
+			}
+		} else {
+			if y == spanY0 {
+				left = clampInt(x0, 0, width)
+			}
+			if y == spanY1 {
+				right = clampInt(x1+1, 0, width)
+			}
 		}
 		if left >= right {
 			continue
