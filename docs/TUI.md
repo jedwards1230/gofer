@@ -986,12 +986,63 @@ no header. A "copy the transcript" that silently included the input box would be
 a third, surprising thing. Both share `normalizeCopy` unchanged, so their output
 has the same shape.
 
-Auto-scroll *while dragging* is the remaining half of gofer#312 and is not
-implemented: the selection anchor lives in screen-row coordinates, so it would
-drift the moment content scrolled under it, and `selectedText` reads the frame —
-a drag that scrolled would paint a highlight the clipboard could not honor,
-breaking the agreement below. That needs the anchor in document coordinates,
-tracked separately.
+**Auto-scroll while dragging (attach transcript only): document coordinates.**
+Dragging to the top or bottom edge of the attach screen's header+transcript
+region (gofer#312) scrolls `App.scroll` and keeps extending the selection,
+rather than clamping at whatever happened to be on screen when the drag
+started. The cheap fix — keep the existing screen-row anchor and bump both it
+and `a.scroll` by the same delta on each edge motion — does not work: it
+relies on `selectedText` reading the rendered frame, which by construction can
+only ever contain rows currently on screen, so after auto-scrolling away from
+where the drag began, `highlightSelection` would paint a range the clipboard
+could not honor — the exact highlight/clipboard disagreement gofer#307
+forbids, now triggered by scrolling instead of by the region clamp #307 fixed.
+
+So a click that lands inside the attach document (`App.attachDocLines` —
+`attachHeaderLines` followed by `Model.transcriptLines`, the same slice
+`Model.view` windows via `scrollTail` before drawing) starts a
+DOCUMENT-coordinate selection instead of the ordinary screen-row one
+(`selectionState.docMode`): `startY`/`curY`/`anchorY` become document line
+indices, independent of `a.scroll`, rather than absolute screen rows. From
+there:
+
+- `App.selectedText` (via `App.selectedDocText`) extracts the span straight out
+  of `attachDocLines`, so a range that has scrolled off-screen is still fully
+  present in the copy — the reason document coordinates exist at all.
+- `highlightSelection`'s doc-mode branch intersects the span against
+  `App.attachDocWindow`'s CURRENT `a.scroll`-derived window (recomputed by
+  `App.render` on every frame, not cached on the selection, so a later
+  wheel/PgUp-PgDn scroll of a frozen selection still paints correctly) and
+  paints only the rows that are both inside the span and on screen right now.
+  Highlight and clipboard therefore always agree: one always shows a subset of
+  what the other can return, by construction, rather than by coincidence.
+- `wordBoundsAt`'s double-click/word-drag counterpart (`attachWordBoundsAt`,
+  `selectionState.extendDocWord`) gets the identical treatment, snapping word
+  boundaries against document content instead of the frame.
+- Holding the pointer at the transcript window's top or bottom edge
+  (`App.extendDocSelection`) scrolls `a.scroll` by one document row per
+  `tea.MouseMotionMsg` (`dragScrollStep`) — as long as there is more document
+  in that direction — and extends the selection to the newly revealed edge
+  row, so the visible window and the selection's reach grow together instead
+  of jumping straight to a row that isn't on screen yet. Reaching the
+  document's own top or bottom (`scrollTail`'s own clamp) stops scrolling but
+  keeps tracking the pointer there.
+
+This is deliberately scoped to the attach transcript, not the whole frame: a
+click on the same screen's footer/menu/panel (outside the document — that
+content is pinned and never scrolls) falls through to the ordinary
+screen-row path unchanged, as does every other screen (overview, peek) —
+docMode never becomes a new selectable surface. The one behavioral
+consequence is that a drag which *starts inside the transcript* and continues
+past its bottom edge into the input box no longer also selects the input
+box's own text the way a plain screen-row drag still does (see
+`TestSelectionReachesChrome`) — it clamps to the document's own last line,
+scrolling first if there is more transcript to reveal. Mixing a scrolling
+document range with the footer's fixed screen rows in one selection would
+need both coordinate spaces to agree on ordering and column extraction, which
+is exactly the complexity document coordinates exist to avoid; a drag that
+starts on the footer (`docMode` stays `false`) is unaffected, since that
+content never scrolls and there is no boundary to cross.
 
 **The clipboard gets text, not a grid.** `normalizeCopy` right-trims every row,
 drops leading/trailing blank rows, and collapses interior runs of blank rows to

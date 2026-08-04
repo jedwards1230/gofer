@@ -1416,7 +1416,8 @@ func (m Model) transcriptLines(width int) []string {
 // header or scroll offset — the plain golden tests that call this directly
 // render the transcript alone; [App.render] goes through ViewWithMenu.
 func (m Model) View(width, height int) string {
-	return m.view(width, height, nil, nil, 0)
+	rendered, _ := m.view(width, height, nil, nil, 0)
+	return rendered
 }
 
 // ViewWithMenu renders like View but splices menuLines — pre-rendered,
@@ -1431,10 +1432,34 @@ func (m Model) View(width, height int) string {
 // scroll is the manual scroll-back offset (0 = tail-to-latest, the default).
 // Called only from App.render.
 func (m Model) ViewWithMenu(width, height int, menuLines, headerLines []string, scroll int) string {
+	rendered, _ := m.view(width, height, menuLines, headerLines, scroll)
+	return rendered
+}
+
+// ViewWithMenuDoc is ViewWithMenu's counterpart for a caller that ALSO needs
+// the pre-window document — headerLines + transcriptLines, before scrollTail
+// windows it down to height — alongside the rendered frame: docLines is
+// exactly [App.attachDocWindow]'s `total` input (its length) and what a
+// document-coordinate selection ([selectionState.docMode]) indexes into.
+//
+// It exists so App.render's attach case computes [Model.transcriptLines]
+// (an O(transcript-length) word-wrap of every item) exactly ONCE per frame.
+// Before this, App.render drew the body through plain ViewWithMenu and then,
+// only while a docMode selection was active, called [App.attachDocLines]
+// separately to learn the document's length for [App.attachDocWindow] — a
+// second full re-wrap of the same content in the same render() call, paid on
+// every frame a selection stays visible (it lingers frozen after release, so
+// ordinary live events — a streamed token, a tool-call update — paid it too,
+// not just an active drag). Threading the already-computed lines out here
+// instead removes that duplicate pass entirely; see
+// BenchmarkAppRenderMassiveTranscriptWithDocSelection (app_internal_test.go).
+//
+// Called only from App.render's screenAttach case.
+func (m Model) ViewWithMenuDoc(width, height int, menuLines, headerLines []string, scroll int) (rendered string, docLines []string) {
 	return m.view(width, height, menuLines, headerLines, scroll)
 }
 
-func (m Model) view(width, height int, menuLines, headerLines []string, scroll int) string {
+func (m Model) view(width, height int, menuLines, headerLines []string, scroll int) (rendered string, docLines []string) {
 	if width < 1 {
 		width = 1
 	}
@@ -1457,6 +1482,17 @@ func (m Model) view(width, height int, menuLines, headerLines []string, scroll i
 		combined = append(combined, lines...)
 		lines = combined
 	}
+	// Captured BEFORE scrollTail/pad below reassign `lines` to a (possibly
+	// windowed) slice — docLines is always the FULL pre-window document.
+	// Safe to alias rather than copy: `lines` at this point is either
+	// `combined` above (built via make(...,0,exactCap) then filled to
+	// exactly that capacity, so len==cap and any later append on a
+	// sub-slice of it reallocates instead of writing back into this
+	// backing array) or, when headerLines is empty, transcriptLines' own
+	// return, which docLines only ever exposes read-only — neither path
+	// lets a later mutation through THIS slice header reach what docLines
+	// still considers in-bounds.
+	docLines = lines
 
 	// The input box is framed by full-width rules above and below, with the
 	// status line beneath it. A pending approval or structured decision
@@ -1511,7 +1547,7 @@ func (m Model) view(width, height int, menuLines, headerLines []string, scroll i
 	lines = scrollTail(lines, avail, scroll)
 	lines = pad(lines, avail)
 	lines = append(lines, footer...)
-	return strings.Join(lines, "\n")
+	return strings.Join(lines, "\n"), docLines
 }
 
 // promptLines renders whichever inline prompt is pending as the bottom-
