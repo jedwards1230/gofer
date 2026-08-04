@@ -56,9 +56,18 @@ entire correctness suite and surfaced only when a user said it felt slow.
 - **The gate is allocations only** (`allocs/op`, `B/op`), never wall-clock:
   ns/op on a shared runner is too noisy for a threshold that both catches
   regressions and avoids false alarms, and a gate that cries wolf gets ignored.
-  Concurrent benchmarks are marked `allocs-only` in the baseline and skip the
-  `B/op` half — at one iteration their byte total is decided by goroutine
-  scheduling and swings ~200% with no code change.
+  A concurrent benchmark may be marked `allocs-only` in the baseline to skip the
+  `B/op` half — at one iteration per-peer byte totals can be decided by
+  goroutine scheduling and swing ~200% with no code change (that is what an
+  un-batched `BroadcastRawEvent` did; gofer#334). The mark is not permanent:
+  once a benchmark batches enough work per iteration that its B/op spread is
+  *measured*, on `ubuntu-latest`, to clear a comfortable margin against the 25%
+  tolerance, the mark should come off and B/op should gate normally again —
+  see gofer#343, where `BroadcastRawEvent`'s six rows had it lifted on exactly
+  that evidence (15 ubuntu-latest samples, worst-row margin 4.65x; numbers and
+  methodology are in `bench/baseline.txt`'s comment above those rows). Deciding
+  to KEEP the mark on the strength of runner data is an equally valid outcome
+  and should be recorded the same way.
 - **A concurrent benchmark must batch its work per iteration.** `allocs-only`
   exempts the byte total, not the count: Go charges allocations process-wide, so
   peer goroutines land in the window and move the count too (gofer#334). The
