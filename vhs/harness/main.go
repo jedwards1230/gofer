@@ -514,7 +514,19 @@ const scrollSelectTurns = 40
 // enough that transcript-scroll-select.tape has already attached to the
 // session and captured its OWN "before" screenshot — mirrors
 // [autoCompactDelay]'s reasoning for the same before/after-pair shape.
-const scrollSelectDriverDelay = 3 * time.Second
+//
+// The tape's own timeline (transcript-scroll-select.tape) reaches its
+// "before" screenshot at Sleep 2s + Enter + Sleep 1500ms ≈ 3.5s after this
+// process starts, so this must clear that with margin — 5s leaves 1.5s of
+// slack for process-startup/exec jitter on a slower machine (a PR review on
+// gofer#312 caught the prior 3s value sitting BELOW that 3.5s mark, meaning
+// the synthetic click could already have landed before the "before" frame
+// was captured). If this changes, transcript-scroll-select.tape's own Sleep
+// after its "before" screenshot needs to keep clearing
+// scrollSelectDriverDelay + the full drag duration (see
+// [scrollSelectMouseScript]'s doc) with margin — the tape's own comment
+// states the arithmetic, since VHS tapes can't `go doc` this constant.
+const scrollSelectDriverDelay = 5 * time.Second
 
 // scrollSelectApp is the transcript-scroll-select scene (gofer#312): a real
 // attach over a long transcript, whose click+drag is driven PROGRAMMATICALLY

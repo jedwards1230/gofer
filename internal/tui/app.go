@@ -1974,6 +1974,13 @@ func (a App) render() string {
 	fl := a.frameLayout()
 
 	var body string
+	// docLines is screenAttach's pre-window document (attachHeaderLines +
+	// transcriptLines, before scrollTail) — nil on every other screen. The
+	// highlight block below reuses it for a docMode selection's
+	// [App.attachDocWindow] population instead of recomputing it via
+	// [App.attachDocLines] a second time in this same render() call — see
+	// [Model.ViewWithMenuDoc]'s doc for why that duplicate pass mattered.
+	var docLines []string
 	switch a.scr {
 	case screenPeek:
 		body = NewPeek(a.theme, a.over, a.peekReply).View(a.width, fl.h)
@@ -1997,8 +2004,8 @@ func (a App) render() string {
 		// this lands on a LOCAL copy and never touches a.sess. [App.transcriptRegion]
 		// measures through the SAME helper so the frame it draws and the rows it
 		// lets a selection paint can never drift apart — see attachModel's doc.
-		body = a.attachModel().
-			ViewWithMenu(a.width, fl.h, fl.menuLines, attachHeaderLines(a.theme, a.over.meta, a.width), a.scroll)
+		body, docLines = a.attachModel().
+			ViewWithMenuDoc(a.width, fl.h, fl.menuLines, attachHeaderLines(a.theme, a.over.meta, a.width), a.scroll)
 	default:
 		body = a.over.ViewWithMenu(a.width, fl.h, fl.menuLines, a.scroll, a.panel != nil)
 	}
@@ -2037,9 +2044,12 @@ func (a App) render() string {
 			// created — see [selectionState]'s docWinStart/docWinAvail doc
 			// (a frozen selection stays visible across a later wheel scroll).
 			// Populate them fresh, every render, from [App.attachDocWindow]
-			// rather than caching them in a.sel itself.
+			// rather than caching them in a.sel itself. total is docLines'
+			// length — the screenAttach case above already built docLines
+			// through [Model.ViewWithMenuDoc] to draw body, so this reuses
+			// that instead of a second full [App.attachDocLines] rebuild.
 			if sel.docMode {
-				total := len(a.attachDocLines())
+				total := len(docLines)
 				if start, avail, winOK := a.attachDocWindow(total); winOK {
 					sel.docWinStart, sel.docWinAvail = start, avail
 				} else {

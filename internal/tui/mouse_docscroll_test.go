@@ -324,6 +324,13 @@ func TestWordSelectDragAutoScrollAcrossBoundary(t *testing.T) {
 // document coordinates exist to avoid. A drag that starts on the footer
 // (docMode false) is unaffected — that content never scrolls, so there is no
 // boundary to cross and the existing frame-based path still reaches it.
+//
+// This deliberately uses a transcript too SHORT to overflow, so the
+// bottom-edge branch of [App.extendDocSelection] never has anything to
+// scroll toward before the clamp fires — it pins the clamp in isolation.
+// [TestDragAutoScrollThenClampsIntoFooterAtTail] below is its overflowing
+// counterpart: auto-scroll toward the tail actually fires FIRST, and only
+// clamps into the footer once there is truly nothing left to reveal.
 func TestDragIntoAttachFooterAfterDocSelectionClampsAtDocumentEnd(t *testing.T) {
 	const turns = 3 // deliberately NOT enough to overflow
 	a := NewApp(theme.Test(), &internalFakeSup{}, func() OverviewMeta {
@@ -380,5 +387,123 @@ func TestDragIntoAttachFooterAfterDocSelectionClampsAtDocumentEnd(t *testing.T) 
 	}
 	if !strings.Contains(text, fmt.Sprintf("turn %d", turns-1)) {
 		t.Errorf("docMode selection lost the document's own last line while clamping: %q", text)
+	}
+}
+
+// dragToBottomEdge is [dragToTopEdge]'s mirror: it holds a docMode drag at
+// the transcript window's BOTTOM edge for up to maxSteps motion events,
+// recomputing that edge's CURRENT screen row via [App.attachDocWindow] each
+// iteration (the row itself doesn't move once the footer's own height
+// settles, but recomputing keeps this correct if it ever does), stopping
+// early once a.scroll stops advancing (the tail — a.scroll 0 — has been
+// reached). It returns the resulting App and how many steps actually moved
+// a.scroll.
+func dragToBottomEdge(a App, maxSteps int) (App, int) {
+	steps := 0
+	for range maxSteps {
+		before := a.scroll
+		_, avail, ok := a.attachDocWindow(len(a.attachDocLines()))
+		if !ok {
+			break
+		}
+		a = a.handleMouseMotion(tea.MouseMotionMsg{X: 0, Y: layout.TopPadding + avail - 1, Button: tea.MouseLeft})
+		if a.scroll == before {
+			break
+		}
+		steps++
+	}
+	return a, steps
+}
+
+// TestDragAutoScrollThenClampsIntoFooterAtTail directly pins the interaction
+// [TestDragIntoAttachFooterAfterDocSelectionClampsAtDocumentEnd] cannot: that
+// test's transcript is deliberately too short to overflow, so
+// [App.extendDocSelection]'s bottom-edge auto-scroll branch never actually
+// fires before the footer-clamp fallback does — the two only agree by CODE
+// SYMMETRY with the well-tested top-edge case, not by direct observation.
+// Here the transcript overflows, so the same held-at-the-bottom-edge drag
+// first auto-scrolls all the way to the tail (revealing "turn 39", the
+// document's real last line, exactly like the top-edge tests reveal the
+// header) and ONLY THEN — once there is truly nothing left below to reveal —
+// does a further motion event into the footer clamp instead of continuing to
+// scroll or reaching into the footer's own text.
+func TestDragAutoScrollThenClampsIntoFooterAtTail(t *testing.T) {
+	const turns = 40
+	a := buildOverflowingAttachApp(t, theme.Test(), turns)
+
+	// Scroll all the way BACK before clicking, so there is real content
+	// below the fold for the downward drag to reveal. Set a.scroll to
+	// EXACTLY scrollTail's own ceiling (total-avail) rather than an
+	// oversized value like 1_000_000: attachDocWindow clamps the EFFECTIVE
+	// offset it windows against internally, but extendDocSelection's
+	// bottom-edge branch decrements the STORED a.scroll by dragScrollStep
+	// per motion event — an oversized raw value would need a step for every
+	// one of those excess units before it ever reached the real ceiling,
+	// which is exactly the mismatch that made this precondition fail before
+	// this comment was added (a.scroll got stuck at 999800 after 200 steps).
+	total := len(a.attachDocLines())
+	_, avail, ok := a.attachDocWindow(total)
+	if !ok {
+		t.Fatalf("precondition failed: attachDocWindow reported not ok before scrolling back")
+	}
+	maxOffset := total - avail
+	if maxOffset <= 0 {
+		t.Fatalf("precondition failed: transcript does not overflow (total=%d avail=%d) — the fixture doesn't overflow enough", total, avail)
+	}
+	a.scroll = maxOffset
+	rendered := ansi.Strip(a.render())
+	if !strings.Contains(rendered, "gofer v") {
+		t.Fatalf("precondition failed: not scrolled back to the header:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "turn 39") {
+		t.Fatalf("precondition failed: turn 39 (the document's last line) is already visible scrolled all the way back — the fixture doesn't overflow enough:\n%s", rendered)
+	}
+
+	// Click the header's own first line (row layout.TopPadding — the
+	// document's very first row while scrolled all the way back), same
+	// technique the top-edge tests use in reverse.
+	a, _ = a.handleMouseClick(tea.MouseClickMsg{X: 0, Y: layout.TopPadding, Button: tea.MouseLeft})
+	if a.sel == nil || !a.sel.docMode {
+		t.Fatalf("click inside the attach transcript did not start a document-coordinate selection: %+v", a.sel)
+	}
+
+	a, steps := dragToBottomEdge(a, 200)
+	if steps == 0 {
+		t.Fatalf("precondition failed: holding the drag at the bottom edge never scrolled a.scroll")
+	}
+	if a.scroll != 0 {
+		t.Fatalf("expected the held drag to auto-scroll all the way back to the tail (a.scroll=0), got a.scroll=%d", a.scroll)
+	}
+
+	tailedRendered := ansi.Strip(a.render())
+	if !strings.Contains(tailedRendered, "turn 39") {
+		t.Fatalf("expected auto-scroll to have revealed the document's last line (turn 39) at the tail:\n%s", tailedRendered)
+	}
+	if strings.Contains(tailedRendered, "gofer v") {
+		t.Fatalf("expected the header to have scrolled back off-screen once tailed:\n%s", tailedRendered)
+	}
+
+	// Now past the bottom edge (nothing left to scroll to — see the assertion
+	// above) and into the footer's own rows: the interaction under test.
+	_, avail, ok = a.attachDocWindow(len(a.attachDocLines()))
+	if !ok {
+		t.Fatalf("precondition failed: attachDocWindow reported not ok once tailed")
+	}
+	footerY := layout.TopPadding + avail + 1
+	a = a.handleMouseMotion(tea.MouseMotionMsg{X: 999, Y: footerY, Button: tea.MouseLeft})
+
+	if a.scroll != 0 {
+		t.Errorf("a.scroll moved to %d dragging into the footer after already reaching the tail; want 0 (nothing left to scroll)", a.scroll)
+	}
+
+	text := a.selectedText()
+	if strings.Contains(text, "─") {
+		t.Errorf("docMode selection reached the input box's framing rule after auto-scrolling to the tail; want it clamped to the document's own last line: %q", text)
+	}
+	if !strings.Contains(text, "turn 39") {
+		t.Errorf("docMode selection lost the document's own last line (turn 39) while clamping into the footer: %q", text)
+	}
+	if !strings.Contains(text, "turn 0") {
+		t.Errorf("docMode selection lost the earlier auto-scrolled range (turn 0, from the anchor click) while clamping into the footer: %q", text)
 	}
 }

@@ -25,6 +25,7 @@ import (
 
 	"github.com/jedwards1230/gofer/internal/config"
 	"github.com/jedwards1230/gofer/internal/decision"
+	"github.com/jedwards1230/gofer/internal/tui/layout"
 	"github.com/jedwards1230/gofer/internal/tui/testkit"
 	"github.com/jedwards1230/gofer/internal/tui/theme"
 )
@@ -1552,6 +1553,48 @@ func BenchmarkAppRenderMassiveTranscript(b *testing.B) {
 	env, _, reads := benchConfigEnv(b, benchConfigSmall(), true)
 	a := newBenchApp(b, env, 5000)
 	assertRenderReadsConfig(b, a, reads)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		a.scroll = i % 200 // simulate wheel notches moving the window each render
+		_ = a.render()
+	}
+}
+
+// BenchmarkAppRenderMassiveTranscriptWithDocSelection is
+// [BenchmarkAppRenderMassiveTranscript]'s counterpart with an ACTIVE
+// document-coordinate selection ([selectionState.docMode], mouse.go) held
+// through every iteration — the scenario a gofer#312 PR review flagged:
+// App.render's docMode highlight branch used to call [App.attachDocLines]
+// to learn the document's length for [App.attachDocWindow], which rebuilds
+// the WHOLE attach document — the identical O(transcript-length) word-wrap
+// [Model.view] already just did, in the SAME render() call, to draw the
+// body. That duplicate pass was paid on every frame a selection stayed
+// visible, not just during an active drag: a selection lingers frozen after
+// release (docs/TUI.md), so an ordinary live event on the attach screen
+// (streamed tokens, a tool-call update) paid it too.
+//
+// [Model.ViewWithMenuDoc] now threads the already-computed document lines
+// out of the SAME transcriptLines call the body draw uses, so this
+// benchmark's allocs/op should track [BenchmarkAppRenderMassiveTranscript]'s
+// closely rather than roughly doubling it — run both side by side to see
+// the delta a change here introduces (not yet in bench/baseline.txt; see
+// this PR's description for the numbers measured when it was added).
+func BenchmarkAppRenderMassiveTranscriptWithDocSelection(b *testing.B) {
+	env, _, reads := benchConfigEnv(b, benchConfigSmall(), true)
+	a := newBenchApp(b, env, 5000)
+	assertRenderReadsConfig(b, a, reads)
+
+	// Click the topmost visible content row — always valid, whatever the
+	// window's current scroll offset (see mouse.go's attachDocIndexAt) — to
+	// start a real docMode selection through the same path a user's click
+	// takes, rather than hand-constructing a selectionState.
+	mdl, _ := a.Update(tea.MouseClickMsg{X: 2, Y: layout.TopPadding, Button: tea.MouseLeft})
+	a = mdl.(App)
+	if a.sel == nil || !a.sel.docMode {
+		b.Fatalf("precondition failed: click did not start a docMode selection: %+v", a.sel)
+	}
 
 	b.ReportAllocs()
 	b.ResetTimer()

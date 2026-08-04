@@ -29,11 +29,16 @@
 # at the top edge from the very first motion event, needing no assumption
 # about exactly which row the transcript happens to overflow to.
 #
-# TIMING: the harness's drag sequence starts scrollSelectDriverDelay (3s)
-# after PROCESS START, not after this tape's own keystrokes — so the "before"
-# screenshot below has to land before that, and the "after" screenshot has to
-# wait past it (3s delay + 61 steps * 70ms ≈ 3s of drag ≈ 6.3s total). The
-# Sleep durations here are sized with slack on both sides of that budget.
+# TIMING (a PR review on gofer#312 caught this arithmetic wrong once already
+# — re-derive it here if either side changes, don't just eyeball it): the
+# harness's drag sequence starts scrollSelectDriverDelay (5s) after PROCESS
+# START, not after this tape's own keystrokes. The "before" screenshot below
+# lands at Sleep 2s + Enter + Sleep 1500ms ≈ 3.5s post-start — 1.5s BEFORE the
+# driver's first Send, which is the margin that keeps the "before" frame
+# genuinely pre-drag. The drag itself is 61 steps (1 click + 60 motion
+# events) * 70ms ≈ 4.3s, so the driver fully finishes at 5s + 4.3s ≈ 9.3s
+# post-start — the Sleep below the "before" screenshot (7s, landing at
+# 3.5s + 7s = 10.5s post-start) clears that with ~1.2s of margin.
 #
 # 40 seeded turns (harness: scrollSelectHistory) is comfortably more than any
 # reasonable terminal height needs to overflow — deliberately plain, legible
@@ -73,9 +78,10 @@ Sleep 1500ms
 
 Screenshot vhs/out/transcript-scroll-select-before.png
 
-# Past scrollSelectDriverDelay (3s) plus the full 61-step drag (~3s more, at
-# ~2.2s elapsed already) — comfortably clear of the driver's own finish.
-Sleep 5s
+# Past scrollSelectDriverDelay (5s) plus the full 61-step drag (~4.3s more) —
+# see the TIMING note above for the arithmetic — comfortably clear of the
+# driver's own finish (~9.3s post-start; this lands at ~10.5s).
+Sleep 7s
 
 Screenshot vhs/out/transcript-scroll-select.png
 Sleep 200ms
