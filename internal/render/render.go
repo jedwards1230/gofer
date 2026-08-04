@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/jedwards1230/agent-sdk-go/event"
 )
@@ -56,7 +57,8 @@ func messageCount(n int) string {
 
 // Render writes a human-readable representation of e. Message deltas stream
 // inline (reasoning dimmed, text raw); every other event kind renders as a
-// single line.
+// single line, except MessageFinished{MessageUser}, which echoes the user's
+// own prompt verbatim and so may itself span multiple lines.
 func (h *Human) Render(e event.Event) error {
 	switch ev := e.(type) {
 	case event.MessageStarted:
@@ -115,13 +117,26 @@ func (h *Human) Render(e event.Event) error {
 }
 
 // marker writes a one-line "· kind  detail" marker, omitting the detail when
-// empty.
+// empty. detail comes from free-form producer strings (e.g.
+// [event.SessionError]'s Err) that carry no guarantee against embedded
+// newlines — errors.Join, for one, joins with "\n" — so it is sanitized
+// through [collapseWhitespace] first. Without that, a multiline detail would
+// split the marker across terminal rows and misalign every marker after it
+// in the stream, defeating the one-line contract this doc comment claims.
 func (h *Human) marker(kind, detail string) {
-	if detail == "" {
+	if detail = collapseWhitespace(detail); detail == "" {
 		h.write(fmt.Sprintf("· %s\n", kind))
 		return
 	}
 	h.write(fmt.Sprintf("· %s  %s\n", kind, detail))
+}
+
+// collapseWhitespace collapses every run of whitespace in s — including
+// embedded "\n"/"\r\n" — to a single space, and trims the result. It exists
+// to enforce a one-line render invariant against a caller-supplied string
+// with no such guarantee of its own.
+func collapseWhitespace(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }
 
 // dim wraps s in ANSI dim codes when color is enabled, else returns it as-is.
