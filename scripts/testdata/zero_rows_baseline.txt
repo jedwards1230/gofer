@@ -1,0 +1,6 @@
+# gofer benchmark baseline: <name> <allocs/op> <B/op> [allocs-only]
+# Regenerate with scripts/bench.sh --update. Gating: scripts/bench.sh --check.
+# ns/op is deliberately absent — see the header of scripts/bench.sh.
+
+# Nothing below but comments and a blank line — every benchmark was deleted
+# and no one re-ran --update. This is the gofer#344 case 6 fixture.
