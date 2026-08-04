@@ -1,0 +1,2 @@
+# gofer benchmark baseline: <name> <allocs/op> <B/op> [allocs-only]
+BenchmarkFoo abc 1000

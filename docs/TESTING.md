@@ -184,6 +184,47 @@ review as a diff, so a regression cannot be absorbed silently. A baseline entry
 that stops running fails the gate as `MISSING`, so deleting or renaming a
 benchmark cannot quietly retire its coverage.
 
+### Testing the gate itself
+
+Every benchmark above is only as trustworthy as `scripts/bench.sh`'s own
+parse/threshold logic, and that logic had no test (gofer#344) — the risk being
+the gate silently ceasing to gate, which exits 0 and looks exactly like a clean
+run. `scripts/bench_test.go` covers it, driving the real script via
+`exec.Command` against fixtures in `scripts/testdata/` rather than a shell-test
+framework, so it stays inside `go test ./...` and needs no new CI hook. Two env
+vars, documented as a **test seam** in `bench.sh`'s own header (not an operator
+feature — CI and a local `--check` never set them), let the test supply
+synthetic `go test -bench` output and a synthetic baseline instead of running
+real benchmarks or touching the committed baseline: `BENCH_RAW_FILE`,
+`BENCH_BASELINE_FILE`.
+
+Nine subtests, table-driven, one `t.Run` each: a regression beyond tolerance
+fails and names the row; one inside tolerance passes; a baseline row absent
+from the run fails as `MISSING`; a benchmark present in the run but absent from
+the baseline is invisible to `--check` by construction (the loop iterates the
+baseline, not the current results) and must not affect the gate; an
+`allocs-only` row ignores B/op growth but still gates allocs/op (both
+directions asserted separately); and two bug fixes below.
+
+Both were confirmed against the *unmodified* script before being fixed, not
+assumed from the issue text:
+
+- **Zero gate-able rows in the baseline (comments/blanks only) exited 0** with
+  "no allocation regressions" — the `while read` loop over the baseline simply
+  never ran, leaving `status` at its initial 0. Fixed with a `gated_rows`
+  counter checked after the loop.
+- **A malformed baseline field could silently pass**, and not merely by
+  skipping a check: an unquoted non-numeric operand in bash's `$(( ))` is a
+  *nested variable reference*, not a parse error. A field that happens to
+  collide with another shell variable already in `bench.sh`'s scope — a
+  hand-edited baseline row of `BenchmarkFoo tolerance 1000` — silently
+  substituted `$tolerance`'s value (25) into the comparison and reported a
+  clean gate. A plain non-numeric string like `"abc"` happened to abort loudly
+  via `set -u` already (an *unset* variable reference is fatal, an existing
+  one is not), which is why the test fixture that actually caught the bug is
+  the name-collision one, not the plain-garbage one. Fixed with an explicit
+  `is_uint` check before either baseline or current field reaches arithmetic.
+
 What to benchmark: anything whose cost grows with **session count**, **transcript
 length**, or **attached client count**. Sweep the axis rather than reporting one
 number — the question is never "how fast is it" but "what happens as this grows",

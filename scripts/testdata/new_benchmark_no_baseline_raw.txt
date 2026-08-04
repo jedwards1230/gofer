@@ -1,0 +1,4 @@
+BenchmarkFoo-8   1   100 ns/op   1000 B/op   10 allocs/op
+BenchmarkNew-8   1   100 ns/op   500 B/op   5 allocs/op
+PASS
+ok  	example	1.234s

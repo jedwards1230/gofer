@@ -59,12 +59,28 @@
 # act that shows up in review as a diff, so a regression cannot be absorbed
 # silently — if a change legitimately costs more allocations, the baseline bump
 # is where that gets argued.
+#
+# TEST SEAM (not an operator-facing feature): scripts/bench_test.go drives this
+# script's parse/threshold logic against synthetic fixtures via two env vars,
+# so gofer#344's coverage never shells out to `go test -bench` or touches the
+# real committed baseline:
+#   BENCH_RAW_FILE      - read `raw` (the `go test -bench` output this script
+#                          would otherwise produce) from this file instead of
+#                          running the benchmark suite.
+#   BENCH_BASELINE_FILE - use this path instead of bench/baseline.txt.
+# Both default to the real behavior when unset — CI and a local
+# `scripts/bench.sh --check` never set either, so this is inert for them.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-baseline="bench/baseline.txt"
+baseline="${BENCH_BASELINE_FILE:-bench/baseline.txt}"
+# A stray exported BENCH_RAW_FILE/BENCH_BASELINE_FILE left in a developer's
+# shell would otherwise silently redirect a normal --check run with no sign
+# in the output that it happened — flag it the same way BENCH_PKGS's
+# narrowing is flagged below.
+[ -n "${BENCH_BASELINE_FILE:-}" ] && echo "bench.sh: BENCH_BASELINE_FILE override active -> $baseline" >&2
 # 25%: loose enough to absorb the odd map-growth or slice-doubling boundary that
 # shifts a count without changing the algorithm, tight enough that anything
 # accidentally quadratic (which is what actually goes wrong here) blows through
@@ -94,8 +110,13 @@ esac
 # (BENCH_PKGS="./internal/tui/ ./internal/supervisor/") without relying on
 # unquoted word-splitting.
 read -ra pkgs <<<"${BENCH_PKGS:-./...}"
-echo "running benchmarks (-benchtime 1x) over ${pkgs[*]}..." >&2
-raw="$(go test -run '^$' -bench . -benchmem -benchtime 1x "${pkgs[@]}" 2>&1)"
+if [ -n "${BENCH_RAW_FILE:-}" ]; then
+	echo "bench.sh: BENCH_RAW_FILE override active -> $BENCH_RAW_FILE" >&2
+	raw="$(cat "$BENCH_RAW_FILE")"
+else
+	echo "running benchmarks (-benchtime 1x) over ${pkgs[*]}..." >&2
+	raw="$(go test -run '^$' -bench . -benchmem -benchtime 1x "${pkgs[@]}" 2>&1)"
+fi
 echo "$raw"
 
 # Normalize to "name allocs bytes ns". Benchmark lines look like:
@@ -165,11 +186,32 @@ check)
 	# A benchmark present in the baseline but missing from this run is a FAILURE,
 	# not a pass. Otherwise deleting or renaming a benchmark silently retires its
 	# gate, and coverage erodes without anyone deciding to erode it.
+	#
+	# is_uint rejects a malformed baseline/current field before it reaches bash
+	# arithmetic. This is not defensive polish: an unquoted non-numeric operand
+	# in a `$(( ))` expression is a NESTED VARIABLE REFERENCE, not a parse
+	# error, so a malformed field that happens to collide with another shell
+	# variable's name in this script's scope (a baseline row hand-edited to
+	# read e.g. "BenchmarkFoo tolerance 1000") silently substitutes that
+	# variable's value into the comparison and can report a clean gate.
+	# Verified against unmodified bench.sh, gofer#344.
+	is_uint() {
+		case "$1" in
+		'' | *[!0-9]*) return 1 ;;
+		*) return 0 ;;
+		esac
+	}
+
 	status=0
 	missing=""
+	# Counts baseline rows actually gated (comments/blanks excluded). A
+	# baseline that resolves to zero such rows must fail the gate rather than
+	# report success — see the zero-rows check after this loop, gofer#344.
+	gated_rows=0
 	while read -r name base_allocs base_bytes base_mode; do
 		[ -z "${name:-}" ] && continue
 		case "$name" in \#*) continue ;; esac
+		gated_rows=$((gated_rows + 1))
 
 		line="$(echo "$current" | awk -v n="$name" '$1 == n')"
 		if [ -z "$line" ]; then
@@ -181,6 +223,12 @@ check)
 
 		cur_allocs="$(echo "$line" | awk '{print $2}')"
 		cur_bytes="$(echo "$line" | awk '{print $3}')"
+
+		if ! is_uint "$base_allocs" || ! is_uint "$base_bytes" || ! is_uint "$cur_allocs" || ! is_uint "$cur_bytes"; then
+			echo "MALFORMED: $name has a non-numeric field — baseline allocs=\"$base_allocs\" bytes=\"$base_bytes\", current allocs=\"$cur_allocs\" bytes=\"$cur_bytes\"" >&2
+			status=1
+			continue
+		fi
 
 		for metric in allocs bytes; do
 			if [ "$metric" = allocs ]; then
@@ -206,6 +254,17 @@ check)
 			fi
 		done
 	done <"$baseline"
+
+	# A baseline that resolves to zero gated rows (empty, or only comments and
+	# blank lines) must not report success — the loop above simply never runs,
+	# leaving $status at its initial 0. The $current empty-guard earlier in
+	# this script covers an empty benchmark RUN, not an empty baseline; this is
+	# the baseline-side counterpart. Verified against unmodified bench.sh,
+	# gofer#344.
+	if [ "$gated_rows" -eq 0 ]; then
+		echo "bench.sh: no gate-able rows in $baseline (empty, or only comments/blank lines) — the gate cannot pass on nothing to compare against" >&2
+		status=1
+	fi
 
 	# GitHub Actions job summary. Written on BOTH outcomes: on a failure it is
 	# where you see WHICH numbers moved without opening the log, and on a pass it
