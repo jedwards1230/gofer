@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   review:
-    uses: jedwards1230/release-workflows/.github/workflows/claude-pr-review.yml@915facd9a46f88da767d2d7122ab4fced5c2c1d6 # v1
+    uses: jedwards1230/release-workflows/.github/workflows/claude-pr-review.yml@ac78f4af7ed28f4e149ba21e482f390777a204ce # v1
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} # preferred (subscription)
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }} # fallback (metered API)
