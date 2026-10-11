@@ -109,7 +109,7 @@ jobs:
     name: Tag & Generate Notes
     needs: [detect]
     if: needs.detect.outputs.release == 'true'
-    uses: jedwards1230/release-workflows/.github/workflows/ai-release.yml@ac78f4af7ed28f4e149ba21e482f390777a204ce # v1
+    uses: jedwards1230/release-workflows/.github/workflows/ai-release.yml@9a48fc8ec1985081e7337e4ae6669a2753f847ef # v1
     with:
       service_name: gofer
       service_description: "a daemon + TUI for running and supervising many coding agents on the agent-sdk-go contract"
@@ -154,7 +154,7 @@ jobs:
           # into the binary so `gofer version` matches the release.
           go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "$out" ./cmd/gofer
           sha256sum "$out" > "$out.sha256"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.0
         with:
           name: gofer-${{ matrix.goos }}-${{ matrix.goarch }}
           path: |
@@ -169,7 +169,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.0
         with:
           path: dist
           merge-multiple: true
