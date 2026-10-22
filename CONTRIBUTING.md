@@ -6,7 +6,7 @@ through the workflow below.
 
 ## Prerequisites
 
-Go ≥ 1.25 and `golangci-lint`.
+Go ≥ 1.26.10 and `golangci-lint`.
 
 `gopls` is optional but recommended: the LSP live tests
 (`internal/lspdiag`, `internal/supervisor`) drive a real language server and
@@ -222,7 +222,7 @@ about the workaround.
   captures `i`/`v` by reference, so all goroutines see the last value" are
   **wrong for this repo** *when the variable is the loop variable itself*. Go
   made loop variables **per-iteration in 1.22**, and `go.mod` declares
-  `go 1.25.0`. Each iteration gets its own variable, so
+  `go 1.26.10`. Each iteration gets its own variable, so
   `for i, v := range xs { go func() { use(i, v) }() }` is correct as written and
   the pre-1.22 `i := i` shadow is redundant. (The codebase also uses
   range-over-int, which is itself 1.22+, so the language version is not in
